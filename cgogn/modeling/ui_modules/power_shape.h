@@ -408,13 +408,14 @@ public:
 			// CGAL::parameters::use_monte_carlo_sampling(true).number_of_points_per_area_unit(50));
 			CGAL::parameters::use_grid_sampling(true).grid_spacing(1));
 
-		std::array<std::array<double, 3>, 8> cube_corners = compute_big_box(surface, csm);
-		// 	Add bounding box vertices in the sample points set
-		for (auto& p : cube_corners)
-		{
-			Delaunay_tri_point.emplace_back(p[0], p[1], p[2]);
+
+ 		std::array<std::array<double, 3>, 8> cube_corners = compute_big_box(surface, csm);
+ 		// 	Add bounding box vertices in the sample points set
+ 		for (auto& p : cube_corners)
+ 		{
+ 			Delaunay_tri_point.emplace_back(p[0], p[1], p[2]);
 			mesh_samples.emplace_back(p[0], p[1], p[2]);
-		}
+ 		}
 
 		// Add sampled vertices into the volume data to construct the delauney tredrahedron
 		for (auto& s : mesh_samples)
@@ -677,11 +678,11 @@ public:
 		Cgal_Surface_mesh csm;
 		load_model_in_cgal(surface, csm);
 		auto inner_position = get_attribute<Vec3, PointVertex>(medial_points, "position");
-		auto sample_position = get_attribute<Vec3, SurfaceVertex>(surface, "position");
+		auto sample_position = get_attribute<Vec3, Vertex>(surface, "position");
 		auto sphere_radius = get_attribute<double, PointVertex>(medial_points, "sphere_radius");
 		Delaunay constrained_voronoi_diagram;
 		uint32 count = 0;
-		foreach_cell(medial_points, [&](PointVertex nv) {
+		foreach_cell(medial_points, [&](PointVertex nv){
 			Vec3 pos = value<Vec3>(medial_points, inner_position, nv);
 			Delaunay_Vertex_handle v = constrained_voronoi_diagram.insert(Point(pos[0], pos[1], pos[2]));
 			v->info().inside = true;
@@ -690,7 +691,7 @@ public:
 			return true;
 		});
 
-		foreach_cell(surface, [&](SurfaceVertex v) {
+		foreach_cell(surface, [&](Vertex v) {
 			Vec3 pos = value<Vec3>(surface, sample_position, v);
 			Delaunay_Vertex_handle vhd = constrained_voronoi_diagram.insert(Point(pos[0], pos[1], pos[2]));
 			vhd->info().inside = false;
@@ -701,8 +702,8 @@ public:
 
 		return constrained_voronoi_diagram;
 	}
-
-	void construct_complete_constrained_voronoi_diagram(Delaunay& delaunay, const std::string& name)
+	
+	void construct_complete_constrained_voronoi_diagram(Delaunay& delaunay, std::string& name)
 	{
 		NONMANIFOLD* mv =
 			nonmanifold_provider_->add_mesh(std::to_string(nonmanifold_provider_->number_of_meshes()) + "_" + name);
@@ -750,7 +751,7 @@ public:
 		uint32 inner_power_nb_edges = Inner_CVD_data.edges_vertex_indices_.size() / 2;
 		uint32 inner_power_nb_faces = Inner_CVD_data.faces_nb_edges_.size();
 
-		Inner_CVD_data.reserve(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
+		Inner_CVD_data.set_parameter(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
 
 		import_incidence_graph_data(*mv, Inner_CVD_data);
 
@@ -761,9 +762,10 @@ public:
 
 		nonmanifold_provider_->emit_connectivity_changed(*mv);
 	}
-
-	NONMANIFOLD& construct_inner_constrained_voronoi_diagram(Delaunay& CVD, const std::string& name)
+	
+	NONMANIFOLD& construct_inner_constrained_voronoi_diagram(Delaunay& CVD, std::string name)
 	{
+		
 		NONMANIFOLD* mv =
 			nonmanifold_provider_->add_mesh(std::to_string(nonmanifold_provider_->number_of_meshes()) + "_" + name);
 		cgogn::io::IncidenceGraphImportData Inner_CVD_data;
@@ -823,7 +825,7 @@ public:
 		uint32 inner_power_nb_edges = Inner_CVD_data.edges_vertex_indices_.size() / 2;
 		uint32 inner_power_nb_faces = Inner_CVD_data.faces_nb_edges_.size();
 
-		Inner_CVD_data.reserve(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
+		Inner_CVD_data.set_parameter(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
 
 		import_incidence_graph_data(*mv, Inner_CVD_data);
 
@@ -835,11 +837,11 @@ public:
 		nonmanifold_provider_->emit_connectivity_changed(*mv);
 		return *mv;
 	}
-
+	
 	NONMANIFOLD& constrcut_power_shape_non_manifold(Regular& power_shape, string name)
 	{
 		NONMANIFOLD* mv =
-			nonmanifold_provider_->add_mesh(std::to_string(nonmanifold_provider_->number_of_meshes()) + "_" + name);
+			nonmanifold_provider_->add_mesh(std::to_string(nonmanifold_provider_->number_of_meshes()) + "_" +name);
 		cgogn::io::IncidenceGraphImportData Inner_Power_shape_data;
 		std::unordered_map<std::pair<uint32, uint32>, uint32, edge_hash, edge_equal> edge_indices;
 		uint32 edge_count = 0;
@@ -847,7 +849,7 @@ public:
 		for (auto vit = power_shape.finite_vertices_begin(); vit != power_shape.finite_vertices_end(); ++vit)
 		{
 			// if the point is inside
-
+			
 			if (vit->info().inside)
 			{
 				power_point.push_back(vit->point());
@@ -855,11 +857,11 @@ public:
 					{vit->point().x(), vit->point().y(), vit->point().z()});
 			}
 		}
-
+	
 		for (auto eit = power_shape.finite_edges_begin(); eit != power_shape.finite_edges_end(); ++eit)
 		{
-			typename Regular::Vertex_handle v1 = eit->first->vertex(eit->second);
-			typename Regular::Vertex_handle v2 = eit->first->vertex(eit->third);
+			Regular::Vertex_handle v1 = eit->first->vertex(eit->second);
+			Regular::Vertex_handle v2 = eit->first->vertex(eit->third);
 			if (v1->info().inside && v2->info().inside)
 			{
 				// Add edge
@@ -874,7 +876,7 @@ public:
 
 		for (auto fit = power_shape.finite_facets_begin(); fit != power_shape.finite_facets_end(); ++fit)
 		{
-			typename Regular::Vertex_handle v[3];
+			Regular::Vertex_handle v[3];
 			int count = 0;
 			bool inside = true;
 			// If face is inside
@@ -882,7 +884,7 @@ public:
 			{
 				if (idx != fit->second)
 				{
-					v[count] = fit->first->vertex(idx);
+					v[count]= fit->first->vertex(idx);
 					inside &= v[count]->info().inside;
 					count++;
 				}
@@ -893,13 +895,14 @@ public:
 				Inner_Power_shape_data.faces_edge_indices_.push_back(edge_indices[{v[0]->info().id, v[1]->info().id}]);
 				Inner_Power_shape_data.faces_edge_indices_.push_back(edge_indices[{v[1]->info().id, v[2]->info().id}]);
 				Inner_Power_shape_data.faces_edge_indices_.push_back(edge_indices[{v[2]->info().id, v[0]->info().id}]);
+				
 			}
 		}
 		uint32 inner_power_nb_vertices = Inner_Power_shape_data.vertex_position_.size();
 		uint32 inner_power_nb_edges = Inner_Power_shape_data.edges_vertex_indices_.size() / 2;
 		uint32 inner_power_nb_faces = Inner_Power_shape_data.faces_nb_edges_.size();
 
-		Inner_Power_shape_data.reserve(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
+		Inner_Power_shape_data.set_parameter(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
 
 		import_incidence_graph_data(*mv, Inner_Power_shape_data);
 		auto sphere_raidus = add_attribute<double, NonManifoldVertex>(*mv, "sphere_radius");
@@ -909,6 +912,7 @@ public:
 			(*sphere_raidus)[idx] = std::sqrt(power_point[idx].weight());
 			(*sphere_info)[idx] =
 				Vec4(power_point[idx].x(), power_point[idx].y(), power_point[idx].z(), power_point[idx].weight());
+			
 		}
 
 		std::shared_ptr<NonManifoldAttribute<Vec3>> mv_vertex_position =
@@ -919,7 +923,7 @@ public:
 		nonmanifold_provider_->emit_connectivity_changed(*mv);
 		return *mv;
 	}
-
+	
 	void compute_stability_ratio_edge(NONMANIFOLD& nm, NonManifoldEdge e,
 									  std::shared_ptr<NonManifoldAttribute<double>>& stability_ratio,
 									  std::shared_ptr<NonManifoldAttribute<Vec3>>& stability_color,
@@ -928,8 +932,8 @@ public:
 		auto iv = incident_vertices(nm, e);
 		NonManifoldVertex v1 = iv[0];
 		NonManifoldVertex v2 = iv[1];
-		const Vec3& v1_p = value<Vec4>(nm, sphere_info, v1).template head<3>();
-		const Vec3& v2_p = value<Vec4>(nm, sphere_info, v2).template head<3>();
+		const Vec3& v1_p = value<Vec4>(nm, sphere_info, v1).head<3>();
+		const Vec3& v2_p = value<Vec4>(nm, sphere_info, v2).head<3>();
 		const double& r1 = value<Vec4>(nm, sphere_info, v1).w();
 		const double& r2 = value<Vec4>(nm, sphere_info, v2).w();
 		const double center_dist = (v1_p - v2_p).norm();
@@ -941,7 +945,7 @@ public:
 			return;
 		}
 		double stability = dis / center_dist;
-		value<double>(nm, stability_ratio, e) = stability;
+		value<double>(nm, stability_ratio,e) = stability;
 		value<Vec3>(nm, stability_color, e) =
 			(stability <= 0.5) ? Vec3(0, stability, (0.5 - stability)) : Vec3(stability - 0.5, (1 - stability), 0);
 	}
@@ -950,18 +954,19 @@ public:
 	{
 		auto stability_ratio = add_attribute<double, NonManifoldEdge>(nm, "stability_ratio");
 		auto stability_color = add_attribute<Vec3, NonManifoldEdge>(nm, "stability_color");
-		auto sphere_info = get_attribute<Vec4, NonManifoldVertex>(nm, "sphere_info"); // {center, radius} = {x, y, z, r}
+		auto sphere_info =
+			get_attribute<Vec4, NonManifoldVertex>(nm, "sphere_info"); // {center, radius} = {x, y, z, r}
 		parallel_foreach_cell(nm, [&](NonManifoldEdge e) -> bool {
 			compute_stability_ratio_edge(nm, e, stability_ratio, stability_color, sphere_info);
 			return true;
 		});
 	}
 
-	void collapse_non_manifold_using_QMat(NONMANIFOLD& nm, uint32 number_vertices_remain, float k)
+	 void collapse_non_manifold_using_QMat(NONMANIFOLD& nm, uint32 number_vertices_remain, float k)
 	{
 		using QMatHelper = modeling::DecimationSQEM_Helper<NONMANIFOLD>;
 		using Slab_Quadric = geometry::Slab_Quadric;
-
+		
 		auto sphere_radius = get_attribute<double, NonManifoldVertex>(nm, "sphere_radius");
 		auto stability_ratio = get_attribute<double, NonManifoldEdge>(nm, "stability_ratio");
 		auto stability_color = get_attribute<Vec3, NonManifoldEdge>(nm, "stability_color");
@@ -970,25 +975,23 @@ public:
 		auto fixed_vertex = add_attribute<bool, NonManifoldVertex>(nm, "fixed_vertex");
 		foreach_cell(nm, [&](NonManifoldVertex v) -> bool {
 			value<bool>(nm, fixed_vertex, v) = false;
+>>>>>>> 7918279 (continue try to control the dilated constant with local geometry)
 			return true;
 		});
 
-		QMatHelper helper(k, nm, position, sphere_info, stability_color, stability_ratio, sphere_radius, fixed_vertex);
+		foreach_cell(surface, [&](SurfaceVertex v) {
+			Vec3 pos = value<Vec3>(surface, sample_position, v);
+			Delaunay_Vertex_handle vhd = constrained_voronoi_diagram.insert(Point(pos[0], pos[1], pos[2]));
+			vhd->info().inside = false;
+			vhd->info().id = count;
+			count++;
+			return true;
+		});
 
-		helper.initial_slab_mesh();
-		helper.initial_boundary_mesh();
-		helper.initial_collapse_queue();
-		helper.simplify(number_vertices_remain, true);
-
-		remove_attribute<NonManifoldVertex>(nm, fixed_vertex);
-		nonmanifold_provider_->emit_connectivity_changed(nm);
-		nonmanifold_provider_->emit_attribute_changed(nm, position.get());
-		nonmanifold_provider_->emit_attribute_changed(nm, sphere_radius.get());
-		nonmanifold_provider_->emit_attribute_changed(nm, stability_ratio.get());
-		nonmanifold_provider_->emit_attribute_changed(nm, stability_color.get());
+		return constrained_voronoi_diagram;
 	}
-
-	void coverage_axis_CVD(SURFACE& surface, POINT& mv, HighsSolution& solution)
+	
+	 void coverage_axis_CVD(SURFACE& surface, POINT& mv, HighsSolution& solution)
 	{
 		Cgal_Surface_mesh csm;
 		load_model_in_cgal(surface, csm);
@@ -1252,7 +1255,6 @@ public:
 	}
 	void compute_power_shape(SURFACE& surface)
 	{
-
 		Cgal_Surface_mesh csm;
 		load_model_in_cgal(*selected_surface_mesh_, csm);
 		Tree tree(faces(csm).first, faces(csm).second, csm);
@@ -1358,7 +1360,7 @@ protected:
 				if (solution.col_value.size() > 0)
 				{
 					if (ImGui::Button("Collpase"))
-						coverage_axis_collapse(*selected_surface_mesh_, *selected_candidates_, solution);
+						coverage_axis_collapse(*selected_surface_mesh_, *selected_candidates_, solution); 
 					if (ImGui::Button("PD"))
 						coverage_axis_PD(*selected_surface_mesh_, *selected_candidates_, solution, dilation_factor);
 					if (ImGui::Button("CVD"))
