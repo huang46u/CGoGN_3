@@ -87,7 +87,7 @@ class PowerShape : public Module
 		bool angle_flag = false;
 		bool radius_flag = false;
 		bool distance_flag = true;
-		bool selected = true;
+		bool selected = false;
 		Point centroid;
 		double angle;
 		double radius2;//radius square
@@ -232,8 +232,8 @@ private:
 					if (cell->info().radius2 > vit->info().inside_pole_distance)
 					{
 						vit->info().inside_pole_distance = cell->info().radius2;
-						ch_inside = cell;
 						inside = true;
+						ch_inside = cell;
 					}
 				}
 				else
@@ -241,18 +241,23 @@ private:
 					if (cell->info().radius2 > vit->info().outside_pole_distance)
 					{
 						vit->info().outside_pole_distance = cell->info().radius2;
-						ch_outside = cell;
 						outside = true;
+						ch_outside = cell;
 					}
 				}
 			}
+			
 			if (inside)
-				ch_inside->info().is_pole = true;
-			if (outside)
-				ch_outside->info().is_pole = true;
-			if (inside && outside)
 			{
-				inside_to_outside.insert({ch_inside, ch_outside});
+				ch_inside->info().is_pole = true;
+				vit->info().inside_pole = ch_inside->info().centroid;
+				vit->info().inside_pole_distance = std::sqrt(ch_inside->info().radius2);
+			}
+			if (outside)
+			{
+				ch_outside->info().is_pole = true;
+				vit->info().outside_pole = ch_outside->info().centroid;
+				vit->info().outside_pole_distance = std::sqrt(ch_outside->info().radius2);
 			}
 		}
 	}
@@ -262,27 +267,25 @@ private:
 		uint32 count = 0;
 		for (auto cit = tri.finite_cells_begin(); cit != tri.finite_cells_end(); ++cit)
 		{
-			if (cit->info().inside)
+			double max_angle = 0;
+			for (size_t i = 0; i < 4; i++)
 			{
-				double max_angle = 0;
-				for (size_t i = 0; i < 4; i++)
+				for (size_t j = i + 1; j < 4; j++)
 				{
-					for (size_t j = i + 1; j < 4; j++)
-					{
-						Point p1 = cit->vertex(i)->point();
-						Point p2 = cit->vertex(j)->point();
-						Point p3 = cit->info().centroid;
-						Vec3 v1 = Vec3(p1.x(), p1.y(), p1.z()) - Vec3(p3.x(), p3.y(), p3.z());
-						Vec3 v2 = Vec3(p2.x(), p2.y(), p2.z()) - Vec3(p3.x(), p3.y(), p3.z());
-						double angle = std::acos(v1.dot(v2) / (std::sqrt(v1.dot(v1)) * std::sqrt(v2.dot(v2))));
-						max_angle = std::max(angle, max_angle);
-					}
+					Point p1 = cit->vertex(i)->point();
+					Point p2 = cit->vertex(j)->point();
+					Point p3 = cit->info().centroid;
+					Vec3 v1 = Vec3(p1.x(), p1.y(), p1.z()) - Vec3(p3.x(), p3.y(), p3.z());
+					Vec3 v2 = Vec3(p2.x(), p2.y(), p2.z()) - Vec3(p3.x(), p3.y(), p3.z());
+					double angle = std::acos(v1.dot(v2) / (std::sqrt(v1.dot(v1)) * std::sqrt(v2.dot(v2))));
+					max_angle = std::max(angle, max_angle);
 				}
-				cit->info().angle = max_angle;
-				cit->info().angle_flag = max_angle > angle_threshold ? true : false;
-				if (!cit->info().angle_flag)
-					count++;
 			}
+			cit->info().angle = max_angle;
+			cit->info().angle_flag = max_angle > angle_threshold ? true : false;
+			if (!cit->info().angle_flag)
+				count++;
+			
 		}
 		std::cout << "angle deletion " << count << std::endl;
 	}
@@ -292,7 +295,9 @@ private:
 		uint32 count = 0;
 		for (auto cit = tri.finite_cells_begin(); cit != tri.finite_cells_end(); ++cit)
 		{
-			cit->info().radius_flag = std::sqrt(cit->info().radius2) > radius_threshold ? true : false;
+			cit->info().radius_flag = std::sqrt(cit->info().radius2) > radius_threshold
+										  ? (std::sqrt(cit->info().radius2) < max_radius_ ? true : false)
+										  : false;
 			if (!cit->info().radius_flag)
 				count++;
 		}
@@ -457,13 +462,117 @@ public:
 		return tri;
 	}
 
-	
+	void construct_voronoi_cell(SURFACE& surface, Delaunay& tri)
+	{
+		NONMANIFOLD* voronoi_cell =
+			nonmanifold_provider_->add_mesh(surface_provider_->mesh_name(surface) + "voronoi cells");
+		cgogn::io::IncidenceGraphImportData Cell_non_manifold;
+		std::unordered_map<std::pair<uint32, uint32>, size_t, edge_hash, edge_equal> edge_indices;
+		std::vector<double> sphere_radius;
+		std::vector<Vec3> sphere_color;
+		bool valid;
+		bool inside;
+		bool outside;
+		int vertex_count = 0;
+		int face_number = 0;
+		std::vector<Delaunay_Cell_handle> incells;
+		
+		for (auto eit = tri.finite_edges_begin(); eit != tri.finite_edges_end(); ++eit)
+		{
+			valid = false;
+			incells.clear();
+			inside = false;
+			outside = false;
+			Delaunay_Cell_circulator& cc = tri.incident_cells(*eit);
+			do
+			{
+				
+				if (cc->info().radius_flag)
+				{
+					if (cc->info().inside && (distance_filtering_ ? cc->info().distance_flag : true) &&
+						(angle_filtering_ ? cc->info().angle_flag : true) &&
+						(pole_filtering_ ? cc->info().is_pole : true))
+					{
+						cc->info().selected = true;
+						valid = true;
+					}
+					incells.push_back(cc);
+					if (cc->info().inside)
+						inside = true;
+					else
+						outside = true;
+				}
+				
+				cc++;
+			} while (cc != tri.incident_cells(*eit));
+			if (!valid || !inside || !outside || incells.size()<3)
+				continue;
+			for (size_t k = 0; k < incells.size(); k++)
+			{
+				if (incells[k]->info().selected)
+				{
+					sphere_color.push_back(Vec3(1.0, 0.0, 0.0));
+				}
+				else
+				{
+					sphere_color.push_back(Vec3(0.0, 1.0, 0.0));
+				}
+				Point centroid = incells[k]->info().centroid;
+				double radius = std::sqrt(incells[k]->info().radius2);
+				Cell_non_manifold.vertex_position_.emplace_back(centroid[0], centroid[1], centroid[2]);
+				sphere_radius.push_back(radius);
+				incells[k]->info().id = vertex_count;
+				vertex_count++;
+				
+			}
+			Cell_non_manifold.faces_nb_edges_.push_back(incells.size());
+			for (size_t k = 0; k < incells.size(); k++)
+			{
+				uint32 ev1 = incells[k]->info().id;
+				uint32 ev2 = incells[(k + 1) % incells.size()]->info().id;
+				if (edge_indices.find({ev1, ev2}) == edge_indices.end())
+				{
+					Cell_non_manifold.edges_vertex_indices_.push_back(ev1);
+					Cell_non_manifold.edges_vertex_indices_.push_back(ev2);
+					edge_indices.insert({{ev1, ev2}, edge_indices.size()});
+				}
+				
+				Cell_non_manifold.faces_edge_indices_.push_back(edge_indices[{ev1,ev2}]);
+			}
+			face_number++;
+		}
+
+		uint32 Cell_non_manifold_nb_vertices = Cell_non_manifold.vertex_position_.size();
+		uint32 Cell_non_manifold_nb_edges = Cell_non_manifold.edges_vertex_indices_.size() / 2;
+		uint32 Cell_non_manifold_nb_faces = face_number;
+		Cell_non_manifold.set_parameter(Cell_non_manifold_nb_vertices, Cell_non_manifold_nb_edges,
+										   Cell_non_manifold_nb_faces);
+
+		import_incidence_graph_data(*voronoi_cell, Cell_non_manifold);
+
+		auto sphere_raidus_att = add_attribute<double, NonManifoldVertex>(*voronoi_cell, "sphere_radius");
+		auto sphere_color_att = add_attribute<Vec3, NonManifoldVertex>(*voronoi_cell, "sphere_color");
+		for (size_t idx = 0; idx < sphere_radius.size(); idx++)
+		{
+			(*sphere_raidus_att)[idx] = sphere_radius[idx];
+			(*sphere_color_att)[idx] = sphere_color[idx];
+		}
+		std::shared_ptr<NonManifoldAttribute<Vec3>> mv_vertex_position =
+			get_attribute<Vec3, NonManifoldVertex>(*voronoi_cell, "position");
+		if (mv_vertex_position)
+			nonmanifold_provider_->set_mesh_bb_vertex_position(*voronoi_cell, mv_vertex_position);
+
+		nonmanifold_provider_->emit_connectivity_changed(*voronoi_cell);
+
+	}
 	void construct_candidates_points(SURFACE& surface, Delaunay& tri)
 	{
 		cgogn::io::PointImportData candidates;
 		cgogn::io::PointImportData outside_poles_data;
 		POINT* candidates_point = point_provider_->add_mesh(point_provider_->mesh_name(surface) + "candidates");
 		POINT* outside_poles_point = point_provider_->add_mesh(point_provider_->mesh_name(surface) + "outside_poles");
+		
+
 		std::vector<double> candidates_radius;
 		std::vector<double> angle;
 
@@ -474,7 +583,7 @@ public:
 		if (circumradius_filtering_) filter_by_circumradius(tri, radius_threshold_);
 		if (angle_filtering_) filter_by_angle(tri, angle_threshold_);
 		
-
+		construct_voronoi_cell(surface, tri);
 		for (auto cit = tri.finite_cells_begin(); cit != tri.finite_cells_end(); ++cit)
 		{
 			if (cit->info().inside && 
@@ -483,17 +592,26 @@ public:
 				(angle_filtering_ ? cit->info().angle_flag : true)&&
 				(pole_filtering_? cit->info().is_pole: true))
 			{
-				
-				Delaunay_Cell_handle c_out = inside_to_outside[cit];
 				candidates.vertex_position_.emplace_back(cit->info().centroid.x(), cit->info().centroid.y(),
 														 cit->info().centroid.z());
 				candidates_radius.push_back(std::sqrt(cit->info().radius2));
 				angle.push_back(cit->info().angle);
-				oustside_poles_radius.push_back(std::sqrt(c_out->info().radius2));	
-				oustside_poles_center.emplace_back(c_out->info().centroid.x(), c_out->info().centroid.y(),
-												   c_out->info().centroid.z());
-				outside_poles_data.vertex_position_.emplace_back(c_out->info().centroid.x(), c_out->info().centroid.y(),
-																					 c_out->info().centroid.z());
+				double min_dist = std::numeric_limits<double>::max();
+				Vec3 nearest_pole(0,0,0);
+				for (size_t i = 0; i < 4; ++i)
+				{
+					if (min_dist > cit->vertex(i)->info().outside_pole_distance)
+					{
+						min_dist = cit->vertex(i)->info().outside_pole_distance;
+						nearest_pole =
+							Vec3(cit->vertex(i)->info().outside_pole.x(), 
+												cit->vertex(i)->info().outside_pole.y(), 
+												cit->vertex(i)->info().outside_pole.z());
+					}
+				}	
+				oustside_poles_radius.emplace_back(min_dist);
+				oustside_poles_center.push_back(nearest_pole);
+				outside_poles_data.vertex_position_.emplace_back(nearest_pole.x(), nearest_pole.y(), nearest_pole.z());
 			}
 		}
 		candidates.reserve(candidates_radius.size());
@@ -650,11 +768,9 @@ public:
 				(circumradius_filtering_ ? cit->info().radius_flag : true) &&
 				(angle_filtering_ ? cit->info().angle_flag : true) && cit->info().is_pole)
 			{
-				Delaunay_Cell_handle c_out = inside_to_outside[cit];
 				Weight_Point wp(cit->info().centroid, cit->info().radius2);
 				power_shape.insert(wp);
-				Weight_Point wp_out(c_out->info().centroid, c_out->info().radius2);
-				power_shape.insert(wp_out);
+				
 			}
 			
 		}
@@ -1044,7 +1160,7 @@ public:
 		auto coverage_infos = get_attribute<std::vector<uint32>, Vertex>(surface, "coverage_infos");
 		auto sample_position = get_attribute<Vec3, Vertex>(surface, "position");
 	
-		POINT* outside_poles_point = point_provider_->add_mesh(point_provider_->mesh_name(surface) + "outside_poles");
+		POINT* outside_poles_point = point_provider_->add_mesh(point_provider_->mesh_name(surface) + "filtered_outside_poles");
 		cgogn::io::PointImportData outside_poles;
 
 		std::vector<double> outside_poles_radius;
@@ -1379,7 +1495,6 @@ private:
 	MeshProvider<SURFACE>* surface_provider_;
 	MeshProvider<NONMANIFOLD>* nonmanifold_provider_;
 	HighsSolution solution;
-	std::unordered_map<Delaunay_Cell_handle,Delaunay_Cell_handle, Cell_handle_hash, Cell_handle_equal> inside_to_outside;
 	Delaunay tri_;
 	Tree tree_;
 	bool angle_filtering_ = false;
