@@ -639,9 +639,68 @@ public:
 			(*outside_pole_radius_att)[idx] = oustside_poles_radius[idx];
 			(*outside_pole_center_att)[idx] = oustside_poles_center[idx];
 		}
+		construct_candidates_delaunay(surface, *candidates_point);
 		Delaunay CVD = compute_constrained_voronoi_diagram(surface, *candidates_point);
 		construct_inner_constrained_voronoi_diagram(CVD, "constrained_voronoi_diagram");
 		std::cout << "point size: " << candidates_radius.size() << std::endl;
+	}
+
+	void construct_candidates_delaunay(SURFACE& surface, POINT& candidates)
+	{
+		Delaunay tri;
+		auto position = get_attribute<Vec3, PointVertex>(candidates, "position");
+		
+		foreach_cell(candidates, [&](PointVertex v) {
+			tri.insert(Point(value<Vec3>(candidates, position, v).x(), value<Vec3>(candidates, position, v).y(),
+							 value<Vec3>(candidates, position, v).z()));
+			return true;
+		});
+
+		int count = 0;
+		for (auto cit = tri.finite_cells_begin(); cit != tri.finite_cells_end(); ++cit)
+		{
+			cit->info().centroid = CGAL::circumcenter(tri.tetrahedron(cit));
+			cit->info().radius2 = CGAL::squared_distance(cit->info().centroid, cit->vertex(0)->point());
+			cit->info().id = count;
+			count++;
+		}
+		mark_poles(tri);
+		NONMANIFOLD* candidates_voronoi =
+			nonmanifold_provider_->add_mesh(surface_provider_->mesh_name(surface) + "candidates_voronoi");
+		cgogn::io::IncidenceGraphImportData Candidates_voronoi_non_manifold;
+		std::unordered_map<std::pair<uint32, uint32>, size_t, edge_hash, edge_equal> edge_indices;
+		std::vector<Delaunay_Cell_handle> incells;
+		bool all_finite_inside = true;
+		int face_number = 0, vertex_count = 0;
+		for (auto vit = tri.finite_vertices_begin(); vit != tri.finite_vertices_end(); ++vit)
+		{
+			if (vit->info().outside_pole_distance < 0.2)
+			{
+
+				Candidates_voronoi_non_manifold.vertex_position_.emplace_back(vit->point().x(), vit->point().y(),
+																			  vit->point().z());
+				Candidates_voronoi_non_manifold.vertex_position_.emplace_back(
+					vit->info().outside_pole.x(), vit->info().outside_pole.y(), vit->info().outside_pole.z());
+				Candidates_voronoi_non_manifold.edges_vertex_indices_.emplace_back(vertex_count);
+				Candidates_voronoi_non_manifold.edges_vertex_indices_.emplace_back(vertex_count + 1);
+				vertex_count += 2;
+			}
+		}
+
+		uint32 Cell_non_manifold_nb_vertices = Candidates_voronoi_non_manifold.vertex_position_.size();
+		uint32 Cell_non_manifold_nb_edges = Candidates_voronoi_non_manifold.edges_vertex_indices_.size() / 2;
+		uint32 Cell_non_manifold_nb_faces = face_number;
+		Candidates_voronoi_non_manifold.set_parameter(Cell_non_manifold_nb_vertices, Cell_non_manifold_nb_edges,
+										Cell_non_manifold_nb_faces);
+
+		import_incidence_graph_data(*candidates_voronoi, Candidates_voronoi_non_manifold);
+		std::shared_ptr<NonManifoldAttribute<Vec3>> mv_vertex_position =
+			get_attribute<Vec3, NonManifoldVertex>(*candidates_voronoi, "position");
+		if (mv_vertex_position)
+			nonmanifold_provider_->set_mesh_bb_vertex_position(*candidates_voronoi, mv_vertex_position);
+
+		nonmanifold_provider_->emit_connectivity_changed(*candidates_voronoi);
+
 	}
 	NONMANIFOLD& compute_initial_non_manifold(Delaunay& tri, string name)
 	{
@@ -1497,13 +1556,13 @@ private:
 	HighsSolution solution;
 	Delaunay tri_;
 	Tree tree_;
-	bool angle_filtering_ = false;
-	bool circumradius_filtering_ = false;
-	bool distance_filtering_ = false;
-	bool pole_filtering_ = false;
-	float distance_threshold_ = 0.0;
-	float angle_threshold_ = 0.0;
-	float radius_threshold_ = 0.0;
+	bool angle_filtering_ = true;
+	bool circumradius_filtering_ = true;
+	bool distance_filtering_ = true;
+	bool pole_filtering_ = true;
+	float distance_threshold_ = 0.001;
+	float angle_threshold_ = 1.9;
+	float radius_threshold_ = 0.030;
 	double min_radius_ = std::numeric_limits<double>::max();
 	double max_radius_ = std::numeric_limits<double>::min();
 };
