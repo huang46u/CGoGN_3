@@ -699,7 +699,7 @@ public:
 		uint32 Cell_non_manifold_nb_vertices = Candidates_voronoi_non_manifold.vertex_position_.size();
 		uint32 Cell_non_manifold_nb_edges = Candidates_voronoi_non_manifold.edges_vertex_indices_.size() / 2;
 		uint32 Cell_non_manifold_nb_faces = face_number;
-		Candidates_voronoi_non_manifold.set_parameter(Cell_non_manifold_nb_vertices, Cell_non_manifold_nb_edges,
+		Candidates_voronoi_non_manifold.reserve(Cell_non_manifold_nb_vertices, Cell_non_manifold_nb_edges,
 										Cell_non_manifold_nb_faces);
 
 		import_incidence_graph_data(*candidates_voronoi, Candidates_voronoi_non_manifold);
