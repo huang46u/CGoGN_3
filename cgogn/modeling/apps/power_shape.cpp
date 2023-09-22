@@ -21,6 +21,10 @@
  *                                                                              *
  *******************************************************************************/
 
+#include <cgogn/core/types/incidence_graph/incidence_graph.h>
+#include <cgogn/core/types/maps/cmap/cmap0.h>
+#include <cgogn/core/types/maps/cmap/cmap2.h>
+
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <cgogn/ui/app.h>
@@ -28,13 +32,11 @@
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/modeling/ui_modules/power_shape.h>
-#include <cgogn/rendering/ui_modules/surface_render.h>
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
-#include <cgogn/core/types/incidence_graph/incidence_graph.h>
+#include <cgogn/rendering/ui_modules/surface_render.h>
 
 #define DEFAULT_MESH_PATH CGOGN_STR(CGOGN_DATA_PATH) "/meshes/"
 
-using Graph = cgogn::Graph;
 using Point = cgogn::CMap0;
 using NonManifold = cgogn::IncidenceGraph;
 using Surface = cgogn::CMap2;
@@ -70,14 +72,13 @@ int main(int argc, char** argv)
 	app.init_modules();
 
 	cgogn::ui::View* v1 = app.current_view();
-	
+
 	v1->link_module(&mp);
 	v1->link_module(&ms);
 	v1->link_module(&mpnm);
 	v1->link_module(&sr);
 	v1->link_module(&srp);
 	v1->link_module(&srnm);
-
 
 	if (filename.length() > 0)
 	{
@@ -98,6 +99,5 @@ int main(int argc, char** argv)
 		sr.set_ghost_mode(*v1, *m, true);
 	}
 
-	
 	return app.launch();
 }
