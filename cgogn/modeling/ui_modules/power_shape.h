@@ -550,7 +550,7 @@ public:
 		uint32 Cell_non_manifold_nb_vertices = Cell_non_manifold.vertex_position_.size();
 		uint32 Cell_non_manifold_nb_edges = Cell_non_manifold.edges_vertex_indices_.size() / 2;
 		uint32 Cell_non_manifold_nb_faces = face_number;
-		Cell_non_manifold.set_parameter(Cell_non_manifold_nb_vertices, Cell_non_manifold_nb_edges,
+		Cell_non_manifold.reserve(Cell_non_manifold_nb_vertices, Cell_non_manifold_nb_edges,
 										   Cell_non_manifold_nb_faces);
 
 		import_incidence_graph_data(*voronoi_cell, Cell_non_manifold);
@@ -873,7 +873,7 @@ public:
 		uint32 inner_power_nb_edges = Inner_CVD_data.edges_vertex_indices_.size() / 2;
 		uint32 inner_power_nb_faces = Inner_CVD_data.faces_nb_edges_.size();
 
-		Inner_CVD_data.set_parameter(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
+		Inner_CVD_data.reserve(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
 
 		import_incidence_graph_data(*mv, Inner_CVD_data);
 
@@ -947,7 +947,7 @@ public:
 		uint32 inner_power_nb_edges = Inner_CVD_data.edges_vertex_indices_.size() / 2;
 		uint32 inner_power_nb_faces = Inner_CVD_data.faces_nb_edges_.size();
 
-		Inner_CVD_data.set_parameter(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
+		Inner_CVD_data.reserve(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
 
 		import_incidence_graph_data(*mv, Inner_CVD_data);
 
@@ -1024,7 +1024,7 @@ public:
 		uint32 inner_power_nb_edges = Inner_Power_shape_data.edges_vertex_indices_.size() / 2;
 		uint32 inner_power_nb_faces = Inner_Power_shape_data.faces_nb_edges_.size();
 
-		Inner_Power_shape_data.set_parameter(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
+		Inner_Power_shape_data.reserve(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
 
 		import_incidence_graph_data(*mv, Inner_Power_shape_data);
 		auto sphere_raidus = add_attribute<double, NonManifoldVertex>(*mv, "sphere_radius");
@@ -1084,11 +1084,11 @@ public:
 		});
 	}
 
-	 void collapse_non_manifold_using_QMat(NONMANIFOLD& nm, uint32 number_vertices_remain, float k)
+	void collapse_non_manifold_using_QMat(NONMANIFOLD& nm, uint32 number_vertices_remain, float k)
 	{
 		using QMatHelper = modeling::DecimationSQEM_Helper<NONMANIFOLD>;
 		using Slab_Quadric = geometry::Slab_Quadric;
-		
+
 		auto sphere_radius = get_attribute<double, NonManifoldVertex>(nm, "sphere_radius");
 		auto stability_ratio = get_attribute<double, NonManifoldEdge>(nm, "stability_ratio");
 		auto stability_color = get_attribute<Vec3, NonManifoldEdge>(nm, "stability_color");
@@ -1097,21 +1097,24 @@ public:
 		auto fixed_vertex = add_attribute<bool, NonManifoldVertex>(nm, "fixed_vertex");
 		foreach_cell(nm, [&](NonManifoldVertex v) -> bool {
 			value<bool>(nm, fixed_vertex, v) = false;
->>>>>>> 7918279 (continue try to control the dilated constant with local geometry)
 			return true;
 		});
 
-		foreach_cell(surface, [&](SurfaceVertex v) {
-			Vec3 pos = value<Vec3>(surface, sample_position, v);
-			Delaunay_Vertex_handle vhd = constrained_voronoi_diagram.insert(Point(pos[0], pos[1], pos[2]));
-			vhd->info().inside = false;
-			vhd->info().id = count;
-			count++;
-			return true;
-		});
+		QMatHelper helper(k, nm, position, sphere_info, stability_color, stability_ratio, sphere_radius, fixed_vertex);
 
-		return constrained_voronoi_diagram;
+		helper.initial_slab_mesh();
+		helper.initial_boundary_mesh();
+		helper.initial_collapse_queue();
+		helper.simplify(number_vertices_remain, true);
+
+		remove_attribute<NonManifoldVertex>(nm, fixed_vertex);
+		nonmanifold_provider_->emit_connectivity_changed(nm);
+		nonmanifold_provider_->emit_attribute_changed(nm, position.get());
+		nonmanifold_provider_->emit_attribute_changed(nm, sphere_radius.get());
+		nonmanifold_provider_->emit_attribute_changed(nm, stability_ratio.get());
+		nonmanifold_provider_->emit_attribute_changed(nm, stability_color.get());
 	}
+
 	
 	 void coverage_axis_CVD(SURFACE& surface, POINT& mv, HighsSolution& solution)
 	{
