@@ -658,7 +658,18 @@ public:
 	{
 		Delaunay tri;
 		auto position = get_attribute<Vec3, PointVertex>(candidates, "position");
-		
+		auto [bb_min, bb_max] = geometry::bounding_box(*position);
+		std::vector<Vec3> bb_box;
+		bb_box.emplace_back(bb_min[0], bb_max[1], bb_max[2]);
+		bb_box.emplace_back(bb_max[0], bb_max[1], bb_max[2]);
+		bb_box.emplace_back(bb_min[0], bb_min[1], bb_max[2]);
+		bb_box.emplace_back(bb_max[0], bb_min[1], bb_max[2]);
+		bb_box.emplace_back(bb_min[0], bb_max[1], bb_min[2]);
+		bb_box.emplace_back(bb_max[0], bb_max[1], bb_min[2]);
+		bb_box.emplace_back(bb_min[0], bb_min[1], bb_min[2]);
+		bb_box.emplace_back(bb_max[0], bb_min[1], bb_min[2]);
+		for (Vec3 vec : bb_box)
+			tri.insert(Point(vec.x(), vec.y(), vec.z()));
 		foreach_cell(candidates, [&](PointVertex v) {
 			tri.insert(Point(value<Vec3>(candidates, position, v).x(), value<Vec3>(candidates, position, v).y(),
 							 value<Vec3>(candidates, position, v).z()));
@@ -1240,8 +1251,8 @@ public:
 				selected_points_radius[index_of(selected_points, nv)] =
 					value<double>(selected_points, dilated_radius, nv) -
 					value<double>(selected_points, sphere_radius, nv);
-				power_shape.insert(Weight_Point(Point(pos[0], pos[1], pos[2]),
-												value<double>(selected_points, dilated_radius, nv) *
+				power_shape.insert(
+					Weight_Point(Point(pos[0], pos[1], pos[2]), value<double>(selected_points, dilated_radius, nv) *
 													value<double>(selected_points, dilated_radius, nv)));
 
 				Vec3 outside_pole_pos = value<Vec3>(selected_points, oustide_pole_center_att, nv);

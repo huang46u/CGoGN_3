@@ -230,7 +230,7 @@ public:
 		}
 	}
 
-	MESH* load_surface_from_file(const std::string& filename, bool normalized = true)
+	MESH* load_surface_from_file(const std::string& filename, bool normalized = false)
 	{
 		if constexpr (mesh_traits<MESH>::dimension == 2 && std::is_default_constructible_v<MESH>)
 		{
