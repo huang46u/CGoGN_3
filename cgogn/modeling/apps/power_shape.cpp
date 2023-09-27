@@ -34,6 +34,8 @@
 #include <cgogn/modeling/ui_modules/power_shape.h>
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
 #include <cgogn/rendering/ui_modules/surface_render.h>
+#include <cgogn/geometry/ui_modules/surface_selection.h>
+#include <cgogn/geometry/ui_modules/surface_differential_properties.h>
 
 #define DEFAULT_MESH_PATH CGOGN_STR(CGOGN_DATA_PATH) "/meshes/"
 
@@ -65,6 +67,8 @@ int main(int argc, char** argv)
 	cgogn::ui::MeshProvider<Surface> ms(app);
 	cgogn::ui::MeshProvider<NonManifold> mpnm(app);
 	cgogn::ui::PointCloudRender<Point> srp(app);
+	cgogn::ui::SurfaceSelection<Surface> sl(app);
+	cgogn::ui::SurfaceDifferentialProperties<Surface> sdp(app);
 	cgogn::ui::SurfaceRender<Surface> sr(app);
 	cgogn::ui::SurfaceRender<NonManifold> srnm(app);
 	cgogn::ui::PowerShape<Point, Surface, NonManifold> pw(app);
@@ -76,10 +80,13 @@ int main(int argc, char** argv)
 	v1->link_module(&mp);
 	v1->link_module(&ms);
 	v1->link_module(&mpnm);
+	v1->link_module(&sdp);
+	v1->link_module(&sl);
 	v1->link_module(&sr);
 	v1->link_module(&srp);
 	v1->link_module(&srnm);
 
+	
 	if (filename.length() > 0)
 	{
 		Surface* m = ms.load_surface_from_file(filename);
@@ -89,11 +96,14 @@ int main(int argc, char** argv)
 			return 1;
 		}
 
-		std::shared_ptr<Attribute<Vec3>> vertex_position = cgogn::get_attribute<Vec3, Vertex>(*m, "position");
-		std::shared_ptr<Attribute<Vec3>> vertex_normal = cgogn::add_attribute<Vec3, Vertex>(*m, "normal");
+	
+		auto surface_vertex_position = cgogn::get_attribute<Vec3, cgogn::mesh_traits<Surface>::Vertex>(*s, "position");
+		auto surface_vertex_normal =
+			cgogn::get_or_add_attribute<Vec3, cgogn::mesh_traits<Surface>::Vertex>(*s, "normal");
 
-		sr.set_vertex_position(*v1, *m, vertex_position);
-		sr.set_vertex_normal(*v1, *m, vertex_normal);
+		sdp.compute_normal(*s, surface_vertex_position.get(), surface_vertex_normal.get());
+		sr.set_vertex_position(*v1, *m, surface_vertex_position);
+		sr.set_vertex_normal(*v1, *m, surface_vertex_normal);
 		sr.set_render_edges(*v1, *m, false);
 		sr.set_render_vertices(*v1, *m, false);
 		sr.set_ghost_mode(*v1, *m, true);
