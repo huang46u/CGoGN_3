@@ -36,6 +36,7 @@
 #include <cgogn/rendering/ui_modules/surface_render.h>
 #include <cgogn/geometry/ui_modules/surface_selection.h>
 #include <cgogn/geometry/ui_modules/surface_differential_properties.h>
+#include <cgogn/modeling/ui_modules/surface_modeling.h>
 
 #define DEFAULT_MESH_PATH CGOGN_STR(CGOGN_DATA_PATH) "/meshes/"
 
@@ -67,11 +68,13 @@ int main(int argc, char** argv)
 	cgogn::ui::MeshProvider<Surface> ms(app);
 	cgogn::ui::MeshProvider<NonManifold> mpnm(app);
 	cgogn::ui::PointCloudRender<Point> srp(app);
+	//cgogn::ui::SurfaceModeling<Surface> sms(app);
 	cgogn::ui::SurfaceSelection<Surface> sl(app);
 	cgogn::ui::SurfaceDifferentialProperties<Surface> sdp(app);
 	cgogn::ui::SurfaceRender<Surface> sr(app);
 	cgogn::ui::SurfaceRender<NonManifold> srnm(app);
 	cgogn::ui::PowerShape<Point, Surface, NonManifold> pw(app);
+	
 
 	app.init_modules();
 
@@ -80,11 +83,11 @@ int main(int argc, char** argv)
 	v1->link_module(&mp);
 	v1->link_module(&ms);
 	v1->link_module(&mpnm);
-	v1->link_module(&sdp);
 	v1->link_module(&sl);
 	v1->link_module(&sr);
 	v1->link_module(&srp);
 	v1->link_module(&srnm);
+
 
 	
 	if (filename.length() > 0)
@@ -97,11 +100,11 @@ int main(int argc, char** argv)
 		}
 
 	
-		auto surface_vertex_position = cgogn::get_attribute<Vec3, cgogn::mesh_traits<Surface>::Vertex>(*s, "position");
+		auto surface_vertex_position = cgogn::get_attribute<Vec3, cgogn::mesh_traits<Surface>::Vertex>(*m, "position");
 		auto surface_vertex_normal =
-			cgogn::get_or_add_attribute<Vec3, cgogn::mesh_traits<Surface>::Vertex>(*s, "normal");
+			cgogn::get_or_add_attribute<Vec3, cgogn::mesh_traits<Surface>::Vertex>(*m, "normal");
 
-		sdp.compute_normal(*s, surface_vertex_position.get(), surface_vertex_normal.get());
+		sdp.compute_normal(*m, surface_vertex_position.get(), surface_vertex_normal.get());
 		sr.set_vertex_position(*v1, *m, surface_vertex_position);
 		sr.set_vertex_normal(*v1, *m, surface_vertex_normal);
 		sr.set_render_edges(*v1, *m, false);

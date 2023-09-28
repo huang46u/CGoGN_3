@@ -1288,17 +1288,19 @@ public:
 			return true;
 		});
 		int count = 0;
+	
 		for (auto vit = power_shape.finite_vertices_begin(); vit != power_shape.finite_vertices_end(); ++vit)
 		{
 			// if the point is inside
 			Point p = vit->point().point();
-			if (pointInside(tree, p))
+			if (pointInside(tree_, p))
 			{
 				vit->info().id = count;
 				vit->info().inside = true;
 				count++;
 			}
 		}
+		
 		constrcut_power_shape_non_manifold(power_shape, "_coverage_axis" + surface_provider_->mesh_name(surface));
 	}
 
@@ -1456,7 +1458,193 @@ public:
 		compute_initial_non_manifold(tri_, surface_provider_->mesh_name(surface) + "_inner_voronoi_diagram");
 	}
 
-protected:
+	void sample_medial_axis(SURFACE& s)
+	{
+
+		auto vertex_position = get_attribute<Vec3, SurfaceVertex>(s, "position");
+		auto vertex_normal = get_attribute<Vec3, SurfaceVertex>(s, "normal");
+		auto medial_axis_samples_position_ = add_attribute<Vec3, SurfaceVertex>(s, "medial_axis_samples_position");
+		auto medial_axis_samples_radius_ = add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_radius");
+		auto medial_axis_samples_closest_points_ =
+			add_attribute<std::pair<Vec3, Vec3>, SurfaceVertex>(s, "medial_axis_samples_closest_points");
+		geometry::shrinking_ball_centers(s, vertex_position.get(), vertex_normal.get(),
+										 medial_axis_samples_position_.get(),
+										 medial_axis_samples_radius_.get(),
+										 medial_axis_samples_closest_points_.get());
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(s);
+		auto filtered_medial_axis_samples_set_ = &md.template get_or_add_cells_set<SurfaceVertex>("filtered_medial_axis_samples");
+		filtered_medial_axis_samples_set_->select_if([&](SurfaceVertex v) { return true; });
+
+		surface_provider_->emit_attribute_changed(s, medial_axis_samples_position_.get());
+		surface_provider_->emit_attribute_changed(s, medial_axis_samples_radius_.get());
+
+		surface_provider_->emit_cells_set_changed(s, filtered_medial_axis_samples_set_);
+	}
+
+	void filter_medial_axis_samples(SURFACE& s)
+	{
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(s);
+		auto filtered_medial_axis_samples_set_ = &md.template get_or_add_cells_set<SurfaceVertex>("filtered_medial_axis_samples");
+		filtered_medial_axis_samples_set_->clear();
+		auto medial_axis_samples_position_ = get_attribute<Vec3, SurfaceVertex>(s, "medial_axis_samples_position");
+		auto medial_axis_samples_radius_ = get_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_radius");
+		auto medial_axis_samples_closest_points_ =
+			get_attribute<std::pair<Vec3, Vec3>, SurfaceVertex>(s, "medial_axis_samples_closest_points");
+		foreach_cell(s, [&](SurfaceVertex v) -> bool {
+			const Vec3& c = value<Vec3>(s, medial_axis_samples_position_, v);
+			const auto& [c1, c2] = value<std::pair<Vec3, Vec3>>(s, medial_axis_samples_closest_points_, v);
+			const Scalar r = value<Scalar>(s, medial_axis_samples_radius_, v);
+			if (r > radius_threshold_ && geometry::angle(c1 - c, c2 - c) > angle_threshold_)
+				filtered_medial_axis_samples_set_->select(v);
+			return true;
+		});
+
+		surface_provider_->emit_cells_set_changed(s, filtered_medial_axis_samples_set_);
+	}
+
+	HighsSolution shrinking_balls_coverage_axis(SURFACE& surface, Scalar dilation_factor)
+	{
+		typedef Eigen::SparseMatrix<Scalar> SpMat;
+		typedef Eigen::Triplet<Scalar> T;
+		std::unordered_map<uint32, uint32> local_index;
+		std::vector<T> triplets;
+
+		auto medial_axis_samples_dilated_radius =
+			add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_dilated_radius");
+		auto medial_axis_samples_position = get_attribute<Vec3, SurfaceVertex>(surface, "medial_axis_samples_position");
+		auto medial_axis_samples_radius = get_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_radius");
+		auto sample_position = get_attribute<Vec3, SurfaceVertex>(surface, "position");
+		auto filtered_medial_axis_samples_set =
+			&surface_provider_->mesh_data(surface).template get_or_add_cells_set<SurfaceVertex>(
+				"filtered_medial_axis_samples");
+		auto selected_medial_axis_samples_set =
+			&surface_provider_->mesh_data(surface).template get_or_add_cells_set<SurfaceVertex>(
+				"selected_medial_axis_samples");
+		uint32 nb_candidates = 0;
+		uint32 nb_surface_samples = 0;
+		std::vector<Vec3> sample_points;
+		std::vector<Vec3> inner_points;
+		std::vector<Scalar> weights;
+		filtered_medial_axis_samples_set->foreach_cell([&](SurfaceVertex sv) 
+			{
+			value<Scalar>(surface, medial_axis_samples_dilated_radius, sv) = value<Scalar>(surface, medial_axis_samples_radius, sv) * (1 + dilation_factor);
+			sample_points.push_back(value<Vec3>(surface, sample_position, sv));
+			inner_points.push_back(value<Vec3>(surface, medial_axis_samples_position, sv));
+			weights.push_back(value<Scalar>(surface, medial_axis_samples_dilated_radius, sv));
+			local_index.insert({index_of(surface, sv), nb_candidates});
+			nb_candidates++;
+			nb_surface_samples++;
+			return true;
+		});
+		for (size_t idx1 = 0; idx1 < nb_surface_samples; idx1++)
+		{
+			for (size_t idx2 = 0; idx2 < nb_candidates; idx2++)
+			{
+				if (inside_sphere(sample_points[idx1], inner_points[idx2], weights[idx2]))
+				{
+					triplets.push_back(T(idx1, idx2, 1.0));
+				}
+			}
+		}
+		std::cout << triplets.size() << std::endl;
+
+		SpMat A(nb_surface_samples, nb_candidates);
+		A.setFromTriplets(triplets.begin(), triplets.end());
+		A.makeCompressed();
+		HighsModel model;
+		model.lp_.a_matrix_.format_ = MatrixFormat::kColwise;
+		model.lp_.num_col_ = A.cols();
+		model.lp_.num_row_ = A.rows();
+		model.lp_.sense_ = ObjSense::kMinimize;
+		// Adding decision variable bounds
+		HighsVarType type = HighsVarType::kInteger;
+		model.lp_.col_cost_ = std::vector<double>(model.lp_.num_col_, 1.0);
+		model.lp_.col_lower_ = std::vector<double>(model.lp_.num_col_, 0.0);
+		model.lp_.col_upper_ = std::vector<double>(model.lp_.num_col_, 1.0);
+		model.lp_.row_lower_ = std::vector<double>(model.lp_.num_row_, 1.0);
+		model.lp_.row_upper_ = std::vector<double>(model.lp_.num_row_, 1e30);
+		model.lp_.integrality_ = std::vector<HighsVarType>(model.lp_.num_col_, type);
+
+		model.lp_.a_matrix_.num_col_ = model.lp_.num_col_;
+		model.lp_.a_matrix_.num_row_ = model.lp_.num_row_;
+		model.lp_.a_matrix_.start_.resize(A.cols() + 1);
+		model.lp_.a_matrix_.index_.resize(A.nonZeros());
+		model.lp_.a_matrix_.value_.resize(A.nonZeros());
+
+		// Copy the data from A to the vectors
+		std::copy(A.outerIndexPtr(), A.outerIndexPtr() + A.cols() + 1, model.lp_.a_matrix_.start_.begin());
+		std::copy(A.innerIndexPtr(), A.innerIndexPtr() + A.nonZeros(), model.lp_.a_matrix_.index_.begin());
+		std::copy(A.valuePtr(), A.valuePtr() + A.nonZeros(), model.lp_.a_matrix_.value_.begin());
+
+		Highs highs;
+		HighsStatus status = highs.passModel(model);
+		HighsSolution solution;
+		highs.setOptionValue("time_limit", 200);
+		if (status == HighsStatus::kOk)
+		{
+			highs.run();
+
+			assert(status == HighsStatus::kOk);
+			solution = highs.getSolution();
+		}
+		filtered_medial_axis_samples_set->foreach_cell([&](SurfaceVertex sv) -> bool {
+			if (solution.col_value[local_index[index_of(surface, sv)]] > 1e-5)
+				selected_medial_axis_samples_set->select(sv);
+			return true;
+		});
+		
+		return solution;
+	}
+
+	void shrinking_balls_coverage_axis_PD(SURFACE& surface)
+	{
+		load_model_in_cgal(surface, csm);
+		Tree tree(faces(csm).first, faces(csm).second, csm);
+		tree.accelerate_distance_queries();
+		auto medial_axis_samples_dilated_radius =
+			get_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_dilated_radius");
+		auto medial_axis_samples_position = get_attribute<Vec3, SurfaceVertex>(surface, "medial_axis_samples_position");
+		auto medial_axis_samples_radius = get_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_radius");
+		auto sample_position = get_attribute<Vec3, SurfaceVertex>(surface, "position");
+		auto selected_medial_axis_samples_set =
+			&surface_provider_->mesh_data(surface).template get_or_add_cells_set<SurfaceVertex>(
+				"selected_medial_axis_samples");
+		Regular power_shape;
+		std::cout << "collect selected points info" << std::endl;
+		selected_medial_axis_samples_set->foreach_cell([&](SurfaceVertex sv) {
+			Vec3 pos = value<Vec3>(surface, medial_axis_samples_position, sv);
+			power_shape.insert(
+				Weight_Point(Point(pos[0], pos[1], pos[2]),
+											value<double>(surface, medial_axis_samples_radius, sv) *
+												value<double>(surface, medial_axis_samples_radius, sv)));
+
+			return true;
+		});
+		std::cout << "collect surface samples info " << std::endl;
+		foreach_cell(surface, [&](SurfaceVertex v) {
+			Vec3 pos = value<Vec3>(surface, sample_position, v);
+			power_shape.insert(
+				Weight_Point(Point(pos[0], pos[1], pos[2]), 0.02*0.02));
+			return true;
+		});
+		std::cout << "determine if the point is outside" << std::endl;
+		int count = 0;
+		for (auto vit = power_shape.finite_vertices_begin(); vit != power_shape.finite_vertices_end(); ++vit)
+		{
+			// if the point is inside
+			Point p = vit->point().point();
+			if (pointInside(tree, p))
+			{
+				vit->info().id = count;
+				vit->info().inside = true;
+				count++;
+			}
+		}
+		std::cout << "construct non manifold PD" << std::endl;
+		constrcut_power_shape_non_manifold(power_shape, "_coverage_axis" + surface_provider_->mesh_name(surface));
+	}
+
+ protected:
 	void init() override
 	{
 		point_provider_ = static_cast<ui::MeshProvider<POINT>*>(
@@ -1482,16 +1670,33 @@ protected:
 			nonmanifold_provider_->mesh_data(nm).outlined_until_ = App::frame_time_ + 1.0;
 		});
 
-		if (selected_surface_mesh_)
-		{
-
+		if (selected_surface_mesh_){
+		
+			if (ImGui::Button("Sample medial axis"))
+				sample_medial_axis(*selected_surface_mesh_);
+			if (ImGui::SliderFloat("Min radius (log)", &radius_threshold_, 0.0001f, 0.02f, "%.4f"))
+				filter_medial_axis_samples(*selected_surface_mesh_);
+			if (ImGui::SliderFloat("Min angle (log)", &angle_threshold_, 0.0001f, M_PI, "%.4f"))
+				filter_medial_axis_samples(*selected_surface_mesh_);
+			if (ImGui::Button("Filter medial axis samples"))
+				filter_medial_axis_samples(*selected_surface_mesh_);
+			static float dilation_factor = 0.3f;
+			ImGui::DragFloat("Dilation factor", &dilation_factor, 0.001f, 0.0f, 1.0f, "%.4f");
+			if (ImGui::Button("Shrinking Ball Coverage Axis"))
+			{
+				solution = shrinking_balls_coverage_axis(*selected_surface_mesh_, dilation_factor);
+			}
+			if (solution.col_value.size() > 0)
+			{
+				if (ImGui::Button("Shrinking balls PD"))
+					shrinking_balls_coverage_axis_PD(*selected_surface_mesh_);
+			}
 			if (ImGui::Button("Compute delaunay"))
 			{
-				Cgal_Surface_mesh csm;
 				load_model_in_cgal(*selected_surface_mesh_, csm);
-				tree_ = Tree(faces(csm).first, faces(csm).second, csm);
-				tree_.accelerate_distance_queries();
-				tri_ = compute_delaunay_tredrahedron(*selected_surface_mesh_, csm, tree_);
+				Tree tree(faces(csm).first, faces(csm).second, csm);
+				tree.accelerate_distance_queries();
+				tri_ = compute_delaunay_tredrahedron(*selected_surface_mesh_, csm, tree);
 			}
 			if (selected_candidates_)
 			{
@@ -1516,7 +1721,7 @@ protected:
 
 				if (ImGui::Button("Generate candidates"))
 				{
-				construct_candidates_points(*selected_surface_mesh_, tri_);
+					construct_candidates_points(*selected_surface_mesh_, tri_);
 				}
 				if (ImGui::Button("Power shape"))
 				{
@@ -1538,23 +1743,24 @@ protected:
 						collapse_non_manifold_using_QMat(*selected_medial_axis_, number_vertex_remain, k);
 					}
 				}
-			if (selected_candidates_)
-			{
-				static float dilation_factor = 0.5f;
-				ImGui::DragFloat("Dilation factor", &dilation_factor, 0.001f, 0.0f, 1.0f, "%.4f");
-				if (ImGui::Button("Coverage Axis"))
+				if (selected_candidates_)
 				{
-					solution = point_selection_by_coverage_axis(*selected_surface_mesh_, *selected_candidates_,
-																dilation_factor);
-				}
-				if (solution.col_value.size() > 0)
-				{
-					if (ImGui::Button("Collpase"))
-						coverage_axis_collapse(*selected_surface_mesh_, *selected_candidates_, solution);
-					if (ImGui::Button("PD"))
-						coverage_axis_PD(*selected_surface_mesh_, *selected_candidates_, solution, dilation_factor);
-					if (ImGui::Button("RVD"))
-						coverage_axis_RVD(*selected_surface_mesh_, *selected_candidates_, solution);
+					dilation_factor = 0.5f;
+					ImGui::DragFloat("Dilation factor", &dilation_factor, 0.001f, 0.0f, 1.0f, "%.4f");
+					if (ImGui::Button("Coverage Axis"))
+					{
+						solution = point_selection_by_coverage_axis(*selected_surface_mesh_, *selected_candidates_,
+																	dilation_factor);
+					}
+					if (solution.col_value.size() > 0)
+					{
+						if (ImGui::Button("Collpase"))
+							coverage_axis_collapse(*selected_surface_mesh_, *selected_candidates_, solution);
+						if (ImGui::Button("PD"))
+							coverage_axis_PD(*selected_surface_mesh_, *selected_candidates_, solution, dilation_factor);
+						if (ImGui::Button("RVD"))
+							coverage_axis_RVD(*selected_surface_mesh_, *selected_candidates_, solution);
+					}
 				}
 			}
 		}
@@ -1571,6 +1777,7 @@ private:
 	HighsSolution solution;
 	Delaunay tri_;
 	Tree tree_;
+	Cgal_Surface_mesh csm;
 	bool angle_filtering_ = true;
 	bool circumradius_filtering_ = true;
 	bool distance_filtering_ = true;
