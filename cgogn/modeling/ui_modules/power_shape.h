@@ -1685,8 +1685,6 @@ public:
 	void compute_samples_inside_distance(SURFACE& surface)
 	{
 		std::cout << "compute distance" << std::endl;
-		typedef Eigen::Triplet<Scalar> T;
-		std::vector<T> triplets;
 		std::vector<Vec3> sample_point_position(nb_cells<SurfaceVertex>(surface), Vec3(0,0,0));
 		std::vector<Vec3> medial_point_position(nb_cells<SurfaceVertex>(surface), Vec3(0,0,0));
 		std::cout << "get necessary info" << std::endl;
@@ -1698,6 +1696,7 @@ public:
 			get_attribute<Vec3, SurfaceVertex>(surface, "medial_axis_samples_position");
 		std::cout << "generate necessary vector" << std::endl;
 		dis_matrix.resize(nb_cells<SurfaceVertex>(surface), nb_cells<SurfaceVertex>(surface));
+		dis_matrix.setZero();
 		filtered_medial_axis_samples->foreach_cell( [&](SurfaceVertex sv) {
 			sample_point_position[index_of(surface, sv)] = value<Vec3>(surface, sample_position, sv);
 			medial_point_position[index_of(surface, sv)] = value<Vec3>(surface, medial_axis_samples_position_, sv);
@@ -1712,16 +1711,15 @@ public:
 			{
 				if (medial_point_position[idx2] == Vec3(0,0,0))
 					continue;
-				triplets.push_back(T(idx1, idx2,(sample_point_position[idx1].x() - medial_point_position[idx2].x()) *
+				dis_matrix(idx1, idx2) = (sample_point_position[idx1].x() - medial_point_position[idx2].x()) *
 											 (sample_point_position[idx1].x() - medial_point_position[idx2].x()) +
 										 (sample_point_position[idx1].y() - medial_point_position[idx2].y()) *
 											 (sample_point_position[idx1].y() - medial_point_position[idx2].y()) +
 										 (sample_point_position[idx1].z() - medial_point_position[idx2].z()) *
-											 (sample_point_position[idx1].z() - medial_point_position[idx2].z())));
+											 (sample_point_position[idx1].z() - medial_point_position[idx2].z());
 			}
 		}
-		dis_matrix.setFromTriplets(triplets.begin(), triplets.end());
-		
+		std::cout << "loop end" << std::endl;
 	}
 	void initialise_cluster(SURFACE& surface)
 	{
@@ -1736,8 +1734,8 @@ public:
 		uint32 nb_cluster = 0;
 
 		// Randomly select 50 points as the initial cluster
-		filtered_medial_axis_samples->foreach_cell([&](SurfaceVertex v) {
-			if (nb_cluster >= 10)
+		filtered_medial_axis_samples->foreach_cell_bool([&](SurfaceVertex v) {
+			if (nb_cluster >= 100)
 				return false;
 			Scalar rand_number = (rand() / (double)RAND_MAX);
 			if (rand_number > 0.995)
@@ -1746,8 +1744,8 @@ public:
 				cluster_set->select(v);
 				cluster_map[index_of(surface, v)] = nb_cluster;
 				nb_cluster++;
+				std::cout << "nb cluster " << nb_cluster << std::endl;
 			}
-			
 			return true;
 		});
 		std::cout << "nb cluster " << nb_cluster << std::endl;
@@ -1775,12 +1773,14 @@ public:
 			return true;
 			});
 		//Assign each point to the nearest cluster
-		filtered_medial_axis_samples->foreach_cell([&](SurfaceVertex svs) {
+		std::cout << "assign cluster"<<std::endl;
+		int i = 0;
+		foreach_cell(surface, [&](SurfaceVertex svs) {
 			Scalar min_distance = 1e30;
 			SurfaceVertex cluster_vertex;
 			cluster_set->foreach_cell([&](SurfaceVertex svc) {
 				
-				Scalar dis = dis_matrix.coeffRef(index_of(surface, svs), index_of(surface, svc)); 
+				Scalar dis = dis_matrix(index_of(surface, svs), index_of(surface, svc)); 
 				if (dis < min_distance)
 				{
 					min_distance = dis;
@@ -1802,6 +1802,8 @@ public:
 		MeshData<SURFACE>& md = surface_provider_->mesh_data(surface);
 		auto cluster_set = &md.template get_or_add_cells_set<SurfaceVertex>("clusters");
 		auto clusters = get_or_add_attribute<std::vector<SurfaceVertex>, SurfaceVertex>(surface, "clusters");
+		
+
 		auto new_clusters_set = &md.template get_or_add_cells_set<SurfaceVertex>("new_clusters");
 		auto candidate_split_cluster_set = &md.template get_or_add_cells_set<SurfaceVertex>("candidate_split_cluster");
 		candidate_split_cluster_set->clear();
@@ -1825,10 +1827,10 @@ public:
 				for (SurfaceVertex sv2 : value<std::vector<SurfaceVertex>>(surface, clusters, svc))
 				{
 					//sv1: medial point vertex , sv2: surface point vertex
-					sum_dist += dis_matrix.coeffRef(index_of(surface, sv2), index_of(surface, sv1));
-					if (dis_matrix.coeffRef(index_of(surface, sv2), index_of(surface, sv1)) > max_radius)
+					sum_dist += dis_matrix(index_of(surface, sv2), index_of(surface, sv1));
+					if (dis_matrix(index_of(surface, sv2), index_of(surface, sv1)) > max_radius)
 					{
-						max_radius = dis_matrix.coeffRef(index_of(surface, sv2), index_of(surface, sv1));
+						max_radius = dis_matrix(index_of(surface, sv2), index_of(surface, sv1));
 					}
 				}
 				Scalar max_diff_distance =
@@ -1841,16 +1843,19 @@ public:
 			}
 			std::cout << "unselect vertex: " << index_of(surface, svc) << std::endl;
 			std::cout << "select vertex: " << index_of(surface, new_cluster) << std::endl;
-		
-			new_clusters_set->select(new_cluster);
-			//Reset necessary information of clusters
-			if (index_of(surface, new_cluster) != index_of(surface, svc))
+			if (value<std::vector<SurfaceVertex>>(surface, clusters, svc).size() > 0)
 			{
-				cluster_map[index_of(surface, new_cluster)] = cluster_map[index_of(surface, svc)];
-				cluster_map.erase(index_of(surface, svc));
-				value<std::vector<SurfaceVertex>>(surface, clusters, new_cluster) =
-					value<std::vector<SurfaceVertex>>(surface, clusters, svc);
-				value<std::vector<SurfaceVertex>>(surface, clusters, svc).clear();
+
+				new_clusters_set->select(new_cluster);
+				// Reset necessary information of clusters
+				if (index_of(surface, new_cluster) != index_of(surface, svc))
+				{
+					cluster_map[index_of(surface, new_cluster)] = cluster_map[index_of(surface, svc)];
+					cluster_map.erase(index_of(surface, svc));
+					value<std::vector<SurfaceVertex>>(surface, clusters, new_cluster) =
+						value<std::vector<SurfaceVertex>>(surface, clusters, svc);
+					value<std::vector<SurfaceVertex>>(surface, clusters, svc).clear();
+				}
 			}
 			return true;
 		});
@@ -1861,7 +1866,7 @@ public:
 			return true;
 		});
 
-		
+		assign_cluster(surface);
 		surface_provider_->emit_cells_set_changed(surface, cluster_set);
 		surface_provider_->emit_cells_set_changed(surface, new_clusters_set);
 		
@@ -1871,7 +1876,8 @@ public:
 	{
 		auto cluster_color = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "cluster_color");
 		auto clusters = get_or_add_attribute<std::vector<SurfaceVertex>, SurfaceVertex>(surface, "clusters");
-		
+		auto medial_axis_samples_radius = get_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_radius");
+
 		MeshData<SURFACE>& md = surface_provider_->mesh_data(surface);
 		auto cluster_set = &md.template get_or_add_cells_set<SurfaceVertex>("clusters");
 		auto split_clusters_set = &md.template get_or_add_cells_set<SurfaceVertex>("split_clusters");
@@ -1881,20 +1887,23 @@ public:
 		std::cout << "split cluster ------------------------------------";
 		// Test if the cluster can be split
 		cluster_set->foreach_cell([&](SurfaceVertex svc) {
+			Scalar max_radius = 1e-30;
 			Scalar sum_dist = 0;
 			Scalar min_dist = 1e30;
 			for (SurfaceVertex sv1 : value<std::vector<SurfaceVertex>>(surface, clusters, svc))
 			{
-				sum_dist += dis_matrix.coeffRef(index_of(surface, sv1), index_of(surface, svc));
-				if (dis_matrix.coeffRef(index_of(surface, sv1), index_of(surface, svc)) < min_dist)
-					min_dist = dis_matrix.coeffRef(index_of(surface, sv1), index_of(surface, svc));
+				sum_dist += dis_matrix(index_of(surface, sv1), index_of(surface, svc));
+				if (dis_matrix(index_of(surface, sv1), index_of(surface, svc)) < min_dist)
+					min_dist = dis_matrix(index_of(surface, sv1), index_of(surface, svc));
+				if (dis_matrix(index_of(surface, sv1), index_of(surface, svc)) > max_radius)
+					max_radius = std::sqrt(dis_matrix(index_of(surface, sv1), index_of(surface, svc)));
 			}
 			Scalar diff_to_min_distance =
 				(sum_dist - min_dist * value<std::vector<SurfaceVertex>>(surface, clusters, svc).size()) /
 				value<std::vector<SurfaceVertex>>(surface, clusters, svc).size();
 			std::cout << "sum_dist: " << sum_dist << " min_dist: " << min_dist
 					  << "diff_to_min_distance: " << diff_to_min_distance << std::endl;
-			if (diff_to_min_distance > split_threshold)
+			if (diff_to_min_distance > split_threshold || (max_radius - value<Scalar>(surface, medial_axis_samples_radius, svc))>0.02)
 			{
 				candidate_split_cluster_set->select(svc);
 			}
@@ -1910,10 +1919,10 @@ public:
 				Scalar dist_new = 0;
 				for (SurfaceVertex sv2 : value<std::vector<SurfaceVertex>>(surface, clusters, svc))
 				{
-					if(dis_matrix.coeffRef(index_of(surface, sv2), index_of(surface, sv1))>dis_matrix.coeffRef(index_of(surface, sv2), index_of(surface, svc)))
-						dist_old += dis_matrix.coeffRef(index_of(surface, sv2), index_of(surface, svc));
+					if(dis_matrix(index_of(surface, sv2), index_of(surface, sv1))>dis_matrix(index_of(surface, sv2), index_of(surface, svc)))
+						dist_old += dis_matrix(index_of(surface, sv2), index_of(surface, svc));
 					else
-						dist_new += dis_matrix.coeffRef(index_of(surface, sv2), index_of(surface, sv1));
+						dist_new += dis_matrix(index_of(surface, sv2), index_of(surface, sv1));
 				}
 				if (abs(dist_new - dist_old) < min_diff)
 				{
@@ -1922,7 +1931,8 @@ public:
 				}
 			}
 			split_clusters_set->select(split_cluster);
-			return true;
+			std::cout << "split_cluster: " << index_of(surface, split_cluster) << std::endl;
+				return true;
 		});
 		split_clusters_set->foreach_cell([&](SurfaceVertex sv) {
 			cluster_set->select(sv);
@@ -1956,9 +1966,9 @@ public:
 			Scalar max_dist = -1e30;
 			for (SurfaceVertex sv1 : value<std::vector<SurfaceVertex>>(surface, clusters, sv))
 			{
-				if (max_dist < dis_matrix.coeffRef(index_of(surface, sv1), index_of(surface, sv)))
+				if (max_dist < dis_matrix(index_of(surface, sv1), index_of(surface, sv)))
 				{
-					max_dist = dis_matrix.coeffRef(index_of(surface, sv1), index_of(surface, sv));
+					max_dist = dis_matrix(index_of(surface, sv1), index_of(surface, sv));
 				}
 			}
 			value<Scalar>(surface, medial_axis_samples_dilated_radius, sv) = std::sqrt(max_dist);
@@ -1984,8 +1994,8 @@ public:
 		cluster_set->foreach_cell([&](SurfaceVertex sv) {
 			Vec3 pos = value<Vec3>(surface, medial_axis_samples_position, sv);
 			power_shape.insert(Weight_Point(Point(pos[0], pos[1], pos[2]),
-											value<Scalar>(surface, medial_axis_samples_radius, sv) *
-												value<Scalar>(surface, medial_axis_samples_radius, sv)));
+											value<Scalar>(surface, medial_axis_samples_dilated_radius, sv) *
+												value<Scalar>(surface, medial_axis_samples_dilated_radius, sv)));
 
 			return true;
 		});
@@ -1993,7 +2003,8 @@ public:
 		foreach_cell(surface, [&](SurfaceVertex sv) {
 			Vec3 pos = value<Vec3>(surface, sample_position, sv);
 			power_shape.insert(Weight_Point(Point(pos[0], pos[1], pos[2]),
-											0.01*0.01));
+											0.5 * 0.5 * value<Scalar>(surface, medial_axis_samples_radius, sv) *
+												value<Scalar>(surface, medial_axis_samples_radius, sv)));
 			return true;
 		});
 		std::cout << "determine if the point is outside" << std::endl;
@@ -2007,7 +2018,6 @@ public:
 				vit->info().id = count;
 				vit->info().inside = true;
 				count++;
-				std::cout << "find inside" << std::endl;
 			}
 		}
 		std::cout << "construct non manifold PD" << std::endl;
@@ -2172,7 +2182,7 @@ private:
 	float split_threshold_ = 0.20;
 	double min_radius_ = std::numeric_limits<double>::max();
 	double max_radius_ = std::numeric_limits<double>::min();
-	Eigen::SparseMatrix<Scalar> dis_matrix;
+	Eigen::MatrixXd dis_matrix;
 };
 
 } // namespace ui

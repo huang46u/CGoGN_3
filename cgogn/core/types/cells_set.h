@@ -115,9 +115,26 @@ public:
 	void foreach_cell(const FUNC& f) const
 	{
 		static_assert(is_func_parameter_same<FUNC, CELL>::value, "Wrong function parameter type");
+
 		for (auto& [index, cell] : cells_)
+		{
 			f(cell);
+		}
 	}
+
+	template <typename FUNC>
+	void foreach_cell_bool(const FUNC& f) const
+	{
+		static_assert(is_func_parameter_same<FUNC, CELL>::value, "Wrong function parameter type");
+		static_assert(is_func_return_same<FUNC, bool>::value, "Given function should return a bool");
+		for (auto& [index, cell] : cells_)
+		{
+			if (!f(cell))
+				break;
+		}
+		
+	}
+
 
 	template <typename FUNC>
 	void foreach_cell_index(const FUNC& f) const
