@@ -33,6 +33,7 @@
 #include <cgogn/io/point/point_import.h>
 #include <cgogn/geometry/algos/medial_axis.h>
 #include <cgogn/modeling/algos/decimation/SQEM_helper.h>
+#include <libacc/kd_tree.h>
 
 // import CGAL
 #include <CGAL/Bbox_3.h>
@@ -153,9 +154,11 @@ public:
 	}
 
 private:
-	struct point_hash
+	
+	template <typename T>
+	struct T3_hash
 	{
-		std::size_t operator()(const Point& p) const
+		std::size_t operator()(const T& p) const
 		{
 			return ((std::hash<double>()(p.x()) ^ (std::hash<double>()(p.y()) << 1)) >> 1) ^
 				   (std::hash<double>()(p.z()) << 1);
@@ -340,6 +343,56 @@ private:
 		}
 		std::cout << "distance deletion: " << count << std::endl;
 	}
+
+	template <typename MESH, typename CELL>
+	struct VertexKdTree
+	{
+		std::unordered_map<Vec3, CELL, T3_hash<Vec3>> position_vertex_correspondance;
+		acc::KDTree<3, uint32>* surface_kdt;
+		std::vector<Vec3> vertex_position_vector;
+		VertexKdTree() : surface_kdt(nullptr)
+		{
+		}
+		VertexKdTree(MESH& surface)
+		{
+			auto position = get_attribute<Vec3, CELL>(surface, "position");
+			foreach_cell(surface, [&](CELL v) {
+				vertex_position_vector.push_back(value<Vec3>(surface, position, v));
+				position_vertex_correspondance.insert({value<Vec3>(surface, position, v), v});
+				return true;
+			});
+			surface_kdt = new acc::KDTree<3, uint32>(vertex_position_vector);
+		}
+
+		VertexKdTree(MESH& surface, CellsSet<MESH, CELL>& cell_set)
+		{
+			auto position = get_attribute<Vec3, CELL>(surface, "position");
+			cell_set->foreach_cell([&](CELL v) {
+				vertex_position_vector.push_back(value<Vec3>(surface, position, v));
+				position_vertex_correspondance.insert({value<Vec3>(surface, position, v), v});
+				return true;
+			});
+			surface_kdt = new acc::KDTree<3, uint32>(vertex_position_vector);
+		}
+
+		~VertexKdTree()
+		{
+			delete surface_kdt;
+		}
+
+		bool find_nn(Vec3& position, SurfaceVertex& sv)
+		{
+			std::pair<uint32, Scalar> k_res;
+			bool found = surface_kdt->find_nn(position, &k_res);
+			if (found)
+			{
+				sv = position_vertex_correspondance[surface_kdt->vertex(k_res.first)];
+			}
+			if (!found)
+				std::cout << "closest point not found !!!";
+			return found;
+		}
+	};
 
 public:
 	/*
@@ -1725,6 +1778,9 @@ public:
 		}
 		std::cout << "loop end" << std::endl;
 	}
+
+	
+
 	void initialise_cluster(SURFACE& surface)
 	{
 		compute_samples_inside_distance(surface);
@@ -1758,6 +1814,7 @@ public:
 	}
 
 	void assign_cluster(SURFACE& surface){
+		//To do: using QEM distance
 		auto sample_normal = get_or_add_attribute<Vec3,SurfaceVertex>(surface, "normal");
 		auto sample_position = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "position");
 		auto clusters = get_or_add_attribute<std::vector<SurfaceVertex>, SurfaceVertex>(surface, "clusters");
@@ -1803,6 +1860,61 @@ public:
 		surface_provider_->emit_attribute_changed(surface, cluster_color.get());
 		
 	}	
+	
+	void update_filtered_cluster(SURFACE& surface)
+	{
+		auto sample_position = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "position");
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(surface);
+		auto cluster_set = &md.template get_or_add_cells_set<SurfaceVertex>("clusters");
+		auto clusters = get_or_add_attribute<std::vector<SurfaceVertex>, SurfaceVertex>(surface, "clusters");
+		auto filtered_medial_axis_samples =
+			&md.template get_or_add_cells_set<SurfaceVertex>("filtered_medial_axis_samples");
+		auto new_clusters_set = &md.template get_or_add_cells_set<SurfaceVertex>("new_clusters");
+		auto candidate_split_cluster_set = &md.template get_or_add_cells_set<SurfaceVertex>("candidate_split_cluster");
+		candidate_split_cluster_set->clear();
+		new_clusters_set->clear();
+
+		//Construct a kd tree for the medial axis samples
+		medial_point_kdt = VertexKdTree<SURFACE, SurfaceVertex>(surface,filtered_medial_axis_samples);
+		//For each cluster, find the nearest medial point
+		cluster_set->foreach_cell([&](SurfaceVertex svc) {
+			SurfaceVertex new_cluster = svc;
+			std::cout << "cluster number: " << cluster_map[index_of(surface, svc)] << " has "
+					  << value<std::vector<SurfaceVertex>>(surface, clusters, svc).size() << " vertices." << std::endl;
+			Vec3 sum_coord = Vec3(0, 0, 0);
+			for (SurfaceVertex sv1 : value<std::vector<SurfaceVertex>>(surface, clusters, svc))
+			{
+				sum_coord = sum_coord + value<Vec3>(surface, sample_position, sv1);
+			}
+			Vec3 opti_coord = sum_coord / value<std::vector<SurfaceVertex>>(surface, clusters, svc).size();
+
+			std::pair<uint32, Scalar> k_res;
+			bool found = medial_point_kdt.find_nn(opti_coord, new_cluster);
+			if (found)
+			{
+				new_clusters_set->select(new_cluster);
+				// Reset necessary information of clusters
+				if (index_of(surface, new_cluster) != index_of(surface, svc))
+				{
+					cluster_map[index_of(surface, new_cluster)] = cluster_map[index_of(surface, svc)];
+					cluster_map.erase(index_of(surface, svc));
+					value<std::vector<SurfaceVertex>>(surface, clusters, new_cluster) =
+						value<std::vector<SurfaceVertex>>(surface, clusters, svc);
+					value<std::vector<SurfaceVertex>>(surface, clusters, svc).clear();
+				}
+			}
+			return true;
+		});
+		cluster_set->clear();
+		new_clusters_set->foreach_cell([&](SurfaceVertex svc) {
+			cluster_set->select(svc);
+			return true;
+		});
+
+		assign_cluster(surface);
+		surface_provider_->emit_cells_set_changed(surface, cluster_set);
+		surface_provider_->emit_cells_set_changed(surface, new_clusters_set);
+	}
 
 	void update_cluster(SURFACE& surface)
 	{
@@ -1811,7 +1923,6 @@ public:
 		auto cluster_set = &md.template get_or_add_cells_set<SurfaceVertex>("clusters");
 		auto clusters = get_or_add_attribute<std::vector<SurfaceVertex>, SurfaceVertex>(surface, "clusters");
 		
-
 		auto new_clusters_set = &md.template get_or_add_cells_set<SurfaceVertex>("new_clusters");
 		auto candidate_split_cluster_set = &md.template get_or_add_cells_set<SurfaceVertex>("candidate_split_cluster");
 		candidate_split_cluster_set->clear();
@@ -1823,10 +1934,8 @@ public:
 			Scalar max_radius = 1e-30;
 			Scalar min_dist = 1e30;
 			SurfaceVertex new_cluster = svc;
-			SurfaceVertex split_cluster;
 			Scalar sum_dist = 0;
 			min_dist = 1e30;
-			max_radius = 1e-30;
 			for (SurfaceVertex sv1 : value<std::vector<SurfaceVertex>>(surface, clusters, svc))
 			{
 				//for each medial point in the cluster, compute the sum of distance to all the surface points in the cluster and find the minimum one
@@ -1848,7 +1957,6 @@ public:
 			std::cout << "select vertex: " << index_of(surface, new_cluster) << std::endl;
 			if (value<std::vector<SurfaceVertex>>(surface, clusters, svc).size() > 0)
 			{
-
 				new_clusters_set->select(new_cluster);
 				// Reset necessary information of clusters
 				if (index_of(surface, new_cluster) != index_of(surface, svc))
@@ -1898,7 +2006,7 @@ public:
 				sum_dist += dis_matrix(index_of(surface, sv1), index_of(surface, svc));
 				if (dis_matrix(index_of(surface, sv1), index_of(surface, svc)) < min_dist)
 					min_dist = dis_matrix(index_of(surface, sv1), index_of(surface, svc));
-				if (dis_matrix(index_of(surface, sv1), index_of(surface, svc)) > max_radius)
+				if (std::sqrt(dis_matrix(index_of(surface, sv1), index_of(surface, svc))) > max_radius)
 					max_radius = std::sqrt(dis_matrix(index_of(surface, sv1), index_of(surface, svc)));
 			}
 			Scalar diff_to_min_distance =
@@ -2027,7 +2135,7 @@ public:
 			}
 		}
 		std::cout << "construct non manifold PD" << std::endl;
-		constrcut_power_shape_non_manifold(power_shape, "_coverage_axis" + surface_provider_->mesh_name(surface));
+		constrcut_power_shape_non_manifold(power_shape, "_coverage_axis" + surface_provider_->mesh_name(surface)); 
 	}
 
 
@@ -2070,7 +2178,7 @@ public:
 			if (ImGui::Button("Initialise Cluster"))
 				initialise_cluster(*selected_surface_mesh_);
 			if (ImGui::Button("Update Cluster"))
-				update_cluster(*selected_surface_mesh_);
+				update_filtered_cluster(*selected_surface_mesh_);
 			ImGui::SliderFloat("Split threshold", &split_threshold_, 0.0f, 0.05f, "%.6f");
 			ImGui::SliderFloat("Split radius threshold", &split_radius_threshold_, 0.0f, 3.0f, "%.2f");
 			if (ImGui::Button("Split Cluster"))
@@ -2191,6 +2299,7 @@ private:
 	double min_radius_ = std::numeric_limits<double>::max();
 	double max_radius_ = std::numeric_limits<double>::min();
 	Eigen::MatrixXd dis_matrix;
+	VertexKdTree<SURFACE, SurfaceVertex> medial_point_kdt;
 };
 
 } // namespace ui
