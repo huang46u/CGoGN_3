@@ -1697,8 +1697,12 @@ public:
 		std::cout << "generate necessary vector" << std::endl;
 		dis_matrix.resize(nb_cells<SurfaceVertex>(surface), nb_cells<SurfaceVertex>(surface));
 		dis_matrix.setZero();
-		filtered_medial_axis_samples->foreach_cell( [&](SurfaceVertex sv) {
+		parallel_foreach_cell(surface, [&](SurfaceVertex sv) {
 			sample_point_position[index_of(surface, sv)] = value<Vec3>(surface, sample_position, sv);
+			return true;
+			});
+		filtered_medial_axis_samples->foreach_cell( [&](SurfaceVertex sv) {
+			
 			medial_point_position[index_of(surface, sv)] = value<Vec3>(surface, medial_axis_samples_position_, sv);
 			return true;
 		});
@@ -1735,7 +1739,7 @@ public:
 
 		// Randomly select 50 points as the initial cluster
 		filtered_medial_axis_samples->foreach_cell_bool([&](SurfaceVertex v) {
-			if (nb_cluster >= 100)
+			if (nb_cluster >= 10)
 				return false;
 			Scalar rand_number = (rand() / (double)RAND_MAX);
 			if (rand_number > 0.995)
@@ -1779,8 +1783,12 @@ public:
 			Scalar min_distance = 1e30;
 			SurfaceVertex cluster_vertex;
 			cluster_set->foreach_cell([&](SurfaceVertex svc) {
-				
-				Scalar dis = dis_matrix(index_of(surface, svs), index_of(surface, svc)); 
+				Vec3 dir = (value<Vec3>(surface, sample_position, svs) -
+							value<Vec3>(surface, medial_axis_samples_position_, svc))
+							   .normalized();
+				Scalar cosine = value<Vec3>(surface, sample_normal, svs).dot(dir);
+				Scalar dis = dis_matrix(index_of(surface, svs), index_of(surface, svc)) /*-.8*
+							 dis_matrix(index_of(surface, svs), index_of(surface, svc)) * cosine*/; 
 				if (dis < min_distance)
 				{
 					min_distance = dis;
@@ -1828,13 +1836,8 @@ public:
 				{
 					//sv1: medial point vertex , sv2: surface point vertex
 					sum_dist += dis_matrix(index_of(surface, sv2), index_of(surface, sv1));
-					if (dis_matrix(index_of(surface, sv2), index_of(surface, sv1)) > max_radius)
-					{
-						max_radius = dis_matrix(index_of(surface, sv2), index_of(surface, sv1));
-					}
+					
 				}
-				Scalar max_diff_distance =
-					abs(max_radius * value<std::vector<SurfaceVertex>>(surface, clusters, svc).size() - sum_dist);
 				if (sum_dist < min_dist)
 				{
 					min_dist = sum_dist;
@@ -1872,7 +1875,7 @@ public:
 		
 	}
 
-	void split_cluster(SURFACE& surface, float split_threshold)
+	void split_cluster(SURFACE& surface, float split_threshold, float split_radius_threshold)
 	{
 		auto cluster_color = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "cluster_color");
 		auto clusters = get_or_add_attribute<std::vector<SurfaceVertex>, SurfaceVertex>(surface, "clusters");
@@ -1901,9 +1904,13 @@ public:
 			Scalar diff_to_min_distance =
 				(sum_dist - min_dist * value<std::vector<SurfaceVertex>>(surface, clusters, svc).size()) /
 				value<std::vector<SurfaceVertex>>(surface, clusters, svc).size();
+			Scalar average_adius = sum_dist / value<std::vector<SurfaceVertex>>(surface, clusters, svc).size();
+			Scalar dilated_factor = (max_radius - value<Scalar>(surface, medial_axis_samples_radius, svc)) /
+									value<Scalar>(surface, medial_axis_samples_radius, svc);
 			std::cout << "sum_dist: " << sum_dist << " min_dist: " << min_dist
-					  << "diff_to_min_distance: " << diff_to_min_distance << std::endl;
-			if (diff_to_min_distance > split_threshold || (max_radius - value<Scalar>(surface, medial_axis_samples_radius, svc))>0.02)
+					  << " diff_to_min_distance: " << diff_to_min_distance << " dilated_factor: " << dilated_factor
+					  << std::endl;
+			if (diff_to_min_distance > split_threshold ||dilated_factor > split_radius_threshold)
 			{
 				candidate_split_cluster_set->select(svc);
 			}
@@ -1931,8 +1938,7 @@ public:
 				}
 			}
 			split_clusters_set->select(split_cluster);
-			std::cout << "split_cluster: " << index_of(surface, split_cluster) << std::endl;
-				return true;
+			return true;
 		});
 		split_clusters_set->foreach_cell([&](SurfaceVertex sv) {
 			cluster_set->select(sv);
@@ -2066,9 +2072,10 @@ public:
 			if (ImGui::Button("Update Cluster"))
 				update_cluster(*selected_surface_mesh_);
 			ImGui::SliderFloat("Split threshold", &split_threshold_, 0.0f, 0.05f, "%.6f");
+			ImGui::SliderFloat("Split radius threshold", &split_radius_threshold_, 0.0f, 3.0f, "%.2f");
 			if (ImGui::Button("Split Cluster"))
 			{
-				split_cluster(*selected_surface_mesh_, split_threshold_);
+				split_cluster(*selected_surface_mesh_, split_threshold_, split_radius_threshold_);
 			}
 			if (ImGui::Button("Clustering PD"))
 				shrinking_balls_clustering_PD(*selected_surface_mesh_);
@@ -2179,7 +2186,8 @@ private:
 	float distance_threshold_ = 0.001;
 	float angle_threshold_ = 1.9;
 	float radius_threshold_ = 0.030;
-	float split_threshold_ = 0.20;
+	float split_threshold_ = 0.003;
+	float split_radius_threshold_ = 1.0;
 	double min_radius_ = std::numeric_limits<double>::max();
 	double max_radius_ = std::numeric_limits<double>::min();
 	Eigen::MatrixXd dis_matrix;
