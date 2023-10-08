@@ -52,6 +52,13 @@ public:
 		matrix_ = p * p.transpose();
 	}
 
+	inline Quadric(const Vec3& p1, const Vec3& n)
+	{
+		Scalar d = -(p1.dot(n));
+		Vec4 p = Vec4(n[0], n[1], n[2], d);
+		matrix_ = p * p.transpose();
+		
+	}
 	Quadric(const Quadric& q)
 	{
 		matrix_ = q.matrix_;
