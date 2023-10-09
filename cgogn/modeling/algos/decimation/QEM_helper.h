@@ -127,8 +127,8 @@ struct ClusteringQEM_Helper
 	{
 		vertex_quadric_ = add_attribute<Quadric, Vertex>(m_, "__vertex_quadric");
 		parallel_foreach_cell(m_, [&](Vertex v) -> bool {
-			Quadric q(value<Vec3>(m_, vertex_position_, v), value<Vec3>(m_, vertex_normal_, v));
-			value<Quadric>(m_, vertex_quadric_, v) = q;
+			value<Quadric>(m_, vertex_quadric_, v) =
+				Quadric(value<Vec3>(m_, vertex_position_, v), value<Vec3>(m_, vertex_normal_, v));
 			return true;
 		});
 	}
@@ -150,7 +150,7 @@ struct ClusteringQEM_Helper
 		return q.eval(p);
 	}
 
-	Vec3 optimal_centroid_position(std::vector<Vertex> cluster_vertices)
+	Vec3 optimal_centroid_position(std::vector<Vertex>& cluster_vertices)
 	{
 		Quadric q;
 		for (Vertex& v : cluster_vertices)
@@ -158,8 +158,22 @@ struct ClusteringQEM_Helper
 			q += value<Quadric>(m_, vertex_quadric_, v);
 		}
 		Vec3 p;
-		q.optimized(p);
+		if (q.optimized(p))
+		{
+
+			return p;
+		}
+		else
+		{
+			std::cout << "can't inverse A" << std::endl;
+			return Vec3(0.0, 0.0, 0.0);
+		}
 		return p;
+	}
+
+	void print(Vertex v)
+	{
+		std::cout << value<Quadric>(m_, vertex_quadric_, v) << std::endl;
 	}
 	MESH& m_;
 	const Attribute<Vec3>* vertex_position_;

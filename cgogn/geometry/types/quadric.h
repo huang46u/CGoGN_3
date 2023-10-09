@@ -81,6 +81,12 @@ public:
 		return *this;
 	}
 
+	friend std::ostream& operator<<(std::ostream& os, const Quadric& quad)
+	{
+		os << quad.matrix_;
+		return os;
+	}
+
 	Scalar eval(const Vec3& v)
 	{
 		return eval(Vec4{v[0], v[1], v[2], 1.});
