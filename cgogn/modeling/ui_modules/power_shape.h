@@ -50,6 +50,8 @@
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/Triangulation_cell_base_with_info_3.h>
 #include <CGAL/Triangulation_vertex_base_with_info_3.h>
+#include <CGAL/Min_sphere_of_points_d_traits_3.h>
+#include <CGAL/Min_sphere_of_spheres_d.h>
 #include <CGAL/double.h>
 #include <CGAL/optimal_bounding_box.h>
 
@@ -124,8 +126,11 @@ class PowerShape : public Module
 	using Cgal_Surface_mesh = CGAL::Surface_mesh<Point>;
 	using Point_inside = CGAL::Side_of_triangle_mesh<Cgal_Surface_mesh, K>;
 	using Primitive = CGAL::AABB_face_graph_triangle_primitive<Cgal_Surface_mesh>;
-	using Traits = CGAL::AABB_traits<K, Primitive>;
-	using Tree = CGAL::AABB_tree<Traits>;
+	using Tree_Traits = CGAL::AABB_traits<K, Primitive>;
+	using Tree = CGAL::AABB_tree<Tree_Traits>;
+
+	using Min_Sphere_Tratis =  CGAL::Min_sphere_of_points_d_traits_3<K, K::FT>;
+	using Min_sphere =  CGAL::Min_sphere_of_spheres_d<Min_Sphere_Tratis>;
 
 	template <typename T>
 	using NonManifoldAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
@@ -149,7 +154,7 @@ class PowerShape : public Module
 public:
 	PowerShape(const App& app) : Module(app, "PowerShape"), surface_kdt(nullptr)
 	{
-		clustering_mode = 1;
+		clustering_mode = 0;
 	}
 	~PowerShape()
 	{
@@ -1810,7 +1815,7 @@ public:
 			new modeling::ClusteringQEM_Helper<SURFACE>(surface, sample_position.get(), sample_normal.get());
 		// Randomly select 50 points as the initial cluster
 		filtered_medial_axis_samples->foreach_cell_bool([&](SurfaceVertex v) {
-			if (nb_cluster >= 10)
+			if (nb_cluster >= 2)
 				return false;
 			Scalar rand_number = (rand() / (double)RAND_MAX);
 			if (rand_number > 0.995)
@@ -1919,8 +1924,8 @@ public:
 			Scalar min_dist = 1e30;
 			for (SurfaceVertex& sv1 : value<std::vector<SurfaceVertex>>(surface, clusters, svc))
 			{
-				if (dis_matrix(index_of(surface, sv1), index_of(surface, svc)) < min_dist)
-					min_dist = dis_matrix(index_of(surface, sv1), index_of(surface, svc));
+				if (std::sqrt(dis_matrix(index_of(surface, sv1), index_of(surface, svc))) < min_dist)
+					min_dist = std::sqrt(dis_matrix(index_of(surface, sv1), index_of(surface, svc)));
 				if (std::sqrt(dis_matrix(index_of(surface, sv1), index_of(surface, svc))) > max_radius)
 					max_radius = std::sqrt(dis_matrix(index_of(surface, sv1), index_of(surface, svc)));
 			}
@@ -1929,12 +1934,24 @@ public:
 			switch (clustering_mode)
 			{
 			case 0: {
-				Vec3 sum_coord = Vec3(0, 0, 0);
+				/*Vec3 sum_coord = Vec3(0, 0, 0);
 				for (SurfaceVertex sv1 : value<std::vector<SurfaceVertex>>(surface, clusters, svc))
 				{
 					sum_coord = sum_coord + value<Vec3>(surface, sample_position, sv1);
 				}
-				opti_coord = sum_coord / value<std::vector<SurfaceVertex>>(surface, clusters, svc).size();
+				opti_coord = sum_coord / value<std::vector<SurfaceVertex>>(surface, clusters, svc).size();*/
+				std::vector<Point> surface_points;
+				for (SurfaceVertex : sv1 : value<std::vector<SurfaceVertex>>(surface, clusters, svc))
+				{
+					Vec3 pos = value<Vec3>(surface, sample_position, sv1);
+					surface_points.push_back(Point(pos.x(), pos.y(), pos.z()));
+				}
+				Min_sphere min_sphere(surface_points.begin(), surface_points.end());
+				assert(min_sphere.is_valid());
+
+				opti_coord = Vec3(min_sphere.center_cartesian_begin()[0], min_sphere.center_cartesian_begin()[1],
+								  min_sphere.center_cartesian_begin()[2]);
+			
 				break;
 			}
 			case 1: {
@@ -2005,36 +2022,50 @@ public:
 		auto candidate_split_cluster_set = &md.template get_or_add_cells_set<SurfaceVertex>("candidate_split_cluster");
 		split_clusters_set->clear();
 
-		std::cout << "split cluster ------------------------------------";
+		std::cout << "split cluster ------------------------------------"<<std::endl;
 		// Test if the cluster can be split
+		SurfaceVertex candidate_split_cluster;
+		Scalar max_diff = -1e30;
+		Scalar max_dilated_factor = -1e30;
 		cluster_set->foreach_cell([&](SurfaceVertex svc) {
 			Scalar max_radius = -1e30;
 			Scalar sum_dist = 0;
-			Scalar min_dist = 1e30;
+			Scalar min_radius = 1e30;
 			for (SurfaceVertex sv1 : value<std::vector<SurfaceVertex>>(surface, clusters, svc))
 			{
-				sum_dist += dis_matrix(index_of(surface, sv1), index_of(surface, svc));
-				if (dis_matrix(index_of(surface, sv1), index_of(surface, svc)) < min_dist)
-					min_dist = dis_matrix(index_of(surface, sv1), index_of(surface, svc));
+				if (index_of(surface, sv1) == index_of(surface, svc))
+					continue;
+				sum_dist += std::sqrt(dis_matrix(index_of(surface, sv1), index_of(surface, svc)));
+				if (std::sqrt(dis_matrix(index_of(surface, sv1), index_of(surface, svc))) < min_radius)
+					min_radius = std::sqrt(dis_matrix(index_of(surface, sv1), index_of(surface, svc)));
 				if (std::sqrt(dis_matrix(index_of(surface, sv1), index_of(surface, svc))) > max_radius)
 					max_radius = std::sqrt(dis_matrix(index_of(surface, sv1), index_of(surface, svc)));
 			}
 			Scalar diff_to_min_distance =
-				(sum_dist - min_dist * value<std::vector<SurfaceVertex>>(surface, clusters, svc).size()) /
+				(sum_dist - min_radius * value<std::vector<SurfaceVertex>>(surface, clusters, svc).size()) /
 				value<std::vector<SurfaceVertex>>(surface, clusters, svc).size();
-			Scalar average_adius = sum_dist / value<std::vector<SurfaceVertex>>(surface, clusters, svc).size();
+			/*Scalar average_adius = sum_dist / value<std::vector<SurfaceVertex>>(surface, clusters, svc).size();*/
 			Scalar dilated_factor = (max_radius - value<Scalar>(surface, medial_axis_samples_radius, svc)) /
 									value<Scalar>(surface, medial_axis_samples_radius, svc);
-			std::cout << "sum_dist: " << sum_dist << " min_dist: " << min_dist
+			std::cout << "sum_dist: " << sum_dist << " min_radius: " << min_radius
 					  << " diff_to_min_distance: " << diff_to_min_distance << " dilated_factor: " << dilated_factor
 					  << std::endl;
-			if (diff_to_min_distance > split_threshold || dilated_factor > split_radius_threshold)
+			if (dilated_factor>max_dilated_factor)
+			{
+				max_dilated_factor = dilated_factor;
+				candidate_split_cluster = svc;
+				
+			}
+			/*if (diff_to_min_distance > split_threshold || dilated_factor > split_radius_threshold)
 			{
 				candidate_split_cluster_set->select(svc);
-			}
+			}*/
 			return true;
 		});
-
+		if (max_diff > split_threshold || max_dilated_factor > split_radius_threshold)
+		{
+			candidate_split_cluster_set->select(candidate_split_cluster);
+		}
 		candidate_split_cluster_set->foreach_cell([&](SurfaceVertex svc) {
 			SurfaceVertex split_cluster;
 			
