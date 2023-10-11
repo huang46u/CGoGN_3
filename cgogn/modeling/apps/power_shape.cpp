@@ -68,7 +68,7 @@ int main(int argc, char** argv)
 	cgogn::ui::MeshProvider<Surface> ms(app);
 	cgogn::ui::MeshProvider<NonManifold> mpnm(app);
 	cgogn::ui::PointCloudRender<Point> srp(app);
-	//cgogn::ui::SurfaceModeling<Surface> sms(app);
+	cgogn::ui::SurfaceModeling<Surface> sms(app);
 	cgogn::ui::SurfaceSelection<Surface> sl(app);
 	cgogn::ui::SurfaceDifferentialProperties<Surface> sdp(app);
 	cgogn::ui::SurfaceRender<Surface> sr(app);

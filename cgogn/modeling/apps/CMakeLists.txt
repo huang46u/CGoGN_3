@@ -31,6 +31,7 @@ if (CGOGN_USE_CGAL)
 		cgogn::io
 		cgogn::rendering
 		cgogn::modeling
+		Blossom5
 		${CMAKE_DL_LIBS}
 	)
 endif()
