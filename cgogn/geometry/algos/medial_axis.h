@@ -142,6 +142,32 @@ std::tuple<Vec3, Scalar, Vec3> shrinking_ball_center(
 	return {c, r, q};
 }
 
+template<typename MESH>
+Scalar surface_medial_distance_variance(
+	MESH& m, const typename mesh_traits<MESH>::Vertex medial_axis_sample,
+	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
+	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_shrinking_ball_center,
+	const typename mesh_traits<MESH>::template Attribute<std::vector<typename mesh_traits<MESH>::Vertex>>* clusters,
+	Eigen::MatrixXd& dis_matrix)
+{
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+	
+	Scalar sum_dist = 0;
+	for (Vertex v : value<std::vector<Vertex>>(m, clusters, medial_axis_sample))
+	{
+		sum_dist += std::sqrt(dis_matrix(index_of(m, v), index_of(m, medial_axis_sample)));
+	}
+	Scalar average_dist = sum_dist / value<std::vector<Vertex>>(m, clusters, medial_axis_sample).size();
+	Scalar variance = 0;
+	for (Vertex v : value<std::vector<Vertex>>(m, clusters, medial_axis_sample))
+	{
+			variance += (std::sqrt(dis_matrix(index_of(m, v), index_of(m, medial_axis_sample))) -average_dist) *
+						(std::sqrt(dis_matrix(index_of(m, v), index_of(m, medial_axis_sample))) -average_dist);
+	}
+	return variance /value<std::vector<Vertex>>(m, clusters, medial_axis_sample).size();
+	
+}
+
 // adapted from https://github.com/tudelft3d/masbcpp
 
 template <typename MESH>
