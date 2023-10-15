@@ -1785,7 +1785,8 @@ public:
 			Scalar rand_number = (rand() / (double)RAND_MAX);
 			if (rand_number > 0.995)
 			{
-				colors.push_back(Vec3(rand() / double(RAND_MAX), rand() / double(RAND_MAX), rand() / double(RAND_MAX)));
+				value<Vec3>(surface, cluster_color, v) = 
+					Vec3(rand() / double(RAND_MAX), rand() / double(RAND_MAX), rand() / double(RAND_MAX));
 				cluster_set->select(v);
 				cluster_map[index_of(surface, v)] = nb_cluster;
 				nb_cluster++;
@@ -1810,7 +1811,7 @@ public:
 			});
 			value<std::pair<uint32, SurfaceVertex>>(surface, clusters_info, svs) = {index_of(surface, cluster_vertex),
 																					cluster_vertex};
-			value<Vec3>(surface, cluster_color, svs) = colors[cluster_map[index_of(surface, cluster_vertex)]];
+			value<Vec3>(surface, cluster_color, svs) = value<Vec3>(surface, cluster_color, cluster_vertex);
 			value<std::vector<SurfaceVertex>>(surface, clusters, cluster_vertex).push_back(svs);
 			return true;
 		});
@@ -1852,7 +1853,7 @@ public:
 		cluster_set->foreach_cell([&](SurfaceVertex svc) {
 			if (value<Scalar>(surface, cluster_variance, svc) < split_variance_threshold_)
 				return true;
-			for (SurfaceVertex v : value<std::vector<SurfaceVertex>>(surface, clusters, svc))
+			for (SurfaceVertex& v : value<std::vector<SurfaceVertex>>(surface, clusters, svc))
 			{
 				need_update.mark(v);
 			}
@@ -1882,7 +1883,7 @@ public:
 			});
 			value<std::pair<uint32, SurfaceVertex>>(surface, clusters_info, svs) = {
 				index_of(surface, cluster_vertex), cluster_vertex};
-			value<Vec3>(surface, cluster_color, svs) = colors[cluster_map[index_of(surface, cluster_vertex)]];
+			value<Vec3>(surface, cluster_color, svs) = value<Vec3>(surface, cluster_color, cluster_vertex);
 			value<std::vector<SurfaceVertex>>(surface, clusters, cluster_vertex).push_back(svs);
 			return true;
 		});
@@ -1901,6 +1902,7 @@ public:
 			get_attribute<Vec3, SurfaceVertex>(surface, "medial_axis_samples_position");
 		auto clustering_ball = get_or_add_attribute<std::pair<Vec3, Scalar>,SurfaceVertex>(surface, "clustering_ball");
 		auto cluster_variance = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "cluster_variance");
+		auto cluster_color = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "cluster_color");
 
 		MeshData<SURFACE>& md = surface_provider_->mesh_data(surface);
 		auto cluster_set = &md.template get_or_add_cells_set<SurfaceVertex>("clusters");
@@ -1959,7 +1961,6 @@ public:
 				break;
 			}
 			case 1: {
-				
 					opti_coord = clustering_qem_helper->optimal_centroid_position(
 						value<std::vector<SurfaceVertex>>(surface, clusters, svc));
 				
@@ -1991,8 +1992,12 @@ public:
 				if (index_of(surface, new_cluster) != index_of(surface, svc))
 				{
 					old_new_cluster.push_back({svc, new_cluster});
+
 					cluster_map[index_of(surface, new_cluster)] = cluster_map[index_of(surface, svc)];
 					cluster_map.erase(index_of(surface, svc));
+					
+					value<Scalar>(surface, cluster_variance, new_cluster) =
+						value<Scalar>(surface, cluster_variance, svc);
 					value<std::vector<SurfaceVertex>>(surface, clusters, new_cluster) =
 						value<std::vector<SurfaceVertex>>(surface, clusters, svc);
 					value<std::vector<SurfaceVertex>>(surface, clusters, svc).clear();
@@ -2182,17 +2187,15 @@ public:
 			{
 				cluster_map[index_of(surface, sv)] = cluster_set->size();
 				cluster_set->select(sv);
-				colors.push_back(Vec3(rand() / double(RAND_MAX), rand() / double(RAND_MAX), rand() / double(RAND_MAX)));
+				value<Vec3>(surface, cluster_color, sv) = Vec3(rand() / double(RAND_MAX), rand() / double(RAND_MAX), rand() / double(RAND_MAX));
 			}
 			return true;
 		});
-		std::cout << "color_map number: "
-				  << colors.size() << std::endl;
 		assign_cluster(surface);
 		surface_provider_->emit_cells_set_changed(surface, cluster_set);
 		surface_provider_->emit_cells_set_changed(surface, candidate_split_cluster_set);
 		surface_provider_->emit_attribute_changed(surface, cluster_variance.get());
-		
+		surface_provider_->emit_attribute_changed(surface, cluster_color.get());
 	}
 	/*void update_cluster(SURFACE& surface)
 	{
