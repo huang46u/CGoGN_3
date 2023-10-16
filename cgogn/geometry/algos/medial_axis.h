@@ -212,31 +212,31 @@ Scalar surface_medial_distance_variance(
 	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
 	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_normal,
 	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_shrinking_ball_center,
-	const typename mesh_traits<MESH>::template Attribute<std::vector<typename mesh_traits<MESH>::Vertex>>* clusters,
+	std::vector<typename mesh_traits<MESH>::Vertex>& clusters,
 	Eigen::MatrixXd& dis_matrix)
 {
 	using Vertex = typename mesh_traits<MESH>::Vertex;
 	std::vector<Scalar> cosines;
 	Scalar sum_dist = 0;
-	for (Vertex v : value<std::vector<Vertex>>(m, clusters, medial_axis_sample))
+	for (Vertex v : clusters)
 	{
 		Vec3 dir =
 			(value<Vec3>(m, vertex_position, v) - value<Vec3>(m, vertex_shrinking_ball_center, medial_axis_sample))
 				.normalized();
 		Scalar cosine = value<Vec3>(m, vertex_normal, v).dot(dir);
 		cosines.push_back(cosine);
-		sum_dist += -cosine * std::sqrt(dis_matrix(index_of(m, v), index_of(m, medial_axis_sample)));
+		sum_dist += -cosine * dis_matrix(index_of(m, v), index_of(m, medial_axis_sample));
 	}
-	Scalar average_dist = sum_dist / value<std::vector<Vertex>>(m, clusters, medial_axis_sample).size();
+	Scalar average_dist = sum_dist / clusters.size();
 	Scalar variance = 0;
 	size_t idx = 0;
-	for (Vertex v : value<std::vector<Vertex>>(m, clusters, medial_axis_sample))
+	for (Vertex v : clusters)
 	{
 		Scalar cosine = cosines[idx++];
-		variance += (-cosine * std::sqrt(dis_matrix(index_of(m, v), index_of(m, medial_axis_sample))) - average_dist) *
-					(-cosine * std::sqrt(dis_matrix(index_of(m, v), index_of(m, medial_axis_sample))) - average_dist);
+		variance += (-cosine * dis_matrix(index_of(m, v), index_of(m, medial_axis_sample)) - average_dist) *
+					(-cosine * dis_matrix(index_of(m, v), index_of(m, medial_axis_sample)) - average_dist);
 	}
-	return variance / value<std::vector<Vertex>>(m, clusters, medial_axis_sample).size();
+	return variance / clusters.size();
 }
 } // namespace geometry
 
