@@ -1724,20 +1724,18 @@ public:
 		std::cout << "loop begin" << std::endl;
 		for (size_t idx1 = 0; idx1 < sample_point_position.size(); idx1++)
 		{
-			if (sample_point_position[idx1] == Vec3(0,0,0))
-				continue;
+			/*if (sample_point_position[idx1] == Vec3(0,0,0))
+				continue;*/
 			for (size_t idx2 = 0; idx2 < medial_point_position.size(); idx2++)
 			{
-				if (medial_point_position[idx2] == Vec3(0,0,0))
-					continue;
-				dis_matrix(idx1, idx2) = std::sqrt((sample_point_position[idx1].x() - medial_point_position[idx2].x()) *
-											 (sample_point_position[idx1].x() - medial_point_position[idx2].x()) +
-										 (sample_point_position[idx1].y() - medial_point_position[idx2].y()) *
-											 (sample_point_position[idx1].y() - medial_point_position[idx2].y()) +
-										 (sample_point_position[idx1].z() - medial_point_position[idx2].z()) *
-											 (sample_point_position[idx1].z() - medial_point_position[idx2].z()))-medial_point_radius[idx2];
+				/*if (medial_point_position[idx2] == Vec3(0,0,0))
+					continue;*/
+				Vec3 sample_point_minus_medial_point = sample_point_position[idx1] - medial_point_position[idx2];
+				dis_matrix(idx1, idx2) = std::sqrt(sample_point_minus_medial_point.dot(sample_point_minus_medial_point))/*-medial_point_radius[idx2]*/;
+				if(dis_matrix(idx1, idx2)==0) std::cout<<"distance is zero"<<std::endl;
 			}
 		}
+		
 		std::cout << "loop end" << std::endl;
 	}
 
@@ -1811,6 +1809,7 @@ public:
 				}
 				return true;
 			});
+			
 			Cluster_Info& cf = value<Cluster_Info>(surface, clusters_infos, cluster_vertex);
 			value<Vec3>(surface, cluster_color, svs) = cf.cluster_vertex_color;
 			cf.cluster_vertices.push_back(svs);
@@ -1858,21 +1857,20 @@ public:
 
 		cluster_set->foreach_cell([&](SurfaceVertex svc) {
 			Cluster_Info& cf = value<Cluster_Info>(surface, clusters_infos, svc);
-			if (cf.cluster_variance < 1e-6)
-				return true;
-			for (SurfaceVertex& v : cf.cluster_vertices)
+			/*for (SurfaceVertex& v : cf.cluster_vertices)
 			{
 				need_update.mark(v);
-			}
+			}*/
 			cf.cluster_vertices.clear();
+			
 			return true;
 		});
 		//Assign each point to the nearest cluster
 		
 		int i = 0;
 		foreach_cell(surface, [&](SurfaceVertex svs) {
-			if (!need_update.is_marked(svs))
-				return true;
+		/*	if (!need_update.is_marked(svs))
+				return true;*/
 			Scalar min_distance = 1e30;
 			SurfaceVertex cluster_vertex;
 			cluster_set->foreach_cell([&](SurfaceVertex svc) {
@@ -1884,6 +1882,7 @@ public:
 				}
 				return true;
 			});
+			
 			Cluster_Info& cf = value<Cluster_Info>(surface, clusters_infos, cluster_vertex);
 			value<Vec3>(surface, cluster_color, svs) = cf.cluster_vertex_color;
 			
@@ -1892,14 +1891,13 @@ public:
 				cluster_map[index_of(surface, cluster_vertex)], cluster_vertex};
 			return true;
 		});
-
+		
 
 		//Delete empty cluster
 		std::vector<SurfaceVertex> clusters_to_remove;
-		cluster_set->foreach_cell([&](SurfaceVertex svc)
-			{ 
-				Cluster_Info& cf = value<Cluster_Info>(surface, clusters_infos, svc);
-			std::cout << "cluster: " << index_of(surface, svc) << " size: " << cf.cluster_vertices.size() << std::endl;
+		cluster_set->foreach_cell([&](SurfaceVertex svc) {
+			
+			Cluster_Info& cf = value<Cluster_Info>(surface, clusters_infos, svc);
 			if (cf.cluster_vertices.size() == 0)
 			{
 				clusters_to_remove.push_back(svc);
@@ -1950,12 +1948,34 @@ public:
 			{
 			case 0: {
 				/*Vec3 sum_coord = Vec3(0, 0, 0);
-				for (SurfaceVertex sv1 : value<std::vector<SurfaceVertex>>(surface, clusters, svc))
+				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
 					sum_coord = sum_coord + value<Vec3>(surface, sample_position, sv1);
 				}
-				opti_coord = sum_coord / value<std::vector<SurfaceVertex>>(surface, clusters, svc).size();*/
-				/*std::vector<Point> surface_points;
+				opti_coord = sum_coord / cf.cluster_vertices.size();*/
+				std::vector<Point> medial_points;
+				for (SurfaceVertex sv1 : cf.cluster_vertices)
+				{
+					Vec3 pos = value<Vec3>(surface, medial_axis_samples_position_, sv1);
+					medial_points.push_back(Point(pos.x(), pos.y(), pos.z()));
+				}
+				Min_sphere min_sphere(medial_points.begin(), medial_points.end());
+				assert(min_sphere.is_valid());
+				auto it = min_sphere.center_cartesian_begin();
+				K::FT coord[3];
+				for (size_t idx = 0; idx < 3 && it != min_sphere.center_cartesian_end(); idx++)
+				{
+					coord[idx] = *it;
+					it++;
+				}
+				opti_coord = Vec3(coord[0], coord[1], coord[2]);
+				
+				
+				
+				break;
+			}
+			case 1: {
+				std::vector<Point> surface_points;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
 					Vec3 pos = value<Vec3>(surface, sample_position, sv1);
@@ -1965,31 +1985,27 @@ public:
 				assert(min_sphere.is_valid());
 				auto it = min_sphere.center_cartesian_begin();
 				K::FT coord[3];
-				for (size_t idx = 0; idx < 3 && it!=min_sphere.center_cartesian_end(); idx++)
+				for (size_t idx = 0; idx < 3 && it != min_sphere.center_cartesian_end(); idx++)
 				{
 					coord[idx] = *it;
 					it++;
 				}
 				opti_coord = Vec3(coord[0], coord[1], coord[2]);
 				K::FT radius = min_sphere.radius();
-				value<std::pair<Vec3, Scalar>>(surface, clustering_ball, svc) = {opti_coord, radius};*/
-				Vec3 sum_coord = Vec3(0, 0, 0);
-				Scalar sum_radius = 0;
-				for (SurfaceVertex sv1 : cf.cluster_vertices)
-				{
-					sum_coord += value<Scalar>(surface, medial_axis_samples_radius, sv1) * value<Vec3>(surface, sample_position, sv1);
-					sum_radius += value<Scalar>(surface, medial_axis_samples_radius, sv1);
-				}
-				opti_coord = sum_coord / sum_radius;
-				break;
-			}
-			case 1: {
-					opti_coord = clustering_qem_helper->optimal_centroid_position(
-						cf.cluster_vertices);
-				
+				value<std::pair<Vec3, Scalar>>(surface, clustering_ball, svc) = {opti_coord, radius};
+
 				break;
 			}
 			case 2: {
+				//mean position of medial points
+			/*	Vec3 sum_coord = Vec3(0, 0, 0);
+				for (SurfaceVertex sv1 : cf.cluster_vertices)
+				{
+					sum_coord += value<Vec3>(surface, sample_position, sv1);
+				}
+				opti_coord = sum_coord / cf.cluster_vertices.size();*/
+
+				//weighted mean position of medial points
 				Vec3 sum_coord = Vec3(0, 0, 0);
 				Scalar sum_radius = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
@@ -2024,7 +2040,7 @@ public:
 					cf_new = cf;
 				}
 			}
-			return true;
+			
 		});
 		for (auto it = old_new_cluster.begin(); it!=old_new_cluster.end(); it++)
 		{
@@ -2083,6 +2099,7 @@ public:
 			Scalar max_variance = -1e30;
 			SurfaceVertex candidate_cluster;
 			cluster_set->foreach_cell([&](SurfaceVertex svc) {
+				
 				Cluster_Info& cf = value<Cluster_Info>(surface, clusters_infos, svc);
 				Scalar variance = geometry::surface_medial_distance_variance(
 					surface, 
@@ -2112,15 +2129,17 @@ public:
 			Scalar global_max_dist = -1e30;
 			SurfaceVertex max_radius_cluster;
 			cluster_set->foreach_cell([&](SurfaceVertex svc) {
-				Scalar max_dist = -1e30;
-				for (SurfaceVertex sv1 : value<Cluster_Info>(surface, clusters_infos, svc).cluster_vertices)
+				Scalar sum_dist = 0;
+				Cluster_Info& cf = value<Cluster_Info>(surface, clusters_infos, svc);
+				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
-					if (dis_matrix(index_of(surface, sv1), index_of(surface, svc)) > max_dist)
-						max_dist = dis_matrix(index_of(surface, sv1), index_of(surface, svc));
+					if (dis_matrix(index_of(surface, sv1), index_of(surface, svc)) > sum_dist)
+						sum_dist+= dis_matrix(index_of(surface, sv1), index_of(surface, svc));
 				}
-				if (global_max_dist < max_dist)
+				sum_dist /= cf.cluster_vertices.size();
+				if (global_max_dist < sum_dist )
 				{
-					global_max_dist = max_dist;
+					global_max_dist = sum_dist;
 					max_radius_cluster = svc;
 				}
 				return true;
@@ -2141,7 +2160,15 @@ public:
 		candidate_split_cluster_set->foreach_cell([&](SurfaceVertex svc) {
 			std::cout << "candidate_split_cluster_set: " << index_of(surface, svc) << std::endl;
 			SurfaceVertex split_cluster;
-			
+			Cluster_Info& cf = value<Cluster_Info>(surface, clusters_infos, svc);
+			struct Error_compare
+			{
+				bool operator()(const std::pair<SurfaceVertex, Scalar>& p1,
+								const std::pair<SurfaceVertex, Scalar>& p2) const
+				{
+					return p1.second < p2.second;
+				}
+			};
 			switch (clustering_mode)
 			{
 			case 0: {
@@ -2150,7 +2177,13 @@ public:
 				if (found)
 				{
 					split_cluster = kdt_vertices[k_res.first];
-					split_clusters_set->select(split_cluster);
+					if (index_of(surface, split_cluster) != index_of(surface, svc))
+						split_clusters_set->select(split_cluster);
+					else
+					{
+						split_cluster = kdt_vertices[k_res.second];
+						split_clusters_set->select(split_cluster);
+					}
 					std::cout << "candidate split cluster: " << index_of(surface, svc)
 							  << ", split cluster: " << index_of(surface, split_cluster) << std::endl;
 				}
@@ -2161,31 +2194,10 @@ public:
 
 				break;
 			}
-			case 2: {
-				/*Scalar max_error = -1e30;
-				
-				for (SurfaceVertex& sv : value<std::vector<SurfaceVertex>>(surface, clusters, svc))
-				{
-					Scalar error = clustering_qem_helper->vertex_cost(value<std::vector<SurfaceVertex>>(surface, clusters, svc),
-														   value<Vec3>(surface, medial_axis_samples_position_, sv));
-					
-					if (max_error < error)
-					{
-						max_error = error;
-						split_cluster = sv;
-					}
-				}
-				split_clusters_set->select(split_cluster);*/
+			case 1: {
 				Scalar max_error = -1e30;
-				Cluster_Info& cf = value<Cluster_Info>(surface, clusters_infos, svc);
-				struct Error_compare
-				{
-					bool operator()(const std::pair<SurfaceVertex, Scalar>& p1,
-									const std::pair<SurfaceVertex, Scalar>& p2) const
-					{
-						return p1.second > p2.second;
-					}
-				};
+				
+				
 				std::priority_queue<std::pair<SurfaceVertex, Scalar>, std::vector<std::pair<SurfaceVertex, Scalar>>,
 									Error_compare >error_queue;
 				for (SurfaceVertex& sv : cf.cluster_vertices)
@@ -2194,7 +2206,48 @@ public:
 					{
 						continue;
 					}
-						
+					Scalar dist = std::sqrt((value<Vec3>(surface, sample_position, sv).x() -
+											 value<Vec3>(surface, medial_axis_samples_position_, svc).x()) *
+												(value<Vec3>(surface, sample_position, sv).x() -
+												 value<Vec3>(surface, medial_axis_samples_position_, svc).x()) +
+											(value<Vec3>(surface, sample_position, sv).y() -
+											 value<Vec3>(surface, medial_axis_samples_position_, svc).y()) *
+												(value<Vec3>(surface, sample_position, sv).y() -
+												 value<Vec3>(surface, medial_axis_samples_position_, svc).y()) +
+											(value<Vec3>(surface, sample_position, sv).z() -
+											 value<Vec3>(surface, medial_axis_samples_position_, svc).z()) *
+												(value<Vec3>(surface, sample_position, sv).z() -
+												 value<Vec3>(surface, medial_axis_samples_position_, svc).z())) +
+									value<Scalar>(surface, medial_axis_samples_radius, sv);
+					error_queue.push({sv, dist});
+				}
+				while (error_queue.size() > 0)
+				{
+					auto& p = error_queue.top();
+					if (cluster_map.find(index_of(surface, p.first)) == cluster_map.end() &&
+						!unsplittable->is_marked(p.first))
+					{
+						split_clusters_set->select(p.first);
+						std::cout << "split cluster index: " << index_of(surface, p.first) << std::endl;
+						break;
+					}
+					error_queue.pop();
+				}
+				
+				
+				break;
+			}
+			case 2: {
+				std::priority_queue<std::pair<SurfaceVertex, Scalar>, std::vector<std::pair<SurfaceVertex, Scalar>>,
+									Error_compare>
+					error_queue;
+				for (SurfaceVertex& sv : cf.cluster_vertices)
+				{
+					if (index_of(surface, sv) == index_of(surface, svc))
+					{
+						continue;
+					}
+
 					Vec3 dir = (value<Vec3>(surface, sample_position, sv) -
 								value<Vec3>(surface, medial_axis_samples_position_, svc))
 								   .normalized();
@@ -2213,32 +2266,8 @@ public:
 						std::cout << "split cluster index: " << index_of(surface, p.first) << std::endl;
 						break;
 					}
+					std::cout << "failed split cluster index: " << index_of(surface, p.first) << std::endl;
 					error_queue.pop();
-				}
-				
-				
-				break;
-			}
-			case 1: {
-				std::pair<uint32, Scalar> k_res;
-				bool found = surface_kdt->find_nn(value<Vec3>(surface, medial_axis_samples_position_, svc), &k_res);
-				if (found)
-				{
-					
-					split_cluster = kdt_vertices[k_res.first];
-					if (index_of(surface, split_cluster) != index_of(surface, svc))
-						split_clusters_set->select(split_cluster);
-					else
-					{
-						split_cluster = kdt_vertices[k_res.second];
-						split_clusters_set->select(split_cluster);
-					}
-					std::cout << "candidate split cluster: " << index_of(surface, svc)
-							  << ", split cluster: " << index_of(surface, split_cluster) << std::endl;
-				}
-				else
-				{
-					std::cout << " closest point not found !!!" << std::endl;
 				}
 				break;
 			}
@@ -2272,7 +2301,7 @@ public:
 		std::cout << "after assigned: -------------------------------" << std::endl;
 		for (auto [k, v] : cluster_map)
 			std::cout << "Vertex " << k << " is cluster " << v << std::endl;
-		
+		assign_cluster(surface);
 		surface_provider_->emit_cells_set_changed(surface, cluster_set);
 		surface_provider_->emit_cells_set_changed(surface, candidate_split_cluster_set);
 	}
@@ -2591,24 +2620,28 @@ public:
 			if (ImGui::Button("Initialise Cluster"))
 				initialise_cluster(*selected_surface_mesh_);
 			ImGui::SliderInt("Update time", &(int)update_times, 1, 10);
-			/*if (ImGui::Button("Update Cluster by Bounding Sphere"))
+			if (ImGui::Button("Update Cluster by Bounding Sphere of medial points"))
 			{
 				clustering_mode = 0;
 				for (int i = 0; i < update_times; i++)
 					update_filtered_cluster(*selected_surface_mesh_);
 			}
-			if (ImGui::Button("Update Cluster by QEM"))
+			if (ImGui::Button("Update Cluster by Bounding Sphere of surface points"))
 			{
 				clustering_mode = 1;
 				for (int i = 0; i < update_times; i++)
 					update_filtered_cluster(*selected_surface_mesh_);
-			}*/
-			if (ImGui::Button("Update Cluster by average medial balls"))
+			}
+			if (ImGui::Button("Update Cluster by weighted average medial balls"))
 			{
 				clustering_mode = 2;
 				for (int i = 0; i < update_times; i++)
 					update_filtered_cluster(*selected_surface_mesh_);
 			}
+		/*	if (ImGui::Button("Assign clusters"))
+			{
+				assign_cluster(*selected_surface_mesh_);
+			}*/
 			ImGui::SliderFloat("Split vairance threshold", &split_variance_threshold_, 0.0f, 0.001f, "%.6f");
 			ImGui::SliderFloat("Split radius threshold", &split_radius_threshold_, 0.0f, 0.1f, "%.2f");
 			if (ImGui::Button("Split Cluster by Bounding Sphere"))
@@ -2618,12 +2651,12 @@ public:
 			}
 			if (ImGui::Button("Split Cluster Variance"))
 			{
-				clustering_mode = 2;
+				clustering_mode = 1;
 				split_filtered_cluster(*selected_surface_mesh_, split_variance_threshold_, split_radius_threshold_);
 			}
 			if (ImGui::Button("Split Cluster by average medial balls"))
 			{
-				clustering_mode =1;
+				clustering_mode =2;
 				split_filtered_cluster(*selected_surface_mesh_, split_variance_threshold_, split_radius_threshold_);
 			}
 			if (ImGui::Button("Construct skeleton"))
@@ -2715,6 +2748,7 @@ public:
 
 private:
 	uint32 clustering_mode = 0;//0: least square, 1: QEM
+	
 	POINT* selected_candidates_ = nullptr;
 	POINT* surface_sample_ = nullptr;
 	SURFACE* selected_surface_mesh_ = nullptr;
