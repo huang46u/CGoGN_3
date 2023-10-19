@@ -1731,7 +1731,7 @@ public:
 				/*if (medial_point_position[idx2] == Vec3(0,0,0))
 					continue;*/
 				Vec3 sample_point_minus_medial_point = sample_point_position[idx1] - medial_point_position[idx2];
-				dis_matrix(idx1, idx2) = std::sqrt(sample_point_minus_medial_point.dot(sample_point_minus_medial_point))/*-medial_point_radius[idx2]*/;
+				dis_matrix(idx1, idx2) = std::sqrt(sample_point_minus_medial_point.dot(sample_point_minus_medial_point))-medial_point_radius[idx2];
 				if(dis_matrix(idx1, idx2)==0) std::cout<<"distance is zero"<<std::endl;
 			}
 		}
@@ -2194,7 +2194,7 @@ public:
 
 				break;
 			}
-			case 1: {
+			case 2: {
 				Scalar max_error = -1e30;
 				
 				
@@ -2237,7 +2237,7 @@ public:
 				
 				break;
 			}
-			case 2: {
+			case 1: {
 				std::priority_queue<std::pair<SurfaceVertex, Scalar>, std::vector<std::pair<SurfaceVertex, Scalar>>,
 									Error_compare>
 					error_queue;
@@ -2642,7 +2642,7 @@ public:
 			{
 				assign_cluster(*selected_surface_mesh_);
 			}*/
-			ImGui::SliderFloat("Split vairance threshold", &split_variance_threshold_, 0.0f, 0.001f, "%.6f");
+			ImGui::SliderFloat("Split vairance threshold", &split_variance_threshold_, 0.0f, 0.003f, "%.6f");
 			ImGui::SliderFloat("Split radius threshold", &split_radius_threshold_, 0.0f, 0.1f, "%.2f");
 			if (ImGui::Button("Split Cluster by Bounding Sphere"))
 			{
