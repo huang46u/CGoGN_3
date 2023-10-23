@@ -40,6 +40,7 @@ struct CMap0 : public CMapBase
 	CMap0()
 	{
 	}
+	
 };
 
 template <>
@@ -65,6 +66,7 @@ struct mesh_traits<CMap0>
 
 CMap0::Vertex add_vertex(CMap0& m, bool set_indices = true);
 
+void remove_vertex(CMap0& m, CMap0::Vertex v);
 } // namespace cgogn
 
 #endif // CGOGN_CORE_TYPES_MAPS_CMAP_CMAP0_H_

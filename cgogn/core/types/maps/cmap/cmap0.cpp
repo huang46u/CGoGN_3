@@ -44,4 +44,14 @@ CMap0::Vertex add_vertex(CMap0& m, bool set_indices)
 	return v;
 }
 
+void remove_vertex(CMap0& m, CMap0::Vertex v)
+{
+	using Vertex = CMap0::Vertex;
+	if (is_indexed<Vertex>(m))
+	{
+		Dart& d = v.dart_;
+		remove_dart(m, d);
+	}
+}
+
 } // namespace cgogn

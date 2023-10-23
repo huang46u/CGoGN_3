@@ -206,19 +206,19 @@ void shrinking_ball_centers(
 	delete surface_bvh;
 }
 
-template <typename MESH>
-Scalar surface_medial_distance_variance(
+
+template <typename MESH, bool UseDisMatrix = true>
+typename std::enable_if<UseDisMatrix, Scalar>::type surface_medial_distance_variance(
 	MESH& m, const typename mesh_traits<MESH>::Vertex medial_axis_sample,
 	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
 	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_normal,
 	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_shrinking_ball_center,
-	std::vector<typename mesh_traits<MESH>::Vertex>& clusters,
-	Eigen::MatrixXd& dis_matrix)
+	std::vector<typename mesh_traits<MESH>::Vertex>& clusters, Eigen::MatrixXd& dis_matrix)
 {
 	using Vertex = typename mesh_traits<MESH>::Vertex;
 	std::vector<Scalar> cosines;
 	Scalar sum_dist = 0;
-	for (Vertex v : clusters)
+	for (Vertex& v : clusters)
 	{
 		Vec3 dir =
 			(value<Vec3>(m, vertex_position, v) - value<Vec3>(m, vertex_shrinking_ball_center, medial_axis_sample))
@@ -230,13 +230,46 @@ Scalar surface_medial_distance_variance(
 	Scalar average_dist = sum_dist / clusters.size();
 	Scalar variance = 0;
 	size_t idx = 0;
-	for (Vertex v : clusters)
+	for (Vertex& v : clusters)
 	{
 		Scalar cosine = cosines[idx++];
 		variance += (-cosine * dis_matrix(index_of(m, v), index_of(m, medial_axis_sample)) - average_dist) *
 					(-cosine * dis_matrix(index_of(m, v), index_of(m, medial_axis_sample)) - average_dist);
 	}
 	return variance / clusters.size();
+}
+
+template <typename MESH1, typename MESH2> 
+Scalar surface_medial_distance_variance(
+	MESH1& m1, MESH2& m2, const typename mesh_traits<MESH2>::Vertex medial_axis_sample,
+	const typename mesh_traits<MESH1>::template Attribute<Vec3>* vertex_position,
+	const typename mesh_traits<MESH1>::template Attribute<Vec3>* vertex_normal,
+	const typename mesh_traits<MESH2>::template Attribute<Vec3>* vertex_cluster_center,
+	std::vector<typename mesh_traits<MESH1>::Vertex>& clusters_points)
+{
+	using PointVertex = typename mesh_traits<MESH2>::Vertex;
+	using SurfaceVertex = typename mesh_traits<MESH1>::Vertex;
+	std::vector<Scalar> dist;
+	Scalar sum_dist = 0;
+	for (SurfaceVertex& v : clusters_points)
+	{
+		Vec3 vec = (value<Vec3>(m1, vertex_position, v) - value<Vec3>(m2, vertex_cluster_center, medial_axis_sample));
+		Vec3 dir = vec.normalized();
+		Scalar cosine = value<Vec3>(m1, vertex_normal, v).dot(dir);
+		Scalar distance = -cosine * vec.norm();
+		dist.push_back(distance);
+		sum_dist += distance;
+		
+	}
+	Scalar average_dist = sum_dist / clusters_points.size();
+	Scalar variance = 0;
+	size_t idx = 0;
+	for (SurfaceVertex& v : clusters_points)
+	{
+		Scalar distance = dist[idx++];
+		variance += (distance - average_dist) * (distance - average_dist);
+	}
+	return variance / clusters_points.size();
 }
 } // namespace geometry
 
