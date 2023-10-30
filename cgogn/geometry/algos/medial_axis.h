@@ -256,9 +256,10 @@ Scalar surface_medial_distance_variance(
 		Vec3 vec = (value<Vec3>(m1, vertex_position, v) - value<Vec3>(m2, vertex_cluster_center, medial_axis_sample));
 		Vec3 dir = vec.normalized();
 		Scalar cosine = value<Vec3>(m1, vertex_normal, v).dot(dir);
-		Scalar distance = -cosine * vec.norm();
+		Scalar length = vec.norm();
+		Scalar distance = cosine > 0 ? length: -5*length;//penalise points on the wrong side of the surface
 		dist.push_back(distance);
-		sum_dist += distance;
+		sum_dist += length;
 		
 	}
 	Scalar average_dist = sum_dist / clusters_points.size();
