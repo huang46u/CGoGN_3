@@ -1601,7 +1601,9 @@ public:
 		Highs highs;
 		HighsStatus status = highs.passModel(model);
 		HighsSolution solution;
-		highs.setOptionValue("time_limit", 1000);
+		/*highs.setOptionValue("time_limit", 1000);*/
+		highs.setOptionValue("parallel", "on");
+		/*highs.setHighsOptionValue("solver", "simplex");*/
 		if (status == HighsStatus::kOk)
 		{
 			highs.run();
@@ -2130,10 +2132,10 @@ public:
 		std::vector<Scalar> cluster_radius_vec;
 		// Randomly select 10 points as the initial cluster
 		filtered_medial_axis_samples->foreach_cell_bool([&](SurfaceVertex v) {
-			if (nb_cluster >=50)
+			if (nb_cluster >=20)
 				return false;
 			Scalar rand_number = (rand() / (double)RAND_MAX);
-			if (rand_number > 0.90)
+			if (rand_number > 0.995)
 			{
 				clusters_data.vertex_position_.push_back(value<Vec3>(surface, medial_axis_samples_position, v));
 				inital_clusters_color.push_back(
@@ -2309,10 +2311,11 @@ public:
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
-					sum_coord += abs(value<Scalar>(surface, distance_to_cluster, sv1)) *
-								 value<Vec3>(surface, medial_axis_samples_position, sv1);
-					weight += abs(value<Scalar>(surface, distance_to_cluster, sv1));
+					Scalar dist = value<Scalar>(surface, distance_to_cluster, sv1);
+					sum_coord += dist>0? /*dist **/ value<Vec3>(surface, medial_axis_samples_position, sv1): Vec3(0, 0,0);
+					weight += dist>0? 1: 0;
 				}
+				
 				opti_coord = sum_coord / weight;
 				break;
 			}
@@ -2330,9 +2333,10 @@ public:
 			{
 				opti_coord = vertex_position_vector[k_res.first];
 				v = kdt_vertices[k_res.first];
+				value<Vec3>(clusters, cluster_position, svc) = opti_coord;
+				value<Scalar>(clusters, clusters_radius, svc) = value<Scalar>(surface, medial_axis_sample_radius_, v);
 			}
-			value<Vec3>(clusters, cluster_position, svc) = opti_coord;
-			value<Scalar>(clusters, clusters_radius, svc) = value<Scalar>(surface, medial_axis_sample_radius_, v);
+			
 			return true;
 		});
 		assign_filtered_cluster(surface, clusters);
@@ -2366,7 +2370,7 @@ public:
 			switch (clustering_mode)
 			{
 			case 0: { // Dilated sphere
-				Scalar max_variance = -1e30;
+				Scalar max_error = -1e30;
 				PointVertex candidate_cluster;
 				foreach_cell(clusters, [&](PointVertex svc) {
 					Cluster_Info& cf = value<Cluster_Info>(clusters, clusters_infos, svc);
@@ -2374,16 +2378,17 @@ public:
 						surface, clusters, svc, sample_position.get(), sample_normal.get(), cluster_position.get(),
 						cf.cluster_vertices);
 					std::cout << std::setiosflags(std::ios::fixed);
-					std::cout << "variance: " << std::setprecision(9) << variance << std::endl;
-					if (max_variance < variance)
+					std::cout << "variance: " << std::setprecision(9) << variance
+							  << std::endl;
+					if (max_error < variance)
 					{
-						max_variance = variance;
+						max_error = variance;
 						candidate_cluster = svc;
 					}
 					cf.cluster_variance = variance;
 					return true;
 				});
-				if (max_variance > split_variance_threshold_)
+				if (max_error > split_variance_threshold_)
 				{
 					candidate_split_cluster_set->select(candidate_cluster);
 				}
