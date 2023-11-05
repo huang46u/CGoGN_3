@@ -144,13 +144,18 @@ std::tuple<Vec3, Scalar, Vec3> shrinking_ball_center(
 
 // adapted from https://github.com/tudelft3d/masbcpp
 
-template <typename MESH>
+template <typename MESH, bool ReturnCloestVertexPosition = true>
 void shrinking_ball_centers(
 	MESH& m, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
 	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_normal,
 	typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_shrinking_ball_center,
 	typename mesh_traits<MESH>::template Attribute<Scalar>* vertex_shrinking_ball_radius,
-	typename mesh_traits<MESH>::template Attribute<std::pair<Vec3, Vec3>>* vertex_shrinking_ball_closest_points)
+	typename std::conditional<
+		ReturnCloestVertexPosition, 
+		typename mesh_traits<MESH>::template Attribute<std::pair<Vec3, Vec3>>,
+		typename mesh_traits<MESH>::template Attribute<
+			std::pair<typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH>::Vertex>>>::type*
+		vertex_shrinking_ball_closest_points)
 {
 	using Vertex = typename mesh_traits<MESH>::Vertex;
 	using Face = typename mesh_traits<MESH>::Face;
@@ -162,13 +167,17 @@ void shrinking_ball_centers(
 
 	std::vector<Vec3> vertex_position_vector;
 	vertex_position_vector.reserve(nb_vertices);
-	// std::vector<Vertex> kdt_vertices;
-	// kdt_vertices.reserve(nb_vertices);
+	std::vector<Vertex> kdt_vertices;
+	if constexpr (!ReturnCloestVertexPosition)
+	{
+		kdt_vertices.reserve(nb_vertices);
+	}
 	uint32 idx = 0;
 	foreach_cell(m, [&](Vertex v) -> bool {
 		value<uint32>(m, bvh_vertex_index, v) = idx++;
 		vertex_position_vector.push_back(value<Vec3>(m, vertex_position, v));
-		// kdt_vertices.push_back(v);
+		if constexpr (!ReturnCloestVertexPosition)
+			kdt_vertices.push_back(v);
 		return true;
 	});
 
@@ -195,8 +204,25 @@ void shrinking_ball_centers(
 			shrinking_ball_center(m, v, vertex_position, vertex_normal, surface_bvh, bvh_faces, surface_kdt);
 		value<Vec3>(m, vertex_shrinking_ball_center, v) = c;
 		value<Scalar>(m, vertex_shrinking_ball_radius, v) = r;
-		value<std::pair<Vec3, Vec3>>(m, vertex_shrinking_ball_closest_points, v) = {value<Vec3>(m, vertex_position, v),
-																					q};
+		if constexpr (ReturnCloestVertexPosition)
+		{
+			value<std::pair<Vec3, Vec3>>(m, vertex_shrinking_ball_closest_points,
+										 v) = {value<Vec3>(m, vertex_position, v), q};
+		}
+		else
+		{
+			std::pair<uint32, Scalar> k_res;
+			bool found = surface_kdt->find_nn(q, &k_res);
+			if (found)
+			{
+				Vertex closest_vertex = kdt_vertices[k_res.first];
+				value<std::pair<Vertex, Vertex>>(m, vertex_shrinking_ball_closest_points, v) = {v, closest_vertex};
+			}
+			else
+			{
+				std::cout << "closest point not found !!!";
+			}
+		}
 		return true;
 	});
 
