@@ -18,6 +18,7 @@ set(src_list
 	    "${CMAKE_CURRENT_LIST_DIR}/types/grid.h"
 	    "${CMAKE_CURRENT_LIST_DIR}/types/quadric.h"
 		"${CMAKE_CURRENT_LIST_DIR}/types/slab_quadric.h"
+		"${CMAKE_CURRENT_LIST_DIR}/types/spherical_quadric.h"
 
 		"${CMAKE_CURRENT_LIST_DIR}/functions/angle.h"
 		"${CMAKE_CURRENT_LIST_DIR}/functions/area.h"

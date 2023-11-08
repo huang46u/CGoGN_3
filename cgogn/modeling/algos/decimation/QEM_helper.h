@@ -28,6 +28,7 @@
 #include <cgogn/core/types/mesh_traits.h>
 #include <cgogn/core/utils/type_traits.h>
 #include <cgogn/geometry/types/quadric.h>
+#include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 namespace cgogn
@@ -37,8 +38,10 @@ namespace modeling
 {
 
 using geometry::Quadric;
+using geometry::Spherical_Quadric;
 using geometry::Scalar;
 using geometry::Vec3;
+using geometry::Vec4;
 
 template <typename MESH>
 struct DecimationQEM_Helper
@@ -114,7 +117,7 @@ struct DecimationQEM_Helper
 };
 
 template <typename MESH>
-struct ClusteringQEM_Helper
+struct ClusteringSQEM_Helper
 {
 	template <typename T>
 	using Attribute = typename mesh_traits<MESH>::template Attribute<T>;
@@ -122,63 +125,67 @@ struct ClusteringQEM_Helper
 	using Vertex = typename mesh_traits<MESH>::Vertex;
 	using Edge = typename mesh_traits<MESH>::Edge;
 	using Face = typename mesh_traits<MESH>::Face;
-	ClusteringQEM_Helper(MESH& m, const Attribute<Vec3>* vertex_position, const Attribute<Vec3>* vertex_normal)
+	ClusteringSQEM_Helper(MESH& m, const Attribute<Vec3>* vertex_position, const Attribute<Vec3>* vertex_normal)
 		: m_(m), vertex_position_(vertex_position), vertex_normal_(vertex_normal)
 	{
-		vertex_quadric_ = add_attribute<Quadric, Vertex>(m_, "__vertex_quadric");
+		vertex_quadric_ = add_attribute<Spherical_Quadric, Vertex>(m_, "__vertex_quadric");
 		parallel_foreach_cell(m_, [&](Vertex v) -> bool {
-			value<Quadric>(m_, vertex_quadric_, v) =
-				Quadric(value<Vec3>(m_, vertex_position_, v), value<Vec3>(m_, vertex_normal_, v));
+			value<Spherical_Quadric>(m_, vertex_quadric_, v).clear();
+			return true;
+		});
+		parallel_foreach_cell(m_, [&](Vertex v) -> bool {
+			Vec3 pos = value<Vec3>(m_, vertex_position_, v);
+			Vec3 nor = value<Vec3>(m_, vertex_normal_, v);
+			value<Spherical_Quadric>(m_, vertex_quadric_, v) =
+				Spherical_Quadric(Vec4(pos.x(), pos.y(), pos.z(), 0), Vec4(nor.x(), nor.y(), nor.z(), 1));
 			return true;
 		});
 	}
 
-	~ClusteringQEM_Helper()
+	~ClusteringSQEM_Helper()
 	{
 		remove_attribute<Vertex>(m_, vertex_quadric_);
 	}
 
-	Scalar vertex_cost(std::vector<Vertex> cluster_vertices, Vec3& p)
+	Scalar vertex_cost(std::vector<Vertex> cluster_vertices, Vec4& p)
 	{
 		if (cluster_vertices.size() == 0)
 			return Scalar(0.0);
-		Quadric q;
+		Spherical_Quadric q;
 		for (Vertex& v : cluster_vertices)
 		{
-			q += value<Quadric>(m_, vertex_quadric_, v);
+			q += value<Spherical_Quadric>(m_, vertex_quadric_, v);
 		}
 		return q.eval(p);
 	}
 
-	Vec3 optimal_centroid_position(std::vector<Vertex>& cluster_vertices)
+	bool optimal_sphere(std::vector<Vertex>& cluster_vertices, Vec4& sphere)
 	{
-		Quadric q;
+		Spherical_Quadric q;
 		for (Vertex& v : cluster_vertices)
 		{
-			q += value<Quadric>(m_, vertex_quadric_, v);
+			q += value<Spherical_Quadric>(m_, vertex_quadric_, v);
 		}
-		Vec3 p;
-		if (q.optimized(p))
+		if (q.optimized(sphere))
 		{
 
-			return p;
+			return true;
 		}
 		else
 		{
 			std::cout << "can't inverse A" << std::endl;
-			return Vec3(0.0, 0.0, 0.0);
+			return false;
 		}
-		return p;
 	}
 
 	void print(Vertex v)
 	{
-		std::cout << value<Quadric>(m_, vertex_quadric_, v) << std::endl;
+		std::cout << value<Spherical_Quadric>(m_, vertex_quadric_, v) << std::endl;
 	}
 	MESH& m_;
 	const Attribute<Vec3>* vertex_position_;
 	const Attribute<Vec3>* vertex_normal_;
-	std::shared_ptr<Attribute<Quadric>> vertex_quadric_;
+	std::shared_ptr<Attribute<Spherical_Quadric>> vertex_quadric_;
 };
 } // namespace modeling
 
