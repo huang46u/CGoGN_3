@@ -298,6 +298,61 @@ Scalar surface_medial_distance_variance(
 	}
 	return variance / clusters_points.size();
 }
+
+template <typename MESH>
+	std::tuple <Scalar,
+	typename mesh_traits<MESH>::Vertex,
+	typename mesh_traits<MESH>::Vertex> move_point_to_medial_axis(
+		MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
+							   std::vector<typename mesh_traits<MESH>::Vertex> vertices, Vec3& pos,
+							   const acc::KDTree<3, uint32>* surface_kdt
+							   ) 
+{
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+	Vertex nearest_point, new_nearest_point;
+	Scalar distance_to_nearest = 0;
+	Scalar distance_to_new_nearest = 0;
+	Vec3 nearset_point_pos, new_nearest_point_pos;
+	Scalar step = 0.1;
+	do{
+		
+		std::pair<uint32, Scalar> k_res;
+		bool found = surface_kdt->find_nn(pos, &k_res);
+
+		if (!found)
+		{
+			std::cout << "Closest point not found !!!" << std::endl;
+			return {-1, nearest_point, new_nearest_point}; 
+		}
+
+		nearest_point = vertices[k_res.first];
+		nearset_point_pos = value<Vec3>(mesh, vertex_position, nearest_point);
+		distance_to_nearest = (pos - nearset_point_pos).norm();
+
+		Vec3 move_direction = pos - nearset_point_pos  ;
+		pos += move_direction.normalized() * step; 
+
+		
+		std::pair<uint32, Scalar> new_k_res;
+		found = surface_kdt->find_nn(pos, &new_k_res);
+		if (!found)
+		{
+			std::cout << "Closest point not found after moving!!!" << std::endl;
+			return {-1, nearest_point, new_nearest_point};
+		}
+		new_nearest_point = vertices[new_k_res.first];
+		if (index_of(mesh, nearest_point) != index_of(mesh, new_nearest_point))
+		{
+			step *= 0.5;
+		}
+		new_nearest_point_pos = value<Vec3>(mesh, vertex_position, new_nearest_point);
+		distance_to_new_nearest = (pos - new_nearest_point_pos).norm();
+		std::cout << distance_to_nearest << ", " << distance_to_new_nearest << std::endl;
+
+	} while (index_of(mesh, nearest_point) == index_of(mesh, new_nearest_point) ||
+			 std::fabs(distance_to_nearest - distance_to_new_nearest) > 1e-5);
+	return {distance_to_nearest, nearest_point, new_nearest_point};
+}
 } // namespace geometry
 
 } // namespace cgogn

@@ -168,8 +168,10 @@ struct ClusteringSQEM_Helper
 		}
 		if (q.optimized(sphere))
 		{
-
-			return true;
+			if (sphere.w() > 0 && sphere.w()<1)
+				return true;
+			else
+				return false;
 		}
 		else
 		{
