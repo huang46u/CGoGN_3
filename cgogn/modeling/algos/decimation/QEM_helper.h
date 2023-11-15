@@ -147,7 +147,7 @@ struct ClusteringSQEM_Helper
 		remove_attribute<Vertex>(m_, vertex_quadric_);
 	}
 
-	Scalar vertex_cost(std::vector<Vertex> cluster_vertices, Vec4& p)
+	Scalar cluster_cost(std::vector<Vertex> cluster_vertices, Vec4& p)
 	{
 		if (cluster_vertices.size() == 0)
 			return Scalar(0.0);
@@ -156,6 +156,12 @@ struct ClusteringSQEM_Helper
 		{
 			q += value<Spherical_Quadric>(m_, vertex_quadric_, v);
 		}
+		return q.eval(p);
+	}
+
+	Scalar vertex_cost(Vertex v, Vec4& p)
+	{
+		Spherical_Quadric q= value<Spherical_Quadric>(m_, vertex_quadric_, v);
 		return q.eval(p);
 	}
 
@@ -168,10 +174,15 @@ struct ClusteringSQEM_Helper
 		}
 		if (q.optimized(sphere))
 		{
-			if (sphere.w() > 0 && sphere.w()<1)
+			if (sphere.w() > 1e-4 && sphere.w() < 1)
+			{
 				return true;
+			}
 			else
+			{
+				std::cout << "negative radius" << std::endl;
 				return false;
+			}
 		}
 		else
 		{

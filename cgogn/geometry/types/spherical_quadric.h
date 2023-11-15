@@ -37,6 +37,7 @@ class Spherical_Quadric
 public:
 	Spherical_Quadric()
 	{
+		this->clear();
 	}
 
 	inline Spherical_Quadric(const Vec4& p, const Vec4& n)
@@ -75,8 +76,8 @@ public:
 
 	bool optimized(Vec4& sphere)
 	{
-		
 		Mat4 inverse;
+		inverse.setZero();
 		Scalar determinant;
 		bool invertible;
 		_A.computeInverseAndDetWithCheck(inverse, determinant, invertible, 0.01);

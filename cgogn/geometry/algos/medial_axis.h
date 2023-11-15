@@ -304,6 +304,7 @@ template <typename MESH>
 	typename mesh_traits<MESH>::Vertex,
 	typename mesh_traits<MESH>::Vertex> move_point_to_medial_axis(
 		MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
+	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_normal,
 							   std::vector<typename mesh_traits<MESH>::Vertex> vertices, Vec3& pos,
 							   const acc::KDTree<3, uint32>* surface_kdt
 							   ) 
@@ -313,6 +314,7 @@ template <typename MESH>
 	Scalar distance_to_nearest = 0;
 	Scalar distance_to_new_nearest = 0;
 	Vec3 nearset_point_pos, new_nearest_point_pos;
+	Vec3 original_position = pos;
 	Scalar step = 0.1;
 	do{
 		
@@ -327,10 +329,15 @@ template <typename MESH>
 
 		nearest_point = vertices[k_res.first];
 		nearset_point_pos = value<Vec3>(mesh, vertex_position, nearest_point);
+		
 		distance_to_nearest = (pos - nearset_point_pos).norm();
 
-		Vec3 move_direction = pos - nearset_point_pos  ;
-		pos += move_direction.normalized() * step; 
+		Vec3 move_direction = pos - nearset_point_pos;
+		/*if ((nearset_point_pos - pos).dot(value<Vec3>(mesh, vertex_normal, nearest_point) < 0) {
+			pos = original_position;
+			pos-=move_direction*step;
+		}*/
+		pos += move_direction * step; 
 
 		
 		std::pair<uint32, Scalar> new_k_res;
@@ -347,10 +354,17 @@ template <typename MESH>
 		}
 		new_nearest_point_pos = value<Vec3>(mesh, vertex_position, new_nearest_point);
 		distance_to_new_nearest = (pos - new_nearest_point_pos).norm();
-		std::cout << distance_to_nearest << ", " << distance_to_new_nearest << std::endl;
+		/*std::cout << "distance_to_nearest: " << distance_to_nearest << ", "
+				  << "distance_to_new_nearest: " << distance_to_new_nearest << std::endl;
+		std::cout << "nearest_point_index: " << index_of(mesh, nearest_point) << ", "
+				  << "new_nearest_point_index: " << index_of(mesh, new_nearest_point) << std::endl;
+		std::cout << "cosine: " << (nearset_point_pos-pos).dot(value<Vec3>(mesh, vertex_normal, nearest_point))
+				  << std::endl;*/
+		
 
 	} while (index_of(mesh, nearest_point) == index_of(mesh, new_nearest_point) ||
 			 std::fabs(distance_to_nearest - distance_to_new_nearest) > 1e-5);
+	std::cout << "---------------------------------------------------" << std::endl;
 	return {distance_to_nearest, nearest_point, new_nearest_point};
 }
 } // namespace geometry
