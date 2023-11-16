@@ -315,7 +315,7 @@ template <typename MESH>
 	Scalar distance_to_new_nearest = 0;
 	Vec3 nearset_point_pos, new_nearest_point_pos;
 	Vec3 original_position = pos;
-	Scalar step = 0.1;
+	Scalar step = 0.05;
 	do{
 		
 		std::pair<uint32, Scalar> k_res;
@@ -364,7 +364,7 @@ template <typename MESH>
 
 	} while (index_of(mesh, nearest_point) == index_of(mesh, new_nearest_point) ||
 			 std::fabs(distance_to_nearest - distance_to_new_nearest) > 1e-5);
-	std::cout << "---------------------------------------------------" << std::endl;
+	//std::cout << "---------------------------------------------------" << std::endl;
 	return {distance_to_nearest, nearest_point, new_nearest_point};
 }
 } // namespace geometry
