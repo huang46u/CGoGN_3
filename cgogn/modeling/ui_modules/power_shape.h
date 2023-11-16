@@ -2418,19 +2418,24 @@ public:
 				case 0: { // variance
 					Scalar max_error = -1e30;
 					PointVertex candidate_cluster;
-					foreach_cell(clusters, [&](PointVertex svc) {
-						Cluster_Info& cf = value<Cluster_Info>(clusters, clusters_infos, svc);
+					foreach_cell(clusters, [&](PointVertex pv) {
+						Cluster_Info& cf = value<Cluster_Info>(clusters, clusters_infos, pv);
 						Scalar variance = geometry::surface_medial_distance_variance<SURFACE, POINT>(
-							surface, clusters, svc, sample_position.get(), sample_normal.get(), cluster_position.get(),
+							surface, clusters, pv, sample_position.get(), sample_normal.get(), cluster_position.get(),
 							cf.cluster_vertices);
+						Scalar error = variance + 0.001* value<Scalar>(clusters, clusters_radius, pv);
 						std::cout << std::setiosflags(std::ios::fixed);
-						std::cout << "variance: " << std::setprecision(9) << variance << std::endl;
-						if (max_error < variance)
+						std::cout << "variance: " << std::setprecision(9) 
+							<< variance
+								  << ", radius: " << 0.001 * value<Scalar>(clusters, clusters_radius, pv)
+								  << ", error: " << error
+								  << std::endl;
+						if (max_error < error)
 						{
-							max_error = variance;
-							candidate_cluster = svc;
+							max_error = error;
+							candidate_cluster = pv;
 						}
-						cf.cluster_variance = variance;
+						cf.cluster_variance = error;
 						return true;
 					});
 					if (max_error > split_variance_threshold_)

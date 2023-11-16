@@ -283,7 +283,7 @@ Scalar surface_medial_distance_variance(
 		Vec3 dir = vec.normalized();
 		Scalar cosine = value<Vec3>(m1, vertex_normal, v).dot(dir);
 		Scalar length = vec.norm();
-		Scalar distance = cosine > 0 ? length: -5*length;//penalise points on the wrong side of the surface
+		Scalar distance = cosine > 0 ? length: -1.08 * length;//penalise points on the wrong side of the surface
 		dist.push_back(distance);
 		sum_dist += length;
 		
