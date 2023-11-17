@@ -271,7 +271,7 @@ Scalar surface_medial_distance_variance(
 	const typename mesh_traits<MESH1>::template Attribute<Vec3>* vertex_position,
 	const typename mesh_traits<MESH1>::template Attribute<Vec3>* vertex_normal,
 	const typename mesh_traits<MESH2>::template Attribute<Vec3>* vertex_cluster_center,
-	std::vector<typename mesh_traits<MESH1>::Vertex>& clusters_points)
+	std::vector<typename mesh_traits<MESH1>::Vertex>& clusters_points, Scalar median_sphere_radius)
 {
 	using PointVertex = typename mesh_traits<MESH2>::Vertex;
 	using SurfaceVertex = typename mesh_traits<MESH1>::Vertex;
@@ -282,8 +282,8 @@ Scalar surface_medial_distance_variance(
 		Vec3 vec = (value<Vec3>(m1, vertex_position, v) - value<Vec3>(m2, vertex_cluster_center, medial_axis_sample));
 		Vec3 dir = vec.normalized();
 		Scalar cosine = value<Vec3>(m1, vertex_normal, v).dot(dir);
-		Scalar length = vec.norm();
-		Scalar distance = cosine > 0 ? length: -1.08 * length;//penalise points on the wrong side of the surface
+		Scalar length = vec.norm() - median_sphere_radius;
+		Scalar distance = cosine > 0 ? length: - length;//penalise points on the wrong side of the surface
 		dist.push_back(distance);
 		sum_dist += length;
 		
@@ -300,72 +300,56 @@ Scalar surface_medial_distance_variance(
 }
 
 template <typename MESH>
-	std::tuple <Scalar,
-	typename mesh_traits<MESH>::Vertex,
-	typename mesh_traits<MESH>::Vertex> move_point_to_medial_axis(
-		MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
+std::pair<Scalar, 
+	typename mesh_traits<MESH>::Vertex> 
+	move_point_to_medial_axis(
+	MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
 	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_normal,
-							   std::vector<typename mesh_traits<MESH>::Vertex> vertices, Vec3& pos,
-							   const acc::KDTree<3, uint32>* surface_kdt
-							   ) 
+	const std::vector<typename mesh_traits<MESH>::Vertex>& vertices, Vec3& pos, const acc::KDTree<3, uint32>* surface_kdt,
+	const acc::KDTree<3, uint32>* medial_kdt, acc::BVHTree<uint32, Vec3>* surface_bvh)
 {
 	using Vertex = typename mesh_traits<MESH>::Vertex;
-	Vertex nearest_point, new_nearest_point;
 	Scalar distance_to_nearest = 0;
 	Scalar distance_to_new_nearest = 0;
+	Vertex nearest_medial_vertex;
 	Vec3 nearset_point_pos, new_nearest_point_pos;
-	Vec3 original_position = pos;
-	Scalar step = 0.05;
+	Vec3 old_dir, new_dir;
+	Scalar cosine;
+	Scalar step = 0.005;
 	do{
-		
-		std::pair<uint32, Scalar> k_res;
-		bool found = surface_kdt->find_nn(pos, &k_res);
+		Vec3 nearset_point_pos = surface_bvh->closest_point(pos);
+		distance_to_nearest = (nearset_point_pos - pos).norm();
+		old_dir = (pos - nearset_point_pos).normalized();
+		pos += step * old_dir;
 
-		if (!found)
-		{
-			std::cout << "Closest point not found !!!" << std::endl;
-			return {-1, nearest_point, new_nearest_point}; 
-		}
-
-		nearest_point = vertices[k_res.first];
-		nearset_point_pos = value<Vec3>(mesh, vertex_position, nearest_point);
-		
-		distance_to_nearest = (pos - nearset_point_pos).norm();
-
-		Vec3 move_direction = pos - nearset_point_pos;
-		/*if ((nearset_point_pos - pos).dot(value<Vec3>(mesh, vertex_normal, nearest_point) < 0) {
-			pos = original_position;
-			pos-=move_direction*step;
-		}*/
-		pos += move_direction * step; 
-
-		
-		std::pair<uint32, Scalar> new_k_res;
-		found = surface_kdt->find_nn(pos, &new_k_res);
-		if (!found)
-		{
-			std::cout << "Closest point not found after moving!!!" << std::endl;
-			return {-1, nearest_point, new_nearest_point};
-		}
-		new_nearest_point = vertices[new_k_res.first];
-		if (index_of(mesh, nearest_point) != index_of(mesh, new_nearest_point))
+		Vec3 new_nearest_point_pos = surface_bvh->closest_point(pos);
+		distance_to_new_nearest = (new_nearest_point_pos - pos).norm();
+		new_dir = (pos - new_nearest_point_pos).normalized();
+		cosine = old_dir.dot(new_dir);
+		if (cosine<0)
 		{
 			step *= 0.5;
 		}
-		new_nearest_point_pos = value<Vec3>(mesh, vertex_position, new_nearest_point);
-		distance_to_new_nearest = (pos - new_nearest_point_pos).norm();
-		/*std::cout << "distance_to_nearest: " << distance_to_nearest << ", "
+	/*
+		std::cout << "distance_to_nearest: " << distance_to_nearest << ", "
 				  << "distance_to_new_nearest: " << distance_to_new_nearest << std::endl;
-		std::cout << "nearest_point_index: " << index_of(mesh, nearest_point) << ", "
-				  << "new_nearest_point_index: " << index_of(mesh, new_nearest_point) << std::endl;
-		std::cout << "cosine: " << (nearset_point_pos-pos).dot(value<Vec3>(mesh, vertex_normal, nearest_point))
+		
+		std::cout << "cosine: " << cosine
 				  << std::endl;*/
 		
 
-	} while (index_of(mesh, nearest_point) == index_of(mesh, new_nearest_point) ||
+	} while (cosine>0||
 			 std::fabs(distance_to_nearest - distance_to_new_nearest) > 1e-5);
+	std::pair<uint32, Scalar> k_res;
+	bool found = medial_kdt->find_nn(pos, &k_res);
+	if (!found)
+	{
+		std::cout << "Closest point not found !!!" << std::endl;
+		return {-1, nearest_medial_vertex};
+	}
+	nearest_medial_vertex = vertices[k_res.first];
 	//std::cout << "---------------------------------------------------" << std::endl;
-	return {distance_to_nearest, nearest_point, new_nearest_point};
+	return {distance_to_nearest, nearest_medial_vertex};
 }
 } // namespace geometry
 

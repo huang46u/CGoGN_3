@@ -390,6 +390,7 @@ set (NLOPT_CMAKE_DIR "${INSTALL_CMAKE_DIR}")
 file (RELATIVE_PATH rel_include_dir "${NLOPT_CMAKE_DIR}" "${INSTALL_INCLUDE_DIR}")
 list (APPEND RELATIVE_NLOPT_INCLUDE_DIRS ${rel_include_dir})
 
+
 file (RELATIVE_PATH rel_lib_dir "${NLOPT_CMAKE_DIR}" "${INSTALL_LIB_DIR}")
 list (APPEND RELATIVE_NLOPT_LIB_DIR ${rel_lib_dir})
 

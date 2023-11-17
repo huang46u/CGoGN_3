@@ -25,7 +25,7 @@ if (CGOGN_USE_CGAL)
 	find_package(CGAL REQUIRED)
 	add_executable(power_shape power_shape.cpp)
 	target_link_libraries(power_shape highs::highs
-		#NLopt::nlopt
+		${nlopt_lib}
 		CGAL::CGAL
 		cgogn::core
 		cgogn::ui
