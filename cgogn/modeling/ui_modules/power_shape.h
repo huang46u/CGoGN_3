@@ -2779,43 +2779,43 @@ public:
 				if (ImGui::Button("Update Cluster by weighted average of medial points"))
 				{
 					clustering_mode = 0;
-					for (int i = 0; i < update_times; i++)
+					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
 				if (ImGui::Button("Update Cluster by average of medial points"))
 				{
 					clustering_mode = 1;
-					for (int i = 0; i < update_times; i++)
+					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
 				if (ImGui::Button("Update Cluster by weighted average of surface points"))
 				{
 					clustering_mode = 2;
-					for (int i = 0; i < update_times; i++)
+					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
 				if (ImGui::Button("Update Cluster by average of surface points"))
 				{
 					clustering_mode = 3;
-					for (int i = 0; i < update_times; i++)
+					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
 				if (ImGui::Button("Update Cluster by SQEM"))
 				{
 					clustering_mode = 4;
-					for (int i = 0; i < update_times; i++)
+					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
 				if (ImGui::Button("Update Cluster by minimum enclosing ball of surface points"))
 				{
 					clustering_mode = 5;
-					for (int i = 0; i < update_times; i++)
+					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
 				if (ImGui::Button("Update Cluster by minimum enclosing ball of medial points"))
 				{
 					clustering_mode = 6;
-					for (int i = 0; i < update_times; i++)
+					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
 				
@@ -2862,13 +2862,14 @@ public:
 				ImGui::Checkbox("Filter by Angle", &angle_filtering_);
 				if (angle_filtering_)
 				{
-					ImGui::DragFloat("angle", &angle_threshold_, 0.01, 0.0, M_PI, "%.2f");
+					ImGui::DragFloat("angle", &(float)angle_threshold_, 0.01, 0.0, M_PI, "%.2f");
 				}
 
 				ImGui::Checkbox("Filter by circumradius", &circumradius_filtering_);
 				if (circumradius_filtering_)
 				{
-					ImGui::DragFloat("circumradius", &radius_threshold_, (max_radius_ - min_radius_) / 100, min_radius_,
+					ImGui::DragFloat("circumradius", &(float)radius_threshold_, (max_radius_ - min_radius_) / 100,
+									 min_radius_,
 									 max_radius_, "%.3f");
 				}
 				ImGui::Checkbox("Filter by distance", &distance_filtering_);

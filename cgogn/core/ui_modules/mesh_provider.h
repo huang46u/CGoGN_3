@@ -41,6 +41,7 @@
 #include <cgogn/io/surface/obj.h>
 #include <cgogn/io/surface/off.h>
 #include <cgogn/io/surface/ply.h>
+#include <cgogn/io/surface/stl.h>
 // #include <cgogn/io/volume/cgns.h>
 #include <cgogn/io/volume/mesh.h>
 #include <cgogn/io/volume/meshb.h>
@@ -248,6 +249,8 @@ public:
 				imported = io::import_OBJ(*m, filename);
 			else if (ext.compare("ply") == 0)
 				imported = io::import_PLY(*m, filename);
+			else if (ext.compare("stl")== 0)
+				imported = io::import_STL(*m, filename);
 			else if (ext.compare("ig") == 0)
 			{
 				if constexpr (std::is_same_v<MESH, IncidenceGraph>)

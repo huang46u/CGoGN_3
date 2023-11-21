@@ -29,6 +29,7 @@ set(src_list
 		"${CMAKE_CURRENT_LIST_DIR}/surface/obj.h"
 		"${CMAKE_CURRENT_LIST_DIR}/surface/off.h"
 		"${CMAKE_CURRENT_LIST_DIR}/surface/ply.h"
+		"${CMAKE_CURRENT_LIST_DIR}/surface/stl.h"
 
 		"${CMAKE_CURRENT_LIST_DIR}/volume/volume_import.h"
 		"${CMAKE_CURRENT_LIST_DIR}/volume/volume_import.cpp"
