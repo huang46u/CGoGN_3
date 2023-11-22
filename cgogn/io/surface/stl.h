@@ -39,7 +39,7 @@ namespace io
 {
 
 template <typename MESH>
-bool import_STL(MESH& m, const std::string& filename)
+bool import_ascii_STL(MESH& m, const std::string& filename)
 {
 	static_assert(mesh_traits<MESH>::dimension == 2, "MESH dimension should be 2");
 
@@ -121,8 +121,106 @@ bool import_STL(MESH& m, const std::string& filename)
 
 	return true;
 }
+template <typename MESH>
+bool import_binary_STL(MESH& m, const std::string& filename)
+{
+	static_assert(mesh_traits<MESH>::dimension == 2, "MESH dimension should be 2");
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+	using Face = typename mesh_traits<MESH>::Face;
+	Scoped_C_Locale loc;
 
+	SurfaceImportData surface_data;
+	std::ifstream file(filename, std::ios::binary);
+	if (!file)
+	{
+		std::cerr << "Cannot open file: " << filename << std::endl;
+		return false;
+	}
 
+	// Skip the header
+	file.ignore(80);
+
+	// Read the number of triangles
+	uint32_t num_triangles;
+	file.read(reinterpret_cast<char*>(&num_triangles), 4);
+	std::vector<geometry::Vec3> vertices;
+	// Read triangles
+	for (uint32_t i = 0; i < num_triangles; ++i)
+	{
+		// Read and ignore normal vector
+		file.ignore(12);
+
+		// Read vertices
+		for (int j = 0; j < 3; ++j)
+		{
+			float x, y, z;
+			file.read(reinterpret_cast<char*>(&x), 4);
+			file.read(reinterpret_cast<char*>(&y), 4);
+			file.read(reinterpret_cast<char*>(&z), 4);
+			
+			surface_data.vertex_position_.push_back({x,y,z});
+		}
+		
+		
+		// Skip attribute byte count
+		file.ignore(2);
+	}
+
+	if (!file)
+	{
+		std::cerr << "Error occurred while reading file: " << filename << std::endl;
+		return false;
+	}
+	// Create faces from vertices (assuming each set of 3 vertices forms a face)
+	for (uint32 i = 0; i < surface_data.vertex_position_.size(); i += 3)
+	{
+		std::vector<uint32> indices = {i, i + 1, i + 2};
+		surface_data.faces_nb_vertices_.push_back(3);
+		surface_data.faces_vertex_indices_.insert(surface_data.faces_vertex_indices_.end(), indices.begin(),
+												  indices.end());
+	}
+	surface_data.reserve(surface_data.vertex_position_.size(), surface_data.faces_nb_vertices_.size());
+	import_surface_data(m, surface_data);
+	return true;
+}
+
+template <typename MESH>
+bool import_STL(MESH& m, const std::string& filename)
+{
+	static_assert(mesh_traits<MESH>::dimension == 2, "MESH dimension should be 2");
+
+	std::ifstream file(filename, std::ios::binary);
+	if (!file)
+	{
+		std::cerr << "Cannot open file: " << filename << std::endl;
+		return false;
+	}
+
+	// Read the first few bytes of the file to check the format
+	char header[6];
+	file.read(header, 5);
+	header[5] = '\0';
+	std::string headerStr(header);
+
+	// Check if the file is ASCII or binary
+	if (headerStr == "solid")
+	{
+		// Check next line to be sure
+		std::string line;
+		std::getline(file, line); // Finish the current line
+		std::getline(file, line); // Read the next line
+		if (line.find("facet normal") != std::string::npos)
+		{
+			// It's an ASCII STL file
+			file.close();
+			return import_ascii_STL(m, filename); // A separate function to handle ASCII STL
+		}
+	}
+
+	// If not ASCII, it's assumed to be binary
+	file.close();
+	return import_binary_STL(m, filename); // A separate function to handle binary STL
+}
 template <typename MESH>
 void export_STL(MESH& m, const typename mesh_traits<MESH>::template Attribute<geometry::Vec3>* vertex_position,
 				const std::string& filename)
