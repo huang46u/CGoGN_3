@@ -166,6 +166,13 @@ public:
 		v.request_update();
 	}
 
+	void set_render_vertices(View& v, const MESH& m, bool b)
+	{
+		Parameters& p = parameters_[&v][&m];
+		p.render_vertices_ = b;
+		v.request_update();
+	}
+
 	void set_vertex_radius(View& v, const MESH& m, const std::shared_ptr<Attribute<Scalar>>& vertex_radius)
 	{
 		Parameters& p = parameters_[&v][&m];

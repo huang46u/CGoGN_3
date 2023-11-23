@@ -149,6 +149,7 @@ class PowerShape : public Module
 	using SurfaceEdge = typename mesh_traits<SURFACE>::Edge;
 	using SurfaceFace = typename mesh_traits<SURFACE>::Face;
 
+
 	using Vec4 = geometry::Vec4;
 	using Vec3 = geometry::Vec3;
 	using Scalar = geometry::Scalar;
@@ -363,7 +364,25 @@ private:
 		std::cout << "distance deletion: " << count << std::endl;
 	}
 	
-	
+	void normalise_scalar(SURFACE& surface, std::shared_ptr<SurfaceAttribute<Scalar>> attribute)
+	{
+		Scalar min = 1e30;
+		Scalar max = -1e30;
+		foreach_cell(surface, [&](SurfaceVertex sv) {
+			Scalar s = value<Scalar>(surface, attribute, sv);
+			if (s < min)
+				min = s;
+			if (s > max)
+				max = s;
+			return true;
+		});
+		parallel_foreach_cell(surface, [&](SurfaceVertex sv) {
+			Scalar s = value<Scalar>(surface, attribute, sv);
+			value<Scalar>(surface, attribute, sv) = (s - min) / (max - min);
+			return true;
+		});
+		surface_provider_->emit_attribute_changed(surface, attribute.get());
+	}
 
 public:
 	/*
@@ -1786,7 +1805,10 @@ public:
 		MeshData<SURFACE>& md = surface_provider_->mesh_data(surface);
 		auto filtered_medial_axis_samples =
 			&md.template get_or_add_cells_set<SurfaceVertex>("filtered_medial_axis_samples");
-		
+		auto kmax = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "kmax");
+		normalise_scalar(surface, kmax);
+
+
 		POINT* clusters = point_provider_->add_mesh(point_provider_->mesh_name(surface) + "clusters");
 		auto cluster_color = get_or_add_attribute<Vec3, PointVertex>(*clusters, "color");
 		auto cluster_positions = get_or_add_attribute<Vec3, PointVertex>(*clusters, "position");
@@ -2159,7 +2181,7 @@ public:
 			value<Vec3>(surface, cloest_point_color, sv) = Vec3(0, 0, 0);
 			return true;
 		});
-
+		auto kmax = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "kmax");
 		//For each cluster, find the nearest medial point
 		foreach_cell(clusters, [&](PointVertex pv) {
 			Cluster_Info& cf = value<Cluster_Info>(clusters, clusters_infos, pv);
@@ -2201,9 +2223,9 @@ public:
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
-					Scalar dist = value<Scalar>(surface, distance_to_cluster, sv1);
-					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) ;
-					weight += 1;
+					Scalar k_max = value<Scalar>(surface, kmax, sv1);
+					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * k_max;
+					weight += k_max ;
 				}
 
 				opti_coord = sum_coord / weight;
@@ -2365,6 +2387,7 @@ public:
 	}
 	
 
+
 	
 
 	void sphere_fitting(SURFACE& surface)
@@ -2490,7 +2513,8 @@ public:
 				// Test if the cluster can be split
 				switch (clustering_mode)
 				{
-				case 0: { // variance
+				case 0: 
+				{ // variance
 					Scalar max_error = -1e30;
 					PointVertex candidate_cluster;
 					foreach_cell(clusters, [&](PointVertex pv) {
@@ -2513,32 +2537,34 @@ public:
 						cf.cluster_variance = error;
 						return true;
 					});
+
+
 					if (max_error > split_variance_threshold_)
 					{
-					auto [v1, v2] = value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample,
-																				   candidate_cluster);
-					Vec3 pos1 = value<Vec3>(surface, medial_axis_samples_position_, v1);
-					Vec3 pos2 = value<Vec3>(surface, medial_axis_samples_position_, v2);
-					auto [ r1, v3, v4 ] = geometry::move_point_to_medial_axis(
-						surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, pos1,
-						surface_kdt.get(),
-						medial_kdt.get(), surface_bvh.get());
-					auto [ r2, v5, v6 ] = geometry::move_point_to_medial_axis(
-						surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, pos2,
-						surface_kdt.get(),
-						medial_kdt.get(), surface_bvh.get());
-					value<Vec3>(clusters, cluster_position, candidate_cluster) = pos1;
-					value<Scalar>(clusters, clusters_radius, candidate_cluster) = r1;
-					value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample,
-																   candidate_cluster) = {v3, v4};
+					SurfaceVertex max_dist_vertex;
+					Cluster_Info& cf = value<Cluster_Info>(clusters, clusters_infos, candidate_cluster);
+					Scalar cluster_max_dist = -1e30;
+					for (SurfaceVertex sv : cf.cluster_vertices)
+					{
+						Scalar dist = value<Scalar>(surface, distance_to_cluster, sv);
+						if (dist > cluster_max_dist)
+						{
+							max_dist_vertex = sv;
+						}
+					}
+					Vec3 pos = value<Vec3>(surface, medial_axis_samples_position_, max_dist_vertex);
+					auto [r, v1, v2] = geometry::move_point_to_medial_axis(
+						surface, sample_position.get(),																				sample_normal.get(), surface_kdt_vertices, pos,
+						surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
 
 					PointVertex new_cluster = add_vertex(clusters);
-					value<Vec3>(clusters, cluster_position, new_cluster) = pos2;
-					value<Scalar>(clusters, clusters_radius, new_cluster) = r2;
-					value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, new_cluster) = {v5,
-																													v6};
+					value<Vec3>(clusters, cluster_position, new_cluster) = pos;
+					value<Scalar>(clusters, clusters_radius, new_cluster) = r;
+					value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, new_cluster) = {v1,
+																													v2};
 					value<Vec3>(clusters, cluster_color, new_cluster) =
 						Vec3(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX);
+					
 					}
 					break;
 				}
@@ -2552,7 +2578,6 @@ public:
 						Scalar cluster_max_dist = -1e30;
 						for (SurfaceVertex sv: cf.cluster_vertices)
 						{
-							
 							Scalar dist = value<Scalar>(surface, distance_to_cluster, sv);
 							error += dist;
 							if (dist > cluster_max_dist)
@@ -2819,7 +2844,7 @@ public:
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
 				
-				ImGui::SliderFloat("Split vairance threshold", &split_variance_threshold_, 0.0f, 0.003f, "%.6f");
+				ImGui::DragFloat("Split vairance threshold", &split_variance_threshold_, 0.000001f, 0.0f, 0.0001f, "%.6f");
 				
 				if (ImGui::Button("Split Cluster by variance"))
 				{
@@ -2954,7 +2979,7 @@ private:
 	float distance_threshold_ = 0.001;
 	float angle_threshold_ = 1.9;
 	float radius_threshold_ = 0.030;
-	float split_variance_threshold_ = 0.0001;
+	float split_variance_threshold_ = 0.00005;
 	float split_radius_threshold_ = 0.05;
 	uint32 update_times = 5;
 	double min_radius_ = std::numeric_limits<double>::max();

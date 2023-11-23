@@ -47,6 +47,7 @@ using Surface = cgogn::CMap2;
 template <typename T>
 using Attribute = typename cgogn::mesh_traits<Surface>::Attribute<T>;
 using Vertex = typename cgogn::mesh_traits<Surface>::Vertex;
+using Edge = typename cgogn::mesh_traits<Surface>::Edge;
 using Face = typename cgogn::mesh_traits<Surface>::Face;
 
 using Vec3 = cgogn::geometry::Vec3;
@@ -67,7 +68,7 @@ int main(int argc, char** argv)
 	cgogn::ui::MeshProvider<Point> mp(app);
 	cgogn::ui::MeshProvider<Surface> ms(app);
 	cgogn::ui::MeshProvider<NonManifold> mpnm(app);
-	cgogn::ui::PointCloudRender<Point> srp(app);
+	cgogn::ui::PointCloudRender<Point> pcr(app);
 	cgogn::ui::SurfaceModeling<Surface> sms(app);
 	cgogn::ui::SurfaceSelection<Surface> sl(app);
 	cgogn::ui::SurfaceDifferentialProperties<Surface> sdp(app);
@@ -85,7 +86,7 @@ int main(int argc, char** argv)
 	v1->link_module(&mpnm);
 	v1->link_module(&sl);
 	v1->link_module(&sr);
-	v1->link_module(&srp);
+	v1->link_module(&pcr);
 	v1->link_module(&srnm);
 
 
@@ -100,16 +101,36 @@ int main(int argc, char** argv)
 		}
 
 	
-		auto surface_vertex_position = cgogn::get_attribute<Vec3, cgogn::mesh_traits<Surface>::Vertex>(*m, "position");
+		auto surface_vertex_position = cgogn::get_attribute<Vec3, Vertex>(*m, "position");
 		auto surface_vertex_normal =
-			cgogn::get_or_add_attribute<Vec3, cgogn::mesh_traits<Surface>::Vertex>(*m, "normal");
-
+			cgogn::get_or_add_attribute<Vec3, Vertex>(*m, "normal");
+		auto surface_vertex_kmax = cgogn::get_or_add_attribute<Scalar, Vertex>(*m, "kmax");
+		auto surface_vertex_kmin = cgogn::get_or_add_attribute<Scalar, Vertex>(*m, "kmin");
+		auto surface_vertex_kgaussian = cgogn::get_or_add_attribute<Scalar, Vertex>(*m, "kgaussian");
+		auto surface_vertex_Kmax = cgogn::get_or_add_attribute<Vec3, Vertex>(*m, "Kmax");
+		auto surface_vertex_Kmin = cgogn::get_or_add_attribute<Vec3, Vertex>(*m, "Kmin");
+		auto surface_vertex_Knormal = cgogn::get_or_add_attribute<Vec3, Vertex>(*m, "Knormal");
+		
 		sdp.compute_normal(*m, surface_vertex_position.get(), surface_vertex_normal.get());
 		sr.set_vertex_position(*v1, *m, surface_vertex_position);
 		sr.set_vertex_normal(*v1, *m, surface_vertex_normal);
 		sr.set_render_edges(*v1, *m, false);
-		sr.set_render_vertices(*v1, *m, false);
+		sr.set_render_vertices(*v1, *m, true);
+
 		sr.set_ghost_mode(*v1, *m, true);
+		pcr.set_render_vertices(*v1, *m, true);
+
+		std::shared_ptr<Attribute<Scalar>> edge_angle = cgogn::get_or_add_attribute<Scalar, Edge>(*m, "__edge_angle");
+		cgogn::geometry::compute_angle(*m, surface_vertex_position.get(), edge_angle.get());
+
+		Scalar mean_edge_length = cgogn::geometry::mean_edge_length(*m, surface_vertex_position.get());
+		
+		sdp.compute_curvature(*m, mean_edge_length * 2.5, surface_vertex_position.get(), surface_vertex_normal.get(),
+							  edge_angle.get(), surface_vertex_kmax.get(), surface_vertex_kmin.get(),
+							  surface_vertex_kgaussian.get(), surface_vertex_Kmax.get(), surface_vertex_Kmin.get(),
+							  surface_vertex_Knormal.get());
+
+		
 	}
 
 	return app.launch();
