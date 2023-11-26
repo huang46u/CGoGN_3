@@ -370,21 +370,74 @@ private:
 		Scalar max = -1e30;
 		foreach_cell(surface, [&](SurfaceVertex sv) {
 			Scalar s = value<Scalar>(surface, attribute, sv);
+			if (s > 1e5)
+			{
+				return true;
+			}
 			if (s < min)
 				min = s;
 			if (s > max)
 				max = s;
 			return true;
 		});
+		std::cout << "min: " << min << ", max: " << max << std::endl;
 		parallel_foreach_cell(surface, [&](SurfaceVertex sv) {
 			Scalar s = value<Scalar>(surface, attribute, sv);
+			if (s > 1e5)
+			{
+				value<Scalar>(surface, attribute, sv) = 1;
+				return true;
+			}
 			value<Scalar>(surface, attribute, sv) = (s - min) / (max - min);
 			return true;
 		});
 		surface_provider_->emit_attribute_changed(surface, attribute.get());
 	}
 
-public:
+	void filter_scalar(SURFACE& surface, std::shared_ptr<SurfaceAttribute<Scalar>> attribute, uint32 depth)
+	{
+		CellMarker<SURFACE, SurfaceVertex> marker(surface);
+		std::queue<std::pair<SurfaceVertex, uint32>> queue; // vertex, depth
+
+		foreach_cell(surface, [&](SurfaceVertex sv) {
+			Scalar s = value<Scalar>(surface, attribute, sv);
+			Scalar sum = s;
+			uint32 count = 1;
+			marker.mark(sv);
+			queue.push({sv, 0}); 
+
+			while (!queue.empty())
+			{
+				auto v_depth = queue.front();
+				queue.pop();
+				SurfaceVertex v = v_depth.first;
+				uint32 current_depth = v_depth.second;
+
+				if (current_depth < depth) 
+				{
+					foreach_incident_vertex(surface, v, [&](SurfaceVertex sv2) {
+						if (!marker.is_marked(sv2))
+						{
+							Scalar s2 = value<Scalar>(surface, attribute, sv2);
+							marker.mark(sv2);
+							sum += s2;
+							count++;
+							queue.push({sv2, current_depth + 1}); 
+						}
+						return true;
+					});
+				}
+			}
+
+			Scalar average = sum / count; 
+			value<Scalar>(surface, attribute, sv) = average;
+			marker.unmark_all();
+			return true;
+		});
+	}
+
+	
+ public:
 	/*
 		void detect_boundary_cells(NONMANIFOLD& nm)
 		{
@@ -1504,12 +1557,17 @@ public:
 	void sample_medial_axis(SURFACE& s)
 	{
 
-		auto vertex_position = get_attribute<Vec3, SurfaceVertex>(s, "position");
-		auto vertex_normal = get_attribute<Vec3, SurfaceVertex>(s, "normal");
-		auto medial_axis_samples_position_ = add_attribute<Vec3, SurfaceVertex>(s, "medial_axis_samples_position");
-		auto medial_axis_samples_radius_ = add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_radius");
+		auto vertex_position = get_or_add_attribute<Vec3, SurfaceVertex>(s, "position");
+		auto vertex_normal = get_or_add_attribute<Vec3, SurfaceVertex>(s, "normal");
+		auto medial_axis_samples_position_ =
+			get_or_add_attribute<Vec3, SurfaceVertex>(s, "medial_axis_samples_position");
+		auto medial_axis_samples_radius_ = get_or_add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_radius");
 		auto medial_axis_samples_closest_points_ =
-			add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(s, "medial_axis_samples_closest_points");
+			get_or_add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(
+				s, "medial_axis_samples_closest_points");
+		auto medial_axis_samples_angle_ = get_or_add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_angle");
+		auto medial_axis_samples_weight_ = get_or_add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_weight");
+
 		geometry::shrinking_ball_centers<SURFACE, false>(
 			s, vertex_position.get(), vertex_normal.get(),
 										 medial_axis_samples_position_.get(),
@@ -1518,10 +1576,28 @@ public:
 		MeshData<SURFACE>& md = surface_provider_->mesh_data(s);
 		auto filtered_medial_axis_samples_set_ = &md.template get_or_add_cells_set<SurfaceVertex>("filtered_medial_axis_samples");
 		filtered_medial_axis_samples_set_->select_if([&](SurfaceVertex v) { return true; });
-
+		foreach_cell(s, [&](SurfaceVertex v) -> bool {
+			const Vec3& c = value<Vec3>(s, medial_axis_samples_position_, v);
+			const auto& [v1, v2] =
+				value<std::pair<SurfaceVertex, SurfaceVertex>>(s, medial_axis_samples_closest_points_, v);
+			const auto c1 = value<Vec3>(s, vertex_position, v1);
+			const auto c2 = value<Vec3>(s, vertex_position, v2);
+			const Scalar r = value<Scalar>(s, medial_axis_samples_radius_, v);
+			max_radius_ = std::max(max_radius_, r);
+			min_radius_ = std::min(min_radius_, r);
+			const Scalar angle = geometry::angle(c1 - c, c2 - c);
+			max_angle_ = std::max(max_angle_, angle);
+			min_angle_ = std::min(min_angle_, angle);
+			value<Scalar>(s, medial_axis_samples_angle_, v) = angle;
+			value<Scalar>(s, medial_axis_samples_weight_, v) = 1/ (angle+1e-5) / (r+1e-5);
+		
+			return true;
+		});
+		normalise_scalar(s, medial_axis_samples_weight_);
+		filter_scalar(s, medial_axis_samples_weight_, 4);
 		surface_provider_->emit_attribute_changed(s, medial_axis_samples_position_.get());
 		surface_provider_->emit_attribute_changed(s, medial_axis_samples_radius_.get());
-
+		surface_provider_->emit_attribute_changed(s, medial_axis_samples_angle_.get());
 		surface_provider_->emit_cells_set_changed(s, filtered_medial_axis_samples_set_);
 	}
 
@@ -1537,14 +1613,10 @@ public:
 		auto medial_axis_samples_closest_points_ =
 			get_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(s,
 																				  "medial_axis_samples_closest_points");
+		auto medial_axis_samples_angle_ = get_or_add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_angle");
 		foreach_cell(s, [&](SurfaceVertex v) -> bool {
-			const Vec3& c = value<Vec3>(s, medial_axis_samples_position_, v);
-			const auto& [v1, v2] =
-				value<std::pair<SurfaceVertex, SurfaceVertex>>(s, medial_axis_samples_closest_points_, v);
-			const auto c1 = value<Vec3>(s, vertex_position, v1);
-			const auto c2 = value<Vec3>(s, vertex_position, v2);
 			const Scalar r = value<Scalar>(s, medial_axis_samples_radius_, v);
-			const Scalar angle = geometry::angle(c1 - c, c2 - c);
+			const Scalar angle = value<Scalar>(s, medial_axis_samples_angle_, v);
 			if (r > radius_threshold_ && angle > angle_threshold_)
 				filtered_medial_axis_samples_set_->select(v);
 			return true;
@@ -1757,7 +1829,6 @@ public:
 			return true;
 			});
 		filtered_medial_axis_samples->foreach_cell( [&](SurfaceVertex sv) {
-			
 			medial_point_position[index_of(surface, sv)] = value<Vec3>(surface, medial_axis_samples_position_, sv);
 			medial_point_radius[index_of(surface, sv)] = value<Scalar>(surface, medial_axis_samples_radius_, sv);
 			return true;
@@ -1771,7 +1842,6 @@ public:
 				dis_matrix(idx1, idx2) = std::sqrt(sample_point_minus_medial_point.dot(sample_point_minus_medial_point))-medial_point_radius[idx2];
 			}
 		}
-		
 		std::cout << "loop end" << std::endl;
 	}
 
@@ -2176,6 +2246,7 @@ public:
 		auto medial_axis_samples_closest_points =
 			get_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(surface,
 																				  "medial_axis_samples_closest_points");
+		auto meidal_axis_samples_weight = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_weight");
 		auto cloest_point_color = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "cloest_point_color");
 		parallel_foreach_cell(surface, [&](SurfaceVertex sv) { 
 			value<Vec3>(surface, cloest_point_color, sv) = Vec3(0, 0, 0);
@@ -2209,8 +2280,6 @@ public:
 						surface_kdt.get(),
 						medial_kdt.get(),
 						surface_bvh.get());
-				/*auto [v1, v2] =
-					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v);*/
 				
 				value<Vec3>(clusters, cluster_position, pv) = opti_coord;
 				value<Scalar>(clusters, clusters_radius, pv) = radius;
@@ -2223,9 +2292,9 @@ public:
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
-					Scalar k_max = value<Scalar>(surface, kmax, sv1);
-					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * k_max;
-					weight += k_max ;
+					Scalar w = value<Scalar>(surface, meidal_axis_samples_weight, sv1);
+					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * w;
+					weight += w;
 				}
 
 				opti_coord = sum_coord / weight;
@@ -2484,10 +2553,10 @@ public:
 				{
 					Vec3 pos1 = value<Vec3>(surface, medial_axis_samples_position_, v1);
 					Vec3 pos2 = value<Vec3>(surface, medial_axis_samples_position_, v2);
-					auto [r1, v3, v4] = geometry::move_point_to_medial_axis(
+					auto [r1, v3, v4 ] = geometry::move_point_to_medial_axis(
 						surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, pos1,
 						surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
-					auto [ r2, v5,v6] = geometry::move_point_to_medial_axis(
+					auto [r2, v5, v6] = geometry::move_point_to_medial_axis(
 						surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, pos2,
 						surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
 					value<Vec3>(clusters, cluster_position, pv) = pos1;
@@ -2532,7 +2601,7 @@ public:
 						if (max_error < error)
 						{
 							max_error = error;
-							candidate_cluster = pv;
+							candidate_cluster = pv;																																					
 						}
 						cf.cluster_variance = error;
 						return true;
@@ -2790,9 +2859,9 @@ public:
 				sphere_fitting(*selected_surface_mesh_);*/
 			if (ImGui::Button("Sample medial axis"))
 				sample_medial_axis(*selected_surface_mesh_);
-			if (ImGui::SliderFloat("Min radius (log)", &radius_threshold_, 0.0001f, 0.1f, "%.4f"))
+			if (ImGui::SliderFloat("Min radius (log)", &radius_threshold_, min_radius_, max_radius_, "%.4f"))
 				filter_medial_axis_samples(*selected_surface_mesh_);
-			if (ImGui::SliderFloat("Min angle (log)", &angle_threshold_, 0.0001f, M_PI, "%.4f"))
+			if (ImGui::SliderFloat("Min angle (log)", &angle_threshold_, min_angle_, max_angle_, "%.4f"))
 				filter_medial_axis_samples(*selected_surface_mesh_);
 			if (ImGui::Button("Filter medial axis samples"))
 				filter_medial_axis_samples(*selected_surface_mesh_);
@@ -2984,6 +3053,8 @@ private:
 	uint32 update_times = 5;
 	double min_radius_ = std::numeric_limits<double>::max();
 	double max_radius_ = std::numeric_limits<double>::min();
+	double min_angle_ = std::numeric_limits<double>::max();
+	double max_angle_ = std::numeric_limits<double>::min();
 	Eigen::MatrixXd dis_matrix;
 	std::vector<SurfaceVertex> surface_kdt_vertices;
 	std::vector<Vec3> surface_vertex_position_vector;
