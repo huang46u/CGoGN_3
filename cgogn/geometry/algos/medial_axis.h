@@ -271,6 +271,7 @@ Scalar surface_medial_distance_variance(
 	const typename mesh_traits<MESH1>::template Attribute<Vec3>* vertex_position,
 	const typename mesh_traits<MESH1>::template Attribute<Vec3>* vertex_normal,
 	const typename mesh_traits<MESH2>::template Attribute<Vec3>* vertex_cluster_center,
+	const typename mesh_traits<MESH1>::template Attribute<Scalar>* weight,
 	std::vector<typename mesh_traits<MESH1>::Vertex>& clusters_points, Scalar median_sphere_radius)
 {
 	using PointVertex = typename mesh_traits<MESH2>::Vertex;
@@ -281,11 +282,11 @@ Scalar surface_medial_distance_variance(
 	{
 		Vec3 vec = (value<Vec3>(m1, vertex_position, v) - value<Vec3>(m2, vertex_cluster_center, medial_axis_sample));
 		Vec3 dir = vec.normalized();
-		Scalar cosine = value<Vec3>(m1, vertex_normal, v).dot(dir);
+		/*Scalar cosine = value<Vec3>(m1, vertex_normal, v).dot(dir);*/
 		Scalar length = vec.norm() - median_sphere_radius;
-		Scalar distance = cosine > 0 ? length: - length;//penalise points on the wrong side of the surface
+		Scalar distance = length * value<Scalar>(m1, weight, v);
 		dist.push_back(distance);
-		sum_dist += length;
+		sum_dist += distance;
 		
 	}
 	Scalar average_dist = sum_dist / clusters_points.size();
@@ -303,10 +304,13 @@ template <typename MESH>
 	std::tuple < Scalar, 
 		typename mesh_traits<MESH>::Vertex,
 		typename mesh_traits<MESH>::Vertex> move_point_to_medial_axis(
-	MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
+	MESH& mesh, 
+	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
 	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_normal,
-	const std::vector<typename mesh_traits<MESH>::Vertex>& vertices, Vec3& pos, const acc::KDTree<3, uint32>* surface_kdt,
-	const acc::KDTree<3, uint32>* medial_kdt, acc::BVHTree<uint32, Vec3>* surface_bvh)
+	const std::vector<typename mesh_traits<MESH>::Vertex>& vertices, 
+	Vec3& pos, const acc::KDTree<3, uint32>* surface_kdt,
+	const acc::KDTree<3, uint32>* medial_kdt, 
+	acc::BVHTree<uint32, Vec3>* surface_bvh)
 {
 	using Vertex = typename mesh_traits<MESH>::Vertex;
 	Scalar distance_to_nearest = 0;
