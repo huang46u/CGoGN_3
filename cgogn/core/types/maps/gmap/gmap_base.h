@@ -532,6 +532,72 @@ auto foreach_incident_vertex(const MESH& m, CELL c, const FUNC& func, MapBase::T
 	}
 }
 
+template <typename MESH, typename CELL, typename FUNC>
+auto for_n_ring(const MESH& m, typename mesh_traits<MESH>::Vertex v, uint32 depth, const FUNC& func)
+
+{
+	
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+	using Edge = typename mesh_traits<MESH>::Edge;
+	using Face = typename mesh_traits<MESH>::Face;
+
+	CellMarker<MESH, CELL> marker(m);
+	CellMarker<MESH, Vertex> vertex_marker(m);
+	std::queue<std::pair<Vertex, uint32>> queue; // vertex, depth
+	marker.mark(v);
+	queue.push({v, 0});
+
+	while (!queue.empty())
+	{
+		auto v_depth = queue.front();
+		queue.pop();
+		Vertex v = v_depth.first;
+		uint32 current_depth = v_depth.second;
+
+		if (current_depth < depth)
+		{
+			foreach_adjacent_vertex_through_edge(m, v, [&](Vertex sv2) {
+				if (!vertex_marker.is_marked(sv2))
+				{
+					if constexpr (std::is_same_v<CELL, Vertex>)
+					{
+						func(sv2);
+					}
+					vertex_marker.mark(sv2);
+					queue.push({sv2, current_depth + 1});
+					
+				}
+				return true;
+			});
+			
+			if constexpr(std::is_same_v<CELL, Edge>){
+				foreach_incident_edge(m, v, [&](Edge e) {
+					if (!marker.is_marked(e))
+					{
+						func(e);
+						marker.mark(e);
+					}
+					return true;
+				});
+			}
+			if constexpr(std::is_same_v<CELL, Face>){
+				foreach_incident_face(m, v, [&](Face f) {
+					if (!marker.is_marked(f))
+					{
+						func(f);
+						marker.mark(f);
+					}
+					return true;
+				});
+			}
+		}
+		
+	}
+	marker.unmark_all();
+	vertex_marker.unmark_all();
+}
+
+
 template <typename MESH, typename FUNC>
 auto foreach_adjacent_vertex_through_edge(const MESH& m, typename mesh_traits<MESH>::Vertex v, const FUNC& func)
 	-> std::enable_if_t<std::is_convertible_v<MESH&, GMapBase&>>

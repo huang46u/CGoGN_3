@@ -28,7 +28,7 @@
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/ui/app.h>
 #include <cgogn/ui/module.h>
-
+#include <cgogn/core/types/maps/gmap/gmap_base.h>
 #include <cgogn/geometry/types/slab_quadric.h>
 
 #include <cgogn/io/point/point_import.h>
@@ -370,7 +370,6 @@ private:
 		Scalar max = -1e30;
 		foreach_cell(surface, [&](SurfaceVertex sv) {
 			Scalar s = value<Scalar>(surface, attribute, sv);
-			std::cout << s << std::endl;
 			if (s > 1e5)
 			{
 				return true;
@@ -396,7 +395,7 @@ private:
 		surface_provider_->emit_attribute_changed(surface, attribute.get());
 	}
 
-	void filter_scalar(SURFACE& surface, std::shared_ptr<SurfaceAttribute<Scalar>> attribute, uint32 depth)
+	/*void filter_scalar(SURFACE& surface, std::shared_ptr<SurfaceAttribute<Scalar>> attribute, uint32 depth)
 	{
 		CellMarker<SURFACE, SurfaceVertex> marker(surface);
 		std::queue<std::pair<SurfaceVertex, uint32>> queue; // vertex, depth
@@ -436,27 +435,10 @@ private:
 			marker.unmark_all();
 			return true;
 		});
-	}
+	}*/
 
 	
  public:
-	/*
-		void detect_boundary_cells(NONMANIFOLD& nm)
-		{
-			parallel_foreach_cell(nm, [&](NonManifoldVertex v) {
-				auto ie = incident_edges(nm, v);
-				auto iface = incident_faces(nm, v);
-				set_boundary(nm, v, ie.size() == 1 && iface.size() == 0);
-				return true;
-				});
-			parallel_foreach_cell(nm, [&](NonManifoldEdge e) {
-				auto iface = incident_faces(nm, e);
-				set_boundary(nm, e, iface.size() == 1);
-
-				return true;
-				});
-		}
-	*/
 
 	std::array<std::array<double, 3>, 8> compute_big_box(SURFACE& surface, Cgal_Surface_mesh& csm)
 	{
@@ -1568,6 +1550,8 @@ private:
 			get_or_add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(
 				s, "medial_axis_samples_closest_points");
 		auto medial_axis_samples_angle_ = get_or_add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_angle");
+		auto medial_axis_samples_feature_value_ =
+			get_or_add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_feature_value");
 		auto medial_axis_samples_weight_ = get_or_add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_weight");
 
 		geometry::shrinking_ball_centers<SURFACE, false>(
@@ -1591,11 +1575,29 @@ private:
 			max_angle_ = std::max(max_angle_, angle);
 			min_angle_ = std::min(min_angle_, angle);
 			value<Scalar>(s, medial_axis_samples_angle_, v) = angle;
-			value<Scalar>(s, medial_axis_samples_weight_, v) = 2 / (1+std::exp(-angle))  * (2/ (1+std::exp(-r)));
-		
+			value<Scalar>(s, medial_axis_samples_feature_value_, v) =
+				(10/(1 + std::exp(2*angle))) * (10/(1 + std::exp(10*r)));
+			Scalar sum = 0;
+			uint32_t count = 0;
+			for_n_ring<SURFACE,SurfaceVertex>(s, v, 10, [&](SurfaceVertex iv)
+			{
+				count++;
+				sum += std::sqrt((value<Scalar>(s, medial_axis_samples_radius_, v) -
+								  value<Scalar>(s, medial_axis_samples_radius_, iv)) *
+								 (value<Scalar>(s, medial_axis_samples_radius_, v) -
+								  value<Scalar>(s, medial_axis_samples_radius_, iv)))+
+					   std::sqrt((value<Scalar>(s, medial_axis_samples_angle_, v) -
+								  value<Scalar>(s, medial_axis_samples_angle_, iv)) *
+								 (value<Scalar>(s, medial_axis_samples_angle_, v) -
+								  value<Scalar>(s, medial_axis_samples_angle_, iv)));
+				return true;
+			});
+			value<Scalar>(s, medial_axis_samples_weight_, v) = sum / count;
+			
+
 			return true;
 		});
-		filter_scalar(s, medial_axis_samples_weight_, 6);
+		
 		normalise_scalar(s, medial_axis_samples_weight_);
 		
 		surface_provider_->emit_attribute_changed(s, medial_axis_samples_position_.get());
