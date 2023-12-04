@@ -1576,30 +1576,25 @@ private:
 			min_angle_ = std::min(min_angle_, angle);
 			value<Scalar>(s, medial_axis_samples_angle_, v) = angle;
 			value<Scalar>(s, medial_axis_samples_feature_value_, v) =
-				(10/(1 + std::exp(2*angle))) * (10/(1 + std::exp(10*r)));
+				(1000/(1 + std::exp(1.9*angle / M_PI))) * (1/(1 + std::exp(30*r)));
+			
 			Scalar sum = 0;
 			uint32_t count = 0;
-			for_n_ring<SURFACE,SurfaceVertex>(s, v, 10, [&](SurfaceVertex iv)
+			for_n_ring<SURFACE,SurfaceVertex>(s, v, 3, [&](SurfaceVertex iv)
 			{
 				count++;
-				sum += std::sqrt((value<Scalar>(s, medial_axis_samples_radius_, v) -
-								  value<Scalar>(s, medial_axis_samples_radius_, iv)) *
-								 (value<Scalar>(s, medial_axis_samples_radius_, v) -
-								  value<Scalar>(s, medial_axis_samples_radius_, iv)))+
-					   std::sqrt((value<Scalar>(s, medial_axis_samples_angle_, v) -
-								  value<Scalar>(s, medial_axis_samples_angle_, iv)) *
-								 (value<Scalar>(s, medial_axis_samples_angle_, v) -
-								  value<Scalar>(s, medial_axis_samples_angle_, iv)));
+				sum += value<Scalar>(s, medial_axis_samples_feature_value_, iv);
 				return true;
 			});
 			value<Scalar>(s, medial_axis_samples_weight_, v) = sum / count;
-			
+			/*std::cout << "feature value: "<< value<Scalar>(s, medial_axis_samples_feature_value_, v) 
+				<< ", weight: " << value<Scalar>(s, medial_axis_samples_weight_, v) << std::endl;*/
 
 			return true;
 		});
 		
 		normalise_scalar(s, medial_axis_samples_weight_);
-		
+		normalise_scalar(s, medial_axis_samples_feature_value_);
 		surface_provider_->emit_attribute_changed(s, medial_axis_samples_position_.get());
 		surface_provider_->emit_attribute_changed(s, medial_axis_samples_radius_.get());
 		surface_provider_->emit_attribute_changed(s, medial_axis_samples_angle_.get());
@@ -2221,6 +2216,7 @@ private:
 		auto medial_axis_samples_closest_points =
 			get_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(surface,
 																				  "medial_axis_samples_closest_points");
+		auto medial_axis_samples_feature_value = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_feature_value");
 		auto meidal_axis_samples_weight = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_weight");
 		auto cloest_point_color = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "cloest_point_color");
 		parallel_foreach_cell(surface, [&](SurfaceVertex sv) { 
@@ -2267,7 +2263,7 @@ private:
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
-					Scalar w = value<Scalar>(surface, meidal_axis_samples_weight, sv1);
+					Scalar w = value<Scalar>(surface, medial_axis_samples_feature_value, sv1);
 					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * w;
 					weight += w;
 				}
