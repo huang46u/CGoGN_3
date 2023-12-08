@@ -125,7 +125,7 @@ int main(int argc, char** argv)
 
 		Scalar mean_edge_length = cgogn::geometry::mean_edge_length(*m, surface_vertex_position.get());
 		
-		sdp.compute_curvature(*m, mean_edge_length * 2.5, surface_vertex_position.get(), surface_vertex_normal.get(),
+		sdp.compute_curvature(*m, mean_edge_length * 0.1, surface_vertex_position.get(), surface_vertex_normal.get(),
 							  edge_angle.get(), surface_vertex_kmax.get(), surface_vertex_kmin.get(),
 							  surface_vertex_kgaussian.get(), surface_vertex_Kmax.get(), surface_vertex_Kmin.get(),
 							  surface_vertex_Knormal.get());

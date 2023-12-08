@@ -23,6 +23,7 @@
 
 #ifndef CGOGN_MODULE_POWER_SHAPE_H_
 #define CGOGN_MODULE_POWER_SHAPE_H_
+#include <filesystem>
 #include <cmath>
 #include <nlopt/src/api/nlopt.h>
 #include <cgogn/core/ui_modules/mesh_provider.h>
@@ -1499,17 +1500,18 @@ private:
 
 	void construct_surface_sample(SURFACE& surface)
 	{
-		auto position = get_or_add_attribute<Vec3>(surface, "position");
-
+		auto position = get_or_add_attribute<Vec3,SurfaceVertex>(surface, "position");
+		auto bvh_vertex_index = get_or_add_attribute<uint32, SurfaceVertex>(surface, "bvh_vertex_index");
+		uint32 id = 0;
 		load_model_in_cgal(surface, csm);
 		std::vector<Point> mesh_samples;
 		CGAL::Polygon_mesh_processing::sample_triangle_mesh(
 			csm, std::back_inserter(mesh_samples),
-			CGAL::parameters::use_monte_carlo_sampling(true).number_of_points_per_area_unit(10));
+			CGAL::parameters::use_grid_sampling(true).grid_spacing(0.1));
 		foreach_cell(surface, [&](SurfaceVertex v) {
 			value<uint32>(surface, bvh_vertex_index, v) = id++;
 			surface_kdt_vertices.push_back(v);
-			surface_vertex_position_vector.push_back(value<Vec3>(surface, sample_position, v));
+			surface_vertex_position_vector.push_back(value<Vec3>(surface, position, v));
 			return true;
 		});
 		uint32 nb_faces = nb_cells<SurfaceFace>(surface);
@@ -1529,22 +1531,42 @@ private:
 
 		surface_bvh = std::make_unique<acc::BVHTree<uint32, Vec3>>(face_vertex_indices, surface_vertex_position_vector);
 		POINT* surface_sample = point_provider_->add_mesh(point_provider_->mesh_name(surface) + "surface_sample");
-		auto sample_position = get_or_add_attribute<Vec3, PointVertex>(surface_sample, "position");
-		auto sample_normal = get_or_add_attribute<Vec3, PointVertex>(surface_sample, "normal");
+		auto sample_position = get_or_add_attribute<Vec3, PointVertex>(*surface_sample, "position");
+		auto sample_normal = get_or_add_attribute<Vec3, PointVertex>(*surface_sample, "normal");
 		for (Point& p : mesh_samples)
 		{
 			Vec3 pos(p.x(), p.y(), p.z());
 			std::pair<uint32, Vec3> bvh_res;
 			bool found = surface_bvh->closest_point(pos, &bvh_res);
+			if (!found)
+				std::cout << "not found"<<std::endl;
 			SurfaceFace& f = bvh_faces[bvh_res.first];
-			PointVertex new_v = add_vertex<PointVertex>(*surface_sample);
-			value<Vec3>(surface_sample, sample_position, new_v) = pos;
-			value<Vec3>(surface_sample, sample_normal, new_v) = geometry::normal(surface, f, position.get());
+			PointVertex new_v = add_vertex(*surface_sample);
+			value<Vec3>(*surface_sample, sample_position, new_v) = pos;
+			value<Vec3>(*surface_sample, sample_normal, new_v) = geometry::normal(surface, f, position.get());
 		}
+		if (sample_position)
+			point_provider_->set_mesh_bb_vertex_position(*surface_sample, sample_position);
+		point_provider_->emit_connectivity_changed(*surface_sample);
+		point_provider_->emit_attribute_changed(*surface_sample, sample_position.get());
+		point_provider_->emit_attribute_changed(*surface_sample, sample_normal.get());
+
 	}
+	/*void transfer_file()
+	{
+		using fs = std::filesystem;
+		std::string in_file_dir = "C:/Users/huang/Devel/CGoGN_3/data/meshes/Thingi10K/Thingi10K/rawmesh";
+		std::string out_file_dir = "C:/Users/huang/Devel/CGoGN_3/data/meshes/off/Thingi10K";
+
+		for (const auto& entry : fs::directory_iterator(in_file_dir))
+		{
+			std::string in_file = entry.path().string();
+			std::string off_file = out_file_dir + "/" + entry.path().filename().string() + ;
+		}
+
+	}*/
 	void sample_medial_axis(SURFACE& s)
 	{
-
 		auto vertex_position = get_or_add_attribute<Vec3, SurfaceVertex>(s, "position");
 		auto vertex_normal = get_or_add_attribute<Vec3, SurfaceVertex>(s, "normal");
 		auto medial_axis_samples_position_ =
@@ -1579,10 +1601,10 @@ private:
 			max_angle_ = std::max(max_angle_, angle);
 			min_angle_ = std::min(min_angle_, angle);
 			value<Scalar>(s, medial_axis_samples_angle_, v) = angle;
-			/*value<Scalar>(s, medial_axis_samples_feature_value_, v) =
+			value<Scalar>(s, medial_axis_samples_feature_value_, v) =
 				(1000/(1 + std::exp(1.9*angle / M_PI))) * (1/(1 + std::exp(30*r)));
 			
-			Scalar sum = 0;
+			/*Scalar sum = 0;
 			uint32_t count = 0;
 			for_n_ring<SURFACE,SurfaceVertex>(s, v, 3, [&](SurfaceVertex iv)
 			{
@@ -1598,7 +1620,7 @@ private:
 		});
 		
 		normalise_scalar(s, medial_axis_samples_weight_);
-		/*normalise_scalar(s, medial_axis_samples_feature_value_);*/
+		normalise_scalar(s, medial_axis_samples_feature_value_);
 		surface_provider_->emit_attribute_changed(s, medial_axis_samples_position_.get());
 		surface_provider_->emit_attribute_changed(s, medial_axis_samples_radius_.get());
 		surface_provider_->emit_attribute_changed(s, medial_axis_samples_angle_.get());
@@ -2193,7 +2215,7 @@ private:
 			get_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(surface,
 																				  "medial_axis_samples_closest_points");
 		auto medial_axis_samples_feature_value = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_feature_value");
-		auto meidal_axis_samples_weight = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_weight");
+		auto medial_axis_samples_weight = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_weight");
 		auto cloest_point_color = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "cloest_point_color");
 		parallel_foreach_cell(surface, [&](SurfaceVertex sv) { 
 			value<Vec3>(surface, cloest_point_color, sv) = Vec3(0, 0, 0);
@@ -2211,7 +2233,7 @@ private:
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
-					Scalar w = value<Scalar>(surface, meidal_axis_samples_weight, sv1);
+					Scalar w = 100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) + 100000 * value<Scalar>(surface, medial_axis_samples_weight, sv1);
 					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * w;
 					weight += w;
 				}
@@ -2356,7 +2378,8 @@ private:
 					surface, "medial_axis_samples_closest_points");
 			auto meidal_axis_samples_weight =
 				get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_weight");
-
+			auto medial_axis_samples_feature_value_ =
+				get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_feature_value");
 			auto cluster_cloest_sample = get_or_add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, PointVertex>(
 				clusters, "cluster_cloest_sample");
 			auto neighbours_set =
@@ -2455,7 +2478,7 @@ private:
 						for (SurfaceVertex sv: cf.cluster_vertices)
 						{
 							Scalar dist =
-								value<Scalar>(surface, distance_to_cluster, sv) * value<Scalar>(surface,meidal_axis_samples_weight, sv);
+								value<Scalar>(surface, distance_to_cluster, sv) * value<Scalar>(surface, meidal_axis_samples_weight, sv);
 							error += dist;
 						}
 						error /= cf.cluster_vertices.size();
@@ -2490,7 +2513,7 @@ private:
 					SurfaceVertex max_dist_vertex;
 					for (SurfaceVertex sv : cf.cluster_vertices)
 					{
-						Scalar dist = value<Scalar>(surface, distance_to_cluster, sv) *
+						Scalar dist = value<Scalar>(surface, distance_to_cluster, sv) * 1000*
 									  value<Scalar>(surface, meidal_axis_samples_weight, sv);
 						if (dist > cluster_max_dist)
 						{
@@ -2680,6 +2703,8 @@ private:
 		
 			/*if (ImGui::Button("fitting sphere"))
 				sphere_fitting(*selected_surface_mesh_);*/
+			if (ImGui::Button("Sample surface"))
+				construct_surface_sample(*selected_surface_mesh_);
 			if (ImGui::Button("Sample medial axis"))
 				sample_medial_axis(*selected_surface_mesh_);
 			if (ImGui::SliderFloat("Min radius (log)", &radius_threshold_, min_radius_, max_radius_, "%.4f"))
@@ -2691,7 +2716,8 @@ private:
 			if (ImGui::Button("Initialise Cluster"))
 				iniialise_cluster(*selected_surface_mesh_);
 			if (selected_clusters)
-			{ 
+			{
+				ImGui::SliderInt("Update time", &(int)update_times, 1, 100);
 				if (ImGui::Button("Update Cluster by average of medial points"))
 				{
 					clustering_mode = 0;

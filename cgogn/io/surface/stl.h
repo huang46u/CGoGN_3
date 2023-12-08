@@ -37,7 +37,15 @@ namespace cgogn
 
 namespace io
 {
-
+template <typename T>
+struct T3_hash
+{
+	std::size_t operator()(const T& p) const
+	{
+		return ((std::hash<double>()(p.x()) ^ (std::hash<double>()(p.y()) << 1)) >> 1) ^
+			   (std::hash<double>()(p.z()) << 1);
+	}
+};
 template <typename MESH>
 bool import_ascii_STL(MESH& m, const std::string& filename)
 {
@@ -62,6 +70,8 @@ bool import_ascii_STL(MESH& m, const std::string& filename)
 		std::cerr << "File \"" << filename << "\" is not a valid ASCII STL file." << std::endl;
 		return false;
 	}
+	std::unordered_map<Vec3, uint32, T3_hash<Vec3>> vertexIndexMap;
+	uint32 nextVertexIndex = 0;
 
 	// STL files don't contain the number of vertices or faces explicitly
 	// We will read the file until the end
@@ -83,14 +93,14 @@ bool import_ascii_STL(MESH& m, const std::string& filename)
 			nz = std::stod(normal_component);
 
 			getline_safe(fp, line); // This should be the "outer loop" line
-			std::vector<geometry::Vec3> vertices;
+			surface_data.faces_nb_vertices_.push_back(3);
 			for (int i = 0; i < 3; ++i) // Each face in STL is a triangle
 			{
 				getline_safe(fp, line);						   // This should be the "vertex" line
 				std::istringstream vertex_iss(line.substr(13)); // Skip "vertex"
 				std::string vertex_component;
 				float64 x, y, z;
-
+				
 				vertex_iss >> vertex_component;
 				x = std::stod(vertex_component);
 				vertex_iss >> vertex_component;
@@ -98,23 +108,29 @@ bool import_ascii_STL(MESH& m, const std::string& filename)
 				vertex_iss >> vertex_component;
 				z = std::stod(vertex_component);
 
-				vertices.push_back({x, y, z});
+				Vec3 vertex(x, y, z);
+				uint32 vertexIndex;
+
+				// check if vertex is already existed
+				auto it = vertexIndexMap.find(vertex);
+				if (it == vertexIndexMap.end())
+				{
+					vertexIndex = nextVertexIndex++;
+					surface_data.vertex_position_.push_back(vertex);
+					vertexIndexMap[vertex] = vertexIndex;
+				}
+				else
+				{
+					vertexIndex = it->second;
+				}
+				surface_data.faces_vertex_indices_.push_back(vertexIndex);
 			}
 
-			surface_data.vertex_position_.insert(surface_data.vertex_position_.end(), vertices.begin(), vertices.end());
+			
 			// Skip the "endloop" and "endfacet" lines
 			getline_safe(fp, line);
 			getline_safe(fp, line);
 		}
-	}
-
-	// Create faces from vertices (assuming each set of 3 vertices forms a face)
-	for (uint32 i = 0; i < surface_data.vertex_position_.size(); i += 3)
-	{
-		std::vector<uint32> indices = {i, i + 1, i + 2};
-		surface_data.faces_nb_vertices_.push_back(3);
-		surface_data.faces_vertex_indices_.insert(surface_data.faces_vertex_indices_.end(), indices.begin(),
-												  indices.end());
 	}
 	surface_data.reserve(surface_data.vertex_position_.size(), surface_data.faces_nb_vertices_.size());
 	import_surface_data(m, surface_data);
@@ -136,7 +152,8 @@ bool import_binary_STL(MESH& m, const std::string& filename)
 		std::cerr << "Cannot open file: " << filename << std::endl;
 		return false;
 	}
-
+	std::unordered_map<Vec3, uint32, T3_hash<Vec3>> vertexIndexMap;
+	uint32 nextVertexIndex = 0;
 	// Skip the header
 	file.ignore(80);
 
@@ -149,7 +166,7 @@ bool import_binary_STL(MESH& m, const std::string& filename)
 	{
 		// Read and ignore normal vector
 		file.ignore(12);
-
+		surface_data.faces_nb_vertices_.push_back(3);
 		// Read vertices
 		for (int j = 0; j < 3; ++j)
 		{
@@ -158,9 +175,23 @@ bool import_binary_STL(MESH& m, const std::string& filename)
 			file.read(reinterpret_cast<char*>(&y), 4);
 			file.read(reinterpret_cast<char*>(&z), 4);
 			
-			surface_data.vertex_position_.push_back({x,y,z});
+			Vec3 vertex(x, y, z);
+			uint32 vertexIndex;
+
+			// check if vertex is already existed
+			auto it = vertexIndexMap.find(vertex);
+			if (it == vertexIndexMap.end())
+			{
+				vertexIndex = nextVertexIndex++;
+				surface_data.vertex_position_.push_back(vertex);
+				vertexIndexMap[vertex] = vertexIndex;
+			}
+			else
+			{
+				vertexIndex = it->second;
+			}
+			surface_data.faces_vertex_indices_.push_back(vertexIndex);
 		}
-		
 		
 		// Skip attribute byte count
 		file.ignore(2);

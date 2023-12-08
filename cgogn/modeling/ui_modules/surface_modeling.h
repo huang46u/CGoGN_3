@@ -199,10 +199,12 @@ public:
 		mesh_provider_->emit_attribute_changed(m, vertex_position);
 	}
 
-	void rescale_mesh(MESH& m, Attribute<Vec3>* vertex_position)
+	void rescale_mesh(MESH& m, const std::shared_ptr<Attribute<Vec3>>& vertex_position)
 	{
-		geometry::rescale(*vertex_position, 1.0);
-		mesh_provider_->emit_attribute_changed(m, vertex_position);
+		geometry::rescale(*vertex_position.get(), 1.0);
+		if (vertex_position)
+			mesh_provider_->set_mesh_bb_vertex_position(m, vertex_position);
+		mesh_provider_->emit_attribute_changed(m, vertex_position.get());
 	}
 
 protected:
@@ -276,7 +278,7 @@ protected:
 				if (ImGui::Button("Quad remesh"))
 					quad_remesh(*selected_mesh_, selected_vertex_position_);
 				if (ImGui::Button("Rescale"))
-					rescale_mesh(*selected_mesh_, selected_vertex_position_.get());
+					rescale_mesh(*selected_mesh_, selected_vertex_position_);
 			}
 		}
 	}
