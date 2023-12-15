@@ -2187,7 +2187,7 @@ private:
 			error += value<Scalar>(surface, distance_to_cluster, sv);
 			return true;
 		});
-		//std::cout << "Global distance: " << error << std::endl; 
+		std::cout << "Global distance: " << error << std::endl; 
 		
 		surface_provider_->emit_attribute_changed(surface, vertex_cluster_color.get());
 		surface_provider_->emit_attribute_changed(surface, distance_to_cluster.get());
@@ -2233,7 +2233,7 @@ private:
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
-					Scalar w = 100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) + 100000 * value<Scalar>(surface, medial_axis_samples_weight, sv1);
+					Scalar w = 1;
 					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * w;
 					weight += w;
 				}
@@ -2254,8 +2254,61 @@ private:
 				value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv) = {v1, v2};
 			}
 			break;
-			
 			case 1: {
+				Vec3 sum_coord = Vec3(0, 0, 0);
+				Scalar weight = 0;
+				for (SurfaceVertex sv1 : cf.cluster_vertices)
+				{
+					Scalar w = /*100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) + 
+						100000 * */value<Scalar>(surface, medial_axis_samples_weight, sv1);
+					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * w;
+					weight += w;
+				}
+
+				opti_coord = sum_coord / weight;
+				Vec3 original_coord = opti_coord;
+				auto [radius, v1,v2] = geometry::move_point_to_medial_axis(
+					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, opti_coord,
+					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
+
+				//std::cout << "cloest medial vertex index: " << index_of(surface, v) << std::endl;
+				/*auto [v1, v2] =
+					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v);*/
+				value<Vec3>(surface, cloest_point_color, v1) = value<Vec3>(clusters, cluster_color, pv);
+				value<Vec3>(surface, cloest_point_color, v2) = value<Vec3>(clusters, cluster_color, pv);
+				value<Vec3>(clusters, cluster_position, pv) = opti_coord;
+				value<Scalar>(clusters, clusters_radius, pv) = radius;
+				value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv) = {v1, v2};
+			}
+			break;
+			case 2: {
+				Vec3 sum_coord = Vec3(0, 0, 0);
+				Scalar weight = 0;
+				for (SurfaceVertex sv1 : cf.cluster_vertices)
+				{
+					Scalar w = 100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) +
+							   100000 * value<Scalar>(surface, medial_axis_samples_feature_value, sv1);
+					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * w;
+					weight += w;
+				}
+
+				opti_coord = sum_coord / weight;
+				Vec3 original_coord = opti_coord;
+				auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
+					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, opti_coord,
+					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
+
+				// std::cout << "cloest medial vertex index: " << index_of(surface, v) << std::endl;
+				/*auto [v1, v2] =
+					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v);*/
+				value<Vec3>(surface, cloest_point_color, v1) = value<Vec3>(clusters, cluster_color, pv);
+				value<Vec3>(surface, cloest_point_color, v2) = value<Vec3>(clusters, cluster_color, pv);
+				value<Vec3>(clusters, cluster_position, pv) = opti_coord;
+				value<Scalar>(clusters, clusters_radius, pv) = radius;
+				value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv) = {v1, v2};
+			}
+			break;
+			case 3: {
 				std::vector<Point> surface_points;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
@@ -2718,16 +2771,28 @@ private:
 			if (selected_clusters)
 			{
 				ImGui::SliderInt("Update time", &(int)update_times, 1, 100);
-				if (ImGui::Button("Update Cluster by average of medial points"))
+				if (ImGui::Button("Average of medial points"))
 				{
 					clustering_mode = 0;
+					for (uint32 i = 0; i < update_times; i++)
+						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
+				}
+				if (ImGui::Button("Average of medial points weighted with curvature"))
+				{
+					clustering_mode = 1;
+					for (uint32 i = 0; i < update_times; i++)
+						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
+				}
+				if (ImGui::Button("Average of medial points weighted with feature value"))
+				{
+					clustering_mode = 2;
 					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
 				
 				if (ImGui::Button("Update Cluster by minimum enclosing ball of surface points"))
 				{
-					clustering_mode = 1;
+					clustering_mode = 3;
 					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
@@ -2870,7 +2935,7 @@ private:
 	float distance_threshold_ = 0.001;
 	float angle_threshold_ = 1.9;
 	float radius_threshold_ = 0.030;
-	float split_variance_threshold_ = 0.0001;
+	float split_variance_threshold_ = 0.000001;
 	float split_distance_threshold_ = 0.003;
 	uint32 update_times = 5;
 	double min_radius_ = std::numeric_limits<double>::max();
