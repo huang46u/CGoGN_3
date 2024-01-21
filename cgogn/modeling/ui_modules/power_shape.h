@@ -1507,7 +1507,7 @@ private:
 		std::vector<Point> mesh_samples;
 		CGAL::Polygon_mesh_processing::sample_triangle_mesh(
 			csm, std::back_inserter(mesh_samples),
-			CGAL::parameters::use_grid_sampling(true).grid_spacing(0.1));
+			CGAL::parameters::use_grid_sampling(true).grid_spacing(0.01));
 		foreach_cell(surface, [&](SurfaceVertex v) {
 			value<uint32>(surface, bvh_vertex_index, v) = id++;
 			surface_kdt_vertices.push_back(v);
@@ -2259,8 +2259,8 @@ private:
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
-					Scalar w = /*100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) + 
-						100000 * */value<Scalar>(surface, medial_axis_samples_weight, sv1);
+					Scalar w = 100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) + 
+						100000 * value<Scalar>(surface, medial_axis_samples_weight, sv1);
 					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * w;
 					weight += w;
 				}
@@ -2605,6 +2605,9 @@ private:
 		auto clusters_infos = get_or_add_attribute<Cluster_Info, PointVertex>(clusters, "clusters_infos");
 		auto cluster_color = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "cluster_color");
 		auto clusters_radius = get_or_add_attribute<Scalar, PointVertex>(clusters, "clusters_radius");
+		auto cluster_cloest_sample = get_or_add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, PointVertex>(
+			clusters, "cluster_cloest_sample");
+
 		auto medial_axis_samples_position_ =
 			get_attribute<Vec3, SurfaceVertex>(surface, "medial_axis_samples_position");
 		auto medial_axis_sample_radius_ =
@@ -2625,11 +2628,14 @@ private:
 			return true;
 		});
 
-		foreach_cell(clusters, [&](PointVertex sv) {
+		foreach_cell(clusters, [&](PointVertex pv) {
 			CellMarker<SURFACE, SurfaceVertex> visited(surface);
 			std::queue<SurfaceVertex> queue;
-			SurfaceVertex v = value<Cluster_Info>(clusters, clusters_infos, sv).cluster_vertices[0];
-			queue.push(v);
+			auto [v1, v2] = value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv);
+			queue.push(v1);
+			queue.push(v2);
+			visited.mark(v1);
+			visited.mark(v2);
 			while (queue.size() > 0)
 			{
 				SurfaceVertex current = queue.front();
@@ -2648,7 +2654,7 @@ private:
 					}
 					else
 					{
-						value<std::unordered_map<uint32, PointVertex>>(clusters, neighbours_set, sv)
+						value<std::unordered_map<uint32, PointVertex>>(clusters, neighbours_set, pv)
 							.insert(value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v));
 					}
 					return true;
