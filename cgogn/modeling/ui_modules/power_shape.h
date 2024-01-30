@@ -1507,7 +1507,7 @@ private:
 		std::vector<Point> mesh_samples;
 		CGAL::Polygon_mesh_processing::sample_triangle_mesh(
 			csm, std::back_inserter(mesh_samples),
-			CGAL::parameters::use_grid_sampling(true).grid_spacing(0.1));
+			CGAL::parameters::use_grid_sampling(true).grid_spacing(0.01));
 		foreach_cell(surface, [&](SurfaceVertex v) {
 			value<uint32>(surface, bvh_vertex_index, v) = id++;
 			surface_kdt_vertices.push_back(v);
@@ -2326,8 +2326,8 @@ private:
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
-					Scalar w = /*100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) + 
-						100000 * */value<Scalar>(surface, medial_axis_samples_weight, sv1);
+					Scalar w = 100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) + 
+						100000 * value<Scalar>(surface, medial_axis_samples_weight, sv1);
 					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * w;
 					weight += w;
 				}
@@ -2673,6 +2673,9 @@ private:
 		auto clusters_infos = get_or_add_attribute<Cluster_Info, PointVertex>(clusters, "clusters_infos");
 		auto cluster_color = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "cluster_color");
 		auto clusters_radius = get_or_add_attribute<Scalar, PointVertex>(clusters, "clusters_radius");
+		auto cluster_cloest_sample = get_or_add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, PointVertex>(
+			clusters, "cluster_cloest_sample");
+
 		auto medial_axis_samples_position_ =
 			get_attribute<Vec3, SurfaceVertex>(surface, "medial_axis_samples_position");
 		auto medial_axis_sample_radius_ =
