@@ -1618,7 +1618,6 @@ private:
 
 			return true;
 		});
-		
 		normalise_scalar(s, medial_axis_samples_weight_);
 		normalise_scalar(s, medial_axis_samples_feature_value_);
 		surface_provider_->emit_attribute_changed(s, medial_axis_samples_position_.get());
@@ -1649,6 +1648,31 @@ private:
 
 		surface_provider_->emit_cells_set_changed(s, filtered_medial_axis_samples_set_);
 	}
+
+	void Twin_medial_axis_samples(SURFACE& s)
+	{
+		auto vertex_position = get_attribute<Vec3, SurfaceVertex>(s, "position");
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(s);
+		auto twin_medial_axis_samples_set_ =
+			&md.template get_or_add_cells_set<SurfaceVertex>("twin_medial_axis_samples_set_");
+		twin_medial_axis_samples_set_->clear();
+		auto medial_axis_samples_position_ = get_attribute<Vec3, SurfaceVertex>(s, "medial_axis_samples_position");
+		auto medial_axis_samples_radius_ = get_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_radius");
+		auto medial_axis_samples_closest_points_ =
+			get_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(s,
+																				  "medial_axis_samples_closest_points");
+		auto medial_axis_samples_angle_ = get_or_add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_angle");
+		foreach_cell(s, [&](SurfaceVertex v) -> bool {
+			auto [v1, v2] = value<std::pair<SurfaceVertex, SurfaceVertex>>(s, medial_axis_samples_closest_points_, v);
+			auto [v3, v4] = value<std::pair<SurfaceVertex, SurfaceVertex>>(s, medial_axis_samples_closest_points_, v2);
+			if (index_of(s, v1) == index_of(s,v4))
+				twin_medial_axis_samples_set_->select(v);
+			return true;
+		});
+
+		surface_provider_->emit_cells_set_changed(s, twin_medial_axis_samples_set_);
+	}
+
 
 	HighsSolution shrinking_balls_coverage_axis(SURFACE& surface, Scalar dilation_factor)
 	{
@@ -1896,6 +1920,7 @@ private:
 			get_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(surface, "medial_axis_samples_closest_points");
 		auto distance_to_cluster = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "distance_to_cluster");
 		auto bvh_vertex_index = get_or_add_attribute<uint32, SurfaceVertex>(surface, "bvh_vertex_index");
+		auto cloest_point_color = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "cloest_point_color");
 		MeshData<SURFACE>& md = surface_provider_->mesh_data(surface);
 		auto filtered_medial_axis_samples =
 			&md.template get_or_add_cells_set<SurfaceVertex>("filtered_medial_axis_samples");
@@ -1906,6 +1931,12 @@ private:
 		auto cluster_radius = get_or_add_attribute<Scalar, PointVertex>(*clusters, "clusters_radius");
 		auto clusters_infos = get_or_add_attribute<Cluster_Info, PointVertex>(*clusters, "clusters_infos");
 		auto cluster_cloest_sample = get_or_add_attribute<std::pair<SurfaceVertex,SurfaceVertex>,PointVertex>(*clusters, "cluster_cloest_sample");
+		
+		parallel_foreach_cell(surface, [&](SurfaceVertex sv) {
+			value<Vec3>(surface, cloest_point_color, sv) = Vec3(0, 0, 0);
+			return true;
+		});
+		
 		load_model_in_cgal(surface, csm);
 		tree = new Tree(faces(csm).first, faces(csm).second, csm);
 		tree->accelerate_distance_queries();
@@ -1981,6 +2012,8 @@ private:
 			cf.cluster_variance = 0;
 			cf.cluster_vertices.clear();
 			value<Scalar>(*clusters, cluster_radius, new_cluster) = radius;
+			value<Vec3>(surface, cloest_point_color, v1) = value<Vec3>(*clusters, cluster_color, new_cluster);
+			value<Vec3>(surface, cloest_point_color, v2) = value<Vec3>(*clusters, cluster_color, new_cluster);
 
 			// Add v1 into cluster and remove it from the queue
 			vertex_queue.push(v1);
@@ -2083,7 +2116,7 @@ private:
 		CellMarker<SURFACE, SurfaceVertex> cluster_marker(surface);
 		bfs_marker.unmark_all();
 		cluster_marker.unmark_all();
-		std::queue<SurfaceVertex> vertex_queue;
+		std::queue<std::pair<SurfaceVertex, PointVertex>> vertex_queue;
 		foreach_cell(clusters, [&](PointVertex pv) {
 			value<Cluster_Info>(clusters, clusters_infos, pv).cluster_vertices.clear();
 			return true;
@@ -2093,63 +2126,95 @@ private:
 			Cluster_Info& cf = value<Cluster_Info>(clusters, clusters_infos, pv);
 
 			auto [v1, v2] = value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv);
-			vertex_queue.push(v1);
-			vertex_queue.push(v2);
-			cluster_marker.mark(v1);
-			value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v1) =
-				std::make_pair(index_of(clusters, pv), pv);
-			value<Vec3>(surface, vertex_cluster_color, v1) = value<Vec3>(clusters, cluster_color, pv);
-			value<Scalar>(surface, distance_to_cluster, v2) = 0;
+			Vec3& sphere_center = value<Vec3>(clusters, cluster_positions, pv);
+			Vec3& pos_v1 = value<Vec3>(surface, sample_position, v1);
+			Scalar distance_v1 = (pos_v1 - sphere_center).norm() - value<Scalar>(clusters, cluster_radius, pv);
+			if (cluster_marker.is_marked(v1))
+			{
+				if (distance_v1 < value<Scalar>(surface, distance_to_cluster, v1))
+				{
+					value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v1) =
+						std::make_pair(index_of(clusters, pv), pv);
+					value<Vec3>(surface, vertex_cluster_color, v1) = value<Vec3>(clusters, cluster_color, pv);
+					value<Scalar>(surface, distance_to_cluster, v1) = distance_v1;
+				}
+			}
+			else
+			{
+				value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v1) =
+					std::make_pair(index_of(clusters, pv), pv);
+				value<Vec3>(surface, vertex_cluster_color, v1) = value<Vec3>(clusters, cluster_color, pv);
+				value<Scalar>(surface, distance_to_cluster, v1) = distance_v1;
+				cluster_marker.mark(v1);
+			}
 
-			cluster_marker.mark(v2);
-			value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v2) =
-				std::make_pair(index_of(clusters, pv), pv);
-			value<Vec3>(surface, vertex_cluster_color, v2) = value<Vec3>(clusters, cluster_color, pv);
-			value<Scalar>(surface, distance_to_cluster, v2) = 0;
+			vertex_queue.push({v1, pv});
+			Vec3& pos_v2 = value<Vec3>(surface, sample_position, v2);
+			Scalar distance_v2 = (pos_v2 - sphere_center).norm() - value<Scalar>(clusters, cluster_radius, pv);
+
+			if (cluster_marker.is_marked(v2))
+			{
+				if (distance_v2 < value<Scalar>(surface, distance_to_cluster, v2))
+				{
+					value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v2) =
+						std::make_pair(index_of(clusters, pv), pv);
+					value<Vec3>(surface, vertex_cluster_color, v2) = value<Vec3>(clusters, cluster_color, pv);
+					value<Scalar>(surface, distance_to_cluster, v2) = distance_v2;
+				}
+			}
+			else
+			{
+				value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v2) =
+					std::make_pair(index_of(clusters, pv), pv);
+				value<Vec3>(surface, vertex_cluster_color, v2) = value<Vec3>(clusters, cluster_color, pv);
+				value<Scalar>(surface, distance_to_cluster, v2) = distance_v2;
+				cluster_marker.mark(v2);
+			}
+
+			vertex_queue.push({v2, pv});
 			return true;
 		});
 		// Start BFS
 		//bfs_marker.unmark_all();
 		while (vertex_queue.size() > 0)
 		{
-			SurfaceVertex v = vertex_queue.front();
+			auto [v, pv] = vertex_queue.front();
 			vertex_queue.pop();
 			// Affect the surface points to the cluster
 			foreach_adjacent_vertex_through_edge(surface, v, [&](SurfaceVertex sv) {
-				PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v).second;
-				Vec3& sphere_center = value<Vec3>(clusters, cluster_positions, pv);
 				/*if (bfs_marker.is_marked(sv))
 					return true;*/
+				Vec3& sphere_center = value<Vec3>(clusters, cluster_positions, pv);
 				Vec3& pos = value<Vec3>(surface, sample_position, sv);
-				Vec3& sphere = value<Vec3>(clusters, cluster_positions, pv);
-				Vec4 sphere_homo=
-					Vec4(sphere.x(), sphere.y(), sphere.z(), value<Scalar>(clusters, cluster_radius, pv));
-			
-				// if the distance is less than threshold
 				Scalar distance = (pos - sphere_center).norm() - value<Scalar>(clusters, cluster_radius, pv);
+				
 				//if encounter a vertex who has already been affected
 				if (cluster_marker.is_marked(sv))
 				{
-					//if the point-cluster distance is smaller, change the label
-					if (distance < value<Scalar>(surface, distance_to_cluster, sv))
+					PointVertex pv2 = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv).second;
+					if (index_of(clusters, pv) != index_of(clusters, pv2))
 					{
-						vertex_queue.push(sv);
-						value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv) =
-							std::make_pair(index_of(clusters, pv), pv);
-						value<Vec3>(surface, vertex_cluster_color, sv) =
-							value<Vec3>(clusters, cluster_color, pv);
-						value<Scalar>(surface, distance_to_cluster, sv) = distance;
-					}
-					//else add adjacency info for the current cluster
-					else
-					{
-						value<std::unordered_map<uint32, PointVertex>>(clusters, neighbours_set, pv)
-							.insert(value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv));
+
+						// if the point-cluster distance is smaller, change the label
+						if (distance < value<Scalar>(surface, distance_to_cluster, sv))
+						{
+							vertex_queue.push({sv, pv});
+							value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv) =
+								std::make_pair(index_of(clusters, pv), pv);
+							value<Vec3>(surface, vertex_cluster_color, sv) = value<Vec3>(clusters, cluster_color, pv);
+							value<Scalar>(surface, distance_to_cluster, sv) = distance;
+						}
+						// else add adjacency info for the current cluster
+						else
+						{
+							value<std::unordered_map<uint32, PointVertex>>(clusters, neighbours_set, pv)
+								.insert(value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv));
+						}
 					}
 				}
 				else
 				{
-					vertex_queue.push(sv);
+					vertex_queue.push({sv, pv});
 					value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv) =
 						std::make_pair(index_of(clusters, pv), pv);
 					value<Vec3>(surface, vertex_cluster_color, sv) = value<Vec3>(clusters, cluster_color, pv);
@@ -2180,11 +2245,12 @@ private:
 		for (PointVertex& sv : clusters_to_remove)
 		{
 			std::cout << "delete cluster" << index_of(clusters, sv) << std::endl;
-			remove_vertex(clusters, sv);
+			//remove_vertex(clusters, sv);
 		}
 		Scalar error = 0;
 		foreach_cell(surface, [&](SurfaceVertex sv) { 
 			error += value<Scalar>(surface, distance_to_cluster, sv);
+			//std::cout << "distance: " << value<Scalar>(surface, distance_to_cluster, sv) << std::endl;
 			return true;
 		});
 		std::cout << "Global distance: " << error << std::endl; 
@@ -2252,6 +2318,7 @@ private:
 				value<Vec3>(clusters, cluster_position, pv) = opti_coord;
 				value<Scalar>(clusters, clusters_radius, pv) = radius;
 				value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv) = {v1, v2};
+				
 			}
 			break;
 			case 1: {
@@ -2287,7 +2354,7 @@ private:
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
 					Scalar w = 100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) +
-							   100000 * value<Scalar>(surface, medial_axis_samples_feature_value, sv1);
+							   100 * value<Scalar>(surface, medial_axis_samples_feature_value, sv1);
 					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * w;
 					weight += w;
 				}
@@ -2301,6 +2368,7 @@ private:
 				// std::cout << "cloest medial vertex index: " << index_of(surface, v) << std::endl;
 				/*auto [v1, v2] =
 					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v);*/
+				
 				value<Vec3>(surface, cloest_point_color, v1) = value<Vec3>(clusters, cluster_color, pv);
 				value<Vec3>(surface, cloest_point_color, v2) = value<Vec3>(clusters, cluster_color, pv);
 				value<Vec3>(clusters, cluster_position, pv) = opti_coord;
@@ -2609,7 +2677,8 @@ private:
 			get_attribute<Vec3, SurfaceVertex>(surface, "medial_axis_samples_position");
 		auto medial_axis_sample_radius_ =
 			get_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_radius");
-
+		auto cluster_cloest_sample = get_or_add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, PointVertex>(
+			clusters, "cluster_cloest_sample");
 		auto vertex_cluster_info =
 			get_or_add_attribute<std::pair<uint32, PointVertex>, SurfaceVertex>(surface, "vertex_cluster_info");
 		auto neighbours_set = get_or_add_attribute<std::unordered_map<uint32, PointVertex>, PointVertex>(clusters, "neighbours_set");
@@ -2625,11 +2694,14 @@ private:
 			return true;
 		});
 
-		foreach_cell(clusters, [&](PointVertex sv) {
+		foreach_cell(clusters, [&](PointVertex pv) {
 			CellMarker<SURFACE, SurfaceVertex> visited(surface);
 			std::queue<SurfaceVertex> queue;
-			SurfaceVertex v = value<Cluster_Info>(clusters, clusters_infos, sv).cluster_vertices[0];
-			queue.push(v);
+			auto [v1, v2] = value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv);
+			queue.push(v1);
+			queue.push(v2);
+			visited.mark(v1);
+			visited.mark(v2);
 			while (queue.size() > 0)
 			{
 				SurfaceVertex current = queue.front();
@@ -2648,7 +2720,7 @@ private:
 					}
 					else
 					{
-						value<std::unordered_map<uint32, PointVertex>>(clusters, neighbours_set, sv)
+						value<std::unordered_map<uint32, PointVertex>>(clusters, neighbours_set, pv)
 							.insert(value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v));
 					}
 					return true;
@@ -2756,8 +2828,8 @@ private:
 		
 			/*if (ImGui::Button("fitting sphere"))
 				sphere_fitting(*selected_surface_mesh_);*/
-			if (ImGui::Button("Sample surface"))
-				construct_surface_sample(*selected_surface_mesh_);
+			/*if (ImGui::Button("Sample surface"))
+				construct_surface_sample(*selected_surface_mesh_);*/
 			if (ImGui::Button("Sample medial axis"))
 				sample_medial_axis(*selected_surface_mesh_);
 			if (ImGui::SliderFloat("Min radius (log)", &radius_threshold_, min_radius_, max_radius_, "%.4f"))
@@ -2766,6 +2838,8 @@ private:
 				filter_medial_axis_samples(*selected_surface_mesh_);
 			if (ImGui::Button("Filter medial axis samples"))
 				filter_medial_axis_samples(*selected_surface_mesh_);
+			if (ImGui::Button("Twin point"))
+				Twin_medial_axis_samples(*selected_surface_mesh_);
 			if (ImGui::Button("Initialise Cluster"))
 				iniialise_cluster(*selected_surface_mesh_);
 			if (selected_clusters)

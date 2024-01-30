@@ -325,8 +325,11 @@ template <typename MESH>
 	do{
 		iteration++;
 		if (iteration > 100)
+		{
+			std::cout << "no solution" << std::endl;
 			break;
-		nearset_point_pos= surface_bvh->closest_point(pos);
+		}
+		nearset_point_pos = surface_bvh->closest_point(pos);
 		distance_to_nearest = (nearset_point_pos - pos).norm();
 		old_dir = (pos - nearset_point_pos)/*.normalized()*/;
 		std::pair<uint32, Scalar> k_res;
