@@ -324,7 +324,7 @@ template <typename MESH>
 	int iteration = 0;
 	do{
 		iteration++;
-		if (iteration > 100)
+		if (iteration > 200)
 		{
 			std::cout << "no solution" << std::endl;
 			break;
@@ -358,7 +358,11 @@ template <typename MESH>
 		distance_to_new_nearest = (new_nearest_point_pos - pos).norm();
 		new_dir = (pos - new_nearest_point_pos)/*.normalized()*/;
 		cosine = old_dir.dot(new_dir) / new_dir.norm()/old_dir.norm();
-		if (cosine<0)
+		/*if (cosine<0)
+		{
+			step *= 0.1;
+		}*/
+		if (new_k_res.first!= k_res.first)
 		{
 			step *= 0.1;
 		}
@@ -369,7 +373,7 @@ template <typename MESH>
 				  << std::endl;
 		std::cout << "cosine2: " << old_dir.normalized().dot(value<Vec3>(mesh, vertex_normal, nearest_medial_vertex))
 				  << std::endl;*/
-	} while (cosine > 0 ||
+	} while (/*cosine > 0||*/ 
 			 std::fabs(distance_to_nearest - distance_to_new_nearest) > 1e-5);
 	std::pair<uint32, Scalar> k_res;
 	/*bool found = medial_kdt->find_nn(pos, &k_res);
