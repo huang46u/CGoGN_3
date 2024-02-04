@@ -396,6 +396,91 @@ private:
 		surface_provider_->emit_attribute_changed(surface, attribute.get());
 	}
 
+	std::pair<Vec3, Scalar> sphere_fitting_algo(SURFACE& surface, std::vector<SurfaceVertex> cluster_vertices)
+	{
+		auto position = get_attribute<Vec3, SurfaceVertex>(surface, "position");
+		Eigen::Matrix3d A;
+		Eigen::Vector3d B;
+		Scalar x_avg = 0;
+		Scalar y_avg = 0;
+		Scalar z_avg = 0;
+		Scalar xy_avg = 0;
+		Scalar xz_avg = 0;
+		Scalar yz_avg = 0;
+		Scalar x2_avg = 0;
+		Scalar y2_avg = 0;
+		Scalar z2_avg = 0;
+		Scalar x2y_avg = 0;
+		Scalar x2z_avg = 0;
+		Scalar xy2_avg = 0;
+		Scalar y2z_avg = 0;
+		Scalar xz2_avg = 0;
+		Scalar yz2_avg = 0;
+		Scalar zy2_avg = 0;
+		Scalar x3_avg = 0;
+		Scalar y3_avg = 0;
+		Scalar z3_avg = 0;
+		for (auto sv : cluster_vertices)
+		{
+			Vec3 pos = value<Vec3>(surface, position, sv);
+			x_avg += pos.x();
+			y_avg += pos.y();
+			z_avg += pos.z();
+			xy_avg += pos.x() * pos.y();
+			xz_avg += pos.x() * pos.z();
+			yz_avg += pos.y() * pos.z();
+			x2_avg += pos.x() * pos.x();
+			y2_avg += pos.y() * pos.y();
+			z2_avg += pos.z() * pos.z();
+			x2y_avg += pos.x() * pos.x() * pos.y();
+			x2z_avg += pos.x() * pos.x() * pos.z();
+			xy2_avg += pos.x() * pos.y() * pos.y();
+			y2z_avg += pos.y() * pos.y() * pos.z();
+			xz2_avg += pos.x() * pos.z() * pos.z();
+			yz2_avg += pos.y() * pos.z() * pos.z();
+			zy2_avg += pos.z() * pos.y() * pos.y();
+			x3_avg += pos.x() * pos.x() * pos.x();
+			y3_avg += pos.y() * pos.y() * pos.y();
+			z3_avg += pos.z() * pos.z() * pos.z();
+		}
+		x_avg /= cluster_vertices.size();
+		y_avg /= cluster_vertices.size();
+		z_avg /= cluster_vertices.size();
+		xy_avg /= cluster_vertices.size();
+		xz_avg /= cluster_vertices.size();
+		yz_avg /= cluster_vertices.size();
+		x2_avg /= cluster_vertices.size();
+		y2_avg /= cluster_vertices.size();
+		z2_avg /= cluster_vertices.size();
+		x2y_avg /= cluster_vertices.size();
+		x2z_avg /= cluster_vertices.size();
+		xy2_avg /= cluster_vertices.size();
+		y2z_avg /= cluster_vertices.size();
+		xz2_avg /= cluster_vertices.size();
+		yz2_avg /= cluster_vertices.size();
+		zy2_avg /= cluster_vertices.size();
+		x3_avg /= cluster_vertices.size();
+		y3_avg /= cluster_vertices.size();
+		z3_avg /= cluster_vertices.size();
+		A << x2_avg - x_avg * x_avg, xy_avg - x_avg * y_avg, xz_avg - x_avg * z_avg,
+			xy_avg - x_avg * y_avg, y2_avg - y_avg * y_avg, yz_avg - y_avg * z_avg,
+			xz_avg - x_avg * z_avg, yz_avg - y_avg * z_avg, z2_avg - z_avg * z_avg;
+		B << (x3_avg - x_avg * x2_avg) +
+			(x_avg * y2_avg - x_avg * y2_avg) + 
+			(xz2_avg - x_avg*z2_avg),
+			(x2y_avg - x2_avg * y_avg)
+			+ (y3_avg - y_avg * y2_avg)
+			+ yz2_avg-y_avg*z2_avg,
+			(x2z_avg- x2_avg * z_avg)
+			 +(zy2_avg - z_avg*y2_avg)
+			+(z3_avg - z_avg *z2_avg);
+		Eigen::Vector3d center = A.inverse() *0.5 * B;
+		Scalar radius = std::sqrt((x2_avg - 2 * x_avg * center.x() + center.x() * center.x() +
+								  y2_avg - 2 * y_avg * center.y() + center.y() * center.y() +
+								  z2_avg - 2 * z_avg * center.z() + center.z() * center.z()));
+		return {Vec3(center[0], center[1], center[2]), radius};
+	}
+
  public:
 
 	std::array<std::array<double, 3>, 8> compute_big_box(SURFACE& surface, Cgal_Surface_mesh& csm)
@@ -2121,7 +2206,7 @@ private:
 			value<Cluster_Info>(clusters, clusters_infos, pv).cluster_vertices.clear();
 			return true;
 		});
-		foreach_cell(clusters, [&](PointVertex pv) {
+		/*foreach_cell(clusters, [&](PointVertex pv) {
 			Cluster_Info& cf = value<Cluster_Info>(clusters, clusters_infos, pv);
 			foreach_cell(surface, [&](SurfaceVertex sv) {
 				Vec3& sphere_center = value<Vec3>(clusters, cluster_positions, pv);
@@ -2153,8 +2238,8 @@ private:
 
 
 			return true;
-			});
-		/* foreach_cell(clusters, [&](PointVertex pv) {
+			});*/
+		 foreach_cell(clusters, [&](PointVertex pv) {
 			Cluster_Info& cf = value<Cluster_Info>(clusters, clusters_infos, pv);
 
 			auto [v1, v2] = value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv);
@@ -2254,7 +2339,7 @@ private:
 				}
 				return true;
 			});
-		}*/
+		}
 
 		foreach_cell(surface, [&](SurfaceVertex sv) { 
 			std::pair<uint32, PointVertex>&cluster_info = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv);
@@ -2338,7 +2423,8 @@ private:
 
 				opti_coord = sum_coord / weight;
 				Vec3 original_coord = opti_coord;
-				 auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
+				
+ 				 auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
 					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, opti_coord,
 					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
 				//PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v1).second;*/
@@ -2386,6 +2472,19 @@ private:
 			}
 			break;
 			case 2: {
+				auto [center, r] = sphere_fitting_algo(surface, cf.cluster_vertices);
+				
+				auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
+					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, center,
+					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
+				value<Vec3>(surface, cloest_point_color, v1) = value<Vec3>(clusters, cluster_color, pv);
+				value<Vec3>(surface, cloest_point_color, v2) = value<Vec3>(clusters, cluster_color, pv);
+				value<Vec3>(clusters, cluster_position, pv) = center;
+				value<Scalar>(clusters, clusters_radius, pv) = radius;
+				value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv) = {v1, v2};
+			}
+			break;
+			case 3: {
 				Vec3 sum_coord = Vec3(0, 0, 0);
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
@@ -2409,13 +2508,13 @@ private:
 				/*auto [v1, v2] =
 					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v);*/
 				value<Vec3>(surface, cloest_point_color, v1) = value<Vec3>(clusters, cluster_color, pv);
-			value<Vec3>(surface, cloest_point_color, v2) = value<Vec3>(clusters, cluster_color, pv);
+				value<Vec3>(surface, cloest_point_color, v2) = value<Vec3>(clusters, cluster_color, pv);
 				value<Vec3>(clusters, cluster_position, pv) = opti_coord;
 				value<Scalar>(clusters, clusters_radius, pv) = radius;
 				value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv) = {v1, v2};
 			}
 			break;
-			case 3: {
+			case 4: {
 				Vec3 sum_coord = Vec3(0, 0, 0);
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
@@ -2446,7 +2545,7 @@ private:
 				value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv) = {v1, v2};
 			}
 			break;
-			case 4: {
+			case 5: {
 				std::vector<Point> surface_points;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
@@ -2470,14 +2569,14 @@ private:
 				/*auto [v1, v2] =
 					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v);*/
 				value<Vec3>(clusters, cluster_position, pv) = opti_coord;
-				value<Scalar>(clusters, clusters_radius, pv) = r;
+				value<Scalar>(clusters, clusters_radius, pv) = radius;
 				value<Vec3>(surface, cloest_point_color, v1) = value<Vec3>(clusters, cluster_color, pv);
 				value<Vec3>(surface, cloest_point_color, v2) = value<Vec3>(clusters, cluster_color, pv);
 				value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv) = {v1, v2};
 
 				break;
 			}
-			case 5: {
+			case 6: {
 				std::vector<Point> surface_points;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
@@ -2977,28 +3076,35 @@ private:
 					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
-				if (ImGui::Button("Average of medial points weighted with curvature"))
+				if (ImGui::Button("Sphere fitting"))
 				{
 					clustering_mode = 2;
+					for (uint32 i = 0; i < update_times; i++)
+						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
+				
+				}
+				if (ImGui::Button("Average of medial points weighted with curvature"))
+				{
+					clustering_mode = 3;
 					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
 				if (ImGui::Button("Average of medial points weighted with feature value"))
 				{
-					clustering_mode = 3;
+					clustering_mode = 4;
 					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
 				
 				if (ImGui::Button("Update Cluster by minimum enclosing ball of surface points"))
 				{
-					clustering_mode = 4;
+					clustering_mode = 5;
 					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
 				if (ImGui::Button("Update Cluster by minimum enclosing ball of medial points"))
 				{
-					clustering_mode = 5;
+					clustering_mode = 6;
 					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}

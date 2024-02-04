@@ -31,7 +31,7 @@
 
 #include <array>
 #include <vector>
-
+#include <nlopt/src/api/nlopt.hpp>
 #include <libacc/bvh_tree.h>
 #include <libacc/kd_tree.h>
 
@@ -300,6 +300,80 @@ Scalar surface_medial_distance_variance(
 	return variance / clusters_points.size();
 }
 
+/*
+template <typename MESH>
+std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH>::Vertex> non_linear_solver(
+	MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position, 
+	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_normal,
+	const std::vector<typename mesh_traits<MESH>::Vertex>& vertices, Vec3& pos,
+	const acc::KDTree<3, uint32>* surface_kdt, const acc::KDTree<3, uint32>* medial_kdt,
+	acc::BVHTree<uint32, Vec3>* surface_bvh)
+{
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+	auto objective = [](const std::vector<double>& x, std::vector<double>& grad, void* data) -> double { return x[3]; };
+	
+	nlopt::opt opt(nlopt::LN_COBYLA, 4);
+
+	opt.set_min_objective(objective, nullptr);
+
+	struct ConstraintData
+	{
+		const MESH* mesh;
+		const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position;
+		std::vector<typename mesh_traits<MESH>::Vertex> vertices;
+	};
+
+	auto constraint = [](const std::vector<double>& x, std::vector<double>& grad, void* data) -> double {
+		ConstraintData* constraintData = static_cast<ConstraintData*>(data);
+
+		Vec3 center(x[0], x[1], x[2]); // 球心位置
+		double r = x[3];			   // 球半径
+
+		double minDistance = std::numeric_limits<double>::max(); // 初始化最小距离为最大值
+
+		
+		for (const auto& v : constraintData->vertices)
+		{
+			Vec3 position = value<Vec3>(*constraintData->mesh, constraintData->vertex_position, v);
+			double distance = (position - center).norm();
+			minDistance = std::min(minDistance, distance); // 更新最小距离
+		}
+		return minDistance - r;
+	};
+
+	// 当你添加约束到NLopt优化器时，确保正确传递ConstraintData结构体实例
+	ConstraintData data;
+	data.mesh = &mesh;
+	data.vertex_position = vertex_position;
+	data.vertices = vertices;
+	opt.add_inequality_constraint(constraint, &data, 1e-8);
+
+	
+	opt.set_xtol_rel(1e-4);
+
+	std::vector<double> x = {pos.x(), pos.y(), pos.z(), 1};  
+	double max_r;				   
+
+	try
+	{
+		// 运行优化
+		nlopt::result result = opt.optimize(x, max_r);
+
+		// 输出结果
+		std::cout << "Found maximum radius: " << max_r << " at position (" << x[0] << ", " << x[1] << ", " << x[2]
+				  << ")" << std::endl;
+		return std::make_tuple(max_r, vertices[0], vertices[1]);
+	}
+	catch (std::exception& e)
+	{
+		std::cerr << "NLopt failed: " << e.what() << std::endl;
+		return std::make_tuple(0.0, vertices[0], vertices[1]); // 失败时返回
+	}
+}*/
+
+
+
+/*
 template <typename MESH>
 	std::tuple < Scalar, 
 		typename mesh_traits<MESH>::Vertex,
@@ -315,24 +389,211 @@ template <typename MESH>
 	using Vertex = typename mesh_traits<MESH>::Vertex;
 	Scalar distance_to_nearest = 0;
 	Scalar distance_to_new_nearest = 0;
+	Scalar last_distance_to_nearest = 0;
+	Scalar last_distance_to_new_nearest = 0;
+	Vec3 best_pos;
+	Vertex v1, v2;
+	Vertex nearest_medial_vertex, other_nearest_medial_vertex, last_vertex;
+	Vec3 nearest_v1_pos, nearest_v2_pos, nearset_point_pos, new_nearest_point_pos;
+	Vec3 best_v1_pos, best_v2_pos;
+	Vec3 old_dir, new_dir;
+	Scalar cosine;
+	Scalar step = 0.01;
+	uint32 count = 0;
+	bool found = false, flag = false;
+	int iteration = 0;
+	std::pair<uint32, Scalar> k_res;
+	std::pair<uint32, Scalar> new_k_res;
+	nearest_v1_pos = surface_bvh->closest_point(pos);
+	found = surface_kdt->find_nn(nearest_v1_pos, &k_res);
+	if (found)
+	{
+		v1 = vertices[k_res.first];
+	}
+	else
+	{
+		std::cout << "closest point not found !!!";
+	}
+	bool change = false;
+	Vec3 dir = (pos - nearest_v1_pos);
+	old_dir = dir.normalized();
+	std::vector<string> error_messages;
+	//find v2
+	do
+	{
+		iteration++;
+		if (iteration % 10 == 0 && !change)
+		{
+			step *= 2;
+		}
+		pos += step * dir;
+		distance_to_nearest = (nearest_v1_pos - pos).norm();
+
+		nearest_v2_pos = surface_bvh->closest_point(pos);
+		
+		found = surface_kdt->find_nn(nearest_v2_pos, &new_k_res);
+		if (found)
+		{
+			other_nearest_medial_vertex = vertices[new_k_res.first];
+		}
+		else
+		{
+			std::cout << "closest point not found !!!";
+		}
+		distance_to_new_nearest = (nearest_v2_pos - pos).norm();
+		new_dir = (pos - nearest_v2_pos).normalized();
+		cosine = old_dir.dot(new_dir);
+		error_messages.push_back("iteration : " + std::to_string(iteration));
+		error_messages.push_back("distance_to_nearest: " + std::to_string(distance_to_nearest) + ", " +
+								 "distance_to_new_nearest: " + std::to_string(distance_to_new_nearest));
+		error_messages.push_back("first nearest vertex: " + std::to_string(k_res.first) + ", " +
+								 "second nearest vertex: " + std::to_string(new_k_res.first));
+		error_messages.push_back("cosine: " + std::to_string(cosine));
+		error_messages.push_back("\n");
+		if (new_k_res.first != k_res.first)
+		{
+			if (cosine < 0.5)
+			{
+				best_pos = pos;
+				best_v1_pos = nearest_v1_pos;
+				best_v2_pos = nearest_v2_pos;
+
+				break;
+			}
+			else//find another nearest vertex but the angle is too small
+			{
+				if (count == 0)
+				{
+					// register the best position during exploration
+					best_pos = pos;
+					best_v1_pos = nearest_v1_pos;
+					best_v2_pos = nearest_v2_pos;
+					count++;
+					last_vertex = other_nearest_medial_vertex;
+				}
+				
+				//if the distance to the two closest points are continuously increasing for long time
+				//then we should stop
+				if (distance_to_new_nearest > last_distance_to_new_nearest &&
+					distance_to_nearest > last_distance_to_nearest && 
+					index_of(mesh, last_vertex) == index_of(mesh, other_nearest_medial_vertex))
+				{
+					if (count >= 50)
+					{
+						break;
+					}
+					count++;
+				}
+				else
+				{
+					count = 0;
+					best_pos = pos;
+					best_v1_pos = nearest_v1_pos;
+					best_v2_pos = nearest_v2_pos;
+					count++;
+				}
+				last_vertex = other_nearest_medial_vertex;
+				last_distance_to_nearest = distance_to_nearest;
+				last_distance_to_new_nearest = distance_to_new_nearest;
+				
+			}
+			if (iteration%10 == 0)
+			{
+				step *= 0.5;
+			}
+		}
+	} while (iteration < 100);
+	v2 = other_nearest_medial_vertex;
+	if (iteration >=100 || count>=50) 
+	{
+		flag = true;
+		for (auto& msg : error_messages)
+		{
+			std::cout << msg << std::endl;
+		}
+		std::cout << "no solution" << std::endl;
+		std::cout << "---------------------------------------------------" << std::endl;
+	}
+	else
+	{
+		std::cout << "iteration: " << iteration << ", cosine: " << cosine << std::endl;
+	}
+	error_messages.clear();
+	/ *ocillate between v1 and v2* /
+	iteration = 0;
+	dir *= -1; 
+	pos = best_pos;
+	distance_to_nearest = (best_v1_pos - pos).norm();
+	distance_to_new_nearest = (best_v2_pos - pos).norm();
+	bool compare = distance_to_nearest < distance_to_new_nearest;
+	bool new_compare;
+	do
+	{
+		iteration++;
+		distance_to_nearest = (best_v1_pos - pos).norm();
+		pos += step * dir;
+		distance_to_new_nearest = (best_v2_pos - pos).norm();
+		new_compare = distance_to_nearest < distance_to_new_nearest;
+		if (compare!= new_compare)
+		{
+			compare = new_compare;
+			dir *= -1;
+			step *= 0.1;	
+		}
+		error_messages.push_back("iteration : " + std::to_string(iteration));
+		error_messages.push_back("distance_to_nearest: " + std::to_string(distance_to_nearest) + ", " +
+								 "distance_to_new_nearest: " + std::to_string(distance_to_new_nearest));
+	} while (iteration<100 && std::fabs(distance_to_nearest - distance_to_new_nearest) > 1e-5);
+	if (iteration>=100 || flag)
+	{
+		std::cout << "no solution" << std::endl;
+		for (auto& msg : error_messages)
+		{
+			std::cout << msg << std::endl;
+		}
+		
+		std::cout << "---------------------------------------------------" << std::endl;
+	}
+	return {distance_to_nearest, v1, v2};
+	}*/
+
+	template <typename MESH>
+	std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH>::Vertex>
+	move_point_to_medial_axis(MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
+							  const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_normal,
+							  const std::vector<typename mesh_traits<MESH>::Vertex>& vertices, Vec3& pos,
+							  const acc::KDTree<3, uint32>* surface_kdt, const acc::KDTree<3, uint32>* medial_kdt,
+							  acc::BVHTree<uint32, Vec3>* surface_bvh)
+	{
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+	Scalar distance_to_nearest = 0;
+	Scalar distance_to_new_nearest = 0;
 	Vertex nearest_medial_vertex, other_nearest_medial_vertex;
 	Vec3 nearset_point_pos, new_nearest_point_pos;
 	Vec3 old_dir, new_dir;
+	std::vector<string> error_messages;
 	Scalar cosine;
-	Scalar step = 0.02;
+	Scalar step = 0.1;
 	bool found = false;
 	int iteration = 0;
-	do{
+	std::pair<uint32, Scalar> k_res;
+	std::pair<uint32, Scalar> new_k_res;
+	do
+	{
 		iteration++;
 		if (iteration > 200)
 		{
+			for (auto& msg : error_messages)
+			{
+				std::cout << msg << std::endl;
+			}
 			std::cout << "no solution" << std::endl;
+			std::cout << "---------------------------------------------------" << std::endl;
 			break;
 		}
 		nearset_point_pos = surface_bvh->closest_point(pos);
 		distance_to_nearest = (nearset_point_pos - pos).norm();
-		old_dir = (pos - nearset_point_pos)/*.normalized()*/;
-		std::pair<uint32, Scalar> k_res;
+		old_dir = (pos - nearset_point_pos) /*.normalized()*/;
 		found = surface_kdt->find_nn(nearset_point_pos, &k_res);
 		if (found)
 		{
@@ -343,9 +604,7 @@ template <typename MESH>
 			std::cout << "closest point not found !!!";
 		}
 		pos += step * old_dir;
-
 		new_nearest_point_pos = surface_bvh->closest_point(pos);
-		std::pair<uint32, Scalar> new_k_res;
 		found = surface_kdt->find_nn(new_nearest_point_pos, &new_k_res);
 		if (found)
 		{
@@ -356,39 +615,27 @@ template <typename MESH>
 			std::cout << "closest point not found !!!";
 		}
 		distance_to_new_nearest = (new_nearest_point_pos - pos).norm();
-		new_dir = (pos - new_nearest_point_pos)/*.normalized()*/;
-		cosine = old_dir.dot(new_dir) / new_dir.norm()/old_dir.norm();
-		/*if (cosine<0)
-		{
-			step *= 0.1;
-		}*/
-		if (new_k_res.first!= k_res.first)
+		new_dir = (pos - new_nearest_point_pos) /*.normalized()*/;
+		cosine = old_dir.dot(new_dir) / new_dir.norm() / old_dir.norm();
+		if (new_k_res.first != k_res.first)
 		{
 			step *= 0.1;
 		}
-		/*std::cout << "distance_to_nearest: " << distance_to_nearest << ", "
-				  << "distance_to_new_nearest: " << distance_to_new_nearest << std::endl;
+		error_messages.push_back("iteration : " + std::to_string(iteration));
+		error_messages.push_back("distance_to_nearest: " + std::to_string(distance_to_nearest) + ", " +
+								 "distance_to_new_nearest: " + std::to_string(distance_to_new_nearest));
+		error_messages.push_back("first nearest vertex: " + std::to_string(k_res.first) + ", " +
+								 "second nearest vertex: " + std::to_string(new_k_res.first));
+		error_messages.push_back("cosine: " + std::to_string(cosine));
+		error_messages.push_back("\n");
 		
-		std::cout << "cosine: " << cosine << ", iteration: "<<iteration
-				  << std::endl;
-		std::cout << "cosine2: " << old_dir.normalized().dot(value<Vec3>(mesh, vertex_normal, nearest_medial_vertex))
-				  << std::endl;*/
-	} while (/*cosine > 0||*/ 
+	} while (new_k_res.first == k_res.first ||
 			 std::fabs(distance_to_nearest - distance_to_new_nearest) > 1e-5);
-	std::pair<uint32, Scalar> k_res;
-	/*bool found = medial_kdt->find_nn(pos, &k_res);
-	if (!found)
-	{
-		std::cout << "Closest point not found !!!" << std::endl;
-		return {-1, nearest_medial_vertex};
+	//std::cout<<"iteration: "<<iteration<<", cosine: "<<cosine<<std::endl;
+	
+	return {distance_to_nearest, nearest_medial_vertex, other_nearest_medial_vertex};
 	}
-	nearest_medial_vertex = vertices[k_res.first];*/
-	//std::cout << "---------------------------------------------------" << std::endl;
-	return
-	{
-		distance_to_nearest, nearest_medial_vertex, other_nearest_medial_vertex};
-}
-} // namespace geometry
+	} // namespace geometry
 
 } // namespace cgogn
 
