@@ -31,7 +31,7 @@
 
 #include <array>
 #include <vector>
-#include <nlopt/src/api/nlopt.hpp>
+#include <nlopt.hpp>
 #include <libacc/bvh_tree.h>
 #include <libacc/kd_tree.h>
 
@@ -284,7 +284,7 @@ Scalar surface_medial_distance_variance(
 		Vec3 dir = vec.normalized();
 		/*Scalar cosine = value<Vec3>(m1, vertex_normal, v).dot(dir);*/
 		Scalar length = vec.norm() - median_sphere_radius;
-		Scalar distance = length * value<Scalar>(m1, weight, v);
+		Scalar distance = length /* value<Scalar>(m1, weight, v)*/;
 		dist.push_back(distance);
 		sum_dist += distance;
 		
@@ -300,7 +300,6 @@ Scalar surface_medial_distance_variance(
 	return variance / clusters_points.size();
 }
 
-/*
 template <typename MESH>
 std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH>::Vertex> non_linear_solver(
 	MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position, 
@@ -362,6 +361,7 @@ std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH
 		// 输出结果
 		std::cout << "Found maximum radius: " << max_r << " at position (" << x[0] << ", " << x[1] << ", " << x[2]
 				  << ")" << std::endl;
+		pos = Vec3(x[0], x[1], x[2]);
 		return std::make_tuple(max_r, vertices[0], vertices[1]);
 	}
 	catch (std::exception& e)
@@ -369,8 +369,7 @@ std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH
 		std::cerr << "NLopt failed: " << e.what() << std::endl;
 		return std::make_tuple(0.0, vertices[0], vertices[1]); // 失败时返回
 	}
-}*/
-
+}
 
 
 /*

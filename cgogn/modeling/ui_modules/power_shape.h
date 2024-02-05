@@ -2423,10 +2423,12 @@ private:
 
 				opti_coord = sum_coord / weight;
 				Vec3 original_coord = opti_coord;
-				
- 				 auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
+				auto [radius, v1, v2] = geometry::non_linear_solver(surface, sample_position.get(), sample_normal.get(),
+																	surface_kdt_vertices, opti_coord, surface_kdt.get(),
+																	medial_kdt.get(), surface_bvh.get());
+ 				/*auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
 					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, opti_coord,
-					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
+					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());*/
 				//PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v1).second;*/
 				/*SurfaceVertex v2 =
 					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v1)
@@ -2489,7 +2491,7 @@ private:
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
-					Scalar w = /*100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) +*/ 
+					Scalar w = 100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) + 
 						value<Scalar>(surface, medial_axis_samples_weight, sv1);
 					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * w;
 					weight += w;
@@ -2519,9 +2521,12 @@ private:
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
-					Scalar w = 100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) +
-							   100 * value<Scalar>(surface, medial_axis_samples_feature_value, sv1);
-					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * w;
+					/*Scalar w = 100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) +
+							   100 * value<Scalar>(surface, medial_axis_samples_feature_value, sv1);*/
+					Scalar w = value<Scalar>(surface, medial_axis_samples_weight, sv1) +
+							   value<Scalar>(surface, medial_axis_sample_radius_, sv1);
+					
+					sum_coord += value<Vec3>(surface, sample_position, sv1) * w;
 					weight += w;
 				}
 

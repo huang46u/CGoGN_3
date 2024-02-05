@@ -69,12 +69,13 @@ target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC
 
 target_include_directories(${PROJECT_NAME} PUBLIC
 	$<BUILD_INTERFACE:${CMAKE_BINARY_DIR}>
+	$<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/thirdparty/nlopt>
 	$<BUILD_INTERFACE:${CGOGN_SOURCE_DIR}>
 	$<BUILD_INTERFACE:${EIGEN3_INCLUDE_DIR}>
 	$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
-target_link_libraries(${PROJECT_NAME} cgogn::core Eigen3::Eigen)
+target_link_libraries(${PROJECT_NAME} PUBLIC cgogn::core Eigen3::Eigen nlopt)
 
 # Write out cgogn_geometry_export.h to the current binary directory
 generate_export_header(${PROJECT_NAME})
