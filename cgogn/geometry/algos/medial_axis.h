@@ -34,7 +34,7 @@
 #include <nlopt.hpp>
 #include <libacc/bvh_tree.h>
 #include <libacc/kd_tree.h>
-
+#include <autodiff/autodiff/forward/real.hpp>
 namespace cgogn
 {
 
@@ -300,6 +300,27 @@ Scalar surface_medial_distance_variance(
 	return variance / clusters_points.size();
 }
 
+/*
+using real = autodiff::real;
+real varianceFunction(const std::vector<real>& x, const std::vector<std::vector<real>>& P)
+{
+	real sumDistances = 0;
+	real sumDistancesSquared = 0;
+	int N = P.size();
+
+	for (const auto& p : P)
+	{
+		real distance = sqrt(pow(x[0] - p[0], 2) + pow(x[1] - p[1], 2) + pow(x[2] - p[2], 2));
+		sumDistances += distance;
+		sumDistancesSquared += distance * distance;
+	}
+
+	real meanDistance = sumDistances / N;
+	real variance = (sumDistancesSquared / N) - pow(meanDistance, 2);
+
+	return variance;
+}*/
+
 template <typename MESH>
 std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH>::Vertex> non_linear_solver(
 	MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position, 
@@ -308,53 +329,77 @@ std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH
 	const acc::KDTree<3, uint32>* surface_kdt, const acc::KDTree<3, uint32>* medial_kdt,
 	acc::BVHTree<uint32, Vec3>* surface_bvh)
 {
-	using Vertex = typename mesh_traits<MESH>::Vertex;
-	auto objective = [](const std::vector<double>& x, std::vector<double>& grad, void* data) -> double { return x[3]; };
-	
-	nlopt::opt opt(nlopt::LN_COBYLA, 4);
-
-	opt.set_min_objective(objective, nullptr);
-
-	struct ConstraintData
+	struct OptimizationData
 	{
 		const MESH* mesh;
 		const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position;
 		std::vector<typename mesh_traits<MESH>::Vertex> vertices;
 	};
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+
+	auto objective = [](const std::vector<double>& x, std::vector<double>& grad, void* data) -> double { 
+		auto *optData = reinterpret_cast<OptimizationData*>(data);
+		double mu = 0;
+		std::vector<double> distances;
+
+		// compute the mean distance to the sphere center
+		for (const auto& v : optData->vertices)
+		{
+			Vec3 position = value<Vec3>(*optData->mesh, optData->vertex_position, v);
+			double distance = std::sqrt(std::pow(position.x() - x[0], 2) + std::pow(position.y() - x[1], 2) +
+										std::pow(position.z() - x[2], 2)) - x[3];
+			distances.push_back(distance);
+			mu += distance;
+		}
+		mu /= optData->vertices.size();
+		
+		// compute variance
+		double variance = 0;
+		for (const auto& distance : distances)
+		{
+			variance += std::pow(distance - mu, 2);
+		}
+		variance /= distances.size();
+		/*std::cout << "current position: " << x[0] << ", " << x[1] << ", " << x[2] << ", "
+				  << "current radius" << x[3] << std::endl;
+		std::cout << "current variance: " << variance << std::endl;*/
+		return variance;
+	}; 
+	
+	nlopt::opt opt(nlopt::LN_COBYLA, 4);
+	OptimizationData data;
+	data.mesh = &mesh;
+	data.vertex_position = vertex_position;
+	data.vertices = vertices;
+	opt.set_min_objective(objective, &data);
 
 	auto constraint = [](const std::vector<double>& x, std::vector<double>& grad, void* data) -> double {
-		ConstraintData* constraintData = static_cast<ConstraintData*>(data);
+		OptimizationData* constraintData = reinterpret_cast<OptimizationData*>(data);
 
 		Vec3 center(x[0], x[1], x[2]); // 球心位置
 		double r = x[3];			   // 球半径
 
-		double minDistance = std::numeric_limits<double>::max(); // 初始化最小距离为最大值
+		double minDistance = std::numeric_limits<double>::max();
 
 		
 		for (const auto& v : constraintData->vertices)
 		{
 			Vec3 position = value<Vec3>(*constraintData->mesh, constraintData->vertex_position, v);
 			double distance = (position - center).norm();
-			minDistance = std::min(minDistance, distance); // 更新最小距离
+			minDistance = std::min(minDistance, distance); 
 		}
-		return minDistance - r;
+		return r - minDistance;
 	};
-
-	// 当你添加约束到NLopt优化器时，确保正确传递ConstraintData结构体实例
-	ConstraintData data;
-	data.mesh = &mesh;
-	data.vertex_position = vertex_position;
-	data.vertices = vertices;
-	opt.add_inequality_constraint(constraint, &data, 1e-8);
-
 	
-	opt.set_xtol_rel(1e-4);
-
-	std::vector<double> x = {pos.x(), pos.y(), pos.z(), 1};  
+	opt.add_inequality_constraint(constraint, &data, 1e-8);
+	opt.set_maxtime(0.0001);
+		
+	std::vector<double> x = {pos.x(), pos.y(), pos.z(), 0.1};  
 	double max_r;				   
 
 	try
 	{
+		std::cout << "start optimization"<<std::endl;
 		// 运行优化
 		nlopt::result result = opt.optimize(x, max_r);
 
