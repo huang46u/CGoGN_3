@@ -34,7 +34,7 @@
 #include <nlopt.hpp>
 #include <libacc/bvh_tree.h>
 #include <libacc/kd_tree.h>
-#include <autodiff/autodiff/forward/real.hpp>
+
 namespace cgogn
 {
 

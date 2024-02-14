@@ -2738,7 +2738,43 @@ private:
 
 				break;
 			}
-			
+			case 7: {
+
+				Vec3 current_center = value<Vec3>(clusters, cluster_position, pv);
+				Vec3 opt_coord = current_center;
+				Vec3 new_coord;
+				uint32 iteration = 0;
+				Scalar radius = value<Scalar>(clusters, clusters_radius, pv);
+				Eigen::Vector3d f;
+				Eigen::Matrix3d H;
+				do
+				{
+					iteration++;
+					current_center = opt_coord;
+					f.setZero();
+					H.setZero();
+					Eigen::Matrix3d I = Eigen::Matrix3d::Identity(3, 3);
+					for (SurfaceVertex sv1 : cf.cluster_vertices)
+					{
+						Vec3 x01 = value<Vec3>(surface, sample_position, sv1) - opt_coord;
+						Scalar norm = x01.norm();
+						Vec3 x01_normalised = x01.normalized();
+
+						f += 2*(norm - radius) * x01_normalised;
+						Eigen::Matrix3d x01_m = x01 * x01.transpose() / (norm * norm);
+						H += 2*x01_m + 2*(1 - radius / norm) * (I - x01_m);
+					}
+					
+					// Newtons method
+					new_coord = opt_coord - H.inverse() * f;
+					opt_coord = new_coord;
+					std::cout << "old_coord: " << current_center.x() << ", " << current_center.y() << ", "
+							  << current_center.z()<<", new_coord: " << new_coord.x() << ", " << new_coord.y() <<", " << new_coord.z() <<std::endl;
+				} while (iteration <20 && (new_coord - current_center).norm() > 1e-4);
+				std::cout << "------------------------------------------------" << std::endl;
+				value<Vec3>(clusters, cluster_position, pv) = opt_coord;
+				break;
+			}
 			default:
 				break;
 			}
@@ -3236,6 +3272,12 @@ private:
 				if (ImGui::Button("Update Cluster by minimum enclosing ball of medial points"))
 				{
 					clustering_mode = 6;
+					for (uint32 i = 0; i < update_times; i++)
+						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
+				}
+				if (ImGui::Button("Non linear optimization"))
+				{
+					clustering_mode = 7;
 					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
