@@ -323,11 +323,9 @@ real varianceFunction(const std::vector<real>& x, const std::vector<std::vector<
 
 template <typename MESH>
 std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH>::Vertex> non_linear_solver(
-	MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position, 
+	MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
 	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_normal,
-	const std::vector<typename mesh_traits<MESH>::Vertex>& vertices, Vec3& pos,
-	const acc::KDTree<3, uint32>* surface_kdt, const acc::KDTree<3, uint32>* medial_kdt,
-	acc::BVHTree<uint32, Vec3>* surface_bvh)
+	const std::vector<typename mesh_traits<MESH>::Vertex>& vertices, Vec3& pos, Scalar radius)
 {
 	struct OptimizationData
 	{
@@ -335,38 +333,49 @@ std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH
 		const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position;
 		std::vector<typename mesh_traits<MESH>::Vertex> vertices;
 	};
+	/*struct ConstraintData
+	{
+		const MESH* mesh;
+		const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position;
+		const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position;
+		typename mesh_traits<MESH>::Vertex v;
+		
+	};*/
 	using Vertex = typename mesh_traits<MESH>::Vertex;
 
 	auto objective = [](const std::vector<double>& x, std::vector<double>& grad, void* data) -> double { 
 		auto *optData = reinterpret_cast<OptimizationData*>(data);
-		double mu = 0;
-		std::vector<double> distances;
-
+		double energy = 0;
+		Vec3 f;
+		f.setZero();
+		Scalar dEdr = 0;
 		// compute the mean distance to the sphere center
 		for (const auto& v : optData->vertices)
 		{
 			Vec3 position = value<Vec3>(*optData->mesh, optData->vertex_position, v);
-			double distance = std::sqrt(std::pow(position.x() - x[0], 2) + std::pow(position.y() - x[1], 2) +
-										std::pow(position.z() - x[2], 2)) - x[3];
-			distances.push_back(distance);
-			mu += distance;
+			double distance = (position - Vec3(x[0], x[1], x[2])).norm() - x[3];	
+			energy += distance * distance;
+			//compute gradient
+			Vec3 x01 = value<Vec3>(*optData->mesh, optData->vertex_position, v) - Vec3(x[0], x[1], x[2]);
+			Scalar norm = x01.norm();
+			Vec3 x01_normalised = x01.normalized();
+			f -= 2 * (norm - x[3]) * x01_normalised;
+			dEdr -= 2 * (norm - x[3]);
 		}
-		mu /= optData->vertices.size();
-		
-		// compute variance
-		double variance = 0;
-		for (const auto& distance : distances)
+		if (!grad.empty())
 		{
-			variance += std::pow(distance - mu, 2);
+			grad[0] = f.x();
+			grad[1] = f.y();
+			grad[2] = f.z();
+			grad[3] = dEdr;
 		}
-		variance /= distances.size();
 		/*std::cout << "current position: " << x[0] << ", " << x[1] << ", " << x[2] << ", "
-				  << "current radius" << x[3] << std::endl;
-		std::cout << "current variance: " << variance << std::endl;*/
-		return variance;
+				  << "current radius" << x[3] << std::endl;*/
+		std::cout << "current energy: " << energy << std::endl;
+		return energy;
 	}; 
 	
-	nlopt::opt opt(nlopt::LN_COBYLA, 4);
+	nlopt::opt opt(nlopt::LD_SLSQP, 4);
 	OptimizationData data;
 	data.mesh = &mesh;
 	data.vertex_position = vertex_position;
@@ -381,33 +390,45 @@ std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH
 
 		double minDistance = std::numeric_limits<double>::max();
 
-		
+		Vec3 cloest_vertex;
 		for (const auto& v : constraintData->vertices)
 		{
 			Vec3 position = value<Vec3>(*constraintData->mesh, constraintData->vertex_position, v);
 			double distance = (position - center).norm();
-			minDistance = std::min(minDistance, distance); 
+			if (distance < minDistance)
+			{
+				minDistance = distance;
+				cloest_vertex = position;
+			}
+		}
+		if (!grad.empty())
+		{
+			Vec3 gradient = (cloest_vertex - center).normalized();
+			grad[0] = -gradient.x();
+			grad[1] = -gradient.y();
+			grad[2] = -gradient.z();
+			grad[3] = 1;
 		}
 		return r - minDistance;
 	};
 	
 	opt.add_inequality_constraint(constraint, &data, 1e-8);
-	opt.set_maxtime(0.0001);
+	opt.set_ftol_rel(1e-4);
 		
-	std::vector<double> x = {pos.x(), pos.y(), pos.z(), 0.1};  
-	double max_r;				   
+	std::vector<double> x = {pos.x(), pos.y(), pos.z(), radius};  
+	double min_f;				   
 
 	try
 	{
 		std::cout << "start optimization"<<std::endl;
 		// 运行优化
-		nlopt::result result = opt.optimize(x, max_r);
+		nlopt::result result = opt.optimize(x, min_f);
 
 		// 输出结果
-		std::cout << "Found maximum radius: " << max_r << " at position (" << x[0] << ", " << x[1] << ", " << x[2]
-				  << ")" << std::endl;
+		std::cout << "Found maximum radius: " << x[3] << " at position (" << x[0] << ", " << x[1] << ", " << x[2] << ")"
+				  << "with min energy:" << min_f<< std::endl;
 		pos = Vec3(x[0], x[1], x[2]);
-		return std::make_tuple(max_r, vertices[0], vertices[1]);
+		return std::make_tuple(x[3], vertices[0], vertices[1]);
 	}
 	catch (std::exception& e)
 	{

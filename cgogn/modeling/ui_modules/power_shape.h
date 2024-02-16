@@ -2332,13 +2332,14 @@ private:
 			value<Cluster_Info>(clusters, clusters_infos, pv).cluster_vertices.clear();
 			return true;
 		});
-		/*foreach_cell(clusters, [&](PointVertex pv) {
+		foreach_cell(clusters, [&](PointVertex pv) {
 			Cluster_Info& cf = value<Cluster_Info>(clusters, clusters_infos, pv);
 			foreach_cell(surface, [&](SurfaceVertex sv) {
 				Vec3& sphere_center = value<Vec3>(clusters, cluster_positions, pv);
 				Vec3& pos = value<Vec3>(surface, sample_position, sv);
 				Scalar distance = (pos - sphere_center).norm() - value<Scalar>(clusters, cluster_radius, pv);
-				if (cluster_marker.is_marked(sv)) {
+				if (cluster_marker.is_marked(sv))
+				{
 					if (distance < value<Scalar>(surface, distance_to_cluster, sv))
 					{
 						value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv) =
@@ -2352,7 +2353,8 @@ private:
 							.insert(value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv));
 					}
 				}
-				else {
+				else
+				{
 					value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv) =
 						std::make_pair(index_of(clusters, pv), pv);
 					value<Vec3>(surface, vertex_cluster_color, sv) = value<Vec3>(clusters, cluster_color, pv);
@@ -2360,12 +2362,11 @@ private:
 					cluster_marker.mark(sv);
 				}
 				return true;
-				});
-
+			});
 
 			return true;
-			});*/
-		 foreach_cell(clusters, [&](PointVertex pv) {
+		});
+		 /*foreach_cell(clusters, [&](PointVertex pv) {
 			Cluster_Info& cf = value<Cluster_Info>(clusters, clusters_infos, pv);
 
 			auto [v1, v2] = value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv);
@@ -2466,7 +2467,7 @@ private:
 				return true;
 			});
 		}
-
+	   */
 		foreach_cell(surface, [&](SurfaceVertex sv) { 
 			std::pair<uint32, PointVertex>&cluster_info = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv);
 			PointVertex cluster_point = cluster_info.second;
@@ -2483,11 +2484,24 @@ private:
 			}
 			return true;
 		});
-		for (PointVertex& sv : clusters_to_remove)
-		{
-			std::cout << "delete cluster" << index_of(clusters, sv) << std::endl;
-			remove_vertex(clusters, sv);
-		}
+// 		/*for (PointVertex& sv : clusters_to_remove)
+// 		{
+// 			std::cout << "delete cluster" << index_of(clusters, sv) << std::endl;
+// 			remove_vertex(clusters, sv);
+// 		}*/
+		
+		foreach_cell(clusters, [&](PointVertex pv) {
+			Scalar cluster_error = 0;
+			Cluster_Info& cf = value<Cluster_Info>(clusters, clusters_infos, pv);
+			for (SurfaceVertex sv:cf.cluster_vertices)
+			{
+				cluster_error +=
+					value<Scalar>(surface, distance_to_cluster, sv) * value<Scalar>(surface, distance_to_cluster, sv);
+			}
+			std::cout << "Cluster " << index_of(clusters, pv) << " distance: " << cluster_error << std::endl;
+			return true;
+
+			});
 		Scalar error = 0;
 		foreach_cell(surface, [&](SurfaceVertex sv) { 
 			error += value<Scalar>(surface, distance_to_cluster, sv);
@@ -2538,7 +2552,7 @@ private:
 			switch (clustering_mode)
 			{
 			case 0: {
-				Vec3 sum_coord = Vec3(0, 0, 0);
+				/*Vec3 sum_coord = Vec3(0, 0, 0);
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
@@ -2548,10 +2562,14 @@ private:
 				}
 
 				opti_coord = sum_coord / weight;
-				Vec3 original_coord = opti_coord;
+				Vec3 original_coord = opti_coord;*/
+				
+				opti_coord = value<Vec3>(clusters, cluster_position, pv);
+				std::cout << "before optimization" << opti_coord.x() << " " << opti_coord.y() << " " << opti_coord.z()
+						  << std::endl;
 				auto [radius, v1, v2] = geometry::non_linear_solver(surface, sample_position.get(), sample_normal.get(),
-																	cf.cluster_vertices, opti_coord, surface_kdt.get(),
-																	medial_kdt.get(), surface_bvh.get());
+																	cf.cluster_vertices, opti_coord,
+																	value<Scalar>(clusters, clusters_radius, pv));
  				/*auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
 					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, opti_coord,
 					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());*/
@@ -2760,7 +2778,7 @@ private:
 						Scalar norm = x01.norm();
 						Vec3 x01_normalised = x01.normalized();
 
-						f += 2*(norm - radius) * x01_normalised;
+						f -= 2*(norm - radius) * x01_normalised;
 						Eigen::Matrix3d x01_m = x01 * x01.transpose() / (norm * norm);
 						H += 2*x01_m + 2*(1 - radius / norm) * (I - x01_m);
 					}
@@ -3227,7 +3245,7 @@ private:
 			if (ImGui::Button("Twin point"))
 				Twin_medial_axis_samples(*selected_surface_mesh_);
 			if (ImGui::Button("Initialise Cluster"))
-				iniialise_cluster2(*selected_surface_mesh_);
+				iniialise_cluster(*selected_surface_mesh_);
 			if (selected_clusters)
 			{
 				ImGui::SliderInt("Update time", &(int)update_times, 1, 100);
