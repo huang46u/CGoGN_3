@@ -2484,13 +2484,13 @@ private:
 			}
 			return true;
 		});
-// 		/*for (PointVertex& sv : clusters_to_remove)
-// 		{
-// 			std::cout << "delete cluster" << index_of(clusters, sv) << std::endl;
-// 			remove_vertex(clusters, sv);
-// 		}*/
+		for (PointVertex& sv : clusters_to_remove)
+		{
+			std::cout << "delete cluster" << index_of(clusters, sv) << std::endl;
+			remove_vertex(clusters, sv);
+		}
 		
-		foreach_cell(clusters, [&](PointVertex pv) {
+		/*foreach_cell(clusters, [&](PointVertex pv) {
 			Scalar cluster_error = 0;
 			Cluster_Info& cf = value<Cluster_Info>(clusters, clusters_infos, pv);
 			for (SurfaceVertex sv:cf.cluster_vertices)
@@ -2501,7 +2501,7 @@ private:
 			std::cout << "Cluster " << index_of(clusters, pv) << " distance: " << cluster_error << std::endl;
 			return true;
 
-			});
+			});*/
 		Scalar error = 0;
 		foreach_cell(surface, [&](SurfaceVertex sv) { 
 			error += value<Scalar>(surface, distance_to_cluster, sv);
@@ -2552,7 +2552,7 @@ private:
 			switch (clustering_mode)
 			{
 			case 0: {
-				/*Vec3 sum_coord = Vec3(0, 0, 0);
+				Vec3 sum_coord = Vec3(0, 0, 0);
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
@@ -2562,17 +2562,18 @@ private:
 				}
 
 				opti_coord = sum_coord / weight;
-				Vec3 original_coord = opti_coord;*/
+				Vec3 original_coord = opti_coord;
 				
-				opti_coord = value<Vec3>(clusters, cluster_position, pv);
-				std::cout << "before optimization" << opti_coord.x() << " " << opti_coord.y() << " " << opti_coord.z()
-						  << std::endl;
-				auto [radius, v1, v2] = geometry::non_linear_solver(surface, sample_position.get(), sample_normal.get(),
+				//opti_coord = value<Vec3>(clusters, cluster_position, pv);
+				/* std::cout << "before optimization" << opti_coord.x() << " " << opti_coord.y() << " "
+							   << opti_coord.z()
+						  << std::endl;*/
+				/*auto [radius, v1, v2] = geometry::non_linear_solver(surface, sample_position.get(), sample_normal.get(),
 																	cf.cluster_vertices, opti_coord,
-																	value<Scalar>(clusters, clusters_radius, pv));
- 				/*auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
+																	value<Scalar>(clusters, clusters_radius, pv));*/
+				auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
 					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, opti_coord,
-					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());*/
+					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
 				//PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v1).second;*/
 				/*SurfaceVertex v2 =
 					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v1)
@@ -2580,11 +2581,11 @@ private:
 				//std::cout << "cloest medial vertex index: " << index_of(surface, v) << std::endl;
 				/*auto [v1, v2] =
 					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v);*/
-				/*value<Vec3>(surface, cloest_point_color, v1) = value<Vec3>(clusters, cluster_color, pv);
-				value<Vec3>(surface, cloest_point_color, v2) = value<Vec3>(clusters, cluster_color, pv);*/
+				value<Vec3>(surface, cloest_point_color, v1) = value<Vec3>(clusters, cluster_color, pv);
+				value<Vec3>(surface, cloest_point_color, v2) = value<Vec3>(clusters, cluster_color, pv);
 				value<Vec3>(clusters, cluster_position, pv) = opti_coord;
 				value<Scalar>(clusters, clusters_radius, pv) = radius;
-				//value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv) = {v1, v2};
+				value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv) = {v1, v2};
 				
 			}
 			break;
@@ -2800,7 +2801,7 @@ private:
 			
 			return true;
 		});
-		//assign_cluster(surface, clusters);
+		assign_cluster(surface, clusters);
 		point_provider_->emit_connectivity_changed(clusters);
 		surface_provider_->emit_attribute_changed(surface, cloest_point_color.get());
 		point_provider_->emit_attribute_changed(clusters, cluster_position.get());

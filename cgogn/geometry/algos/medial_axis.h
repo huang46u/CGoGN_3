@@ -371,11 +371,11 @@ std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH
 		}
 		/*std::cout << "current position: " << x[0] << ", " << x[1] << ", " << x[2] << ", "
 				  << "current radius" << x[3] << std::endl;*/
-		std::cout << "current energy: " << energy << std::endl;
+		//std::cout << "current energy: " << energy << std::endl;
 		return energy;
 	}; 
 	
-	nlopt::opt opt(nlopt::LD_SLSQP, 4);
+	nlopt::opt opt(nlopt::GN_AGS, 4);
 	OptimizationData data;
 	data.mesh = &mesh;
 	data.vertex_position = vertex_position;
@@ -413,22 +413,22 @@ std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH
 	};
 	
 	opt.add_inequality_constraint(constraint, &data, 1e-8);
-	opt.set_ftol_rel(1e-4);
+	opt.set_ftol_rel(1e-5);
+	opt.set_upper_bounds({1,1,1,0.3});
 		
 	std::vector<double> x = {pos.x(), pos.y(), pos.z(), radius};  
 	double min_f;				   
 
 	try
 	{
-		std::cout << "start optimization"<<std::endl;
-		// 运行优化
 		nlopt::result result = opt.optimize(x, min_f);
 
 		// 输出结果
-		std::cout << "Found maximum radius: " << x[3] << " at position (" << x[0] << ", " << x[1] << ", " << x[2] << ")"
-				  << "with min energy:" << min_f<< std::endl;
+		std::cout << "after optimization: " << x[0] << ", " << x[1] << ", " << x[2] << 
+				  ", with min energy:" << min_f<< std::endl;
 		pos = Vec3(x[0], x[1], x[2]);
 		return std::make_tuple(x[3], vertices[0], vertices[1]);
+
 	}
 	catch (std::exception& e)
 	{
@@ -438,7 +438,8 @@ std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH
 }
 
 
-/*
+
+
 template <typename MESH>
 	std::tuple < Scalar, 
 		typename mesh_traits<MESH>::Vertex,
@@ -584,7 +585,7 @@ template <typename MESH>
 		std::cout << "iteration: " << iteration << ", cosine: " << cosine << std::endl;
 	}
 	error_messages.clear();
-	/ *ocillate between v1 and v2* /
+	/*ocillate between v1 and v2*/
 	iteration = 0;
 	dir *= -1; 
 	pos = best_pos;
@@ -620,9 +621,9 @@ template <typename MESH>
 		std::cout << "---------------------------------------------------" << std::endl;
 	}
 	return {distance_to_nearest, v1, v2};
-	}*/
+	}
 
-	template <typename MESH>
+	/*template <typename MESH>
 	std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH>::Vertex>
 	move_point_to_medial_axis(MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
 							  const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_normal,
@@ -658,7 +659,7 @@ template <typename MESH>
 		}
 		nearset_point_pos = surface_bvh->closest_point(pos);
 		distance_to_nearest = (nearset_point_pos - pos).norm();
-		old_dir = (pos - nearset_point_pos) /*.normalized()*/;
+		old_dir = (pos - nearset_point_pos) / *.normalized()* /;
 		found = surface_kdt->find_nn(nearset_point_pos, &k_res);
 		if (found)
 		{
@@ -680,12 +681,13 @@ template <typename MESH>
 			std::cout << "closest point not found !!!";
 		}
 		distance_to_new_nearest = (new_nearest_point_pos - pos).norm();
-		new_dir = (pos - new_nearest_point_pos) /*.normalized()*/;
+		new_dir = (pos - new_nearest_point_pos) / *.normalized()* /;
 		cosine = old_dir.dot(new_dir) / new_dir.norm() / old_dir.norm();
 		if (new_k_res.first != k_res.first)
 		{
-			step *= 0.1;
+			step *= 0.95;
 		}
+		
 		error_messages.push_back("iteration : " + std::to_string(iteration));
 		error_messages.push_back("distance_to_nearest: " + std::to_string(distance_to_nearest) + ", " +
 								 "distance_to_new_nearest: " + std::to_string(distance_to_new_nearest));
@@ -695,11 +697,11 @@ template <typename MESH>
 		error_messages.push_back("\n");
 		
 	} while (new_k_res.first == k_res.first ||
-			 std::fabs(distance_to_nearest - distance_to_new_nearest) > 1e-5);
+			 std::fabs(distance_to_nearest - distance_to_new_nearest) > 5e-5 || cosine>0.5);
 	//std::cout<<"iteration: "<<iteration<<", cosine: "<<cosine<<std::endl;
 	
 	return {distance_to_nearest, nearest_medial_vertex, other_nearest_medial_vertex};
-	}
+	}*/
 	} // namespace geometry
 
 } // namespace cgogn
