@@ -2045,7 +2045,6 @@ private:
 			return true;
 			});
 		uint32 nb_faces = nb_cells<SurfaceFace>(surface);
-		std::vector<SurfaceFace> bvh_faces;
 		bvh_faces.reserve(nb_faces);
 		std::vector<uint32> face_vertex_indices;
 		face_vertex_indices.reserve(nb_faces * 3);
@@ -2552,7 +2551,7 @@ private:
 			switch (clustering_mode)
 			{
 			case 0: {
-				Vec3 sum_coord = Vec3(0, 0, 0);
+				/*Vec3 sum_coord = Vec3(0, 0, 0);
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
@@ -2562,18 +2561,18 @@ private:
 				}
 
 				opti_coord = sum_coord / weight;
-				Vec3 original_coord = opti_coord;
+				Vec3 original_coord = opti_coord;*/
 				
-				//opti_coord = value<Vec3>(clusters, cluster_position, pv);
-				/* std::cout << "before optimization" << opti_coord.x() << " " << opti_coord.y() << " "
+				opti_coord = value<Vec3>(clusters, cluster_position, pv);
+				 std::cout << "before optimization" << opti_coord.x() << " " << opti_coord.y() << " "
 							   << opti_coord.z()
-						  << std::endl;*/
-				/*auto [radius, v1, v2] = geometry::non_linear_solver(surface, sample_position.get(), sample_normal.get(),
+						  << std::endl;
+				auto [radius, v1, v2] = geometry::non_linear_solver(surface, sample_position.get(), sample_normal.get(),
 																	cf.cluster_vertices, opti_coord,
-																	value<Scalar>(clusters, clusters_radius, pv));*/
-				auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
-					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, opti_coord,
-					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
+																	value<Scalar>(clusters, clusters_radius, pv));
+				/*auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
+					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices,bvh_faces, opti_coord,
+					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());*/
 				//PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v1).second;*/
 				/*SurfaceVertex v2 =
 					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v1)
@@ -2581,11 +2580,11 @@ private:
 				//std::cout << "cloest medial vertex index: " << index_of(surface, v) << std::endl;
 				/*auto [v1, v2] =
 					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v);*/
-				value<Vec3>(surface, cloest_point_color, v1) = value<Vec3>(clusters, cluster_color, pv);
-				value<Vec3>(surface, cloest_point_color, v2) = value<Vec3>(clusters, cluster_color, pv);
+				/*value<Vec3>(surface, cloest_point_color, v1) = value<Vec3>(clusters, cluster_color, pv);
+				value<Vec3>(surface, cloest_point_color, v2) = value<Vec3>(clusters, cluster_color, pv);*/
 				value<Vec3>(clusters, cluster_position, pv) = opti_coord;
 				value<Scalar>(clusters, clusters_radius, pv) = radius;
-				value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv) = {v1, v2};
+				/*value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv) = {v1, v2};*/
 				
 			}
 			break;
@@ -2602,7 +2601,7 @@ private:
 				opti_coord = sum_coord / weight;
 				Vec3 original_coord = opti_coord;
 				auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
-					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, opti_coord,
+					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, bvh_faces, opti_coord, 
 					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
 				// PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v1).second;*/
 				/*SurfaceVertex v2 =
@@ -2622,7 +2621,7 @@ private:
 				auto [center, r] = sphere_fitting_algo(surface, cf.cluster_vertices);
 				
 				auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
-					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, center,
+					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, bvh_faces, center,
 					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
 				value<Vec3>(surface, cloest_point_color, v1) = value<Vec3>(clusters, cluster_color, pv);
 				value<Vec3>(surface, cloest_point_color, v2) = value<Vec3>(clusters, cluster_color, pv);
@@ -2644,8 +2643,9 @@ private:
 
 				opti_coord = sum_coord / weight;
 				Vec3 original_coord = opti_coord;
-				auto [radius, v1,v2] = geometry::move_point_to_medial_axis(
-					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, opti_coord,
+				auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
+					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, bvh_faces,
+					opti_coord,
 					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
 				//PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v1).second;
 				/*SurfaceVertex v2 =
@@ -2678,7 +2678,7 @@ private:
 				opti_coord = sum_coord / weight;
 				Vec3 original_coord = opti_coord;
 				auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
-					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, opti_coord,
+					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, bvh_faces, opti_coord,
 					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
 				PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v1).second;
 				/*SurfaceVertex v2 =
@@ -2714,7 +2714,8 @@ private:
 				opti_coord = Vec3(coord[0], coord[1], coord[2]);
 				K::FT radius = min_sphere.radius();
 				auto [r, v1, v2] = geometry::move_point_to_medial_axis(
-					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, opti_coord,
+					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, bvh_faces,
+					 opti_coord,
 					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
 				/*auto [v1, v2] =
 					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v);*/
@@ -2745,7 +2746,7 @@ private:
 				opti_coord = Vec3(coord[0], coord[1], coord[2]);
 				K::FT radius = min_sphere.radius();
 				auto [r, v1, v2] = geometry::move_point_to_medial_axis(
-					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, opti_coord,
+					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, bvh_faces, opti_coord,
 					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
 				/*auto [v1, v2] =
 					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v);*/
@@ -2794,6 +2795,31 @@ private:
 				value<Vec3>(clusters, cluster_position, pv) = opt_coord;
 				break;
 			}
+			case 8: {
+				Vec4 opti_sphere;
+				/*	std::cout << "cluster " << index_of(clusters, svc) << std::endl;*/
+				bool find_optimal = sqem_helper->optimal_sphere(cf.cluster_vertices, opti_sphere);
+				// std::cout << opti_sphere << std::endl;
+				// std::cout << find_optimal << std::endl;
+				if (find_optimal)
+				{
+					std::cout << "opti_sphere radius: " << opti_sphere[3] << std::endl;
+					Vec3 pos = Vec3(opti_sphere[0], opti_sphere[1], opti_sphere[2]);
+					/*auto [radius, v1, v2] =
+						geometry::move_point_to_medial_axis(surface, sample_position.get(), sample_normal.get(),
+															surface_kdt_vertices, pos, surface_kdt.get());*/
+					value<Vec3>(clusters, cluster_position, pv) = pos;
+					value<Scalar>(clusters, clusters_radius, pv) = opti_sphere[3];
+					//value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, svc) = {v1, v2};
+					/*value<Vec3>(clusters, cluster_position, svc) = pos;
+					value<Scalar>(clusters, clusters_radius, svc) = opti_sphere[3];*/
+					break;
+				}
+				else
+				{
+					std::cout << "can't find optimal sphere" << std::endl;
+				}
+			}
 			default:
 				break;
 			}
@@ -2837,6 +2863,7 @@ private:
 			});
 			return true;
 		});
+		
 		surface_bvh = std::make_unique<acc::BVHTree<uint32, Vec3>>(face_vertex_indices, surface_vertex_position_vector);
 		surface_kdt = std::make_unique<acc::KDTree<3, uint32>>(surface_vertex_position_vector);
 		Vec4 opt_sphere = Vec4(0,0,0,0);
@@ -2908,37 +2935,32 @@ private:
 				{
 					Vec3 pos1 = value<Vec3>(surface, medial_axis_samples_position_, v1);
 					Vec3 pos2 = value<Vec3>(surface, medial_axis_samples_position_, v2);
-					auto [r1, v3, v4 ] = geometry::move_point_to_medial_axis(
-						surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, pos1,
-						surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
-					auto [r2, v5, v6] = geometry::move_point_to_medial_axis(
-						surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, pos2,
-						surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
 					value<Vec3>(clusters, cluster_position, pv) = pos1;
-					value<Scalar>(clusters, clusters_radius, pv) = r1;
-					value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, pv) = {v3, v4};
+					value<Scalar>(clusters, clusters_radius, pv) = value<Scalar>(surface, medial_axis_sample_radius_, v1);
 					
 					PointVertex new_cluster = add_vertex(clusters);
 					value<Vec3>(clusters, cluster_position, new_cluster) = pos2;
-					value<Scalar>(clusters, clusters_radius, new_cluster) = r2;
-					value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, new_cluster) = {v5,
-																													v6};
+					value<Scalar>(clusters, clusters_radius, new_cluster) =
+						value<Scalar>(surface, medial_axis_sample_radius_, v2);
+					
+					
+					value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, new_cluster) =
+						value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points_, v2);
 					value<Vec3>(clusters, cluster_color, new_cluster) =
 						Vec3(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX);
 					
 					split = true;
-				
 				}
 				
 				return true;
 			});
 			struct CompareScalar
 			{
-			bool operator()(const std::pair<PointVertex, Scalar>& a, const std::pair<PointVertex, Scalar>& b)
-			{
-				// Assuming higher variance is given higher priority
-				return a.second < b.second;
-			}
+				bool operator()(const std::pair<PointVertex, Scalar>& a, const std::pair<PointVertex, Scalar>& b)
+				{
+					// Assuming higher variance is given higher priority
+					return a.second < b.second;
+				}
 			};
 			std::priority_queue<std::pair<PointVertex, Scalar>, 
 				std::vector<std::pair<PointVertex, Scalar>>,
@@ -3022,23 +3044,23 @@ private:
 					SurfaceVertex max_dist_vertex;
 					for (SurfaceVertex sv : cf.cluster_vertices)
 					{
-						Scalar dist = value<Scalar>(surface, distance_to_cluster, sv) * 1000*
-									  value<Scalar>(surface, meidal_axis_samples_weight, sv);
+						Scalar dist = value<Scalar>(surface, distance_to_cluster, sv) /** 1000*
+									  value<Scalar>(surface, meidal_axis_samples_weight, sv)*/;
 						if (dist > cluster_max_dist)
 						{
 							max_dist_vertex = sv;
 						}
 					}
 					Vec3 pos = value<Vec3>(surface, medial_axis_samples_position_, max_dist_vertex);
-					auto [r, v1, v2] = geometry::move_point_to_medial_axis(
+					/*auto [r, v1, v2] = geometry::move_point_to_medial_axis(
 						surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices, pos,
-						surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
+						surface_kdt.get(), medial_kdt.get(), surface_bvh.get());*/
 
 					PointVertex new_cluster = add_vertex(clusters);
 					value<Vec3>(clusters, cluster_position, new_cluster) = pos;
-					value<Scalar>(clusters, clusters_radius, new_cluster) = r;
-					value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, new_cluster) = {v1,
-																													v2};
+					value<Scalar>(clusters, clusters_radius, new_cluster) = value<Scalar>(surface, medial_axis_sample_radius_,max_dist_vertex);
+					value<std::pair<SurfaceVertex, SurfaceVertex>>(clusters, cluster_cloest_sample, new_cluster) = 
+						value<std::pair<SurfaceVertex,SurfaceVertex>>(surface, medial_axis_samples_closest_points_,max_dist_vertex);
 					value<Vec3>(clusters, cluster_color, new_cluster) =
 						Vec3(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX);
 				}
@@ -3300,6 +3322,12 @@ private:
 					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
+				if (ImGui::Button("SQEM"))
+				{
+					clustering_mode = 8;
+					for (uint32 i = 0; i < update_times; i++)
+						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
+				}
 				
 				
 				ImGui::DragFloat("Split vairance threshold", &split_variance_threshold_, 0.00000001f, 0.0f, 0.000001f,
@@ -3450,6 +3478,7 @@ private:
 	std::vector<SurfaceVertex> surface_kdt_vertices;
 	std::vector<Vec3> surface_vertex_position_vector;
 	std::vector<Vec3> medial_vertex_position_vector;
+	std::vector<SurfaceFace> bvh_faces;
 	std::unique_ptr<acc::KDTree<3, uint32>> surface_kdt;
 	std::unique_ptr<acc::BVHTree<uint32, Vec3>> surface_bvh;
 	std::unique_ptr<acc::KDTree<3, uint32>> medial_kdt;
