@@ -142,6 +142,86 @@ std::tuple<Vec3, Scalar, Vec3> shrinking_ball_center(
 	return {c, r, q};
 }
 
+template <typename MESH>
+std::tuple<Vec3, Scalar, Vec3> shrinking_ball_center(
+	MESH& m, const Vec3 inner_pos, const Vec3 pos,
+	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
+	const acc::BVHTree<uint32, Vec3>* surface_bvh, const std::vector<typename mesh_traits<MESH>::Face>& bvh_faces,
+	const acc::KDTree<3, uint32>* surface_kdt)
+{
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+	using Face = typename mesh_traits<MESH>::Face;
+
+	const Vec3& n = (pos- inner_pos).normalized();
+
+	uint32 j = 0;
+	Scalar r = 0.;
+	acc::Ray<Vec3> ray{pos, -n, 1e-5, acc::inf};
+	acc::BVHTree<uint32, Vec3>::Hit h;
+	if (surface_bvh->intersect(ray, &h))
+	{
+		Face f = bvh_faces[h.idx];
+		std::vector<Vertex> vertices = incident_vertices(m, f);
+		Vec3 ip = h.bcoords[0] * value<Vec3>(m, vertex_position, vertices[0]) +
+				  h.bcoords[1] * value<Vec3>(m, vertex_position, vertices[1]) +
+				  h.bcoords[2] * value<Vec3>(m, vertex_position, vertices[2]);
+		r = (pos - ip).norm() * 0.75;
+	}
+	// else
+	// 	std::cout << "intersection point not found !!!";
+
+	Vec3 c = pos - (r * n);
+	Vec3 q = pos - (2 * r * n);
+
+	while (true)
+	{
+		// find closest point to c
+		/*std::pair<uint32, Scalar> k_res;
+		bool found = surface_kdt->find_nn(c, &k_res);*/
+		std::pair<uint32, Vec3> cp_res;
+		bool found = surface_bvh->closest_point(c, &cp_res);
+		/*if (!found)
+			std::cout << "closest point not found !!!";*/
+
+		/*const Vec3& q_next = surface_kdt->vertex(k_res.first);
+		Scalar d = k_res.second;*/
+		Vec3 q_next = cp_res.second;
+		Scalar d = (q_next - c).norm();
+
+		// This should handle all (special) cases where we want to break the loop
+		// - normal case when ball no longer shrinks
+		// - the case where q == p
+		// - any duplicate point cases
+		if ((d >= r - delta_convergence) || (pos - q_next).norm()<1e-4)
+			break;
+
+		// Compute next ball center
+		r = compute_radius(pos, n, q_next);
+		Vec3 c_next = pos - (r * n);
+
+		// Denoising
+		if (denoise_preserve > 0 || denoise_planar > 0)
+		{
+			Scalar separation_angle = geometry::angle(pos - c_next, q_next - c_next);
+
+			// if (j == 0 && denoise_planar > 0 && separation_angle < denoise_planar)
+			// 	break;
+			if (j > 0 && denoise_preserve > 0 && (separation_angle < denoise_preserve && r > (q_next - pos).norm()))
+				break;
+		}
+
+		// Stop iteration if this looks like an infinite loop:
+		if (j > iteration_limit)
+			break;
+
+		c = c_next;
+		q = q_next;
+		j++;
+	}
+
+	return {c, r, q};
+}
+
 // adapted from https://github.com/tudelft3d/masbcpp
 
 template <typename MESH, bool ReturnCloestVertexPosition = true>
@@ -284,7 +364,7 @@ Scalar surface_medial_distance_variance(
 		Vec3 dir = vec.normalized();
 		/*Scalar cosine = value<Vec3>(m1, vertex_normal, v).dot(dir);*/
 		Scalar length = vec.norm() - median_sphere_radius;
-		Scalar distance = length /* value<Scalar>(m1, weight, v)*/;
+		Scalar distance = length /**value<Scalar>(m1, weight, v)*/;
 		dist.push_back(distance);
 		sum_dist += distance;
 		
@@ -300,26 +380,7 @@ Scalar surface_medial_distance_variance(
 	return variance / clusters_points.size();
 }
 
-/*
-using real = autodiff::real;
-real varianceFunction(const std::vector<real>& x, const std::vector<std::vector<real>>& P)
-{
-	real sumDistances = 0;
-	real sumDistancesSquared = 0;
-	int N = P.size();
 
-	for (const auto& p : P)
-	{
-		real distance = sqrt(pow(x[0] - p[0], 2) + pow(x[1] - p[1], 2) + pow(x[2] - p[2], 2));
-		sumDistances += distance;
-		sumDistancesSquared += distance * distance;
-	}
-
-	real meanDistance = sumDistances / N;
-	real variance = (sumDistancesSquared / N) - pow(meanDistance, 2);
-
-	return variance;
-}*/
 
 template <typename MESH>
 std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH>::Vertex> non_linear_solver(
@@ -444,92 +505,21 @@ std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH
 
 template <typename MESH>
 	std::tuple < Scalar, 
-		typename mesh_traits<MESH>::Vertex,
-		typename mesh_traits<MESH>::Vertex> move_point_to_medial_axis(
-	MESH& mesh, 
-	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
+		typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH>::Vertex> move_point_to_medial_axis(
+	MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
 	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_normal,
-	const std::vector<typename mesh_traits<MESH>::Vertex>& vertices, 
-	const std::vector<typename mesh_traits<MESH>::Face>& bvh_faces,
-	Vec3& pos, const acc::KDTree<3, uint32>* surface_kdt,
-	const acc::KDTree<3, uint32>* medial_kdt, 
+	const std::vector<typename mesh_traits<MESH>::Vertex>& vertices,
+	const std::vector<typename mesh_traits<MESH>::Face>& bvh_faces, Vec3& pos,
+	const acc::KDTree<3, uint32>* surface_kdt, const acc::KDTree<3, uint32>* medial_kdt,
 	acc::BVHTree<uint32, Vec3>* surface_bvh)
 {
 	using Vertex = typename mesh_traits<MESH>::Vertex;
-	Scalar distance_to_nearest = 0;
-	Scalar distance_to_new_nearest = 0;
-	Scalar max_sdf = std::numeric_limits<Scalar>::min();
-	Scalar min_diff = std::numeric_limits<Scalar>::max();
-	Vec3 best_pos;
-	Vertex v1, v2;
-	Vec3 nearest_v1_pos, nearest_v2_pos;
-	Vec3 last_pos, current_pos;
-	Vec3 cp, new_cp;
-	Scalar cosine;
-	Scalar step = 0.01;
+	Vec3 nearest_pos = surface_bvh->closest_point(pos);
+	auto [c, r, q] =
+		shrinking_ball_center(mesh, pos, nearest_pos, vertex_position, surface_bvh, bvh_faces, surface_kdt);
+	Vertex v1, v2; 
 	std::pair<uint32, Scalar> k_res;
-	std::pair<uint32, Scalar> new_k_res;
-	
-	nearest_v1_pos = surface_bvh->closest_point(pos);
-	
-	Vec3 dir = (pos - nearest_v1_pos);
-	acc::Ray<Vec3> ray
-	{pos, dir.normalized(), 1e-5, acc::inf};
-	acc::BVHTree<uint32, Vec3>::Hit h;
-	Vec3 intersect_position;
-	if (surface_bvh->intersect(ray, &h))
-	{
-		Face f = bvh_faces[h.idx];
-		std::vector<Vertex> vertices = incident_vertices(mesh, f);
-		intersect_position = h.bcoords[0] * value<Vec3>(mesh, vertex_position, vertices[0]) +
-							 h.bcoords[1] * value<Vec3>(mesh, vertex_position, vertices[1]) +
-							 h.bcoords[2] * value<Vec3>(mesh, vertex_position, vertices[2]);
-	}
-	std::vector<string> error_messages;
-	Vec3 path = intersect_position - nearest_v1_pos;
-	Scalar path_length = path.norm() - dir.norm();
-	last_pos = pos;
-	step = path_length / 99;
-	Vec3 dir_normalised = dir.normalized();
-	for (uint32 idx = 1; idx < 100; idx++)
-	{
-		current_pos = last_pos + step * dir_normalised;
-		cp = surface_bvh->closest_point(last_pos);
-		distance_to_nearest = (last_pos - cp).norm();
-		new_cp = surface_bvh->closest_point(current_pos);
-		distance_to_new_nearest = (current_pos - new_cp).norm();
-		Scalar diff_sdf = abs(distance_to_new_nearest - distance_to_nearest);
-		Scalar cosine = (current_pos - cp).normalized().dot((current_pos - new_cp).normalized());
-		if (min_diff > diff_sdf && std::max(distance_to_new_nearest, distance_to_nearest)>max_sdf && cosine <0)
-		{
-			min_diff = diff_sdf;
-			max_sdf = std::max(distance_to_nearest, distance_to_new_nearest);
-			best_pos = last_pos;
-			std::cout << "distance to v1:" << distance_to_nearest << ", distance to v2: " << distance_to_new_nearest
-					  << std::endl;
-			std::cout << "cosine: "
-					  << cosine
-					  << std::endl;
-		}
-		last_pos = current_pos;
-	}
-	Vec3 start_pos = best_pos;
-	Vec3 end_pos = best_pos + step * dir_normalised;
-	Scalar diff_sdf = 0;
-	step = (end_pos - start_pos).norm() / 99;
-	do
-	{
-		cp = surface_bvh->closest_point(last_pos);
-		distance_to_nearest = (last_pos - cp).norm();
-		current_pos = start_pos + step * dir_normalised;
-		new_cp = surface_bvh->closest_point(current_pos);
-		distance_to_new_nearest = (current_pos - new_cp).norm();
-		diff_sdf = abs(distance_to_new_nearest - distance_to_nearest);
-		last_pos = current_pos;
-	} while (diff_sdf > 1e-5);
-	std::cout << "best_distance:" << distance_to_nearest << std::endl;
-	pos = last_pos;
-	 bool found = surface_kdt->find_nn(cp, &k_res);
+	bool found = surface_kdt->find_nn(nearest_pos, &k_res);
 	if (found)
 	{
 		v1 = vertices[k_res.first];
@@ -538,20 +528,18 @@ template <typename MESH>
 	{
 		std::cout << "closest point not found !!!";
 	}
-	found = surface_kdt->find_nn(new_cp, &new_k_res);
+	found = surface_kdt->find_nn(q, &k_res);
 	if (found)
 	{
-		v2 = vertices[new_k_res.first];
+		v2 = vertices[k_res.first];
 	}
 	else
 	{
 		std::cout << "closest point not found !!!";
 	}
-
-	std::cout << "---------------------------" << std::endl;
-	return {distance_to_nearest, v1, v2};
-	}
-
+	pos = c;
+	return {r, v1, v2};
+}	
 	/*template <typename MESH>
 	std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH>::Vertex>
 	move_point_to_medial_axis(MESH& mesh, const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
