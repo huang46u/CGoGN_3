@@ -2635,8 +2635,8 @@ private:
 				Scalar weight = 0;
 				for (SurfaceVertex sv1 : cf.cluster_vertices)
 				{
-					Scalar w = 100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) + 
-						value<Scalar>(surface, medial_axis_samples_weight, sv1);
+					Scalar w = 2 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) /*+ 
+						value<Scalar>(surface, medial_axis_samples_weight, sv1)*/;
 					sum_coord += value<Vec3>(surface, medial_axis_samples_position, sv1) * w;
 					weight += w;
 				}
@@ -2668,7 +2668,7 @@ private:
 				{
 					/*Scalar w = 100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) +
 							   100 * value<Scalar>(surface, medial_axis_samples_feature_value, sv1);*/
-					Scalar w = /*value<Scalar>(surface, medial_axis_samples_weight, sv1) +*/
+					Scalar w = value<Scalar>(surface, medial_axis_samples_weight, sv1) +
 							   value<Scalar>(surface, medial_axis_sample_radius_, sv1);
 					
 					sum_coord += value<Vec3>(surface, sample_position, sv1) * w;
@@ -2815,6 +2815,21 @@ private:
 					std::cout << "can't find optimal sphere" << std::endl;
 				}
 			}
+			break;
+			case 9: {
+				opti_coord = value<Vec3>(clusters, cluster_position, pv);
+				std::cout << "before optimization" << opti_coord.x() << " " << opti_coord.y() << " "
+							   << opti_coord.z()
+						  << std::endl;
+				auto [radius, v1, v2] = geometry::non_linear_solver(surface, sample_position.get(),
+				   sample_normal.get(), cf.cluster_vertices, opti_coord, value<Scalar>(clusters, clusters_radius,
+				   pv));
+				value<Vec3>(clusters, cluster_position, pv) = opti_coord;
+				value<Scalar>(clusters, clusters_radius, pv) = radius;
+				
+				break;
+			}
+
 			default:
 				break;
 			}
@@ -3004,7 +3019,7 @@ private:
 						for (SurfaceVertex sv: cf.cluster_vertices)
 						{
 							Scalar dist =
-								value<Scalar>(surface, distance_to_cluster, sv) * value<Scalar>(surface, meidal_axis_samples_weight, sv);
+								value<Scalar>(surface, distance_to_cluster, sv) /** value<Scalar>(surface, meidal_axis_samples_weight, sv)*/;
 							error += dist;
 						}
 						error /= cf.cluster_vertices.size();
@@ -3286,13 +3301,13 @@ private:
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				
 				}
-				if (ImGui::Button("Average of medial points weighted with curvature"))
+				if (ImGui::Button("Average of medial points weighted with radius"))
 				{
 					clustering_mode = 3;
 					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
-				if (ImGui::Button("Average of medial points weighted with feature value"))
+				if (ImGui::Button("Average of medial points weighted with curvature"))
 				{
 					clustering_mode = 4;
 					for (uint32 i = 0; i < update_times; i++)
@@ -3311,7 +3326,7 @@ private:
 					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
-				if (ImGui::Button("Non linear optimization"))
+				if (ImGui::Button("Mass spring optimization"))
 				{
 					clustering_mode = 7;
 					for (uint32 i = 0; i < update_times; i++)
@@ -3323,7 +3338,12 @@ private:
 					for (uint32 i = 0; i < update_times; i++)
 						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
 				}
-				
+				if (ImGui::Button("Non linear optimization"))
+				{
+					clustering_mode = 9;
+					for (uint32 i = 0; i < update_times; i++)
+						update_filtered_cluster(*selected_surface_mesh_, *selected_clusters);
+				}
 				
 				ImGui::DragFloat("Split vairance threshold", &split_variance_threshold_, 0.00000001f, 0.0f, 0.000001f,
 								 "%.6f");
@@ -3462,7 +3482,7 @@ private:
 	float distance_threshold_ = 0.001;
 	float angle_threshold_ = 1.9;
 	float radius_threshold_ = 0.030;
-	float split_variance_threshold_ = 0.000001;
+	float split_variance_threshold_ = 0.0001;
 	float split_distance_threshold_ = 0.003;
 	uint32 update_times = 5;
 	double min_radius_ = std::numeric_limits<double>::max();

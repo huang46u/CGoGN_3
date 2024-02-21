@@ -393,6 +393,8 @@ std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH
 		const MESH* mesh;
 		const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position;
 		std::vector<typename mesh_traits<MESH>::Vertex> vertices;
+		Vec3 p;
+		Scalar rad;
 	};
 	/*struct ConstraintData
 	{
@@ -430,13 +432,15 @@ std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH
 			grad[2] = f.z();
 			grad[3] = dEdr;
 		}
-		/*std::cout << "current position: " << x[0] << ", " << x[1] << ", " << x[2] << ", "
-				  << "current radius" << x[3] << std::endl;*/
-		//std::cout << "current energy: " << energy << std::endl;
+		optData->p = Vec3(x[0], x[1], x[2]);
+		optData->rad = x[3];
+		std::cout << "current position: " << x[0] << ", " << x[1] << ", " << x[2] << ", "
+				  << "current radius: " << x[3] << std::endl;
+		std::cout << "current energy: " << energy << std::endl;
 		return energy;
 	}; 
 	
-	nlopt::opt opt(nlopt::LD_TNEWTON, 4);
+	nlopt::opt opt(nlopt::LD_SLSQP, 4);
 	OptimizationData data;
 	data.mesh = &mesh;
 	data.vertex_position = vertex_position;
@@ -477,20 +481,23 @@ std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH
 	opt.set_ftol_rel(1e-5);
 	opt.set_upper_bounds({1, 1, 1, 1});
 	opt.set_lower_bounds({-1, -1, -1, 0});
-	opt.set_maxtime(0.1);
+	/* opt.set_maxtime(0.1);
+	*/
 		
-	std::vector<double> x = {pos.x()+0.001, pos.y()-0.02, pos.z()-0.005, radius+0.01};  
+	std::vector<double> x = {pos.x(), pos.y(), pos.z(), radius};  
 	double min_f;				   
 
 	try
 	{
 		nlopt::result result = opt.optimize(x, min_f);
-
 		// Êä³ö½á¹û
-		std::cout << "after optimization: " << x[0] << ", " << x[1] << ", " << x[2] << 
+		std::cout << "after optimization: " << x[0] << ", " << x[1] << ", " << x[2] << ", " << x[3]
+				  << 
 				  ", with min energy:" << min_f<< std::endl;
-		pos = Vec3(x[0], x[1], x[2]);
-		return std::make_tuple(x[3], vertices[0], vertices[1]);
+		pos = data.p;
+		std::cout << "after optimization: " << pos.x() << ", " << pos.y() << ", " << pos.z() << ", " << data.rad
+				  << ", with min energy:" << min_f << std::endl;
+		return std::make_tuple(data.rad, vertices[0], vertices[1]);
 
 	}
 	catch (std::exception& e)
