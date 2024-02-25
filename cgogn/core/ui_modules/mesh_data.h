@@ -46,6 +46,7 @@ namespace ui
 {
 
 using geometry::Vec3;
+using geometry::Scalar;
 
 template <typename MESH>
 struct MeshData
@@ -151,6 +152,10 @@ public:
 		}
 		else
 			std::tie(bb_min_, bb_max_) = geometry::bounding_box(*bb_vertex_position_);
+	}
+	Scalar diangonal_length() const
+	{
+		return (bb_max_ - bb_min_).norm();
 	}
 
 	rendering::VBO* vbo(AttributeGen* attribute)

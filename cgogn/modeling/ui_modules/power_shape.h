@@ -57,7 +57,7 @@
 #include <CGAL/Min_sphere_of_spheres_d.h>
 #include <CGAL/double.h>
 #include <CGAL/optimal_bounding_box.h>
-
+#include <GLFW/glfw3.h>
 #include <Highs.h>
 
 #include <iomanip>
@@ -70,7 +70,7 @@ namespace ui
 {
 
 template <typename POINT, typename SURFACE, typename NONMANIFOLD>
-class PowerShape : public Module
+class PowerShape : public ViewModule
 {
 	static_assert(mesh_traits<SURFACE>::dimension >= 2, "PowerShape can only be used with meshes of dimension >= 2");
 	// Kernel for construct Delaunay
@@ -139,6 +139,8 @@ class PowerShape : public Module
 	using NonManifoldAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
 	template <typename T>
 	using SurfaceAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
+	template <typename T>
+	using PointAttribute = typename mesh_traits<POINT>::template Attribute<T>;
 
 	using PointVertex = typename mesh_traits<POINT>::Vertex;
 
@@ -156,7 +158,7 @@ class PowerShape : public Module
 	using Scalar = geometry::Scalar;
 
 public:
-	PowerShape(const App& app) : Module(app, "PowerShape"), tree(nullptr), inside_tester(nullptr)
+	PowerShape(const App& app) : ViewModule(app, "PowerShape"), tree(nullptr), inside_tester(nullptr)
 	{
 		clustering_mode = 0;
 	}
@@ -2502,13 +2504,16 @@ private:
 
 			});*/
 		Scalar error = 0;
+		Scalar max_distance = std::numeric_limits<Scalar>::min();
+		Scalar dia_length = md.diangonal_length();
 		foreach_cell(surface, [&](SurfaceVertex sv) { 
 			error += value<Scalar>(surface, distance_to_cluster, sv);
-			//std::cout << "distance: " << value<Scalar>(surface, distance_to_cluster, sv) << std::endl;
+			max_distance = std::max(max_distance, value<Scalar>(surface, distance_to_cluster, sv));
+			//std::cout << "distance: " << value<Scalar>(surface, distance_to_cluster, sv) << std::endl
 			return true;
 		});
 		std::cout << "Global distance: " << error << std::endl; 
-		
+		std::cout << "One-sided distance hausdorff: " << max_distance / dia_length *100 << std::endl; 
 		surface_provider_->emit_attribute_changed(surface, vertex_cluster_color.get());
 		surface_provider_->emit_attribute_changed(surface, distance_to_cluster.get());
 	}
@@ -2562,7 +2567,7 @@ private:
 
 				opti_coord = sum_coord / weight;
 				Vec3 original_coord = opti_coord;
-				
+				Vec3 last_coord = opti_coord;
 				//opti_coord = value<Vec3>(clusters, cluster_position, pv);
 				/* std::cout << "before optimization" << opti_coord.x() << " " << opti_coord.y() << " "
 							   << opti_coord.z()
@@ -2573,6 +2578,8 @@ private:
 				auto [radius, v1, v2] = geometry::move_point_to_medial_axis(
 					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices,bvh_faces, opti_coord,
 					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
+				Scalar norm = (opti_coord - last_coord).norm();
+				std::cout << "cluster " << index_of(clusters, pv) << ", correction distance: " << norm << std::endl;
 				//PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v1).second;*/
 				/*SurfaceVertex v2 =
 					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v1)
@@ -2668,8 +2675,8 @@ private:
 				{
 					/*Scalar w = 100 * value<Scalar>(surface, medial_axis_sample_radius_, sv1) +
 							   100 * value<Scalar>(surface, medial_axis_samples_feature_value, sv1);*/
-					Scalar w = value<Scalar>(surface, medial_axis_samples_weight, sv1) +
-							   value<Scalar>(surface, medial_axis_sample_radius_, sv1);
+					Scalar w = value<Scalar>(surface, medial_axis_samples_weight, sv1) /* +
+							   value<Scalar>(surface, medial_axis_sample_radius_, sv1)*/;
 					
 					sum_coord += value<Vec3>(surface, sample_position, sv1) * w;
 					weight += w;
@@ -3040,10 +3047,13 @@ private:
 				}
 				while (pq.size() > 0)
 				{
+					
 					auto& [candidate_cluster, error] = pq.top();
 					pq.pop();
 					if (marker.is_marked(candidate_cluster))
-					continue;
+						continue;
+					std::cout << "cluster: " << index_of(clusters, candidate_cluster) << ", variance:" << error
+							  << std::endl;
 					for (auto& [id, neighbour] :
 						 value<std::unordered_map<uint32, PointVertex>>(clusters, neighbours_set, candidate_cluster))
 					{
@@ -3236,6 +3246,18 @@ private:
 		remove_attribute<PointVertex>(clusters, neighbours_set.get());
 	}
 
+	void set_spheres_position(const std::shared_ptr<PointAttribute<Vec3>>& spheres_position)
+	{
+		spheres_position_ = spheres_position;
+	}
+	void set_spheres_radius(const std::shared_ptr<PointAttribute<Scalar>>& spheres_radius)
+	{
+		spheres_radius_ = spheres_radius;
+	}
+	void set_spheres_color(const std::shared_ptr<PointAttribute<Vec3>>& spheres_color)
+	{
+		spheres_color_ = spheres_color;
+	}
 
  protected:
 	void init() override
@@ -3248,6 +3270,69 @@ private:
 			app_.module("MeshProvider (" + std::string{mesh_traits<NONMANIFOLD>::name} + ")"));
 	}
 
+	void key_press_event(View* view, int32 keycode) override{
+		if (keycode == GLFW_KEY_I)
+		{
+
+			int32 x = view->mouse_x();
+			int32 y = view->mouse_y();
+
+			rendering::GLVec3d near_d = view->unproject(x, y, 0.0);
+			rendering::GLVec3d far_d = view->unproject(x, y, 1.0);
+			Vec3 A{near_d.x(), near_d.y(), near_d.z()};
+			Vec3 B{far_d.x(), far_d.y(), far_d.z()};
+
+			Vec3 picked_sphere_center;
+			foreach_cell(*selected_clusters, [&](PointVertex v) -> bool {
+				if (!picked_sphere_.is_valid())
+				{
+					picked_sphere_ = v;
+					picked_sphere_center = value<Vec3>(*selected_clusters, spheres_position_, picked_sphere_);
+					return true;
+				}
+				const Vec3& sp = value<Vec3>(*selected_clusters, spheres_position_, v);
+				// Scalar sr = value<Scalar>(*spheres, spheres_radius_, v);
+				if (geometry::squared_distance_line_point(A, B, sp) <
+					geometry::squared_distance_line_point(A, B, picked_sphere_center))
+				{
+					picked_sphere_ = v;
+					picked_sphere_center = sp;
+				}
+				return true;
+			});
+
+			sphere_info_popup_ = true;
+		}
+	}
+
+	void key_release_event(View* view, int32 key_code) override
+	{
+		if (key_code == GLFW_KEY_I)
+			sphere_info_popup_ = false;
+	}
+
+	void popups() override
+	{
+		if (sphere_info_popup_)
+			ImGui::OpenPopup("Sphere Info");
+		
+		if (ImGui::BeginPopup("Sphere Info"))
+		{
+			if (picked_sphere_.is_valid())
+			{
+					ImGui::Text("Picked sphere:");
+					const Vec3& sp = value<Vec3>(*selected_clusters, spheres_position_, picked_sphere_);
+					ImGui::Text("Index: %d", index_of(*selected_clusters, picked_sphere_));
+					ImGui::Text("Radius: %f", value<Scalar>(*selected_clusters, spheres_radius_, picked_sphere_));
+			}
+			else
+			{
+					ImGui::Text("No sphere picked");
+			}
+			ImGui::EndPopup();
+		}
+	}
+
 	void left_panel() override
 	{
 		imgui_mesh_selector(surface_provider_, selected_surface_mesh_, "Surface", [&](SURFACE& m) {
@@ -3257,6 +3342,10 @@ private:
 		
 		imgui_mesh_selector(point_provider_, selected_clusters, "Clusters", [&](POINT& m) {
 			selected_clusters = &m;
+			spheres_color_ = get_or_add_attribute<Vec3, PointVertex>(*selected_clusters, "color");
+			spheres_position_ = get_attribute<Vec3, PointVertex>(*selected_clusters, "position");
+			spheres_info_ = get_or_add_attribute<Cluster_Info, PointVertex>(*selected_clusters, "clusters_infos");
+			spheres_radius_ = get_or_add_attribute<Scalar, PointVertex>(*selected_clusters, "clusters_radius");
 			point_provider_->mesh_data(m).outlined_until_ = App::frame_time_ + 1.0;
 		});
 	
@@ -3281,6 +3370,21 @@ private:
 				iniialise_cluster(*selected_surface_mesh_);
 			if (selected_clusters)
 			{
+				
+				if (picked_sphere_.is_valid())
+				{
+						ImGui::Text("Picked sphere:");
+						const Vec3& sp = value<Vec3>(*selected_clusters, spheres_position_, picked_sphere_);
+						ImGui::Text("Center: (%f, %f, %f)", sp[0], sp[1], sp[2]);
+						ImGui::Text("Radius: %f", value<Scalar>(*selected_clusters, spheres_radius_, picked_sphere_));
+				}
+				else
+				{
+						ImGui::Text("No sphere picked");
+				}
+				if (ImGui::Button("Assign Cluster"))
+					assign_cluster(*selected_surface_mesh_, *selected_clusters);
+
 				ImGui::SliderInt("Update time", &(int)update_times, 1, 100);
 				if (ImGui::Button("Average of medial points"))
 				{
@@ -3464,6 +3568,18 @@ private:
 	POINT* selected_clusters = nullptr;
 	SURFACE* selected_surface_mesh_ = nullptr;
 	NONMANIFOLD* selected_medial_axis_ = nullptr;
+
+	std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_position_ = nullptr;
+	std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_normal_ = nullptr;
+
+	std::shared_ptr<PointAttribute<Vec3>> spheres_position_ = nullptr;
+	std::shared_ptr<PointAttribute<Scalar>> spheres_radius_ = nullptr;
+	std::shared_ptr<PointAttribute<Vec3>> spheres_color_ = nullptr;
+	std::shared_ptr<PointAttribute<Cluster_Info>> spheres_info_ = nullptr;
+
+	PointVertex picked_sphere_;
+	bool sphere_info_popup_ = false;
+
 	MeshProvider<POINT>* point_provider_;
 	MeshProvider<SURFACE>* surface_provider_;
 	MeshProvider<NONMANIFOLD>* nonmanifold_provider_;

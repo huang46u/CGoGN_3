@@ -88,7 +88,7 @@ int main(int argc, char** argv)
 	v1->link_module(&sr);
 	v1->link_module(&pcr);
 	v1->link_module(&srnm);
-
+	v1->link_module(&pw);
 
 	
 	if (filename.length() > 0)

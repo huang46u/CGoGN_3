@@ -130,7 +130,14 @@ public:
 	{
 		return viewport_height_;
 	}
-
+	inline int32 mouse_x() const
+	{
+		return inputs_->mouse_x_;
+	}
+	inline int32 mouse_y() const
+	{
+		return inputs_->mouse_y_;
+	}
 	inline bool shift_pressed() const
 	{
 		return inputs_->shift_pressed_;
