@@ -2348,11 +2348,6 @@ private:
 						value<Vec3>(surface, vertex_cluster_color, sv) = value<Vec3>(clusters, cluster_color, pv);
 						value<Scalar>(surface, distance_to_cluster, sv) = distance;
 					}
-					else
-					{
-						value<std::unordered_map<uint32, PointVertex>>(clusters, neighbours_set, pv)
-							.insert(value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv));
-					}
 				}
 				else
 				{
@@ -2469,6 +2464,19 @@ private:
 			});
 		}
 	   */
+		foreach_cell(surface, [&](SurfaceVertex sv) {
+			PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv).second;
+			foreach_adjacent_vertex_through_edge(surface, sv, [&](SurfaceVertex v) {
+				if (value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v).first !=
+					value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv).first)
+				{
+					value<std::unordered_map<uint32, PointVertex>>(clusters, neighbours_set, pv)
+						.insert(value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v));
+				}
+				return true;
+			});
+			return true;
+		});
 		foreach_cell(surface, [&](SurfaceVertex sv) { 
 			std::pair<uint32, PointVertex>&cluster_info = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, sv);
 			PointVertex cluster_point = cluster_info.second;
@@ -2579,7 +2587,7 @@ private:
 					surface, sample_position.get(), sample_normal.get(), surface_kdt_vertices,bvh_faces, opti_coord,
 					surface_kdt.get(), medial_kdt.get(), surface_bvh.get());
 				Scalar norm = (opti_coord - last_coord).norm();
-				std::cout << "cluster " << index_of(clusters, pv) << ", correction distance: " << norm << std::endl;
+				//std::cout << "cluster " << index_of(clusters, pv) << ", correction distance: " << norm << std::endl;
 				//PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, vertex_cluster_info, v1).second;*/
 				/*SurfaceVertex v2 =
 					value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, medial_axis_samples_closest_points, v1)
@@ -3027,13 +3035,13 @@ private:
 						{
 							Scalar dist =
 								value<Scalar>(surface, distance_to_cluster, sv) /** value<Scalar>(surface, meidal_axis_samples_weight, sv)*/;
-							error += dist;
+							/* error += dist;*/
+							error = std::max(dist, error);
 						}
-						error /= cf.cluster_vertices.size();
+						/*error /= cf.cluster_vertices.size();*/
 						std::cout << std::setiosflags(std::ios::fixed);
-						std::cout << "distance: " << std::setprecision(9) << error
-								  << ", radius: " << 0.01 * value<Scalar>(clusters, clusters_radius, pv)
-								  << ", error: " << error << std::endl;
+						std::cout << "cluster : "<<index_of(clusters, pv)
+								  << ", distance: " << std::setprecision(9) << error << std::endl;
 						if (error > split_distance_threshold_)
 						{
 							pq.push({pv, error});
@@ -3057,6 +3065,8 @@ private:
 					for (auto& [id, neighbour] :
 						 value<std::unordered_map<uint32, PointVertex>>(clusters, neighbours_set, candidate_cluster))
 					{
+						std::cout << "cluster: " << id
+								  << "is neighbour of cluster: " << index_of(clusters, candidate_cluster) << std::endl;
 						marker.mark(neighbour);
 					}
 					Cluster_Info& cf = value<Cluster_Info>(clusters, clusters_infos, candidate_cluster);
@@ -3598,8 +3608,8 @@ private:
 	float distance_threshold_ = 0.001;
 	float angle_threshold_ = 1.9;
 	float radius_threshold_ = 0.030;
-	float split_variance_threshold_ = 0.0001;
-	float split_distance_threshold_ = 0.003;
+	float split_variance_threshold_ = 0.001;
+	float split_distance_threshold_ = 0.02;
 	uint32 update_times = 5;
 	double min_radius_ = std::numeric_limits<double>::max();
 	double max_radius_ = std::numeric_limits<double>::min();

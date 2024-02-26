@@ -176,28 +176,28 @@ std::tuple<Vec3, Scalar, Vec3> shrinking_ball_center(
 	while (true)
 	{
 		// find closest point to c
-		/*std::pair<uint32, Scalar> k_res;
-		bool found = surface_kdt->find_nn(c, &k_res);*/
-		std::pair<uint32, Vec3> cp_res;
-		bool found = surface_bvh->closest_point(c, &cp_res);
+		std::pair<uint32, Scalar> k_res;
+		bool found = surface_kdt->find_nn(c, &k_res);
+		/*std::pair<uint32, Vec3> cp_res;
+		bool found = surface_bvh->closest_point(c, &cp_res);*/
 		/*if (!found)
 			std::cout << "closest point not found !!!";*/
 
-		/*const Vec3& q_next = surface_kdt->vertex(k_res.first);
-		Scalar d = k_res.second;*/
-		Vec3 q_next = cp_res.second;
-		Scalar d = (q_next - c).norm();
+		const Vec3& q_next = surface_kdt->vertex(k_res.first);
+		Scalar d = k_res.second;
+		/*Vec3 q_next = cp_res.second;
+		Scalar d = (q_next - c).norm();*/
 
 		// This should handle all (special) cases where we want to break the loop
 		// - normal case when ball no longer shrinks
 		// - the case where q == p
 		// - any duplicate point cases
-		if ((d >= r - delta_convergence) || (pos - q_next).norm()<1e-4)
+		if ((d >= r - delta_convergence) || (pos - q_next).norm() < delta_convergence)
 			break;
 
 		// Compute next ball center
-		r = compute_radius(pos, n, q_next);
-		Vec3 c_next = pos - (r * n);
+		Scalar r_next = compute_radius(pos, n, q_next);
+		Vec3 c_next = pos - (r_next * n);
 
 		// Denoising
 		if (denoise_preserve > 0 || denoise_planar > 0)
@@ -212,8 +212,12 @@ std::tuple<Vec3, Scalar, Vec3> shrinking_ball_center(
 
 		// Stop iteration if this looks like an infinite loop:
 		if (j > iteration_limit)
+		{
+			std::cout << "too long to converge" << std::endl;
 			break;
-
+		}
+			
+		r = r_next;
 		c = c_next;
 		q = q_next;
 		j++;
