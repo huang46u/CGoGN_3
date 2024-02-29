@@ -355,7 +355,6 @@ Scalar surface_medial_distance_variance(
 	const typename mesh_traits<MESH1>::template Attribute<Vec3>* vertex_position,
 	const typename mesh_traits<MESH1>::template Attribute<Vec3>* vertex_normal,
 	const typename mesh_traits<MESH2>::template Attribute<Vec3>* vertex_cluster_center,
-	const typename mesh_traits<MESH1>::template Attribute<Scalar>* weight,
 	std::vector<typename mesh_traits<MESH1>::Vertex>& clusters_points, Scalar median_sphere_radius)
 {
 	using PointVertex = typename mesh_traits<MESH2>::Vertex;
@@ -366,9 +365,9 @@ Scalar surface_medial_distance_variance(
 	{
 		Vec3 vec = (value<Vec3>(m1, vertex_position, v) - value<Vec3>(m2, vertex_cluster_center, medial_axis_sample));
 		Vec3 dir = vec.normalized();
-		/*Scalar cosine = value<Vec3>(m1, vertex_normal, v).dot(dir);*/
+	
 		Scalar length = vec.norm() - median_sphere_radius;
-		Scalar distance = length /**value<Scalar>(m1, weight, v)*/;
+		Scalar distance = length ;
 		dist.push_back(distance);
 		sum_dist += distance;
 		
@@ -525,31 +524,122 @@ template <typename MESH>
 	acc::BVHTree<uint32, Vec3>* surface_bvh)
 {
 	using Vertex = typename mesh_traits<MESH>::Vertex;
-	Vec3 nearest_pos = surface_bvh->closest_point(pos);
-	auto [c, r, q] =
-		shrinking_ball_center(mesh, pos, nearest_pos, vertex_position, surface_bvh, bvh_faces, surface_kdt);
-	Vertex v1, v2; 
 	std::pair<uint32, Scalar> k_res;
-	bool found = surface_kdt->find_nn(nearest_pos, &k_res);
-	if (found)
+	Vec3 new_pos, v2_pos, nearest_pos;
+	Scalar step = 0.1, nearest_dis, last_nearest_dis;
+	Vertex v1, v2;
+	Scalar radius = 0;
+
+	auto log_error_and_return = []() { std::cout << "closest point not found !!!\n"; };
+
+	if (!surface_kdt->find_nn(pos, &k_res))
 	{
-		v1 = vertices[k_res.first];
+		log_error_and_return();
+		return {};
+	}
+
+	v1 = vertices[k_res.first];
+	Vec3 v1_pos = value<Vec3>(mesh, vertex_position, v1);
+	Vec3 dir = pos - v1_pos;
+	Vec3 normal = value<Vec3>(mesh, vertex_normal, v1);
+	
+
+	last_nearest_dis = dir.norm();
+	if (dir.dot(normal) >= 0)
+	{ // Point is outside the mesh
+		// Finding two closest vertices
+		/*std::cout << "Starting point: ";
+		std::cout << pos.x() << ", " << pos.y() << "," << pos.z() << std::endl;
+		std::cout << "Direction: ";
+		std::cout << dir.x() << ", " << dir.y() << ", " << dir.z() << std::endl;
+		std::cout << "Initial closest vertex (v1): " << v1 << "\n";
+		std::cout << "Position of v1: ";
+		std::cout << v1_pos.x() << ", " << v1_pos.y() << ", " << v1_pos.z() << std::endl;*/
+		do
+		{
+			new_pos = pos + step * dir;
+			if (!surface_kdt->find_nn(new_pos, &k_res))
+			{
+				log_error_and_return();
+				break;
+			}
+			v2 = vertices[k_res.first];
+			v2_pos = value<Vec3>(mesh, vertex_position, v2);
+			nearest_dis = (new_pos - v2_pos).norm();
+/*
+			std::cout << "Iterating to find v2: New position: ";
+			std::cout << new_pos.x() << ", " << new_pos.y() << ", " << new_pos.z() << std::endl;
+			std::cout << "Nearest vertex (v2): " << v2 << "\n";
+			std::cout << "Position of v2: ";
+			std::cout << v2_pos.x() << ", " << v2_pos.y() << ", " << v2_pos.z() << std::endl;
+			std::cout << "Distance to v2: " << nearest_dis << "\n";*/
+			if (nearest_dis< last_nearest_dis)
+				break; // Found the closest v2
+
+			pos = new_pos; // Update position
+			last_nearest_dis = nearest_dis;
+		} while (true);
+
+		// Now refine the position between v1 and v2
+		Scalar v1_distance = (pos - v1_pos).norm(), v2_distance;
+		Scalar previous_diff = std::numeric_limits<Scalar>::infinity();
+
+		do
+		{
+			new_pos = pos + step * dir;
+			Scalar new_v1_distance = (new_pos - v1_pos).norm();
+			Scalar new_v2_distance = (new_pos - v2_pos).norm();
+			Scalar current_diff = std::abs(new_v1_distance - new_v2_distance);
+			/*std::cout << "v1 Distance : " << new_v1_distance
+					  << ", v2 Distance: " << new_v2_distance << ", Diff: " << current_diff << "\n";*/
+			if (current_diff >= previous_diff)
+
+			{
+				/*std::cout << "Direction reversed, step reduced: " << step << "\n";*/
+				dir = -dir;
+				step *= 0.5;
+			}
+			else
+			{
+				pos = new_pos;
+				v1_distance = new_v1_distance;
+				v2_distance = new_v2_distance;
+				previous_diff = current_diff;
+			}
+		} while (previous_diff > 1e-5);
+		radius = v1_distance; // Set the radius as the distance to v1 or v2
+		pos = new_pos;
+		/*std::cout << "Final position: " << pos.x() << "," << pos.y() << ", " << pos.z() << "\n";
+		std::cout << "Radius: " << radius << ", v1: " << v1 << ", v2: " << v2 << "\n";*/
 	}
 	else
 	{
-		std::cout << "closest point not found !!!";
+
+		Vec3 nearest_pos = surface_bvh->closest_point(pos);
+		auto [c, r, q] =
+			shrinking_ball_center(mesh, pos, nearest_pos, vertex_position, surface_bvh, bvh_faces, surface_kdt);
+		if (!surface_kdt->find_nn(nearest_pos, &k_res))
+		{
+			log_error_and_return();
+			return {};
+		}
+		else{
+			v1 = vertices[k_res.first];
+		}
+		if (!surface_kdt->find_nn(q, &k_res))
+		{
+			log_error_and_return();
+			return {};
+		}
+		else
+		{
+			v2 = vertices[k_res.first];
+		}
+		pos = c;
+		radius = r;
 	}
-	found = surface_kdt->find_nn(q, &k_res);
-	if (found)
-	{
-		v2 = vertices[k_res.first];
-	}
-	else
-	{
-		std::cout << "closest point not found !!!";
-	}
-	pos = c;
-	return {r, v1, v2};
+	
+	return {radius, v1, v2};
 }	
 	/*template <typename MESH>
 	std::tuple<Scalar, typename mesh_traits<MESH>::Vertex, typename mesh_traits<MESH>::Vertex>
