@@ -2865,9 +2865,9 @@ private:
 				std::vector<std::pair<PointVertex, Scalar>>,
 				CompareScalar> pq;
 			// Test if the cluster can be split
-			switch (clustering_mode)
+			switch (split_mode)
 			{
-			case 0: 
+			case VARIANCE: 
 			{ // variance
 				foreach_cell(clusters, [&](PointVertex pv) {
 					if (marker.is_marked(pv))
@@ -2887,7 +2887,7 @@ private:
 				});
 				break;
 			}
-			case 1: { // distance
+			case DISTANCE_POINT_SPHERE: { // distance
 				foreach_cell(clusters, [&](PointVertex pv) {
 					if (marker.is_marked(pv))
 					{
