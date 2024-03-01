@@ -550,8 +550,6 @@ private:
 			point_provider_->set_mesh_bb_vertex_position(*surface_sample_, position);
 	}
 
-	
-
 	Delaunay compute_delaunay_tredrahedron(SURFACE& surface, Cgal_Surface_mesh& csm, Tree& tree)
 	{
 
@@ -615,7 +613,6 @@ private:
 		mark_poles(tri);
 		return tri;
 	}
-
 
 	void construct_voronoi_cell(SURFACE& surface, Delaunay& tri)
 	{
@@ -1662,19 +1659,7 @@ private:
 		point_provider_->emit_attribute_changed(*surface_sample, sample_normal.get());
 
 	}
-	/*void transfer_file()
-	{
-		using fs = std::filesystem;
-		std::string in_file_dir = "C:/Users/huang/Devel/CGoGN_3/data/meshes/Thingi10K/Thingi10K/rawmesh";
-		std::string out_file_dir = "C:/Users/huang/Devel/CGoGN_3/data/meshes/off/Thingi10K";
-
-		for (const auto& entry : fs::directory_iterator(in_file_dir))
-		{
-			std::string in_file = entry.path().string();
-			std::string off_file = out_file_dir + "/" + entry.path().filename().string() + ;
-		}
-
-	}*/
+	
 	void sample_medial_axis(SURFACE& s)
 	{
 		auto vertex_position = get_or_add_attribute<Vec3, SurfaceVertex>(s, "position");
@@ -1686,8 +1671,8 @@ private:
 			get_or_add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(
 				s, "medial_axis_samples_closest_points");
 		auto medial_axis_samples_angle_ = get_or_add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_angle");
-		auto medial_axis_samples_feature_value_ =
-			get_or_add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_feature_value");
+		/*auto medial_axis_samples_feature_value_ =
+			get_or_add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_feature_value");*/
 		auto medial_axis_samples_weight_ = get_or_add_attribute<Scalar, SurfaceVertex>(s, "medial_axis_samples_weight");
 		auto kmax = get_or_add_attribute<Scalar, SurfaceVertex>(s, "kmax");
 		geometry::shrinking_ball_centers<SURFACE, false>(
@@ -1711,17 +1696,9 @@ private:
 			max_angle_ = std::max(max_angle_, angle);
 			min_angle_ = std::min(min_angle_, angle);
 			value<Scalar>(s, medial_axis_samples_angle_, v) = angle;
-			value<Scalar>(s, medial_axis_samples_feature_value_, v) =
-				(1000/(1 + std::exp(1.9*angle / M_PI))) * (1/(1 + std::exp(30*r)));
+			/*value<Scalar>(s, medial_axis_samples_feature_value_, v) =
+				(1000/(1 + std::exp(1.9*angle / M_PI))) * (1/(1 + std::exp(30*r)));*/
 			
-			/*Scalar sum = 0;
-			uint32_t count = 0;
-			for_n_ring<SURFACE,SurfaceVertex>(s, v, 3, [&](SurfaceVertex iv)
-			{
-				count++;
-				sum += value<Scalar>(s, medial_axis_samples_feature_value_, iv);
-				return true;
-			});*/
 			value<Scalar>(s, medial_axis_samples_weight_, v) = value<Scalar>(s, kmax, v);
 			/*std::cout << "feature value: "<< value<Scalar>(s, medial_axis_samples_feature_value_, v) 
 				<< ", weight: " << value<Scalar>(s, medial_axis_samples_weight_, v) << std::endl;*/
@@ -1729,7 +1706,7 @@ private:
 			return true;
 		});
 		normalise_scalar(s, medial_axis_samples_weight_);
-		normalise_scalar(s, medial_axis_samples_feature_value_);
+		/*normalise_scalar(s, medial_axis_samples_feature_value_);*/
 		surface_provider_->emit_attribute_changed(s, medial_axis_samples_position_.get());
 		surface_provider_->emit_attribute_changed(s, medial_axis_samples_radius_.get());
 		surface_provider_->emit_attribute_changed(s, medial_axis_samples_angle_.get());
@@ -1782,7 +1759,6 @@ private:
 
 		surface_provider_->emit_cells_set_changed(s, twin_medial_axis_samples_set_);
 	}
-
 
 	HighsSolution shrinking_balls_coverage_axis(SURFACE& surface, Scalar dilation_factor)
 	{
@@ -2569,8 +2545,7 @@ private:
 		surface_provider_->emit_attribute_changed(surface, distance_to_cluster.get());
 	}
 	
-	
-	
+
 	void update_filtered_cluster(SURFACE& surface, POINT& clusters)
 	{
 		
@@ -2592,7 +2567,7 @@ private:
 		auto medial_axis_samples_closest_points =
 			get_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(surface,
 																				  "medial_axis_samples_closest_points");
-		auto medial_axis_samples_feature_value = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_feature_value");
+		//auto medial_axis_samples_feature_value = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_feature_value");
 		auto medial_axis_samples_weight = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_weight");
 		auto cloest_point_color = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "cloest_point_color");
 		parallel_foreach_cell(surface, [&](SurfaceVertex sv) { 
@@ -2803,8 +2778,8 @@ private:
 					surface, "medial_axis_samples_closest_points");
 			auto meidal_axis_samples_weight =
 				get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_weight");
-			auto medial_axis_samples_feature_value_ =
-				get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_feature_value");
+			//auto medial_axis_samples_feature_value_ =
+			//	get_or_add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_feature_value");
 			auto cluster_cloest_sample = get_or_add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, PointVertex>(
 				clusters, "cluster_cloest_sample");
 
@@ -3095,6 +3070,7 @@ private:
 		std::cout << "finish creating skeleton"<< std::endl;
 		remove_attribute<PointVertex>(clusters, neighbours_set.get());
 	}
+
 
 	void set_spheres_position(const std::shared_ptr<PointAttribute<Vec3>>& spheres_position)
 	{
@@ -3457,7 +3433,6 @@ private:
 	std::unique_ptr<acc::KDTree<3, uint32>> surface_kdt;
 	std::unique_ptr<acc::BVHTree<uint32, Vec3>> surface_bvh;
 	std::unique_ptr<acc::KDTree<3, uint32>> medial_kdt;
-	std::unique_ptr<CellMarker<SURFACE, SurfaceVertex>> unsplittable;
 	std::unique_ptr<modeling::ClusteringSQEM_Helper<SURFACE>> sqem_helper;
 	};
 
