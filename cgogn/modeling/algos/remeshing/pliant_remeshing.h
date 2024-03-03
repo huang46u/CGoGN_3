@@ -147,7 +147,7 @@ struct PliantRemeshing_Helper
 		auto vertex_medial_point = add_attribute<Vec3, Vertex>(m_, "__vertex_medial_point");
 		auto vertex_medial_point_radius = add_attribute<Scalar, Vertex>(m_, "__vertex_medial_point_radius");
 		auto vertex_medial_point_closest_points_ =
-			add_attribute<std::pair<Vec3, Vec3>, Vertex>(m_, "__vertex_medial_point_closest_points");
+			add_attribute<std::pair<Vertex, Vertex>, Vertex>(m_, "__vertex_medial_point_closest_points");
 		geometry::shrinking_ball_centers(m_, vertex_position_.get(), vertex_normal.get(), vertex_medial_point.get(),
 										 vertex_medial_point_radius.get(), vertex_medial_point_closest_points_.get());
 

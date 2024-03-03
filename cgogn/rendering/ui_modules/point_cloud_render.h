@@ -46,10 +46,12 @@ namespace ui
 
 using geometry::Scalar;
 using geometry::Vec3;
+using geometry::Vec4;
 
 template <typename MESH>
 class PointCloudRender : public ViewModule
 {
+public:
 	enum AttributePerCell
 	{
 		GLOBAL = 0,
@@ -60,6 +62,7 @@ class PointCloudRender : public ViewModule
 		VECTOR = 0
 	};
 
+private:
 	template <typename T>
 	using Attribute = typename mesh_traits<MESH>::template Attribute<T>;
 
@@ -89,7 +92,7 @@ class PointCloudRender : public ViewModule
 		rendering::VBO* vertex_position_vbo_;
 		std::shared_ptr<Attribute<Scalar>> vertex_radius_;
 		rendering::VBO* vertex_radius_vbo_;
-		std::shared_ptr<Attribute<Vec3>> vertex_color_;
+		std::shared_ptr<Attribute<Vec4>> vertex_color_;
 		rendering::VBO* vertex_color_vbo_;
 
 		std::unique_ptr<rendering::ShaderPointSprite::Param> param_point_sprite_;
@@ -194,7 +197,7 @@ public:
 		v.request_update();
 	}
 
-	void set_vertex_color(View& v, const MESH& m, const std::shared_ptr<Attribute<Vec3>>& vertex_color)
+	void set_vertex_color(View& v, const MESH& m, const std::shared_ptr<Attribute<Vec4>>& vertex_color)
 	{
 		Parameters& p = parameters_[&v][&m];
 		if (p.vertex_color_ == vertex_color)
@@ -244,7 +247,10 @@ protected:
 						if (p.param_point_sprite_size_->attributes_initialized())
 						{
 							p.param_point_sprite_size_->bind(proj_matrix, view_matrix);
+							glEnable(GL_BLEND);
+							glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 							md.draw(rendering::POINTS);
+							glDisable(GL_BLEND);
 							p.param_point_sprite_size_->release();
 						}
 					}
@@ -252,8 +258,11 @@ protected:
 					case PER_VERTEX: {
 						if (p.param_point_sprite_color_size_->attributes_initialized())
 						{
+							glEnable(GL_BLEND);
+							glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 							p.param_point_sprite_color_size_->bind(proj_matrix, view_matrix);
 							md.draw(rendering::POINTS);
+							glDisable(GL_BLEND);
 							p.param_point_sprite_color_size_->release();
 						}
 					}
@@ -269,7 +278,10 @@ protected:
 						{
 							p.param_point_sprite_->point_size_ = p.vertex_base_size_ * p.vertex_scale_factor_;
 							p.param_point_sprite_->bind(proj_matrix, view_matrix);
+							glEnable(GL_BLEND);
+							glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 							md.draw(rendering::POINTS);
+							glDisable(GL_BLEND);
 							p.param_point_sprite_->release();
 						}
 					}
@@ -279,7 +291,10 @@ protected:
 						{
 							p.param_point_sprite_color_->point_size_ = p.vertex_base_size_ * p.vertex_scale_factor_;
 							p.param_point_sprite_color_->bind(proj_matrix, view_matrix);
+							glEnable(GL_BLEND);
+							glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 							md.draw(rendering::POINTS);
+							glDisable(GL_BLEND);
 							p.param_point_sprite_color_->release();
 						}
 					}
@@ -345,9 +360,9 @@ protected:
 				}
 				else if (p.color_per_cell_ == PER_VERTEX)
 				{
-					imgui_combo_attribute<Vertex, Vec3>(
+					imgui_combo_attribute<Vertex, Vec4>(
 						*selected_mesh_, p.vertex_color_, "Attribute##vectorvertexcolor",
-						[&](const std::shared_ptr<Attribute<Vec3>>& attribute) {
+						[&](const std::shared_ptr<Attribute<Vec4>>& attribute) {
 							set_vertex_color(*selected_view_, *selected_mesh_, attribute);
 						});
 				}
