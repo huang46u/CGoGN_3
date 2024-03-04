@@ -86,7 +86,8 @@ enum SplitMethod
 {
 	DEVIATION,
 	DISTANCE_POINT_SPHERE,
-	DISTANCE_TO_MEDIAL_AXIS
+	DISTANCE_TO_MEDIAL_AXIS,
+	HAUSDORFF_DISTANCE,
 };
 
 template <typename POINT, typename SURFACE, typename NONMANIFOLD>
@@ -1879,7 +1880,8 @@ private:
 		std::shared_ptr<PointAttribute<Scalar>> clusters_deviation_ = nullptr;
 		std::shared_ptr<PointAttribute<std::unordered_map<uint32, PointVertex>>> clusters_neighbours_ = nullptr;
 		std::shared_ptr<PointAttribute<std::pair<SurfaceVertex, SurfaceVertex>>> clusters_cloest_sample_ = nullptr;
-		std::shared_ptr < PointAttribute<std::pair<Scalar, SurfaceVertex>>> clusters_max_distance_vertex_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> clusters_max_distance_ = nullptr;
+		std::shared_ptr<PointAttribute<SurfaceVertex>> clusters_max_vertex_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> correction_error_ = nullptr;
 																					 
 		PointAttribute<Scalar>* selected_clusters_error_ = nullptr;
@@ -1891,9 +1893,10 @@ private:
 		SplitMethod split_method_  = DEVIATION;
 		float mean_update_curvature_weight_ = 0.2;
 		bool auto_split_outside_spheres_ = true;
-		float split_variance_threshold_ = 0.001;
-		float split_distance_threshold_ = 0.02;
-		float split_distance_to_medial_axis_threshold_ = 0.001;
+		float split_variance_threshold_ = 0.0001f;
+		float split_distance_threshold_ = 0.01f;
+		float split_distance_to_medial_axis_threshold_ = 0.0001f;
+		float split_hausdorff_distance_threshold_ = 0.0001f;
 		Scalar total_error_ = 0.0;
 		Scalar min_error_ = 0.0;
 		Scalar max_error_ = 0.0;
@@ -2009,8 +2012,9 @@ private:
 			*p.clusters_, "clusters_neighbours");
 		p.clusters_cloest_sample_ = get_or_add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, PointVertex>(
 			*p.clusters_, "clusters_cloest_sample_");
-		p.clusters_max_distance_vertex_ = get_or_add_attribute<std::pair<Scalar, SurfaceVertex>, PointVertex>(
-			*p.clusters_, "clusters_max_distance_vertex_");
+		p.clusters_max_distance_ = get_or_add_attribute<Scalar, PointVertex>(
+			*p.clusters_, "clusters_max_distance");
+		p.clusters_max_vertex_ = get_or_add_attribute<SurfaceVertex, PointVertex>(*p.clusters_, "cluster_max_vertex");
 		p.correction_error_ = get_or_add_attribute<Scalar, PointVertex>(*p.clusters_, "correction_error");
 		p.selected_clusters_error_ = p.clusters_error_.get();
 
@@ -2052,6 +2056,7 @@ private:
 		std::cout << "start BFS " << std::endl;
 		while (sphere_queue.size() > 0)
 		{
+			uint32 size = sphere_queue.size();
 			SphereQueueIt it = sphere_queue.begin();
 			auto [radius, v] = *it;
 			if (!value<SphereInfo>(surface, sphere_info, v).first)
@@ -2060,17 +2065,20 @@ private:
 				continue;
 			}
 			auto [v1, v2] = value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, p.medial_axis_closest_points_, v);
+			
 			Vec3& sphere_center = value<Vec3>(surface, p.medial_axis_position_, v1);
 			value<SphereInfo>(surface, sphere_info, v1).first = false;
+			
 			if (!value<SphereInfo>(surface, sphere_info, v2).first)
 			{
+
 				continue;
 			}
 			
-			//Set new *p.clusters_ info
+			//Set new clusters info
 			PointVertex new_cluster = add_vertex(*p.clusters_);
 			value<Vec3>(*p.clusters_, p.clusters_position_, new_cluster) = sphere_center;
-			value<std::pair<SurfaceVertex, SurfaceVertex>>(*p.clusters_, p.medial_axis_closest_points_,
+			value<std::pair<SurfaceVertex, SurfaceVertex>>(*p.clusters_, p.clusters_cloest_sample_,
 														   new_cluster) = {v1, v2};
 			
 			value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster) =
@@ -2113,7 +2121,7 @@ private:
 					Vec4 sphere = Vec4(sphere_center.x(), sphere_center.y(), sphere_center.z(), radius);
 					// if the distance is less than threshold
 					Scalar error = (pos - sphere_center).norm() - radius;
-					if (error < dilation_factor /*&& cosine>=0*/)
+					if (error < p.init_distance_ /*&& cosine>=0*/)
 					{
 						vertex_queue.push(sv);
 						if (!value<SphereInfo>(surface,sphere_info,sv).first)
@@ -2144,18 +2152,14 @@ private:
 			}
 		}
 		remove_attribute<SurfaceVertex>(surface, sphere_info.get());
-		
+		std::cout << "end bfs" << std::endl;
 		assign_cluster(surface);
-		
-		if (p.clusters_position_)
-			point_provider_->set_mesh_bb_vertex_position(*p.clusters_, p.clusters_position_);
-		point_provider_->emit_connectivity_changed(*p.clusters_);
-		point_provider_->emit_attribute_changed(*p.clusters_, p.clusters_position_.get());
-		point_provider_->emit_attribute_changed(*p.clusters_, p.clusters_radius_.get());
-		point_provider_->emit_attribute_changed(*p.clusters_, p.clusters_surface_color_.get());
-		surface_provider_->emit_attribute_changed(surface,p.surface_vertex_color_.get());
-		surface_provider_->emit_attribute_changed(surface, p.surface_distance_to_cluster_.get());
+		update_clusters_neighbor(surface);
+		update_clusters_data(surface);
+		update_clusters_color(surface);
 
+		if (!p.running_)
+			update_render_data(surface);
 		
 	}
 	
@@ -2267,10 +2271,11 @@ private:
 				error += d * d;
 			}
 			value<Scalar>(*p.clusters_, p.clusters_error_, pv) = error;
-			value<std::pair<Scalar, SurfaceVertex>>(*p.clusters_, p.clusters_max_distance_vertex_,
-													pv) = {cluster_max_error, max_error_vertex};
-
+			value<Scalar>(*p.clusters_, p.clusters_max_distance_,
+													pv) = cluster_max_error;
+			value<SurfaceVertex>(*p.clusters_, p.clusters_max_vertex_, pv) = max_error_vertex;
 			Scalar mean_error = error / cluster.size();
+			
 			Scalar variance = 0.0;
 			for (SurfaceVertex sv : cluster)
 			{
@@ -2590,7 +2595,7 @@ private:
 
 		value<Vec3>(*p.clusters_, p.clusters_position_, cluster) = center0;
 		value<Scalar>(*p.clusters_, p.clusters_radius_, cluster) = radius0;
-		value<std::pair<SurfaceVertex, SurfaceVertex>>(*p.clusters_, p.medial_axis_closest_points_,
+		value<std::pair<SurfaceVertex, SurfaceVertex>>(*p.clusters_, p.clusters_cloest_sample_,
 													   cluster) = {max_angle_vertex, secondary0};
 		value<Vec3>(surface, p.surface_vertex_color_, v) =
 			value<Vec4>(*p.clusters_, p.clusters_surface_color_, cluster).head<3>();
@@ -2606,7 +2611,7 @@ private:
 
 		PointVertex new_cluster = add_vertex(*p.clusters_);
 		value<Vec3>(*p.clusters_, p.clusters_position_, new_cluster) = center1;
-		value<std::pair<SurfaceVertex, SurfaceVertex>>(*p.clusters_, p.medial_axis_closest_points_,
+		value<std::pair<SurfaceVertex, SurfaceVertex>>(*p.clusters_, p.clusters_cloest_sample_,
 													   new_cluster) = {max_angle_vertex, secondary1};
 		value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster) =
 			Vec4(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX,0.75);
@@ -2621,9 +2626,7 @@ private:
 	void split_cluster(SURFACE& surface, PointVertex& candidate_cluster)
 	{
 		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
-		SurfaceVertex max_dist_vertex =
-			value<std::pair<Scalar, SurfaceVertex>>(*p.clusters_, p.clusters_max_distance_vertex_, candidate_cluster)
-				.second;
+		SurfaceVertex max_dist_vertex = value<SurfaceVertex>(*p.clusters_, p.clusters_max_vertex_, candidate_cluster);
 		Vec3 pos = value<Vec3>(surface, p.medial_axis_position_, max_dist_vertex);
 		PointVertex new_cluster = add_vertex(*p.clusters_);
 		value<Vec3>(*p.clusters_, p.clusters_position_, new_cluster) = pos;
@@ -2659,12 +2662,19 @@ private:
 		{
 		case DEVIATION:
 			threshold = p.split_variance_threshold_;
+			p.selected_clusters_error_ = p.clusters_deviation_.get();
 			break;
 		case DISTANCE_POINT_SPHERE:
 			threshold = p.split_distance_threshold_;
+			p.selected_clusters_error_ = p.clusters_error_.get();
 			break;
 		case DISTANCE_TO_MEDIAL_AXIS:
 			threshold = p.split_distance_to_medial_axis_threshold_;
+			p.selected_clusters_error_ = p.correction_error_.get();
+			break;
+		case HAUSDORFF_DISTANCE:
+			threshold = p.split_hausdorff_distance_threshold_;
+			p.selected_clusters_error_ = p.clusters_max_distance_.get();
 			break;
 		default:
 			break;
@@ -2977,7 +2987,7 @@ private:
 			}
 			if (p.initialized_)
 			{
-				ImGui::DragFloat("Init distance", &p.init_distance_, 0.00000001f, 0.0f, 0.000001f,
+				ImGui::DragFloat("Init distance", &p.init_distance_, 0.00001f, 0.0f, 0.1f,
 								 "%.6f");
 				
 				if (ImGui::Button("Initialise Cluster"))
@@ -3024,19 +3034,41 @@ private:
 					if (ImGui::Button("Stop clusters update"))
 						stop_clusters_update(*selected_surface_mesh_);
 				}
-
-				ImGui::DragFloat("Split vairance threshold", &p.split_variance_threshold_, 0.00000001f, 0.0f, 0.000001f,
-								 "%.6f");
-				ImGui::DragFloat("Split distance threshold", &p.split_distance_threshold_, 0.00000001f, 0.0f, 0.000001f,
-								 "%.6f");
-				ImGui::DragFloat("Split distance to medial axis threshold", &p.split_distance_to_medial_axis_threshold_, 0.00000001f, 0.0f, 0.000001f,
-								 "%.6f");
 				ImGui::Separator();
 
-				imgui_combo_attribute<PointVertex, Scalar>(*p.clusters_, p.selected_clusters_error_, "Error measure",
-													   [&](const std::shared_ptr<PointAttribute<Scalar>>& attribute) {
-					set_selected_clusters_error(*selected_surface_mesh_, attribute.get());
-													   });
+				if (ImGui::RadioButton("Distance               ", (int*)&p.split_method_, DISTANCE_POINT_SPHERE))
+				{
+					set_selected_clusters_error(*selected_surface_mesh_, p.clusters_error_.get());
+
+				}
+				ImGui::SameLine();
+				ImGui::DragFloat("distance threshold", &p.split_distance_threshold_, 0.0001f, 0.0f, 0.1f, "%.6f");
+								
+				if(ImGui::RadioButton("Deviation               ", (int*)&p.split_method_, DEVIATION))
+				{
+					set_selected_clusters_error(*selected_surface_mesh_, p.clusters_deviation_.get());
+				}
+				ImGui::SameLine();
+				ImGui::DragFloat("Deviation threshold", &p.split_variance_threshold_, 0.000001f, 0.0f, 0.1f,
+								 "%.6f");
+				
+				if(ImGui::RadioButton("Correction distance     ", (int*)&p.split_method_, DISTANCE_TO_MEDIAL_AXIS))
+				{
+					set_selected_clusters_error(*selected_surface_mesh_, p.correction_error_.get());
+				}
+				ImGui::SameLine();
+				ImGui::DragFloat("Correction distance threshold", &p.split_distance_to_medial_axis_threshold_,
+								 0.000001f, 0.0f, 0.1f, "%.6f");
+
+				if(ImGui::RadioButton("Hausdorff distance ", (int*)&p.split_method_, HAUSDORFF_DISTANCE))
+				{
+					set_selected_clusters_error(*selected_surface_mesh_, p.clusters_max_distance_.get());
+				}
+				ImGui::SameLine();
+				ImGui::DragFloat("Hausdorff Distance threshold", &p.split_hausdorff_distance_threshold_, 0.000001f, 0.0f, 0.1f, "%.6f");
+
+				
+			
 				ImGui::DragInt("Max split number", &(int)p.max_split_number, 1, 0, 20);
 				
 				if (ImGui::Button("Split clusters"))
