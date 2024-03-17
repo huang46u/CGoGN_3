@@ -43,8 +43,461 @@ using geometry::Slab_Quadric;
 using geometry::Vec3;
 using geometry::Vec4;
 
+bool ProjectOntoLineSegment(const Vec3& p, const Vec3& v0, const Vec3& v1, Vec3& fp, double& dist)
+{
+	double t((p - v0).dot(v1 - v0) / (v1 - v0).norm() / (v1 - v0).norm());
+	if ((t >= 0.0) && (t <= 1.0))
+	{
+		fp = (1.0 - t) * v0 + t * v1;
+		dist = (p - fp).norm();
+		return true;
+	}
+	else if (t < 0.0)
+	{
+		fp = v0;
+		dist = (p - v0).norm();
+		return false;
+	}
+	else // t > 1.0
+	{
+		fp = v1;
+		dist = (p - v1).norm();
+		return false;
+	}
+}
+
+bool DistanceToLine(const Vec3& p, const Vec3& v0, const Vec3& v1, double& dist, Vec3& fp)
+{
+	Vec3 v0v1(v1 - v0), pv0(v0 - p), pv1(v1 - p);
+	double area = fabs(v0v1.cross(pv0).norm());
+	if (v0v1.norm() > 1e-12)
+	{
+		dist = area / v0v1.norm();
+		double t = (pv0.dot(pv0) - pv0.dot(pv1)) / (pv0.dot(pv0) + pv1.dot(pv1) - 2 * pv0.dot(pv1));
+		fp = (1 - t) * v0 + t * v1;
+		return true;
+	}
+	else
+		return false;
+}
+struct Cone
+{
+public:
+	Vec3 apex;
+	Vec3 axis;
+	Scalar base;
+	Scalar top;
+	Scalar height;
+
+	// 1 -- height = 0.0;
+	// 2 -- cylinder
+	// 3 -- general regular cone
+	int type;
+
+public:
+	Cone()
+	{
+	}
+	Cone(Vec3 c0, Scalar r0, Vec3 c1, Scalar r1)
+	{
+		Vec3 c0c1 = c1 - c0;
+		// one sphere is included in another sphere
+		if (c0c1.norm() - abs(r1 - r0) < 1e-8)
+		{
+			apex = r1 > r0 ? c1 : c0;
+			axis = Vec3(0, 0, 1);
+			base = r1 > r0 ? r1 : r0;
+			top = r1 > r0 ? r1 : r0;
+			height = 0.;
+			type = 1;
+			return;
+		}
+
+		if (c0c1.norm() < 1e-8)
+		{
+			apex = c0;
+			axis = Vec3(0, 0, 1);
+			base = r0;
+			top = r0;
+			height = 0.;
+			type = 1;
+		}
+		else
+		{
+			double dr0r1 = fabs(r0 - r1);
+			if (dr0r1 < 1e-8)
+			{
+				apex = c0;
+				axis = c1 - c0;
+				axis.normalize();
+				base = r0;
+				top = r0;
+				height = (c1 - c0).norm();
+				type = 2;
+			}
+			else
+			{
+				apex = (r1 * c0 - r0 * c1) / (r1 - r0);
+				axis = (r0 < r1) ? (c1 - c0) : (c0 - c1);
+				axis.normalize();
+
+				double cangle;
+				Vec3 apexc0 = c0 - apex;
+				double vc0len = apexc0.norm();
+				Vec3 apexc1 = c1 - apex;
+				double vc1len = apexc1.norm();
+				cangle = sqrt(1. - r0 * r0 / vc0len / vc0len);
+
+				if (r0 < r1)
+				{
+					// cangle = sqrt(1.-r1*r1/vc1len/vc1len);
+					apex = apex + apexc0 * cangle * cangle;
+					base = r0 * cangle;
+					top = r1 * cangle;
+					height = (vc1len - vc0len) * cangle * cangle;
+				}
+				else
+				{
+					// cangle = sqrt(1.-r0*r0/vc0len/vc0len);
+					apex = apex + apexc1 * cangle * cangle;
+					base = r1 * cangle;
+					top = r0 * cangle;
+					height = (vc0len - vc1len) * cangle * cangle;
+				}
+				type = 3;
+			}
+		}
+	}
+	
+	bool ProjectOntoCone(const Vec3& p, Vec3& fp, Scalar& signeddist)
+	{
+		Vec3 apexp;
+		apexp = p - apex;
+		Vec3 apexpCaxis = apexp.cross(axis);
+
+		Vec3 v0, v1;
+		// on the axis
+		if (fabs(apexpCaxis.norm()) < 1e-12)
+		{
+			Vec3 bu, bv, bw;
+			bw = axis;
+			Vec3 u = std::fabs(bw.x()) > std::fabs(bw.y()) ? Vec3(0, 1, 0) : Vec3(1, 0, 0);
+			bu = bw.cross(u);
+			bu.normalize();
+			bv = bw.cross(bu);
+			bv.normalize();
+
+			v0 = apex + bv * base;
+			v1 = apex + axis * height + bv * top;
+			double dist;
+			bool res = ProjectOntoLineSegment(p, v0, v1, fp, dist);
+			signeddist = res ? -dist : dist;
+			return res;
+		}
+		else
+		{
+			bool interior = true;
+			double dp = apexp.dot(axis);
+			if ((dp < 0) || (dp > height))
+				interior = false;
+			else
+			{
+				double cone_dist_to_axis = dp / height * top + (height - dp) / height * base;
+				double dist_to_axis;
+				Vec3 tfp;
+				ProjectOntoLineSegment(p, apex, apex + axis * height, tfp, dist_to_axis);
+				if (dist_to_axis > cone_dist_to_axis)
+					interior = false;
+			}
+			apexp = apexp - apexp.dot(axis) * axis;
+			apexp.normalize();
+
+			v0 = apex + apexp * base;
+			v1 = apex + axis * height + apexp * top;
+			double dist;
+			bool res = ProjectOntoLineSegment(p, v0, v1, fp, dist);
+			if (interior)
+				signeddist = -dist;
+			else
+				signeddist = dist;
+			return res;
+		}
+	}
+	
+};
+
+struct Triangle
+{
+public:
+	Vec3 p1;
+	Vec3 p2;
+	Vec3 p3;
+	Vec3 n;
+
+	bool ProjectontoTriangle(const Vec3& p, Vec3& fp, Scalar& dist)
+	{
+		Vec3 e1 = p2 - p1;
+		Vec3 e2 = p3 - p1;
+		Vec3 e3 = p - p1;
+		Vec3 n = e1.cross(e2);
+		if (n.norm() < 1e-12)
+			return false;
+		Scalar d = n.dot(n);
+		Scalar u = n.dot(e2.cross(e3)) / d;
+		Scalar v = n.dot(e3.cross(e1)) / d;
+		if ((u >= 0) && (v >= 0) && (u + v <= 1))
+		{
+			fp = p - n * n.dot(e3) / d;
+			dist = (p - fp).norm();
+			return true;
+		}
+		else
+		{
+			Vec3 fp01, fp02, fp12;
+			double dist01, dist02, dist12;
+			ProjectOntoLineSegment(p, p1, p2, fp01, dist01);
+			ProjectOntoLineSegment(p, p1, p3, fp02, dist02);
+			ProjectOntoLineSegment(p, p2, p3, fp12, dist12);
+			if ((dist01 <= dist02) && (dist01 <= dist12))
+			{
+				dist = dist01;
+				fp = fp01;
+				return false;
+			}
+			else if ((dist02 <= dist01) && (dist02 <= dist12))
+			{
+				dist = dist02;
+				fp = fp02;
+				return false;
+			}
+			else
+			{
+				dist = dist12;
+				fp = fp12;
+				return false;
+			}
+		}
+	}
+};
+
+
+
+template <typename SURFACE , typename NONMANIFOLD>
+struct SphereMeshConstructor
+{
+	template <typename T>
+	using NAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
+	template <typename T>
+	using SAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
+	using NVertex = typename NONMANIFOLD::Vertex;
+	using NEdge = typename NONMANIFOLD::Edge;
+	using NFace = typename NONMANIFOLD::Face;
+
+	
+	using SVertex = typename SURFACE::Vertex;
+	using SEdge = typename SURFACE::Edge;
+	using SFace = typename SURFACE::Face;
+
+	
+	SphereMeshConstructor(SURFACE& surface, NONMANIFOLD& m, std::shared_ptr<SAttribute<Vec3>>& vertex_position,
+						  std::shared_ptr<NAttribute<Vec4>>& sphere_info, std::shared_ptr<NAttribute<SVertex>>& clusters_vertices)
+		: surface_(surface), m_(m), sphere_info_(sphere_info), vertex_position_(vertex_position), clusters_vertices_(clusters_vertices)
+	{
+		cones_ = add_attribute<Cone, Edge>(m_, "sphere_cone");
+		slabs_ = add_attribute<std::vector<Triangle>, Face>(m_, "slab_triangles");
+
+	}
+	void construct_sphere_mesh()
+	{
+		parallel_foreach_cell(m_, [&](NEdge e) -> bool {
+			if (incident_faces(m_, e).size() == 0)
+			{
+				auto iv = incident_vertices(m_, e);
+				Vec4 p1 = value<Vec4>(m_, sphere_info_, iv[0]);
+				Vec4 p2 = value<Vec4>(m_, sphere_info_, iv[1]);
+				value<Cone>(m_, cones_, e) = Cone(p1.head<3>(), p1.w(), p2.head<3>(), p2.w());
+				if (value<Cone>(m_, cones_, e).type != 1)
+				{
+					cone_marker_.mark(e);
+				}
+			}
+			return true;
+		});
+		foreach_cell(m_, [&](NFace f) -> bool {
+			auto ifv = incident_vertices(m_, f);
+			Vec4 p1 = value<Vec4>(m_, sphere_info_, ifv[0]);
+			Vec4 p2 = value<Vec4>(m_, sphere_info_, ifv[1]);
+			Vec4 p3 = value<Vec4>(m_, sphere_info_, ifv[2]);
+			Triangle t1, t2;
+			if (slab_mesh_triangle(p1, p2, p3,t1,t2))
+			{
+				slab_marker_.mark(f);
+				value<std::vector<Triangle>>(m_, slabs_, f).push_back(t1);
+				value<std::vector<Triangle>>(m_, slabs_, f).push_back(t2);
+			}
+			return true;
+		});
+	}
+	
+	bool slab_mesh_triangle(Vec4& p1, Vec4& p2, Vec4& p3, Triangle t1, Triangle& t2)
+	{
+		Vec3 c1 = p1.head<3>();
+		Vec3 c2 = p2.head<3>();
+		Vec3 c3 = p3.head<3>();
+		double r1 = p1[3];
+		double r2 = p2[3];
+		double r3 = p3[3];
+
+		Vec3 c12 = c2 - c1;
+		Vec3 c13 = c3 - c1;
+		Vec3 c23 = c3 - c2;
+		double dc12 = c12.norm();
+		double dc13 = c13.norm();
+		double dc23 = c23.norm();
+
+		double dr12 = fabs(r2 - r1);
+		double dr13 = fabs(r3 - r1);
+		double dr23 = fabs(r3 - r2);
+
+		if ((dc12 < 1e-8) || (dc13 < 1e-8) || (dc23 < 1e-8))
+			return false;
+
+		Vec3 n = c12.cross(c13).normalized();
+
+		if ((dr12 < 1e-8) && (dr13 < 1e-8) && (dr23 < 1e-8))
+		{
+			t1.p1 = c1 + n * r1;
+			t1.p2 = c2 + n * r1;
+			t1.p3 = c3 + n * r1;
+			t1.n = n;
+
+			t2.p1 = c1 - n * r1;
+			t2.p2 = c2 - n * r1;
+			t2.p3 = c3 - n * r1;
+			t2.n = -n;
+
+			return true;
+		}
+		else
+		{
+			// two points on the tangent plane
+			Vec3 contact_point1, contact_point2;
+
+			if (dr12 < 1e-8)
+			{
+				contact_point1 = (r3 * c1 - r1 * c3) / (r3 - r1);
+				contact_point2 = (r3 * c2 - r2 * c3) / (r3 - r2);
+			}
+			else if (dr13 < 1e-8)
+			{
+				contact_point1 = (r2 * c1 - r1 * c2) / (r2 - r1);
+				contact_point2 = (r3 * c2 - r2 * c3) / (r3 - r2);
+			}
+			else if (dr23 < 1e-8)
+			{
+				contact_point1 = (r3 * c1 - r1 * c3) / (r3 - r1);
+				contact_point2 = (r1 * c2 - r2 * c1) / (r1 - r2);
+			}
+			else
+			{
+				contact_point1 = (r3 * c1 - r1 * c3) / (r3 - r1);
+				contact_point2 = (r3 * c2 - r2 * c3) / (r3 - r2);
+			}
+
+			Vec3 inter_point;
+			double dist;
+			DistanceToLine(c1, contact_point1, contact_point2, dist, inter_point);
+			double sangle = r1 / dist;
+			if (fabs(sangle) > 1.)
+				return false;
+			double cangle = sqrt(1. - sangle * sangle);
+			Vec3 c1inter = (c1 - inter_point).normalized();
+			Vec3 n1_vec3 = n * cangle - c1inter * sangle;
+			Vec3 n2_vec3 = -n * cangle - c1inter * sangle;
+			n1_vec3.normalize();
+			n2_vec3.normalize();
+
+			t1.p1 = c1 + n1_vec3 * r1;
+			t1.p2 = c2 + n1_vec3 * r1;
+			t1.p3 = c3 + n1_vec3 * r1;
+			t1.n = n1_vec3;
+
+			t2.p1 = c1 + n2_vec3 * r1;
+			t2.p2 = c2 + n2_vec3 * r1;
+			t2.p3 = c3 + n2_vec3 * r1;
+			t2.n = n2_vec3;
+
+			return true;
+		}
+		return false;
+	}
+	Scalar min_distance_to_enveloppe(NVertex nv, SVertex sv)
+	{
+		Scalar min_dist = std::numeric_limits<Scalar>::max();
+		foreach_incident_face(m_, nv, [&](NFace f) { 
+			if (slab_marker_.is_marked(f))
+			{
+				for (Triangle t : value<std::vector<Triangle>>(m_, slabs_, f))
+				{
+					Vec3 fp;
+					Scalar dist;
+					t.ProjectontoTriangle(value<Vec4>(m_, sphere_info_, sv), fp, dist);
+					{
+						dist = fabs(dist);
+						min_dist = std::min(min_dist, dist);
+					}
+				}
+			}
+			return true;
+			});
+		foreach_incident_edge(m_, nv, [&](NEdge e) {
+			if (cone_marker_.is_marked(e))
+			{
+				Vec3 fp;
+				Scalar dist;
+				value<Cone>(m_, cones_, e).ProjectOntoCone(value<Vec4>(m_, sphere_info_, sv), fp, dist);
+				dist = fabs(dist);
+				min_dist = std::min(min_dist, dist);
+			}
+			return true;
+		});
+		Vec3 sphere_center = value<Vec4>(m_, sphere_info_, nv).head<3>();
+		Scalar sphere_radius = value<Vec4>(m_, sphere_info_, nv).w();
+		Scalar distance_to_sphere  = (sphere_center - value<Vec3>(surface_, vertex_position_, sv)).norm() - sphere_radius;
+		return std::min(distance_to_sphere, min_dist);
+	}
+
+
+	Scalar compute_hausdorff_distance()
+	{
+		Scalar max_dist = 0.0;
+		foreach_cell(m_, [&](NVertex v) -> bool {
+			for (SVertex sv: value<std::vector<SVertex>>(m_, clusters_vertices_, v))
+			{
+				Scalar min_dist = min_distance_to_enveloppe(v, sv);
+				max_dist = std::max(max_dist, min_dist);
+			}
+			return true;
+		});
+		return max_dist;
+	}
+
+private:
+	NONMANIFOLD& m_;
+	SURFACE& surface_;
+	CellMarker<NONMANIFOLD, NFace> slab_marker_;
+	CellMarker<NONMANIFOLD, NEdge> cone_marker_;
+	std::shared_ptr<NAttribute<Vec4>> sphere_info_;
+	std::shared_ptr<NAttribute<std::vector<SVertex>>> clusters_vertices_;
+	std::shared_ptr<NAttribute<Cone>> cones_;
+	std::shared_ptr<NAttribute<std::vector<Triangle>>> slabs_;
+	std::shared_ptr<SAttribute<Vec3>> vertex_position_;
+	
+
+};
+
 template <typename NONMANIFOLD>
-struct DecimationSQEM_Helper
+struct DecimationSQEM_Helper 
 {
 	template <typename T>
 	using Attribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;

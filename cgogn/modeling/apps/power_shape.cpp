@@ -120,7 +120,7 @@ int main(int argc, char** argv)
 		sr.set_ghost_mode(*v1, *m, true);
 		pcr.set_render_vertices(*v1, *m, true);
 
-	/*	std::shared_ptr<Attribute<Scalar>> edge_angle = cgogn::get_or_add_attribute<Scalar, Edge>(*m,
+		std::shared_ptr<Attribute<Scalar>> edge_angle = cgogn::get_or_add_attribute<Scalar, Edge>(*m,
 		   "__edge_angle");
 		cgogn::geometry::compute_angle(*m, surface_vertex_position.get(), edge_angle.get());
 
@@ -129,7 +129,7 @@ int main(int argc, char** argv)
 		sdp.compute_curvature(*m, mean_edge_length * 2.5, surface_vertex_position.get(), surface_vertex_normal.get(),
 							  edge_angle.get(), surface_vertex_kmax.get(), surface_vertex_kmin.get(),
 							  surface_vertex_kgaussian.get(), surface_vertex_Kmax.get(), surface_vertex_Kmin.get(),
-							  surface_vertex_Knormal.get());*/
+							  surface_vertex_Knormal.get());
 
 		
 	}

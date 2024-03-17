@@ -1872,7 +1872,7 @@ private:
 		std::shared_ptr<Point_inside> inside_tester_ = nullptr;
 		std::shared_ptr<modeling::ClusteringSQEM_Helper<SURFACE>> sqem_helper_ = nullptr;
 		
-		POINT* clusters_;
+		POINT* clusters_ = nullptr;
 		
 		std::shared_ptr<PointAttribute<Vec3>> clusters_position_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_radius_ = nullptr;
@@ -1890,6 +1890,10 @@ private:
 		std::shared_ptr<PointAttribute<Vec3>> clusters_without_correction_position_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_without_correction_radius_ = nullptr;
 
+		NONMANIFOLD* non_manifold_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Vec3>> non_manifold_vertex_position_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Scalar>> non_manifold_vertex_radius = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Vec4>> non_manifold_sphere_info = nullptr;
 																					 
 		PointAttribute<Scalar>* selected_clusters_error_ = nullptr;
 		std::shared_ptr<CellMarkerStore<SURFACE, SurfaceVertex>> no_ball;
@@ -2049,6 +2053,8 @@ private:
 			get_or_add_attribute<Scalar, PointVertex>(*p.clusters_, "clusters_without_correction_radius");
 
 		p.initialized_ = true;
+
+
 	}
 	void set_selected_clusters_error(SURFACE& surface, PointAttribute<Scalar>* attribute)
 	{
@@ -2194,7 +2200,7 @@ private:
 		}
 		update_clusters_data(surface);
 		update_clusters_color(surface);
-
+		//shrinking_balls_clustering_connectivity(surface);
 		if (!p.running_)
 			update_render_data(surface);
 		
@@ -2706,7 +2712,7 @@ private:
 		}
 		update_clusters_data(surface);
 		update_clusters_color(surface);
-		
+		//shrinking_balls_clustering_connectivity(surface);
 		if (!p.running_)
 			update_render_data(surface);
 	}
@@ -2762,7 +2768,7 @@ private:
 			value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster).head<3>();*/
 	}
 
-	void split_cluster(SURFACE& surface, PointVertex& candidate_cluster)
+	void split(SURFACE& surface, PointVertex& candidate_cluster)
 	{
 		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
 		SurfaceVertex max_dist_vertex = value<SurfaceVertex>(*p.clusters_, p.clusters_max_vertex_, candidate_cluster);
@@ -2776,6 +2782,35 @@ private:
 		value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster) =
 			Vec4(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, 0.75);
 
+	}
+
+	void split_one_cluster(SURFACE& surface, PointVertex& candidate_cluster)
+	{
+		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
+		std::lock_guard<std::mutex> lock(p.mutex_);
+		SurfaceVertex max_dist_vertex = value<SurfaceVertex>(*p.clusters_, p.clusters_max_vertex_, candidate_cluster);
+		Vec3 pos = value<Vec3>(surface, p.medial_axis_position_, max_dist_vertex);
+		PointVertex new_cluster = add_vertex(*p.clusters_);
+		value<Vec3>(*p.clusters_, p.clusters_position_, new_cluster) = pos;
+		value<Scalar>(*p.clusters_, p.clusters_radius_, new_cluster) =
+			value<Scalar>(surface, p.medial_axis_radius_, max_dist_vertex);
+		value<std::pair<SurfaceVertex, SurfaceVertex>>(*p.clusters_, p.clusters_cloest_sample_, new_cluster) =
+			value<std::pair<SurfaceVertex, SurfaceVertex>>(surface, p.medial_axis_closest_points_, max_dist_vertex);
+		value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster) =
+			Vec4(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, 0.75);
+		assign_cluster(surface);
+		update_clusters_neighbor(surface);
+		if (p.fuzzy_clustering_)
+		{
+			assign_fuzzy_clusters(surface);
+		}
+		update_clusters_data(surface);
+		update_clusters_color(surface);
+		// shrinking_balls_clustering_connectivity(surface);
+
+		if (!p.running_)
+			update_render_data(surface);
+	
 	}
 
 	void split_cluster(SURFACE& surface)
@@ -2847,7 +2882,7 @@ private:
 			{
 				marker.mark(neighbour);
 			}
-			split_cluster(surface, candidate_cluster);
+			split(surface, candidate_cluster);
 			split_count++;
 		}
 
@@ -2859,6 +2894,7 @@ private:
 		}
 		update_clusters_data(surface);
 		update_clusters_color(surface);
+		//shrinking_balls_clustering_connectivity(surface);
 
 		if (!p.running_)
 			update_render_data(surface);
@@ -2921,10 +2957,7 @@ private:
 	void shrinking_balls_clustering_connectivity(SURFACE& surface)
 	{
 		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
-
-		NONMANIFOLD* mv = nonmanifold_provider_->add_mesh(
-				std::to_string(nonmanifold_provider_->number_of_meshes()) + "_" + "skeleton");
-
+		p.non_manifold_ = nonmanifold_provider_->add_mesh("skeleton" + std::to_string(nonmanifold_provider_->number_of_meshes()));
 		//Reindex the cluster
 		uint32 index = 0;
 		cluster_map.clear();
@@ -3008,15 +3041,16 @@ private:
 
 		skeleton_data.reserve(skeleton_nb_vertices, skeleton_nb_edges, skeleton_nb_faces);
 
-		import_incidence_graph_data(*mv, skeleton_data);
+		import_incidence_graph_data(*p.non_manifold_, skeleton_data);
 		std::shared_ptr<NonManifoldAttribute<Vec3>> mv_vertex_position =
-			get_attribute<Vec3, NonManifoldVertex>(*mv, "position");
+			get_attribute<Vec3, NonManifoldVertex>(*p.non_manifold_, "position");
 		if (mv_vertex_position)
-			nonmanifold_provider_->set_mesh_bb_vertex_position(*mv, mv_vertex_position);
+			nonmanifold_provider_->set_mesh_bb_vertex_position(*p.non_manifold_, mv_vertex_position);
 		
-		nonmanifold_provider_->emit_connectivity_changed(*mv);
+		
+		nonmanifold_provider_->emit_connectivity_changed(*p.non_manifold_);
 		std::cout << "finish creating skeleton"<< std::endl;
-		remove_attribute<PointVertex>(*p.clusters_, p.clusters_neighbours_.get());
+		
 	}
 
  protected:
@@ -3034,7 +3068,7 @@ private:
 
 	void key_press_event(View* view, int32 keycode) override{
 		ClusterAxisParameter& p= cluster_axis_parameters_[selected_surface_mesh_];
-		if (keycode == GLFW_KEY_I)
+		if (keycode == GLFW_KEY_I || keycode == GLFW_KEY_S)
 		{
 			int32 x = view->mouse_x();
 			int32 y = view->mouse_y();
@@ -3063,15 +3097,12 @@ private:
 				return true;
 			});
 
-			sphere_info_popup_ = true;
 		}
+		if (keycode == GLFW_KEY_S && picked_sphere_.is_valid())
+			split_one_cluster(*selected_surface_mesh_, picked_sphere_);
 	}
 
-	void key_release_event(View* view, int32 key_code) override
-	{
-		if (key_code == GLFW_KEY_I)
-			sphere_info_popup_ = false;
-	}
+	
 
 	void popups() override
 	{
@@ -3104,21 +3135,8 @@ private:
 		});
 	
 
-		if (selected_surface_mesh_){
-			
-			
-			
-		/*	if (ImGui::Button("Sample medial axis"))
-				sample_medial_axis(*selected_surface_mesh_);
-			if (ImGui::SliderFloat("Min radius (log)", &radius_threshold_, min_radius_, max_radius_, "%.4f"))
-				filter_medial_axis_samples(*selected_surface_mesh_);
-			if (ImGui::SliderFloat("Min angle (log)", &angle_threshold_, min_angle_, max_angle_, "%.4f"))
-				filter_medial_axis_samples(*selected_surface_mesh_);
-			if (ImGui::Button("Filter medial axis samples"))
-				filter_medial_axis_samples(*selected_surface_mesh_);
-			if (ImGui::Button("Twin point"))
-				Twin_medial_axis_samples(*selected_surface_mesh_);
-		*/ 
+		if (selected_surface_mesh_){	
+		
 			ClusterAxisParameter& p = cluster_axis_parameters_[selected_surface_mesh_];
 			imgui_combo_attribute<SurfaceVertex, Vec3>(*selected_surface_mesh_, p.surface_vertex_position_, "Position",
 													   [&](const std::shared_ptr<SurfaceAttribute<Vec3>>& attribute) {
@@ -3246,6 +3264,17 @@ private:
 			ImGui::Separator();
 			if (ImGui::Button("Coverage Axis"))
 			{
+				if (ImGui::Button("Sample medial axis"))
+					sample_medial_axis(*selected_surface_mesh_);
+				if (ImGui::SliderFloat("Min radius (log)", &radius_threshold_, min_radius_, max_radius_, "%.4f"))
+					filter_medial_axis_samples(*selected_surface_mesh_);
+				if (ImGui::SliderFloat("Min angle (log)", &angle_threshold_, min_angle_, max_angle_, "%.4f"))
+					filter_medial_axis_samples(*selected_surface_mesh_);
+				if (ImGui::Button("Filter medial axis samples"))
+					filter_medial_axis_samples(*selected_surface_mesh_);
+				if (ImGui::Button("Twin point"))
+					Twin_medial_axis_samples(*selected_surface_mesh_);
+		 
 				ImGui::DragFloat("Dilation factor", &dilation_factor, 0.0001f, 0.0f, 1.0f, "%.6f");
 				if (ImGui::Button("Shrinking Ball Coverage Axis"))
 				{
@@ -3353,7 +3382,7 @@ private:
 	POINT* selected_candidates_ = nullptr;
 	POINT* surface_sample_ = nullptr;
 	std::unordered_map<const SURFACE*, ClusterAxisParameter> cluster_axis_parameters_;
-
+	
 	PointVertex picked_sphere_;
 	bool sphere_info_popup_ = false;
 
