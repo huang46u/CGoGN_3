@@ -513,7 +513,6 @@ private:
 
 	Delaunay compute_delaunay_tredrahedron(SURFACE& surface, Cgal_Surface_mesh& csm, Tree& tree)
 	{
-
 		std::vector<Point> Delaunay_tri_point;
 		// Sampling the mesh surface
 		std::vector<Point> mesh_samples;
@@ -2130,20 +2129,26 @@ private:
 
 			// Add v1 into cluster and remove it from the queue
 			vertex_queue.push(v1);
+			Vec3& v1_pos = value<Vec3>(surface, p.surface_vertex_position_, v1);
+			Vec3& v1_center = value<Vec3>(surface, p.medial_axis_position_, v1);
+			Scalar v1_radius = value<Scalar>(surface, p.medial_axis_radius_, v1);
 			value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, v1) =
 				std::make_pair(index_of(*p.clusters_, new_cluster), new_cluster);
 			value<Vec3>(surface, p.surface_vertex_color_, v1) =
 				value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster).head<3>();
-			value<Scalar>(surface, p.surface_distance_to_cluster_, v1) = 0;
+			value<Scalar>(surface, p.surface_distance_to_cluster_, v1) = (v1_pos - v1_center).norm() - v1_radius;
 			/*value<SphereInfo>(surface, sphere_info, v1).first = false;*/
 			
 			// Add v2 into cluster and remove it from the queue
 			vertex_queue.push(v2);
+			Vec3& v2_pos = value<Vec3>(surface, p.surface_vertex_position_, v2);
+			Vec3& v2_center = value<Vec3>(surface, p.medial_axis_position_, v2);
+			Scalar v2_radius = value<Scalar>(surface, p.medial_axis_radius_, v2);
 			value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, v2) =
 				std::make_pair(index_of(*p.clusters_, new_cluster), new_cluster);
 			value<Vec3>(surface, p.surface_vertex_color_, v2) =
 				value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster).head<3>();
-			value<Scalar>(surface, p.surface_distance_to_cluster_, v2) = 0;
+			value<Scalar>(surface, p.surface_distance_to_cluster_, v2) = (v2_pos - v2_center).norm() - v2_radius;
 			value<SphereInfo>(surface, sphere_info, v2).first = false;
 			
 			//Start BFS
@@ -2295,6 +2300,8 @@ private:
 			}
 		);
 		foreach_cell(surface, [&](SurfaceVertex sv) {
+			if (value<Scalar>(surface, p.surface_distance_to_cluster_, sv) == 0)
+				return true;
 			auto& clusters_color =
 				value<std::vector<std::pair<Scalar, Vec3>>>(surface, p.clusters_fuzzy_cluster_color_, sv);
 			clusters_color.clear();
@@ -2329,8 +2336,10 @@ private:
 			for (auto& [weight, c] :
 				 value<std::vector<std::pair<Scalar, Vec3>>>(surface, p.clusters_fuzzy_cluster_color_, sv))
 			{
-				w += 1 / weight;
-				color += 1 / weight * c;
+			
+					w += 1 / weight;
+					color += 1 / weight * c;
+				
 			}
 			color /= w;
 			value<Vec3>(surface, p.surface_vertex_color_, sv) = color;
@@ -2531,42 +2540,91 @@ private:
 			break;
 			case ENCLOSING_SPHERE_OF_SURFACE_SAMPLE: {
 				std::vector<Point> surface_points;
-				for (SurfaceVertex sv1 :
-					 value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv))
+				if (p.fuzzy_clustering_)
 				{
-					Vec3 pos = value<Vec3>(surface, p.surface_vertex_position_, sv1);
-					surface_points.push_back(Point(pos.x(), pos.y(), pos.z()));
+					for (SurfaceVertex sv1 :
+						 value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_fuzzy_surface_vertices_, pv))
+					{
+						Vec3 pos = value<Vec3>(surface, p.surface_vertex_position_, sv1);
+						surface_points.push_back(Point(pos.x(), pos.y(), pos.z()));
+					}
+					Min_sphere min_sphere(surface_points.begin(), surface_points.end());
+					assert(min_sphere.is_valid());
+					auto it = min_sphere.center_cartesian_begin();
+					K::FT coord[3];
+					for (size_t idx = 0; idx < 3 && it != min_sphere.center_cartesian_end(); idx++)
+					{
+						coord[idx] = *it;
+						it++;
+					}
+					opti_coord = Vec3(coord[0], coord[1], coord[2]);
+					rad = min_sphere.radius();
 				}
-				Min_sphere min_sphere(surface_points.begin(), surface_points.end());
-				assert(min_sphere.is_valid());
-				auto it = min_sphere.center_cartesian_begin();
-				K::FT coord[3];
-				for (size_t idx = 0; idx < 3 && it != min_sphere.center_cartesian_end(); idx++)
+				else
 				{
-					coord[idx] = *it;
-					it++;
+					for (SurfaceVertex sv1 :
+						 value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv))
+					{
+						Vec3 pos = value<Vec3>(surface, p.surface_vertex_position_, sv1);
+						surface_points.push_back(Point(pos.x(), pos.y(), pos.z()));
+					}
+					Min_sphere min_sphere(surface_points.begin(), surface_points.end());
+					assert(min_sphere.is_valid());
+					auto it = min_sphere.center_cartesian_begin();
+					K::FT coord[3];
+					for (size_t idx = 0; idx < 3 && it != min_sphere.center_cartesian_end(); idx++)
+					{
+						coord[idx] = *it;
+						it++;
+					}
+					opti_coord = Vec3(coord[0], coord[1], coord[2]);
+					rad = min_sphere.radius();
 				}
-				opti_coord = Vec3(coord[0], coord[1], coord[2]);
 				break;
 			}
 			case ENCLOSING_SPHERE_OF_MEDIAL_SAMPLE: {
 				std::vector<Point> surface_points;
-				for (SurfaceVertex sv1 :
-					 value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv))
+				if (p.fuzzy_clustering_)
 				{
-					Vec3 pos = value<Vec3>(surface, p.medial_axis_position_, sv1);
-					surface_points.push_back(Point(pos.x(), pos.y(), pos.z()));
+					for (SurfaceVertex sv1 :
+						 value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_fuzzy_surface_vertices_, pv))
+					{
+						Vec3 pos = value<Vec3>(surface, p.medial_axis_position_, sv1);
+						surface_points.push_back(Point(pos.x(), pos.y(), pos.z()));
+					}
+					Min_sphere min_sphere(surface_points.begin(), surface_points.end());
+					assert(min_sphere.is_valid());
+					auto it = min_sphere.center_cartesian_begin();
+					K::FT coord[3];
+					for (size_t idx = 0; idx < 3 && it != min_sphere.center_cartesian_end(); idx++)
+					{
+						coord[idx] = *it;
+						it++;
+					}
+					opti_coord = Vec3(coord[0], coord[1], coord[2]);
+					rad = min_sphere.radius();
 				}
-				Min_sphere min_sphere(surface_points.begin(), surface_points.end());
-				assert(min_sphere.is_valid());
-				auto it = min_sphere.center_cartesian_begin();
-				K::FT coord[3];
-				for (size_t idx = 0; idx < 3 && it != min_sphere.center_cartesian_end(); idx++)
+				else
 				{
-					coord[idx] = *it;
-					it++;
+					for (SurfaceVertex sv1 :
+						 value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv))
+					{
+						Vec3 pos = value<Vec3>(surface, p.medial_axis_position_, sv1);
+						surface_points.push_back(Point(pos.x(), pos.y(), pos.z()));
+					}
+					Min_sphere min_sphere(surface_points.begin(), surface_points.end());
+					assert(min_sphere.is_valid());
+					auto it = min_sphere.center_cartesian_begin();
+					K::FT coord[3];
+					for (size_t idx = 0; idx < 3 && it != min_sphere.center_cartesian_end(); idx++)
+					{
+						coord[idx] = *it;
+						it++;
+					}
+					opti_coord = Vec3(coord[0], coord[1], coord[2]);
+					rad = min_sphere.radius();
 				}
-				opti_coord = Vec3(coord[0], coord[1], coord[2]);
+				
 				break;
 			}
 			case MASS_SPRING: {
@@ -2616,12 +2674,14 @@ private:
 				{
 					std::cout << "opti_sphere radius: " << opti_sphere[3] << std::endl;
 					opti_coord = Vec3(opti_sphere[0], opti_sphere[1], opti_sphere[2]);
+					rad = opti_sphere[3];
 					break;
 				}
 				else
 				{
 					std::cout << "can't find optimal sphere" << std::endl;
 				}
+				
 			}
 			break;
 			case OPTIMAL_SPHERE_UNDER_CONSTRAINT: {
@@ -3053,6 +3113,12 @@ private:
 		
 	}
 
+	void init_delaunay(SURFACE& surface)
+	{
+		MedialAxisParameter& m = medial_axis_parameters_[&surface];
+		m.initialized_ = true;
+	}
+	
  protected:
 	void init() override
 	{
@@ -3138,6 +3204,7 @@ private:
 		if (selected_surface_mesh_){	
 		
 			ClusterAxisParameter& p = cluster_axis_parameters_[selected_surface_mesh_];
+			
 			imgui_combo_attribute<SurfaceVertex, Vec3>(*selected_surface_mesh_, p.surface_vertex_position_, "Position",
 													   [&](const std::shared_ptr<SurfaceAttribute<Vec3>>& attribute) {
 														   p.surface_vertex_position_ = attribute;
@@ -3262,7 +3329,8 @@ private:
 					shrinking_balls_clustering_connectivity(*selected_surface_mesh_);
 			}
 			ImGui::Separator();
-			if (ImGui::Button("Coverage Axis"))
+			MedialAxisParameter& m = medial_axis_parameters_[selected_surface_mesh_];
+			if (ImGui::Button("Delaunay based method"))
 			{
 				if (ImGui::Button("Sample medial axis"))
 					sample_medial_axis(*selected_surface_mesh_);
@@ -3301,6 +3369,19 @@ private:
 					selected_candidates_ = &m;
 					point_provider_->mesh_data(m).outlined_until_ = App::frame_time_ + 1.0;
 				});
+				if (ImGui::Button("Coverage Axis"))
+				{
+					ImGui::DragFloat("Dilation factor", &dilation_factor, 0.0001f, 0.0f, 1.0f, "%.6f");
+					if (ImGui::Button("Shrinking Ball Coverage Axis"))
+					{
+						solution = shrinking_balls_coverage_axis(*selected_surface_mesh_, dilation_factor);
+					}
+					if (solution.col_value.size() > 0)
+					{
+						if (ImGui::Button("Shrinking balls PD"))
+							shrinking_balls_coverage_axis_PD(*selected_surface_mesh_);
+					}
+				}
 				if (selected_candidates_)
 				{
 					ImGui::Checkbox("Preseve only poles", &pole_filtering_);
@@ -3374,8 +3455,12 @@ private:
 			}
 		}
 	}
+	struct MedialAxisParameter
+	{
+		bool initialized_ = false;
+	};
 
-private:
+private :
 	
 	SURFACE* selected_surface_mesh_ = nullptr;
 	NONMANIFOLD* selected_medial_axis_ = nullptr;
