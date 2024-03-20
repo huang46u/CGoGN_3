@@ -1912,10 +1912,12 @@ private:
 		Scalar min_error_ = 0.0;
 		Scalar max_error_ = 0.0;
 		float init_distance_ = 0.1f;
+		float init_factor_ = 0.8f;
 		Scalar max_hausdorff_distance_ = 0.0;
 
 		std::mutex mutex_;
 		bool running_ = false;
+		bool stopping_ = false;
 		bool fuzzy_clustering_ = true;
 		
 		uint32 update_rate_ = 20;
@@ -2165,7 +2167,8 @@ private:
 					Vec4 sphere = Vec4(sphere_center.x(), sphere_center.y(), sphere_center.z(), radius);
 					// if the distance is less than threshold
 					Scalar error = (pos - sphere_center).norm() - radius;
-					if (error < p.init_distance_ /*&& cosine>=0*/)
+					error = error / radius;
+					if (error < p.init_factor_ /*&& cosine>=0*/)
 					{
 						vertex_queue.push(sv);
 						if (!value<SphereInfo>(surface,sphere_info,sv).first)
@@ -2964,23 +2967,30 @@ private:
 		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
 
 		p.running_ = true;
-
+		p.stopping_ = false;
+		
 		launch_thread([&]() {
 			while (p.running_)
 			{
 				update_clusters(surface);
+				if (p.stopping_)
+				{
+					p.running_ = false;
+				}
 				std::this_thread::sleep_for(std::chrono::microseconds(1000000 / p.update_rate_));
 			}
+			
 		});
 
+		
 		app_.start_timer(100, [&]() -> bool { return !p.running_; });
 	}
 
 	void stop_clusters_update(SURFACE& surface)
 	{
 		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
-
-		p.running_ = false;
+		
+		p.stopping_ = true;
 	}
 
 	void update_render_data(SURFACE& surface)
@@ -3115,7 +3125,7 @@ private:
 
 	void init_delaunay(SURFACE& surface)
 	{
-		MedialAxisParameter& m = medial_axis_parameters_[&surface];
+		
 		m.initialized_ = true;
 	}
 	
@@ -3215,8 +3225,8 @@ private:
 			}
 			if (p.initialized_)
 			{
-				ImGui::DragFloat("Init distance", &p.init_distance_, 0.00001f, 0.0f, 0.1f,
-								 "%.6f");
+				ImGui::DragFloat("Init factor", &p.init_factor_, 0.01f, 0.0f, 5.0f,
+								 "%.3f");
 				
 				if (ImGui::Button("Initialise Cluster"))
 					initialise_cluster(*selected_surface_mesh_);
@@ -3329,7 +3339,7 @@ private:
 					shrinking_balls_clustering_connectivity(*selected_surface_mesh_);
 			}
 			ImGui::Separator();
-			MedialAxisParameter& m = medial_axis_parameters_[selected_surface_mesh_];
+			
 			if (ImGui::Button("Delaunay based method"))
 			{
 				if (ImGui::Button("Sample medial axis"))
