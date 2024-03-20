@@ -1856,7 +1856,7 @@ private:
 		std::shared_ptr<SurfaceAttribute<Vec3>> medial_axis_position_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<Scalar>> medial_axis_radius_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<Scalar>> surface_distance_to_cluster_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<std::pair<uint32, PointVertex>>> surface_cluster_info_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<PointVertex>> surface_cluster_info_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<std::vector<std::pair<Scalar, Vec3>>>> clusters_fuzzy_cluster_color_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<std::pair<SurfaceVertex,SurfaceVertex>>> medial_axis_closest_points_ = nullptr;
 		std::shared_ptr <SurfaceAttribute<Vec3>> medial_axis_cloest_point_color_ = nullptr;
@@ -1881,7 +1881,7 @@ private:
 		std::shared_ptr<PointAttribute<std::vector<SurfaceVertex>>> clusters_fuzzy_surface_vertices_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_error_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_deviation_ = nullptr;
-		std::shared_ptr<PointAttribute<std::unordered_map<uint32, PointVertex>>> clusters_neighbours_ = nullptr;
+		std::shared_ptr<PointAttribute<std::set<PointVertex>>> clusters_neighbours_ = nullptr;
 		std::shared_ptr<PointAttribute<std::pair<SurfaceVertex, SurfaceVertex>>> clusters_cloest_sample_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_max_distance_ = nullptr;
 		std::shared_ptr<PointAttribute<SurfaceVertex>> clusters_max_vertex_ = nullptr;
@@ -1999,7 +1999,7 @@ private:
 		p.surface_vertex_color_ = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "surface_vertex_color");
 		p.medial_axis_cloest_point_color_ = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "medial_axis_cloest_point_color_");
 		p.surface_distance_to_cluster_ = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "surface_distance_to_cluster_");
-		p.surface_cluster_info_ = get_or_add_attribute<std::pair<uint32, PointVertex>, SurfaceVertex>(surface, "surface_cluster_info_");
+		p.surface_cluster_info_ = get_or_add_attribute<PointVertex, SurfaceVertex>(surface, "surface_cluster_info_");
 		p.medial_axis_closest_points_ = get_or_add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(
 			surface, "medial_axis_closest_points_");
 		p.clusters_fuzzy_cluster_color_ = get_or_add_attribute<std::vector<std::pair<Scalar, Vec3>>, SurfaceVertex>(surface, "clusters_fuzzy_cluster_color_");
@@ -2037,7 +2037,7 @@ private:
 
 		p.clusters_error_ = get_or_add_attribute<Scalar, PointVertex>(*p.clusters_, "clusters_error");
 		p.clusters_deviation_ = get_or_add_attribute<Scalar, PointVertex>(*p.clusters_, "clusters_deviation");
-		p.clusters_neighbours_ = get_or_add_attribute<std::unordered_map<uint32, PointVertex>, PointVertex>(
+		p.clusters_neighbours_ = get_or_add_attribute<std::set<PointVertex>, PointVertex>(
 			*p.clusters_, "clusters_neighbours");
 		p.clusters_cloest_sample_ = get_or_add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, PointVertex>(
 			*p.clusters_, "clusters_cloest_sample_");
@@ -2053,7 +2053,16 @@ private:
 		p.clusters_without_correction_radius_ =
 			get_or_add_attribute<Scalar, PointVertex>(*p.clusters_, "clusters_without_correction_radius");
 
+
+		p.non_manifold_ =
+			nonmanifold_provider_->add_mesh("skeleton" + std::to_string(nonmanifold_provider_->number_of_meshes()));
+		p.non_manifold_vertex_position_ = get_or_add_attribute<Vec3, NonManifoldVertex>(*p.non_manifold_, "position");
+		p.non_manifold_sphere_info = get_or_add_attribute<Vec4, NonManifoldVertex>(*p.non_manifold_, "sphere_info");
+		p.non_manifold_vertex_radius = get_or_add_attribute<Scalar, NonManifoldVertex>(*p.non_manifold_, "radius");
+
 		p.initialized_ = true;
+
+		
 
 
 	}
@@ -2134,8 +2143,7 @@ private:
 			Vec3& v1_pos = value<Vec3>(surface, p.surface_vertex_position_, v1);
 			Vec3& v1_center = value<Vec3>(surface, p.medial_axis_position_, v1);
 			Scalar v1_radius = value<Scalar>(surface, p.medial_axis_radius_, v1);
-			value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, v1) =
-				std::make_pair(index_of(*p.clusters_, new_cluster), new_cluster);
+			value<PointVertex>(surface, p.surface_cluster_info_, v1) = new_cluster;
 			value<Vec3>(surface, p.surface_vertex_color_, v1) =
 				value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster).head<3>();
 			value<Scalar>(surface, p.surface_distance_to_cluster_, v1) = (v1_pos - v1_center).norm() - v1_radius;
@@ -2146,8 +2154,7 @@ private:
 			Vec3& v2_pos = value<Vec3>(surface, p.surface_vertex_position_, v2);
 			Vec3& v2_center = value<Vec3>(surface, p.medial_axis_position_, v2);
 			Scalar v2_radius = value<Scalar>(surface, p.medial_axis_radius_, v2);
-			value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, v2) =
-				std::make_pair(index_of(*p.clusters_, new_cluster), new_cluster);
+			value<PointVertex>(surface, p.surface_cluster_info_, v2) = new_cluster;
 			value<Vec3>(surface, p.surface_vertex_color_, v2) =
 				value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster).head<3>();
 			value<Scalar>(surface, p.surface_distance_to_cluster_, v2) = (v2_pos - v2_center).norm() - v2_radius;
@@ -2175,8 +2182,7 @@ private:
 						{
 							if (error < value<Scalar>(surface, p.surface_distance_to_cluster_, sv))
 							{
-								value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, sv) =
-									std::make_pair(index_of(*p.clusters_, new_cluster), new_cluster);
+								value<PointVertex>(surface, p.surface_cluster_info_, sv) = new_cluster;
 								value<Vec3>(surface, p.surface_vertex_color_, sv) =
 									value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster).head<3>();
 								value<Scalar>(surface, p.surface_distance_to_cluster_, sv) = error;
@@ -2184,8 +2190,7 @@ private:
 						}
 						else
 						{
-							value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, sv) =
-								std::make_pair(index_of(*p.clusters_, new_cluster), new_cluster);
+							value<PointVertex>(surface, p.surface_cluster_info_, sv) = new_cluster;
 							value<Vec3>(surface, p.surface_vertex_color_, sv) =
 								value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster).head<3>();
 							value<Scalar>(surface, p.surface_distance_to_cluster_, sv) = error;
@@ -2240,8 +2245,7 @@ private:
 				}
 				return true;
 			});
-			value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, sv) =
-				std::make_pair(index_of(*p.clusters_, min_cluster), min_cluster);
+			value<PointVertex>(surface, p.surface_cluster_info_, sv) = min_cluster;
 			value<Vec3>(surface, p.surface_vertex_color_, sv) =
 				value<Vec4>(*p.clusters_, p.clusters_surface_color_, min_cluster).head<3>();
 			value<Scalar>(surface, p.surface_distance_to_cluster_, sv) = min_distance;
@@ -2250,7 +2254,7 @@ private:
 		//Update cluster vertices
 		foreach_cell(surface, [&](SurfaceVertex sv) {
 			PointVertex cluster_point =
-				value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, sv).second;
+				value<PointVertex>(surface, p.surface_cluster_info_, sv);
 			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, cluster_point).push_back(sv);
 			return true;
 		});
@@ -2276,21 +2280,25 @@ private:
 	void update_clusters_neighbor(SURFACE& surface)
 	{
 		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
-		
-		foreach_cell(surface, [&](SurfaceVertex sv) {
-			PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, sv).second;
-			foreach_adjacent_vertex_through_edge(surface, sv, [&](SurfaceVertex v) {
-				if (value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, v).first !=
-					value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, sv).first)
-				{
-					value<std::unordered_map<uint32, PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv)
-						.insert(value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, v));
-				}
-				return true;
+		parallel_foreach_cell(*p.clusters_, [&](PointVertex pv) {
+			value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv).clear();
+			return true;
+
 			});
+		foreach_cell(surface, [&](SurfaceEdge e) -> bool {
+			std::vector<SurfaceVertex> vertices = incident_vertices(surface, e);
+
+			PointVertex v1_cluster = value<PointVertex>(surface, p.surface_cluster_info_, vertices[0]);
+			PointVertex v2_cluster = value<PointVertex>(surface, p.surface_cluster_info_, vertices[1]);
+			if (v1_cluster.is_valid() && v2_cluster.is_valid() && v1_cluster != v2_cluster)
+			{
+				value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, v1_cluster).insert(v2_cluster);
+				value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, v2_cluster).insert(v1_cluster);
+			}
 			return true;
 		});
 	}
+
 	void assign_fuzzy_clusters(SURFACE& surface)
 	{
 		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
@@ -2308,12 +2316,12 @@ private:
 			auto& clusters_color =
 				value<std::vector<std::pair<Scalar, Vec3>>>(surface, p.clusters_fuzzy_cluster_color_, sv);
 			clusters_color.clear();
-			PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, sv).second;
+			PointVertex pv = value<PointVertex>(surface, p.surface_cluster_info_, sv);
 			
 			Scalar dis = value<Scalar>(surface, p.surface_distance_to_cluster_, sv);
 			clusters_color.push_back({dis, value<Vec4>(*p.clusters_, p.clusters_surface_color_, pv).head<3>()});
-			for (auto& [index, cluster] :
-				 value<std::unordered_map<uint32, PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv))
+			for (auto& cluster :
+				 value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv))
 			{
 				Vec3& pos = value<Vec3>(surface, p.surface_vertex_position_, sv);
 				Vec3& sphere_center = value<Vec3>(*p.clusters_, p.clusters_position_, cluster);
@@ -2322,9 +2330,6 @@ private:
 				
 				if (std::fabs(dis - distance) <= p.fuzzy_distance_)
 				{
-					/*std::cout << "Surface vertex " << index_of(surface, sv) << " is in the fuzzy cluster" << index_of(*p.clusters_, cluster) << std::endl;
-					std::cout << "distance: " << std::fabs(dis - distance) << std::endl;*/
-									
 					value<std::vector<std::pair<Scalar, Vec3>>>(surface, p.clusters_fuzzy_cluster_color_, sv)
 						.push_back({distance, value<Vec4>(*p.clusters_, p.clusters_surface_color_, cluster).head<3>()});
 					value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_fuzzy_surface_vertices_, cluster).push_back(sv);
@@ -2438,13 +2443,13 @@ private:
 		switch (int(std::floor(std::max(0.0, x2 + 1.0))))
 		{
 		case 0:
-			return Vec4(0.0, 0.0, 1.0, 0.75);
+			return Vec4(0.0, 0.0, 1.0, 0.5);
 		case 1:
-			return Vec4(x2, x2, 1.0, 0.75);
+			return Vec4(x2, x2, 1.0, 0.5);
 		case 2:
-			return Vec4(1.0, 2.0 - x2, 2.0 - x2, 0.75);
+			return Vec4(1.0, 2.0 - x2, 2.0 - x2, 0.5);
 		}
-		return Vec4(1.0, 0.0, 0.0, 0.75);
+		return Vec4(1.0, 0.0, 0.0, 0.5);
 	}
 
 	void update_clusters(SURFACE& surface)
@@ -2846,6 +2851,29 @@ private:
 			Vec4(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, 0.75);
 
 	}
+	void remove_one_cluster(SURFACE& surface, PointVertex v)
+	{
+		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
+
+		std::lock_guard<std::mutex> lock(p.mutex_);
+
+		const std::vector<SurfaceVertex>& clusters_vertices = value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, v);
+		for (SurfaceVertex sv : clusters_vertices)
+			value<PointVertex>(surface, p.surface_cluster_info_, sv) = PointVertex();
+		remove_vertex(*p.clusters_, v);
+
+		assign_cluster(surface);
+		update_clusters_neighbor(surface);
+		if (p.fuzzy_clustering_)
+		{
+			assign_fuzzy_clusters(surface);
+		}
+		update_clusters_data(surface);
+		update_clusters_color(surface);
+		if (!p.running_)
+			update_render_data(surface);
+	}
+
 
 	void split_one_cluster(SURFACE& surface, PointVertex& candidate_cluster)
 	{
@@ -2940,8 +2968,9 @@ private:
 			{
 				continue;
 			}
-			for (auto& [id, neighbour] : value<std::unordered_map<uint32, PointVertex>>(
-					 *p.clusters_, p.clusters_neighbours_, candidate_cluster))
+			const std::set<PointVertex>& neighbours =
+				value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, candidate_cluster);
+			for (const PointVertex& neighbour : neighbours)
 			{
 				marker.mark(neighbour);
 			}
@@ -2967,15 +2996,17 @@ private:
 		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
 
 		p.running_ = true;
-		p.stopping_ = false;
+		
 		
 		launch_thread([&]() {
-			while (p.running_)
+			while (true)
 			{
 				update_clusters(surface);
 				if (p.stopping_)
 				{
 					p.running_ = false;
+					p.stopping_ = false;
+					break;
 				}
 				std::this_thread::sleep_for(std::chrono::microseconds(1000000 / p.update_rate_));
 			}
@@ -3009,6 +3040,9 @@ private:
 			point_provider_->emit_attribute_changed(*p.clusters_, p.clusters_without_correction_radius_.get());
 			surface_provider_->emit_attribute_changed(surface, p.surface_vertex_color_.get());
 			surface_provider_->emit_attribute_changed(surface, p.surface_distance_to_cluster_.get());
+			compute_skeleton(surface);
+			nonmanifold_provider_->emit_connectivity_changed(*p.non_manifold_);
+			nonmanifold_provider_->emit_attribute_changed(*p.non_manifold_, p.non_manifold_vertex_position_.get());
 
 		}
 		else
@@ -3022,104 +3056,84 @@ private:
 			point_provider_->emit_attribute_changed(*p.clusters_, p.clusters_without_correction_radius_.get());
 			surface_provider_->emit_attribute_changed(surface, p.surface_vertex_color_.get());
 			surface_provider_->emit_attribute_changed(surface, p.surface_distance_to_cluster_.get());
+			compute_skeleton(surface);
+			nonmanifold_provider_->emit_connectivity_changed(*p.non_manifold_);
+			nonmanifold_provider_->emit_attribute_changed(*p.non_manifold_, p.non_manifold_vertex_position_.get());
 		}
 	}
-	void shrinking_balls_clustering_connectivity(SURFACE& surface)
+	void compute_skeleton(SURFACE& surface)
 	{
 		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
-		p.non_manifold_ = nonmanifold_provider_->add_mesh("skeleton" + std::to_string(nonmanifold_provider_->number_of_meshes()));
+		
 		//Reindex the cluster
 		uint32 index = 0;
-		cluster_map.clear();
-		foreach_cell(*p.clusters_, [&](PointVertex pv)
-		{
-			value<std::unordered_map<uint32, PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv).clear();
-			cluster_map[index_of(*p.clusters_, pv)] = index;
-			index++;
+		clear(*p.non_manifold_);
+
+		auto spheres_skeleton_vertex_map =
+			add_attribute<NonManifoldVertex, PointVertex>(*p.clusters_, "__spheres_skeleton_vertex_map");
+		//Add vertex
+		foreach_cell(*p.clusters_, [&](PointVertex pv) -> bool {
+			NonManifoldVertex nmv = add_vertex(*p.non_manifold_);
+			value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, nmv) = value<Vec3>(*p.clusters_, p.clusters_position_, pv);
+			value<NonManifoldVertex>(*p.clusters_, spheres_skeleton_vertex_map, pv) = nmv;
 			return true;
 		});
 
-		foreach_cell(surface, [&](SurfaceVertex sv)
-		{
-				PointVertex pv = value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, sv).second;
-				foreach_adjacent_vertex_through_edge(surface, sv, [&](SurfaceVertex v) {
-					if (value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, v).first !=
-						value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, sv).first)
-					{
-						value<std::unordered_map<uint32, PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv)
-							.insert(value<std::pair<uint32, PointVertex>>(surface, p.surface_cluster_info_, v));
-					}
-					return true;
-				});
-				return true;
-		});
-		
-		cgogn::io::IncidenceGraphImportData skeleton_data;
-		std::unordered_map<std::pair<uint32, uint32>, uint32, edge_hash, edge_equal> edge_indices;
-		skeleton_data.vertex_position_ = std::vector<Vec3>(nb_cells<PointVertex>(*p.clusters_), Vec3(0, 0, 0));
-		uint32 edge_count = 0;
-		//Add vertex and edge
-		foreach_cell(*p.clusters_, [&](PointVertex pv) {
-			uint32 cluster_index_1 = cluster_map[index_of(*p.clusters_, pv)];
-			Vec3 pos = value<Vec3>(*p.clusters_, p.clusters_position_, pv);
-			skeleton_data.vertex_position_[cluster_index_1] = pos;
-			std::unordered_map<uint32, PointVertex>& neighbours_pv =
-				value<std::unordered_map<uint32, PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv);
-			for (auto& vertex_neighbours_1 : neighbours_pv)
+		//Add edge
+		std::unordered_map<std::pair<uint32, uint32>, NonManifoldEdge, edge_hash, edge_equal> edge_indices;
+		foreach_cell(*p.clusters_, [&](PointVertex pv) -> bool {
+			NonManifoldVertex nmv1 = value<NonManifoldVertex>(*p.clusters_, spheres_skeleton_vertex_map, pv);
+			const std::set<PointVertex>& neighbors =
+				value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv);
+			for (PointVertex neighbor : neighbors)
 			{
-				uint32 cluster_index_2 = cluster_map[index_of(*p.clusters_, vertex_neighbours_1.second)];
-				if (edge_indices.find({cluster_index_1, cluster_index_2}) == edge_indices.end())
+				NonManifoldVertex nmv2 = value<NonManifoldVertex>(*p.clusters_, spheres_skeleton_vertex_map, neighbor);
+				std::vector<NonManifoldVertex> av = adjacent_vertices_through_edge(*p.non_manifold_, nmv1);
+				if (std::find(av.begin(), av.end(), nmv2) == av.end())
 				{
-					edge_indices[{cluster_index_1, cluster_index_2}] = edge_count;
-					skeleton_data.edges_vertex_indices_.push_back(cluster_index_1);
-					skeleton_data.edges_vertex_indices_.push_back(cluster_index_2);
-					edge_count++;
+					NonManifoldEdge e = add_edge(*p.non_manifold_, nmv1, nmv2);
+					edge_indices[{index_of(*p.non_manifold_, nmv1), index_of(*p.non_manifold_, nmv2)}] = e;
 				}
 			}
 			return true;
 		});
+
 		//Add face
-		foreach_cell(*p.clusters_, [&](PointVertex pv) {
-			uint32 cluster_index_1 = cluster_map[index_of(*p.clusters_, pv)];
-			std::unordered_map<uint32, PointVertex>& neighbours_pv =
-				value<std::unordered_map<uint32, PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv);
-			for (auto& vertex_neighbours_1 : neighbours_pv)
+		foreach_cell(*p.clusters_, [&](PointVertex pv) -> bool {
+			NonManifoldVertex nmv1 = value<NonManifoldVertex>(*p.clusters_, spheres_skeleton_vertex_map, pv);
+			const std::set<PointVertex>& n_pv =
+				value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv);
+			for (PointVertex ne1 : n_pv)
 			{
-				uint32 cluster_index_2 = cluster_map[index_of(*p.clusters_, vertex_neighbours_1.second)]; 
-				std::unordered_map<uint32, PointVertex>& neighbours_1 =
-					value<std::unordered_map<uint32, PointVertex>>(*p.clusters_, p.clusters_neighbours_, vertex_neighbours_1.second);
-				for (auto& vertex_neighbours_2 : neighbours_1)
+				NonManifoldVertex nmv2 = value<NonManifoldVertex>(*p.clusters_, spheres_skeleton_vertex_map, ne1);
+				const std::set<PointVertex>& ne_ne1 =
+					value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, ne1);
+				for (PointVertex ne2 : ne_ne1)
 				{
-					if (neighbours_pv.find(vertex_neighbours_2.first) != neighbours_pv.end())
+					if (n_pv.find(ne2) != n_pv.end())
 					{
-						uint32 cluster_index_3 = cluster_map[index_of(*p.clusters_, vertex_neighbours_2.second)]; 
-						skeleton_data.faces_nb_edges_.push_back(3);
-						skeleton_data.faces_edge_indices_.push_back(
-							edge_indices[{cluster_index_1, cluster_index_2}]);
-						skeleton_data.faces_edge_indices_.push_back(
-							edge_indices[{cluster_index_1, cluster_index_3}]);
-						skeleton_data.faces_edge_indices_.push_back(
-							edge_indices[{cluster_index_2, cluster_index_3}]);
+						NonManifoldVertex nmv3 =
+							value<NonManifoldVertex>(*p.clusters_, spheres_skeleton_vertex_map, ne2);
+						if (index_of(*p.non_manifold_, nmv1) < index_of(*p.non_manifold_, nmv2) &&
+							index_of(*p.non_manifold_, nmv2) < index_of(*p.non_manifold_, nmv3))
+						{
+							std::vector<NonManifoldEdge> edges;
+							edges.push_back(
+								edge_indices[{index_of(*p.non_manifold_, nmv1), index_of(*p.non_manifold_, nmv2)}]);
+							edges.push_back(
+								edge_indices[{index_of(*p.non_manifold_, nmv2), index_of(*p.non_manifold_, nmv3)}]);
+							edges.push_back(
+								edge_indices[{index_of(*p.non_manifold_, nmv1), index_of(*p.non_manifold_, nmv3)}]);
+							add_face(*p.non_manifold_, edges);
+						}
 					}
 				}
 			}
 			return true;
 		});
-		uint32 skeleton_nb_vertices = skeleton_data.vertex_position_.size();
-		uint32 skeleton_nb_edges = skeleton_data.edges_vertex_indices_.size() / 2;
-		uint32 skeleton_nb_faces = skeleton_data.faces_nb_edges_.size();
-
-		skeleton_data.reserve(skeleton_nb_vertices, skeleton_nb_edges, skeleton_nb_faces);
-
-		import_incidence_graph_data(*p.non_manifold_, skeleton_data);
-		std::shared_ptr<NonManifoldAttribute<Vec3>> mv_vertex_position =
-			get_attribute<Vec3, NonManifoldVertex>(*p.non_manifold_, "position");
-		if (mv_vertex_position)
-			nonmanifold_provider_->set_mesh_bb_vertex_position(*p.non_manifold_, mv_vertex_position);
 		
-		
-		nonmanifold_provider_->emit_connectivity_changed(*p.non_manifold_);
-		std::cout << "finish creating skeleton"<< std::endl;
+
+		remove_attribute<PointVertex>(*p.clusters_, spheres_skeleton_vertex_map);
 		
 	}
 
@@ -3144,7 +3158,7 @@ private:
 
 	void key_press_event(View* view, int32 keycode) override{
 		ClusterAxisParameter& p= cluster_axis_parameters_[selected_surface_mesh_];
-		if (keycode == GLFW_KEY_I || keycode == GLFW_KEY_S)
+		if (keycode == GLFW_KEY_I || keycode == GLFW_KEY_S || keycode == GLFW_KEY_D)
 		{
 			int32 x = view->mouse_x();
 			int32 y = view->mouse_y();
@@ -3176,6 +3190,8 @@ private:
 		}
 		if (keycode == GLFW_KEY_S && picked_sphere_.is_valid())
 			split_one_cluster(*selected_surface_mesh_, picked_sphere_);
+		if (keycode == GLFW_KEY_D && picked_sphere_.is_valid())
+			remove_one_cluster(*selected_surface_mesh_, picked_sphere_);
 	}
 
 	
@@ -3327,7 +3343,7 @@ private:
 							p.max_hausdorff_distance_ / md.diangonal_length() * 100);
 				ImGui::Separator();
 
-				ImGui::Text("Pick the sphere under the mouse with I and split it with S");
+				ImGui::Text("Pick the sphere under the mouse with I, split it with S and delete it with D");
 				if (picked_sphere_.is_valid())
 				{
 					ImGui::Text("Picked sphere:");
@@ -3336,7 +3352,7 @@ private:
 					ImGui::Text("Radius: %f", value<Scalar>(*p.clusters_, p.clusters_radius_, picked_sphere_));
 				}
 				if (ImGui::Button("Construct skeleton"))
-					shrinking_balls_clustering_connectivity(*selected_surface_mesh_);
+					compute_skeleton(*selected_surface_mesh_);
 			}
 			ImGui::Separator();
 			
@@ -3491,7 +3507,7 @@ private :
 	Tree* tree;
 	Point_inside* inside_tester;
 
-	std::unordered_map<uint32, uint32> cluster_map;
+	
 	std::vector<Vec3> colors;
 	
 	bool angle_filtering_ = true;
