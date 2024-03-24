@@ -86,8 +86,8 @@ int main(int argc, char** argv)
 	v1->link_module(&mpnm);
 	v1->link_module(&sl);
 	v1->link_module(&sr);
-	v1->link_module(&pcr);
 	v1->link_module(&srnm);
+	v1->link_module(&pcr);
 	v1->link_module(&pw);
 
 	
@@ -115,7 +115,7 @@ int main(int argc, char** argv)
 		sr.set_vertex_position(*v1, *m, surface_vertex_position);
 		sr.set_vertex_normal(*v1, *m, surface_vertex_normal);
 		sr.set_render_edges(*v1, *m, false);
-		sr.set_render_vertices(*v1, *m, true);
+		sr.set_render_vertices(*v1, *m, false);
 
 		sr.set_ghost_mode(*v1, *m, true);
 		pcr.set_render_vertices(*v1, *m, true);
