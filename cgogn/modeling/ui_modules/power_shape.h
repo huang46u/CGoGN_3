@@ -2310,32 +2310,38 @@ private:
 			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv).clear();
 			return true;
 		});
-
-		foreach_cell(surface, [&](SurfaceVertex sv) {
-			Scalar min_distance = std::numeric_limits<Scalar>::max();
-			PointVertex min_cluster;
-			foreach_cell(*p.clusters_, [&](PointVertex pv) {
-				Vec3& sphere_center = value<Vec3>(*p.clusters_, p.clusters_position_, pv);
-				Vec3& pos = value<Vec3>(surface, p.surface_vertex_position_, sv);
-				Scalar distance = (pos - sphere_center).norm() - value<Scalar>(*p.clusters_, p.clusters_radius_, pv);
-				if (min_distance > distance)
-				{
-					min_distance = distance;
-					min_cluster = pv;
-				}
-				return true;
-			});
-			value<PointVertex>(surface, p.surface_cluster_info_, sv) = min_cluster;
-			value<Vec3>(surface, p.surface_vertex_color_, sv) =
-				value<Vec4>(*p.clusters_, p.clusters_surface_color_, min_cluster).head<3>();
-			value<Scalar>(surface, p.surface_distance_to_cluster_, sv) = min_distance;
+		MeshData<POINT>& md = point_provider_->mesh_data(*p.clusters_);
+		uint32 nb_spheres = md.template nb_cells<PointVertex>();
+		std::vector<Vec3> sphere_centers;
+		sphere_centers.reserve(nb_spheres);
+		std::vector<Scalar> sphere_radii;
+		sphere_radii.reserve(nb_spheres);
+		std::vector<PointVertex> spheres_bvh_vertices;
+		spheres_bvh_vertices.reserve(nb_spheres);
+		foreach_cell(*p.clusters_, [&](PointVertex v) -> bool {
+			spheres_bvh_vertices.push_back(v);
+			sphere_centers.push_back(value<Vec3>(*p.clusters_, p.clusters_position_, v));
+			sphere_radii.push_back(value<Scalar>(*p.clusters_, p.clusters_radius_, v));
 			return true;
 		});
-		//Update cluster vertices
-		foreach_cell(surface, [&](SurfaceVertex sv) {
-			PointVertex cluster_point =
-				value<PointVertex>(surface, p.surface_cluster_info_, sv);
-			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, cluster_point).push_back(sv);
+		acc::BVHTreeSpheres<uint32, Vec3> spheres_bvh(sphere_centers, sphere_radii);
+		parallel_foreach_cell(surface, [&](SurfaceVertex v) -> bool {
+	
+			const Vec3& vp = value<Vec3>(surface, p.surface_vertex_position_, v);
+			PointVertex closest_sphere;
+
+			std::pair<uint32, Vec3> bvh_res;
+			spheres_bvh.closest_point(vp, &bvh_res);
+			closest_sphere = spheres_bvh_vertices[bvh_res.first];
+			auto& s_center = sphere_centers[bvh_res.first];
+			auto& s_radius = sphere_radii[bvh_res.first];
+			value<PointVertex>(surface, p.surface_cluster_info_, v) = closest_sphere;
+			value<Vec3>(surface, p.surface_vertex_color_, v) =
+				value<Vec4>(*p.clusters_, p.clusters_surface_color_, closest_sphere).head<3>();
+			value<Scalar>(surface, p.surface_distance_to_cluster_, v) = (vp-s_center).norm() - s_radius;
+			std::lock_guard<std::mutex> lock(spheres_mutex_[bvh_res.first % spheres_mutex_.size()]);
+			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, closest_sphere).push_back(v);
+
 			return true;
 		});
 
@@ -2345,7 +2351,11 @@ private:
 				value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
 			if (clusters_surface_vertices.size() == 0)
 			{
-				clusters_to_remove.push_back(pv);
+				const std::vector<SurfaceVertex>& cluster = value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
+				for (SurfaceVertex sv : cluster)
+					value<PointVertex>(surface, p.surface_cluster_info_, sv) = PointVertex();
+				std::cout << "delete cluster:" << index_of(*p.clusters_, pv) << std::endl;
+				remove_vertex(*p.clusters_, pv);
 			}
 			return true;
 		});
