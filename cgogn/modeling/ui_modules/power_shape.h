@@ -31,6 +31,7 @@
 #include <cgogn/ui/module.h>
 #include <cgogn/core/types/maps/gmap/gmap_base.h>
 #include <cgogn/geometry/types/slab_quadric.h>
+#include <libacc/bvh_trees_spheres.h>
 
 #include <cgogn/io/point/point_import.h>
 #include <cgogn/geometry/algos/medial_axis.h>
@@ -95,6 +96,14 @@ enum InitMethod
 	CONSTANT,
 	FACTOR
 };
+enum CandidateGenerationMethod
+{
+	RANDOM,
+	SHRINKING_BALL,
+	DELAUNAY
+
+};
+
 
 template <typename POINT, typename SURFACE, typename NONMANIFOLD>
 class PowerShape : public ViewModule
@@ -1843,12 +1852,84 @@ private:
 		std::cout << "construct non manifold PD" << std::endl;
 		constrcut_power_shape_non_manifold(power_shape, "_coverage_axis" + surface_provider_->mesh_name(surface));
 	}
+
 	
+	
+	void init_coverage_axis_plus_plus(CoverageAxisParameter& p)
+	{
+		p.initialized_ = true;
+		switch (p.candidate_generation_method)
+		{
+		case SHRINKING_BALL: 
+		{
+			sample_medial_axis(*p.surface_);
+		}
+		break;
+		case RANDOM: 
+		{
+
+		}
+		break;
+		case DELAUNAY: 
+		{
+
+		}
+		break;
+		default:
+			break;
+		}
+		
+	}
+
+	void compute_coverage_matrix(CoverageAxisParameter& p)
+	{
+		typedef Eigen::Triplet<Scalar> T;
+		std::vector<T> triplets;
+
+		uint32 nb_candidates = 0;
+		uint32 nb_surface_samples = 0;
+		std::vector<Vec3> sample_points;
+		std::vector<Vec3> inner_points;
+		std::vector<Scalar> weights;
+		foreach_cell([&](SurfaceVertex sv) {
+			sample_points.push_back(value<Vec3>(surface, p.surface_vertex_position_, sv));
+			inner_points.push_back(value<Vec3>(surface, p.medial_axis_position_, sv));
+			weights.push_back(value<Scalar>(surface, p.medial_axis_radius_, sv) + p.dilation_factor);
+			nb_candidates++;
+			nb_surface_samples++;
+			return true;
+		});
+		for (size_t idx1 = 0; idx1 < nb_surface_samples; idx1++)
+		{
+			for (size_t idx2 = 0; idx2 < nb_candidates; idx2++)
+			{
+				if (inside_sphere(sample_points[idx1], inner_points[idx2], weights[idx2]))
+				{
+					triplets.push_back(T(idx1, idx2, 1.0));
+				}
+			}
+		}
+		p.coverage_matrix.resize(nb_surface_samples, nb_candidates);
+		p.coverage_matrix.setFromTriplets(triplets.begin(), triplets.end());
+		p.coverage_matrix.makeCompressed();
+	}
+
 	using SphereQueue = std::multimap<Scalar, SurfaceVertex,std::greater<Scalar>>;
 	using SphereQueueIt = typename SphereQueue::const_iterator;
 	using SphereInfo = std::pair<bool, SphereQueueIt>;
 
+	struct CoverageAxisParameter
+	{
+		bool initialized_ = false;
+		Eigen::SparseMatrix<Scalar> coverage_matrix;
+		SURFACE* surface_;
+		std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_position_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Vec3>> medial_axis_position_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Scalar>> medial_axis_radius_ = nullptr;
 
+		Scalar dilation_factor = 0.02;
+		CandidateGenerationMethod candidate_generation_method = SHRINKING_BALL;
+	};
 	struct ClusterAxisParameter
 	{
 		bool initialized_ = false;
@@ -1925,7 +2006,7 @@ private:
 		std::mutex mutex_;
 		bool running_ = false;
 		bool stopping_ = false;
-		bool fuzzy_clustering_ = true;
+		bool fuzzy_clustering_ = false;
 		Scalar dilation_factor = 0.02;
 
 		uint32 update_rate_ = 20;
@@ -1935,7 +2016,7 @@ private:
 	void cluster_axis_init(SURFACE& surface)
 	{
 		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
-
+		p.surface_ = &surface;
 		if (p.initialized_)
 		{
 			std::cout << "Surface data already initialized" << std::endl;
@@ -2069,55 +2150,10 @@ private:
 		p.non_manifold_vertex_radius = get_or_add_attribute<Scalar, NonManifoldVertex>(*p.non_manifold_, "radius");
 
 		p.initialized_ = true;
-
-		
-
-
 	}
 
-	void init_coverage_axis_plus_plus(SURFACE& surface)
+	void set_selected_clusters_error(ClusterAxisParameter& p, PointAttribute<Scalar>* attribute)
 	{
-		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
-
-		typedef Eigen::SparseMatrix<Scalar> SpMat;
-		typedef Eigen::Triplet<Scalar> T;
-		std::vector<T> triplets;
-
-		uint32 nb_candidates = 0;
-		uint32 nb_surface_samples = 0;
-		std::vector<Vec3> sample_points;
-		std::vector<Vec3> inner_points;
-		std::vector<Scalar> weights;
-		foreach_cell([&](SurfaceVertex sv) {
-			sample_points.push_back(value<Vec3>(surface,p.surface_vertex_position_ , sv));
-			inner_points.push_back(value<Vec3>(surface, p.medial_axis_position_, sv));
-			weights.push_back(value<Scalar>(surface, p.medial_axis_radius_, sv)+p.dilation_factor);
-			nb_candidates++;
-			nb_surface_samples++;
-			return true;
-		});
-		for (size_t idx1 = 0; idx1 < nb_surface_samples; idx1++)
-		{
-			for (size_t idx2 = 0; idx2 < nb_candidates; idx2++)
-			{
-				if (inside_sphere(sample_points[idx1], inner_points[idx2], weights[idx2]))
-				{
-					triplets.push_back(T(idx1, idx2, 1.0));
-				}
-			}
-		}
-
-		SpMat A(nb_surface_samples, nb_candidates);
-		A.setFromTriplets(triplets.begin(), triplets.end());
-		A.makeCompressed();
-		
-		
-		
-	}
-
-	void set_selected_clusters_error(SURFACE& surface, PointAttribute<Scalar>* attribute)
-	{
-		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
 		p.selected_clusters_error_ = attribute;
 		update_clusters_color(surface);
 		if (!p.running_)
@@ -2344,12 +2380,10 @@ private:
 
 			return true;
 		});
-
-		std::vector<PointVertex> clusters_to_remove;
 		foreach_cell(*p.clusters_, [&](PointVertex pv) {
 			auto& clusters_surface_vertices =
 				value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
-			if (clusters_surface_vertices.size() == 0)
+			if (clusters_surface_vertices.size() < 4)
 			{
 				const std::vector<SurfaceVertex>& cluster = value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
 				for (SurfaceVertex sv : cluster)
@@ -2359,11 +2393,7 @@ private:
 			}
 			return true;
 		});
-		for (PointVertex& sv : clusters_to_remove)
-		{
-			std::cout << "delete cluster" << index_of(*p.clusters_, sv) << std::endl;
-			remove_vertex(*p.clusters_, sv);
-		}
+		
 	}
 	
 	// Update the neighborhood of the clusters
@@ -2373,8 +2403,7 @@ private:
 		parallel_foreach_cell(*p.clusters_, [&](PointVertex pv) {
 			value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv).clear();
 			return true;
-
-			});
+		});
 		foreach_cell(surface, [&](SurfaceEdge e) -> bool {
 			std::vector<SurfaceVertex> vertices = incident_vertices(surface, e);
 
@@ -3206,7 +3235,7 @@ private:
 			NonManifoldVertex nmv1 = value<NonManifoldVertex>(*p.clusters_, spheres_skeleton_vertex_map, pv);
 			const std::set<PointVertex>& neighbors =
 				value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv);
-			for (PointVertex neighbor : neighbors)
+			for (const PointVertex& neighbor : neighbors)
 			{
 				NonManifoldVertex nmv2 = value<NonManifoldVertex>(*p.clusters_, spheres_skeleton_vertex_map, neighbor);
 				std::vector<NonManifoldVertex> av = adjacent_vertices_through_edge(*p.non_manifold_, nmv1);
@@ -3224,12 +3253,12 @@ private:
 			NonManifoldVertex nmv1 = value<NonManifoldVertex>(*p.clusters_, spheres_skeleton_vertex_map, pv);
 			const std::set<PointVertex>& n_pv =
 				value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv);
-			for (PointVertex ne1 : n_pv)
+			for (const PointVertex& ne1 : n_pv)
 			{
 				NonManifoldVertex nmv2 = value<NonManifoldVertex>(*p.clusters_, spheres_skeleton_vertex_map, ne1);
 				const std::set<PointVertex>& ne_ne1 =
 					value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, ne1);
-				for (PointVertex ne2 : ne_ne1)
+				for (const PointVertex& ne2 : ne_ne1)
 				{
 					if (n_pv.find(ne2) != n_pv.end())
 					{
@@ -3363,15 +3392,14 @@ private:
 			if (p.initialized_)
 			{
 				
-				
 				ImGui::RadioButton("Init method: Dilation Constant", (int*)&p.init_method_, CONSTANT);
 				ImGui::SameLine();
-				ImGui::DragFloat("Init factor", &p.init_distance_, 0.01f, 0.0f, 5.0f, "%.3f");
+				ImGui::DragFloat("Init Distance", &p.init_distance_, 0.01f,0.0f, 5.0f, "%.2f" );
 				ImGui::RadioButton("Init method: Dilation Factor", (int*)&p.init_method_, FACTOR);
 				ImGui::SameLine();
-				ImGui::DragFloat("Init factor", &p.init_factor_, 0.01f, 0.0f, 5.0f, "%.3f");
+				ImGui::DragFloat("Init factor", &p.init_factor_, 0.01f, 0.0f, 5.0f, "%.2f");
 				if (ImGui::Button("Initialise Cluster"))
-					initialise_cluster(*selected_surface_mesh_);
+					initialise_cluster(p);
 
 				if (picked_sphere_.is_valid())
 				{
@@ -3400,31 +3428,31 @@ private:
 				if (ImGui::Button("Update clusters"))
 				{
 					for (uint32 i = 0; i < update_times; i++)
-						update_clusters(*selected_surface_mesh_);
+						update_clusters(p);
 				}
 
 				ImGui::SliderInt("Update rate", (int*)&p.update_rate_, 1, 1000);
 				if (ImGui::Checkbox("Fuzzy clustering", &p.fuzzy_clustering_))
 				{
 					if(p.fuzzy_clustering_)
-						assign_fuzzy_clusters(*selected_surface_mesh_);
+						assign_fuzzy_clusters(p);
 				}
 				ImGui::DragFloat("Fuzzy distance", &p.fuzzy_distance_, 0.00001f, 0.0f, 1.0f, "%.5f");
 				if (!p.running_)
 				{
 					if (ImGui::Button("Start clusters update"))
-						start_clusters_update(*selected_surface_mesh_);
+						start_clusters_update(p);
 				}
 				else
 				{
 					if (ImGui::Button("Stop clusters update"))
-						stop_clusters_update(*selected_surface_mesh_);
+						stop_clusters_update(p);
 				}
 				ImGui::Separator();
 
 				if (ImGui::RadioButton("Distance               ", (int*)&p.split_method_, DISTANCE_POINT_SPHERE))
 				{
-					set_selected_clusters_error(*selected_surface_mesh_, p.clusters_error_.get());
+					set_selected_clusters_error(p, p.clusters_error_.get());
 
 				}
 				ImGui::SameLine();
@@ -3432,7 +3460,7 @@ private:
 								
 				if(ImGui::RadioButton("Deviation               ", (int*)&p.split_method_, DEVIATION))
 				{
-					set_selected_clusters_error(*selected_surface_mesh_, p.clusters_deviation_.get());
+					set_selected_clusters_error(p, p.clusters_deviation_.get());
 				}
 				ImGui::SameLine();
 				ImGui::DragFloat("Deviation threshold", &p.split_variance_threshold_, 0.000001f, 0.0f, 0.1f,
@@ -3440,7 +3468,7 @@ private:
 				
 				if(ImGui::RadioButton("Correction distance     ", (int*)&p.split_method_, DISTANCE_TO_MEDIAL_AXIS))
 				{
-					set_selected_clusters_error(*selected_surface_mesh_, p.correction_error_.get());
+					set_selected_clusters_error(p, p.correction_error_.get());
 				}
 				ImGui::SameLine();
 				ImGui::DragFloat("Correction distance threshold", &p.split_distance_to_medial_axis_threshold_,
@@ -3458,7 +3486,7 @@ private:
 				ImGui::DragInt("Max split number", &(int)p.max_split_number, 1, 0, 20);
 				
 				if (ImGui::Button("Split clusters"))
-					split_cluster(*selected_surface_mesh_);
+					split_cluster(p);
 				ImGui::Separator();
 
 				ImGui::Text("Total error: %f", p.total_error_);
@@ -3477,12 +3505,11 @@ private:
 					ImGui::Text("Center: (%f, %f, %f)", sp[0], sp[1], sp[2]);
 					ImGui::Text("Radius: %f", value<Scalar>(*p.clusters_, p.clusters_radius_, picked_sphere_));
 				}
-				if (ImGui::Button("Construct skeleton"))
-					compute_skeleton(*selected_surface_mesh_);
+				
 			}
 			ImGui::Separator();
 			
-			if (ImGui::Button("Delaunay based method"))
+			if (ImGui::Button("Coverage_axis"))
 			{
 				if (ImGui::Button("Sample medial axis"))
 					sample_medial_axis(*selected_surface_mesh_);
@@ -3607,10 +3634,7 @@ private:
 			}
 		}
 	}
-	struct MedialAxisParameter
-	{
-		bool initialized_ = false;
-	};
+	
 
 private :
 	
@@ -3632,7 +3656,7 @@ private :
 	Cgal_Surface_mesh csm;
 	Tree* tree;
 	Point_inside* inside_tester;
-
+	std::array<std::mutex, 43> spheres_mutex_;
 	
 	std::vector<Vec3> colors;
 	
