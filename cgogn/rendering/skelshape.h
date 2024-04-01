@@ -206,6 +206,12 @@ public:
 	{}
 
 
+	void clear()
+	{
+		vertices_.clear();
+		edges_.clear();
+		triangles_.clear();
+	}
 	template<typename VEC4>
 	void add_vertex(const VEC4& v)
 	{

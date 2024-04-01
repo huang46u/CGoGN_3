@@ -300,30 +300,38 @@ struct SphereMeshConstructor
 
 	
 	SphereMeshConstructor(SURFACE& surface, NONMANIFOLD& m, std::shared_ptr<SAttribute<Vec3>>& vertex_position,
-						  std::shared_ptr<NAttribute<Vec4>>& sphere_info, std::shared_ptr<NAttribute<SVertex>>& clusters_vertices)
+						  std::shared_ptr<NAttribute<Vec4>>& sphere_info,
+						  std::shared_ptr<NAttribute<std::vector<SVertex>>>& clusters_vertices)
 		: surface_(surface), m_(m), sphere_info_(sphere_info), vertex_position_(vertex_position), clusters_vertices_(clusters_vertices)
 	{
-		cones_ = add_attribute<Cone, Edge>(m_, "sphere_cone");
-		slabs_ = add_attribute<std::vector<Triangle>, Face>(m_, "slab_triangles");
-
+		cones_ = add_attribute<Cone, NEdge>(m_, "sphere_cone");
+		slabs_ = add_attribute<std::vector<Triangle>, NFace>(m_, "slab_triangles");
+		slab_marker_ = std::make_unique<CellMarker<NONMANIFOLD, NFace>>(m_);
+		cone_marker_ = std::make_unique<CellMarker<NONMANIFOLD, NEdge>>(m_);
+		construct_sphere_mesh();
 	}
+
+	~SphereMeshConstructor()
+	{
+		remove_attribute<NEdge>(m_, cones_);
+		remove_attribute<NFace>(m_, slabs_);
+	}
+
+
 	void construct_sphere_mesh()
 	{
 		parallel_foreach_cell(m_, [&](NEdge e) -> bool {
-			if (incident_faces(m_, e).size() == 0)
+			auto iv = incident_vertices(m_, e);
+			Vec4 p1 = value<Vec4>(m_, sphere_info_, iv[0]);
+			Vec4 p2 = value<Vec4>(m_, sphere_info_, iv[1]);
+			value<Cone>(m_, cones_, e) = Cone(p1.head<3>(), p1.w(), p2.head<3>(), p2.w());
+			if (value<Cone>(m_, cones_, e).type != 1)
 			{
-				auto iv = incident_vertices(m_, e);
-				Vec4 p1 = value<Vec4>(m_, sphere_info_, iv[0]);
-				Vec4 p2 = value<Vec4>(m_, sphere_info_, iv[1]);
-				value<Cone>(m_, cones_, e) = Cone(p1.head<3>(), p1.w(), p2.head<3>(), p2.w());
-				if (value<Cone>(m_, cones_, e).type != 1)
-				{
-					cone_marker_.mark(e);
-				}
+				cone_marker_->mark(e);
 			}
 			return true;
 		});
-		foreach_cell(m_, [&](NFace f) -> bool {
+		parallel_foreach_cell(m_, [&](NFace f) -> bool {
 			auto ifv = incident_vertices(m_, f);
 			Vec4 p1 = value<Vec4>(m_, sphere_info_, ifv[0]);
 			Vec4 p2 = value<Vec4>(m_, sphere_info_, ifv[1]);
@@ -331,7 +339,7 @@ struct SphereMeshConstructor
 			Triangle t1, t2;
 			if (slab_mesh_triangle(p1, p2, p3,t1,t2))
 			{
-				slab_marker_.mark(f);
+				slab_marker_->mark(f);
 				value<std::vector<Triangle>>(m_, slabs_, f).push_back(t1);
 				value<std::vector<Triangle>>(m_, slabs_, f).push_back(t2);
 			}
@@ -367,13 +375,13 @@ struct SphereMeshConstructor
 		if ((dr12 < 1e-8) && (dr13 < 1e-8) && (dr23 < 1e-8))
 		{
 			t1.p1 = c1 + n * r1;
-			t1.p2 = c2 + n * r1;
-			t1.p3 = c3 + n * r1;
+			t1.p2 = c2 + n * r2;
+			t1.p3 = c3 + n * r3;
 			t1.n = n;
 
 			t2.p1 = c1 - n * r1;
-			t2.p2 = c2 - n * r1;
-			t2.p3 = c3 - n * r1;
+			t2.p2 = c2 - n * r2;
+			t2.p3 = c3 - n * r3;
 			t2.n = -n;
 
 			return true;
@@ -418,13 +426,13 @@ struct SphereMeshConstructor
 			n2_vec3.normalize();
 
 			t1.p1 = c1 + n1_vec3 * r1;
-			t1.p2 = c2 + n1_vec3 * r1;
-			t1.p3 = c3 + n1_vec3 * r1;
+			t1.p2 = c2 + n1_vec3 * r2;
+			t1.p3 = c3 + n1_vec3 * r3;
 			t1.n = n1_vec3;
 
 			t2.p1 = c1 + n2_vec3 * r1;
-			t2.p2 = c2 + n2_vec3 * r1;
-			t2.p3 = c3 + n2_vec3 * r1;
+			t2.p2 = c2 + n2_vec3 * r2;
+			t2.p3 = c3 + n2_vec3 * r3;
 			t2.n = n2_vec3;
 
 			return true;
@@ -435,13 +443,13 @@ struct SphereMeshConstructor
 	{
 		Scalar min_dist = std::numeric_limits<Scalar>::max();
 		foreach_incident_face(m_, nv, [&](NFace f) { 
-			if (slab_marker_.is_marked(f))
+			if (slab_marker_->is_marked(f))
 			{
 				for (Triangle t : value<std::vector<Triangle>>(m_, slabs_, f))
 				{
 					Vec3 fp;
 					Scalar dist;
-					t.ProjectontoTriangle(value<Vec4>(m_, sphere_info_, sv), fp, dist);
+					t.ProjectontoTriangle(value<Vec3>(surface_, vertex_position_, sv), fp, dist);
 					{
 						dist = fabs(dist);
 						min_dist = std::min(min_dist, dist);
@@ -451,11 +459,11 @@ struct SphereMeshConstructor
 			return true;
 			});
 		foreach_incident_edge(m_, nv, [&](NEdge e) {
-			if (cone_marker_.is_marked(e))
+			if (cone_marker_->is_marked(e))
 			{
 				Vec3 fp;
 				Scalar dist;
-				value<Cone>(m_, cones_, e).ProjectOntoCone(value<Vec4>(m_, sphere_info_, sv), fp, dist);
+				value<Cone>(m_, cones_, e).ProjectOntoCone(value<Vec3>(surface_, vertex_position_, sv), fp, dist);
 				dist = fabs(dist);
 				min_dist = std::min(min_dist, dist);
 			}
@@ -468,25 +476,13 @@ struct SphereMeshConstructor
 	}
 
 
-	Scalar compute_hausdorff_distance()
-	{
-		Scalar max_dist = 0.0;
-		foreach_cell(m_, [&](NVertex v) -> bool {
-			for (SVertex sv: value<std::vector<SVertex>>(m_, clusters_vertices_, v))
-			{
-				Scalar min_dist = min_distance_to_enveloppe(v, sv);
-				max_dist = std::max(max_dist, min_dist);
-			}
-			return true;
-		});
-		return max_dist;
-	}
+	
 
 private:
 	NONMANIFOLD& m_;
 	SURFACE& surface_;
-	CellMarker<NONMANIFOLD, NFace> slab_marker_;
-	CellMarker<NONMANIFOLD, NEdge> cone_marker_;
+	std::unique_ptr<CellMarker<NONMANIFOLD, NFace>> slab_marker_;
+	std::unique_ptr<CellMarker<NONMANIFOLD, NEdge>> cone_marker_;
 	std::shared_ptr<NAttribute<Vec4>> sphere_info_;
 	std::shared_ptr<NAttribute<std::vector<SVertex>>> clusters_vertices_;
 	std::shared_ptr<NAttribute<Cone>> cones_;
@@ -972,13 +968,14 @@ struct DecimationSQEM_Helper
 		}
 		else
 		{
-			if (eq.optimized(opt) || incident_faces(m_, e).size() == 0)
+			bool optimized = eq.optimized(opt);
+			if (optimized || incident_faces(m_, e).size() == 0)
 			{
 				eq._A = q1._A + q2._A + q1._add_A + q2._add_A;
 				eq._b = q1._b + q2._b + q1._add_b + q2._add_b;
 				eq._c = q1._c + q2._c + q1._add_c + q2._add_c;
 
-				if (eq.optimized(opt))
+				if (optimized)
 				{
 					if (opt[3] < 0)
 						opt = Scalar(0.5) * (p1 + p2);

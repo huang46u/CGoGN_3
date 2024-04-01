@@ -37,6 +37,7 @@
 #include <cgogn/geometry/algos/medial_axis.h>
 #include <cgogn/modeling/algos/decimation/SQEM_helper.h>
 #include <cgogn/modeling/algos/decimation/QEM_helper.h>
+#include <cgogn/rendering/skelshape.h>
 #include <libacc/kd_tree.h>
 #include <libacc/bvh_tree.h>
 #include <cgogn/core/types/maps/cmap/cmap0.h>
@@ -2404,6 +2405,7 @@ private:
 		std::shared_ptr<SurfaceAttribute<Vec3>> medial_axis_position_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<Scalar>> medial_axis_radius_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<Scalar>> surface_distance_to_cluster_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Scalar>> surface_distance_to_enveloppe= nullptr;
 		std::shared_ptr<SurfaceAttribute<PointVertex>> surface_cluster_info_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<std::vector<std::pair<Scalar, Vec3>>>> clusters_fuzzy_cluster_color_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<std::pair<SurfaceVertex,SurfaceVertex>>> medial_axis_closest_points_ = nullptr;
@@ -2439,9 +2441,10 @@ private:
 
 		NONMANIFOLD* non_manifold_ = nullptr;
 		std::shared_ptr<NonManifoldAttribute<Vec3>> non_manifold_vertex_position_ = nullptr;
-		std::shared_ptr<NonManifoldAttribute<Scalar>> non_manifold_vertex_radius = nullptr;
-		std::shared_ptr<NonManifoldAttribute<Vec4>> non_manifold_sphere_info = nullptr;
-																					 
+		std::shared_ptr<NonManifoldAttribute<Scalar>> non_manifold_vertex_radius_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Vec4>> non_manifold_sphere_info_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<std::vector<SurfaceVertex>>> non_manifold_cluster_vertices_ = nullptr;
+																						 
 		PointAttribute<Scalar>* selected_clusters_error_ = nullptr;
 		std::shared_ptr<CellMarkerStore<SURFACE, SurfaceVertex>> no_ball;
 		float init_min_radius_ = 0.01;
@@ -2462,16 +2465,22 @@ private:
 		Scalar max_error_ = 0.0;
 		float init_distance_ = 0.1f;
 		float init_factor_ = 0.8f;
-		Scalar max_hausdorff_distance_ = 0.0;
+		Scalar hausdorff_distance_enveloppe_ = 0.0;
+		Scalar huasdorff_distance_cluster_ = 0.0;
 
 		std::mutex mutex_;
 		bool running_ = false;
 		bool stopping_ = false;
+		bool slow_down_ = true;
 		bool fuzzy_clustering_ = false;
+		bool compute_enveloppe_distance_ = false;
 		Scalar dilation_factor = 0.02;
 
 		uint32 update_rate_ = 20;
 		uint32 max_split_number = 1;
+
+		cgogn::rendering::SkelShapeDrawer skel_drawer_;
+		bool draw_enveloppe = false;
 	};
 
 	void cluster_axis_init(SURFACE& surface)
@@ -2549,6 +2558,7 @@ private:
 		p.surface_vertex_color_ = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "surface_vertex_color");
 		p.medial_axis_cloest_point_color_ = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "medial_axis_cloest_point_color_");
 		p.surface_distance_to_cluster_ = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "surface_distance_to_cluster_");
+		p.surface_distance_to_enveloppe = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "surface_distance_to_enveloppe");
 		p.surface_cluster_info_ = get_or_add_attribute<PointVertex, SurfaceVertex>(surface, "surface_cluster_info_");
 		p.medial_axis_closest_points_ = get_or_add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(
 			surface, "medial_axis_closest_points_");
@@ -2607,10 +2617,17 @@ private:
 		p.non_manifold_ =
 			nonmanifold_provider_->add_mesh("skeleton" + std::to_string(nonmanifold_provider_->number_of_meshes()));
 		p.non_manifold_vertex_position_ = get_or_add_attribute<Vec3, NonManifoldVertex>(*p.non_manifold_, "position");
-		p.non_manifold_sphere_info = get_or_add_attribute<Vec4, NonManifoldVertex>(*p.non_manifold_, "sphere_info");
-		p.non_manifold_vertex_radius = get_or_add_attribute<Scalar, NonManifoldVertex>(*p.non_manifold_, "radius");
+		p.non_manifold_sphere_info_ = get_or_add_attribute<Vec4, NonManifoldVertex>(*p.non_manifold_, "sphere_info");
+		p.non_manifold_vertex_radius_ = get_or_add_attribute<Scalar, NonManifoldVertex>(*p.non_manifold_, "radius");
+		p.non_manifold_cluster_vertices_ =
+			get_or_add_attribute<std::vector<SurfaceVertex>, NonManifoldVertex>(*p.non_manifold_, "cluster_vertices");
+
+		p.skel_drawer_.set_color({1, 0, 0, 0.5});
+		p.skel_drawer_.set_subdiv(40);
 
 		p.initialized_ = true;
+
+		
 	}
 
 	void set_selected_clusters_error(ClusterAxisParameter& p, PointAttribute<Scalar>* attribute)
@@ -2932,7 +2949,7 @@ private:
 
 	void update_clusters_data(ClusterAxisParameter& p)
 	{
-		p.max_hausdorff_distance_ = 0.0;
+		p.huasdorff_distance_cluster_ = 0.0;
 		parallel_foreach_cell(*p.clusters_, [&](PointVertex pv) {
 			Scalar error = 0.0;
 			Scalar cluster_max_error = 0.0;
@@ -2987,8 +3004,9 @@ private:
 		}
 		for (Scalar max_distance : *p.clusters_max_distance_)
 		{
-			p.max_hausdorff_distance_ = std::max(p.max_hausdorff_distance_, max_distance);
+			p.huasdorff_distance_cluster_ = std::max(p.huasdorff_distance_cluster_, max_distance);
 		}
+		
 	} 
 		
 	void update_clusters_color(ClusterAxisParameter& p)
@@ -3360,8 +3378,6 @@ private:
 	
 	void split_outside_cluster(ClusterAxisParameter& p, const Vec3& center, PointVertex cluster)
 	{
-		
-
 		std::vector<std::pair<uint32, Scalar>> k_res;
 		p.surface_kdt_->find_nns(center, 10, &k_res);
 
@@ -3597,13 +3613,16 @@ private:
 			while (true)
 			{
 				update_clusters(p);
+				if (p.slow_down_)
+					std::this_thread::sleep_for(std::chrono::microseconds(1000000 / p.update_rate_));
+				else
+					std::this_thread::yield();
 				if (p.stopping_)
 				{
 					p.running_ = false;
 					p.stopping_ = false;
 					break;
 				}
-				std::this_thread::sleep_for(std::chrono::microseconds(1000000 / p.update_rate_));
 			}
 			
 		});
@@ -3629,12 +3648,15 @@ private:
 			point_provider_->emit_attribute_changed(*p.clusters_, p.clusters_color_.get());
 			point_provider_->emit_attribute_changed(*p.clusters_, p.clusters_without_correction_position_.get());
 			point_provider_->emit_attribute_changed(*p.clusters_, p.clusters_without_correction_radius_.get());
+			compute_skeleton(p);
+
 			surface_provider_->emit_attribute_changed(*p.surface_, p.surface_vertex_color_.get());
 			surface_provider_->emit_attribute_changed(*p.surface_, p.surface_distance_to_cluster_.get());
-			compute_skeleton(p);
+			surface_provider_->emit_attribute_changed(*p.surface_, p.surface_distance_to_enveloppe.get());
+			
 			nonmanifold_provider_->emit_connectivity_changed(*p.non_manifold_);
 			nonmanifold_provider_->emit_attribute_changed(*p.non_manifold_, p.non_manifold_vertex_position_.get());
-
+			
 		}
 		else
 		{
@@ -3645,9 +3667,12 @@ private:
 			point_provider_->emit_attribute_changed(*p.clusters_, p.clusters_color_.get());
 			point_provider_->emit_attribute_changed(*p.clusters_, p.clusters_without_correction_position_.get());
 			point_provider_->emit_attribute_changed(*p.clusters_, p.clusters_without_correction_radius_.get());
+			compute_skeleton(p);
+			
 			surface_provider_->emit_attribute_changed(*p.surface_, p.surface_vertex_color_.get());
 			surface_provider_->emit_attribute_changed(*p.surface_, p.surface_distance_to_cluster_.get());
-			compute_skeleton(p);
+			surface_provider_->emit_attribute_changed(*p.surface_, p.surface_distance_to_enveloppe.get());
+			
 			nonmanifold_provider_->emit_connectivity_changed(*p.non_manifold_);
 			nonmanifold_provider_->emit_attribute_changed(*p.non_manifold_, p.non_manifold_vertex_position_.get());
 		}
@@ -3657,14 +3682,26 @@ private:
 		//Reindex the cluster
 		uint32 index = 0;
 		clear(*p.non_manifold_);
-
+		if (p.draw_enveloppe)
+			p.skel_drawer_.clear();
 		auto spheres_skeleton_vertex_map =
 			add_attribute<NonManifoldVertex, PointVertex>(*p.clusters_, "__spheres_skeleton_vertex_map");
 		//Add vertex
 		foreach_cell(*p.clusters_, [&](PointVertex pv) -> bool {
 			NonManifoldVertex nmv = add_vertex(*p.non_manifold_);
-			value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, nmv) = value<Vec3>(*p.clusters_, p.clusters_position_, pv);
+			Vec3& center = value<Vec3>(*p.clusters_, p.clusters_position_, pv);
+			Scalar radius = value<Scalar>(*p.clusters_, p.clusters_radius_, pv);
+			value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, nmv) = center;
+			value<Scalar>(*p.non_manifold_, p.non_manifold_vertex_radius_, nmv) = radius;
+			value<Vec4>(*p.non_manifold_, p.non_manifold_sphere_info_, nmv) = Vec4(center.x(), center.y(), center.z(), radius);
+			value<std::vector<SurfaceVertex>>(*p.non_manifold_, p.non_manifold_cluster_vertices_, nmv) =
+				value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
 			value<NonManifoldVertex>(*p.clusters_, spheres_skeleton_vertex_map, pv) = nmv;
+			if (p.draw_enveloppe)
+			{
+				p.skel_drawer_.add_vertex(value<Vec3>(*p.clusters_, p.clusters_position_, pv),
+										  value<Scalar>(*p.clusters_, p.clusters_radius_, pv));
+			}
 			return true;
 		});
 
@@ -3682,6 +3719,14 @@ private:
 				{
 					NonManifoldEdge e = add_edge(*p.non_manifold_, nmv1, nmv2);
 					edge_indices[{index_of(*p.non_manifold_, nmv1), index_of(*p.non_manifold_, nmv2)}] = e;
+					if (p.draw_enveloppe)
+					{
+					
+					p.skel_drawer_.add_edge(value<Vec3>(*p.clusters_, p.clusters_position_, pv),
+												value<Scalar>(*p.clusters_, p.clusters_radius_, pv),
+												value<Vec3>(*p.clusters_, p.clusters_position_, neighbor),
+												value<Scalar>(*p.clusters_, p.clusters_radius_, neighbor));
+					}
 				}
 			}
 			return true;
@@ -3714,14 +3759,47 @@ private:
 							edges.push_back(
 								edge_indices[{index_of(*p.non_manifold_, nmv1), index_of(*p.non_manifold_, nmv3)}]);
 							add_face(*p.non_manifold_, edges);
+							if (p.draw_enveloppe)
+							{
+								p.skel_drawer_.add_triangle(value<Vec3>(*p.clusters_, p.clusters_position_, pv),
+														value<Scalar>(*p.clusters_, p.clusters_radius_, pv),
+														value<Vec3>(*p.clusters_, p.clusters_position_, ne1),
+														value<Scalar>(*p.clusters_, p.clusters_radius_, ne1),
+														value<Vec3>(*p.clusters_, p.clusters_position_, ne2),
+														value<Scalar>(*p.clusters_, p.clusters_radius_, ne2));
+							}
+								
 						}
 					}
 				}
 			}
+			
 			return true;
 		});
-		
+		if (p.compute_enveloppe_distance_)
+		{
+			modeling::SphereMeshConstructor<SURFACE, NONMANIFOLD> sphere_mesh_constructor(
+				*p.surface_, *p.non_manifold_, p.surface_vertex_position_, p.non_manifold_sphere_info_,
+				p.non_manifold_cluster_vertices_);
+			Scalar max_dist = 0.0;
+			foreach_cell(*p.non_manifold_, [&](NonManifoldVertex nv){
+				for (SurfaceVertex sv :
+					 value<std::vector<SurfaceVertex>>(*p.non_manifold_, p.non_manifold_cluster_vertices_, nv))
+				{
+					Scalar min_dist = sphere_mesh_constructor.min_distance_to_enveloppe(nv, sv);
+					value<Scalar>(*p.surface_, p.surface_distance_to_enveloppe, sv) = min_dist;
+					max_dist = std::max(max_dist, min_dist);
+				}
+				return true;
+			});
+			p.hausdorff_distance_enveloppe_ = max_dist;
 
+		}
+		
+		if (p.draw_enveloppe)
+		{
+			p.skel_drawer_.update();
+		}
 		remove_attribute<PointVertex>(*p.clusters_, spheres_skeleton_vertex_map);
 		
 	}
@@ -3745,6 +3823,15 @@ private:
 			ClusterAxisParameter& p = cluster_axis_parameters_[selected_surface_mesh_];
 			update_render_data(p);
 		});
+	}
+
+	void draw(View* view) override
+	{
+		ClusterAxisParameter& p = cluster_axis_parameters_[selected_surface_mesh_];
+		auto& proj_matrix = view->projection_matrix();
+		auto& view_matrix = view->modelview_matrix();
+		if(p.draw_enveloppe)
+			p.skel_drawer_.draw(proj_matrix, view_matrix);
 	}
 
 	void key_press_event(View* view, int32 keycode) override{
@@ -3873,7 +3960,7 @@ private:
 					for (uint32 i = 0; i < update_times; i++)
 						update_clusters(p);
 				}
-
+				ImGui::Checkbox("slow down update", &p.slow_down_);
 				ImGui::SliderInt("Update rate", (int*)&p.update_rate_, 1, 1000);
 				if (ImGui::Checkbox("Fuzzy clustering", &p.fuzzy_clustering_))
 				{
@@ -3881,6 +3968,7 @@ private:
 						assign_fuzzy_clusters(p);
 				}
 				ImGui::DragFloat("Fuzzy distance", &p.fuzzy_distance_, 0.00001f, 0.0f, 1.0f, "%.5f");
+				
 				if (!p.running_)
 				{
 					if (ImGui::Button("Start clusters update"))
@@ -3931,13 +4019,21 @@ private:
 				if (ImGui::Button("Split clusters"))
 					split_cluster(p);
 				ImGui::Separator();
+				ImGui::Checkbox("Compute one sided hausdorff distance", &p.compute_enveloppe_distance_);
+				if (ImGui::Checkbox("Draw reconstruction", &p.draw_enveloppe))
+				{
+					update_render_data(p);
+				}
+			
 
 				ImGui::Text("Total error: %f", p.total_error_);
 				ImGui::Text("Min error: %f", p.min_error_);
 				ImGui::Text("Max error: %f", p.max_error_);
 				MeshData<SURFACE>& md = surface_provider_->mesh_data(*selected_surface_mesh_);
-				ImGui::Text("One sided hausdorff distance: %f \% ",
-							p.max_hausdorff_distance_ / md.diangonal_length() * 100);
+				ImGui::Text("One sided hausdorff distance to enveloppe: %f \% ",
+							p.hausdorff_distance_enveloppe_ / md.diangonal_length() * 100);
+				ImGui::Text("One sided hausdorff distance to sphere: %f \% ",
+							p.huasdorff_distance_cluster_ / md.diangonal_length() * 100);
 				ImGui::Separator();
 
 				ImGui::Text("Pick the sphere under the mouse with I, split it with S and delete it with D");
@@ -3967,7 +4063,7 @@ private:
 				}
 				if (c.candidates_valid)
 				{
-					ImGui::DragFloat("Dilation factor", &c.dilation_factor, 0.01f, 0.0f, 1.0f, "%.2f");
+					ImGui::DragFloat("Dilation factor", &c.dilation_factor, 0.001f, 0.0f, 1.0f, "%.3f");
 					ImGui::DragInt("Max Vertices", (int*)&c.max_selected_number,1 ,0, 500);
 					if (ImGui::Button("Compute Coverage axis++"))
 					{
