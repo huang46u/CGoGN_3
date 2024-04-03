@@ -2433,7 +2433,7 @@ private:
 		std::shared_ptr<PointAttribute<Scalar>> clusters_error_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_deviation_ = nullptr;
 		std::shared_ptr<PointAttribute<std::set<PointVertex>>> clusters_neighbours_ = nullptr;
-		std::shared_ptr<PointAttribute<std::unordered_map<PointVertex*, std::set<uint32>>>> clusters_adjacency_info_ =
+		std::shared_ptr<PointAttribute<std::map<PointVertex, std::set<uint32>>>> clusters_adjacency_info_ =
 			nullptr;
 		std::shared_ptr<PointAttribute<std::pair<SurfaceVertex, SurfaceVertex>>> clusters_cloest_sample_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_max_distance_ = nullptr;
@@ -2448,7 +2448,8 @@ private:
 		std::shared_ptr<NonManifoldAttribute<Scalar>> non_manifold_vertex_radius_ = nullptr;
 		std::shared_ptr<NonManifoldAttribute<Vec4>> non_manifold_sphere_info_ = nullptr;
 		std::shared_ptr<NonManifoldAttribute<std::vector<SurfaceVertex>>> non_manifold_cluster_vertices_ = nullptr;
-																						 
+		std::shared_ptr<NonManifoldAttribute<Vec3>> non_manifold_cloest_surface_color = nullptr;						
+
 		PointAttribute<Scalar>* selected_clusters_error_ = nullptr;
 		std::shared_ptr<CellMarkerStore<SURFACE, SurfaceVertex>> no_ball;
 		float init_min_radius_ = 0.01;
@@ -2486,6 +2487,7 @@ private:
 
 		cgogn::rendering::SkelShapeDrawer skel_drawer_;
 		bool draw_enveloppe = false;
+		bool detect_volumn = false;
 	};
 
 	void cluster_axis_init(SURFACE& surface)
@@ -2612,7 +2614,7 @@ private:
 		p.clusters_max_vertex_ = get_or_add_attribute<SurfaceVertex, PointVertex>(*p.clusters_, "cluster_max_vertex");
 		p.correction_error_ = get_or_add_attribute<Scalar, PointVertex>(*p.clusters_, "correction_error");
 		p.clusters_cc_number_ = get_or_add_attribute<uint32, PointVertex>(*p.clusters_, "clusters_cc_number");
-		p.clusters_adjacency_info_ = get_or_add_attribute<std::unordered_map<PointVertex*, std::set<uint32>>, PointVertex>(
+		p.clusters_adjacency_info_ = get_or_add_attribute<std::map<PointVertex, std::set<uint32>>, PointVertex>(
 			*p.clusters_, "clusters_adjacency_info");
 		p.selected_clusters_error_ = p.clusters_error_.get();
 
@@ -2630,6 +2632,7 @@ private:
 		p.non_manifold_vertex_radius_ = get_or_add_attribute<Scalar, NonManifoldVertex>(*p.non_manifold_, "radius");
 		p.non_manifold_cluster_vertices_ =
 			get_or_add_attribute<std::vector<SurfaceVertex>, NonManifoldVertex>(*p.non_manifold_, "cluster_vertices");
+		p.non_manifold_cloest_surface_color = get_or_add_attribute<Vec3, NonManifoldFace>(*p.non_manifold_, "volumn_detected_color");
 
 		p.skel_drawer_.set_color({1, 0, 0, 0.5});
 		p.skel_drawer_.set_subdiv(40);
@@ -2839,7 +2842,7 @@ private:
 			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv).clear();
 			value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv).clear();
 			value<uint32>(*p.clusters_, p.clusters_cc_number_, pv) = 0;
-			value<std::unordered_map<PointVertex*, std::set<uint32>>>(*p.clusters_, p.clusters_adjacency_info_,
+			value<std::map<PointVertex, std::set<uint32>>>(*p.clusters_, p.clusters_adjacency_info_,
 																	  pv).clear();
 			return true;
 		});
@@ -2930,6 +2933,66 @@ private:
 		});
 	}
 
+	void dfs(ClusterAxisParameter& p, NonManifoldFace& f, NonManifoldFace last_face, NONMANIFOLD& nm,
+		CellMarker<NONMANIFOLD, NonManifoldFace> &visited, 
+		std::vector<NonManifoldFace> &path,
+		std::vector<std::vector<NonManifoldFace>>& volumns)
+	{
+		visited.mark(f);
+		path.push_back(f);
+		foreach_adjacent_face_through_edge(nm, f, [&](NonManifoldFace n) {
+			if (!visited.is_marked(n))
+			{
+				dfs(p, n, f, nm, visited, path, volumns);
+			}
+			else if (index_of(nm, n) != index_of(nm, last_face)
+				&& std::find(path.begin(), path.end(), n) != path.end())
+			{
+				vector<NonManifoldFace> new_volumn;
+				bool recording = false;
+				std::cout << "circle start: " << std::endl;
+				for (auto tri : path)
+				{
+					if (index_of(nm, tri) == index_of(nm, n) || recording)
+					{
+						recording = true;
+						std::cout << index_of(nm, tri) << ", ";
+						new_volumn.push_back(tri);
+						value<Vec3>(nm, p.non_manifold_cloest_surface_color, tri) = Vec3(1, 0, 0);
+
+					}
+					
+					if (index_of(nm, tri) == index_of(nm, f) && recording)
+						break;
+				}
+				std::cout << std::endl;
+				new_volumn.push_back(n);
+				
+				volumns.push_back(new_volumn);
+			}
+			return true;
+		});
+		path.pop_back();
+	}
+
+	void detect_cloest_triangle(ClusterAxisParameter& p) {
+		parallel_foreach_cell(*p.non_manifold_, [&](NonManifoldFace f) {
+			value<Vec3>(*p.non_manifold_, p.non_manifold_cloest_surface_color, f) = Vec3(0.0, 0.0, 0.0);
+			return true;
+		});
+		CellMarker<NONMANIFOLD, NonManifoldFace> visited(*p.non_manifold_);
+		std::vector<NonManifoldFace> path;
+		std::vector<std::vector<NonManifoldFace>> volumns;
+		foreach_cell(*p.non_manifold_,[&](NonManifoldFace f) {
+			if (!visited.is_marked(f))
+			{
+				dfs(p, f, f, *p.non_manifold_, visited, path, volumns);
+			}
+			return true;
+		});
+		
+	}
+
 	void compute_correct_clusters_neighbor(ClusterAxisParameter& p)
 	{
 		foreach_cell(*p.surface_, [&](SurfaceEdge e) -> bool {
@@ -2941,32 +3004,64 @@ private:
 			{
 				uint32 v1_cc_id = value<uint32>(*p.surface_, p.surface_clusters_cc_idx_, vertices[0]);
 				uint32 v2_cc_id = value<uint32>(*p.surface_, p.surface_clusters_cc_idx_, vertices[1]);
-				value<std::unordered_map<PointVertex*, std::set<uint32>>>(*p.clusters_, p.clusters_adjacency_info_,
-																		  v1_cluster)[&v2_cluster]
-					.insert(v2_cc_id);
-				value<std::unordered_map<PointVertex*, std::set<uint32>>>(*p.clusters_, p.clusters_adjacency_info_,
-																		  v2_cluster)[&v1_cluster]
-					.insert(v1_cc_id);
+				auto& v1_adj_info = value<std::map<PointVertex, std::set<uint32>>>(*p.clusters_, p.clusters_adjacency_info_,
+																		  v1_cluster);
+				auto& v2_adj_info = value<std::map<PointVertex, std::set<uint32>>>(
+					*p.clusters_, p.clusters_adjacency_info_, v2_cluster);
+				auto& it = v1_adj_info.find(v2_cluster);
+				if (it == v1_adj_info.end())
+				{
+					v1_adj_info[v2_cluster].insert(v2_cc_id);
+				}
+				else
+				{
+					it->second.insert(v2_cc_id);
+				}
+				it = v2_adj_info.find(v1_cluster);
+				if (v2_adj_info.find(v1_cluster) == v2_adj_info.end())
+				{
+					v2_adj_info[v1_cluster].insert(v1_cc_id);
+				}
+				else
+				{
+					it->second.insert(v1_cc_id);
+				}
 			}
 			return true;
 		});
 		foreach_cell(*p.clusters_, [&](PointVertex pv) {
-			auto& adjacency_info = value<std::unordered_map<PointVertex*, std::set<uint32>>>(*p.clusters_, p.clusters_adjacency_info_, pv);
+			auto& adjacency_info =
+				value<std::map<PointVertex, std::set<uint32>>>(*p.clusters_, p.clusters_adjacency_info_, pv);
 			auto& cc_numbers = value<uint32>(*p.clusters_, p.clusters_cc_number_, pv);
-			
+			auto & neighbours = value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv);
 			for (auto& it : adjacency_info)
 			{
-				PointVertex* cluster = it.first;
-				auto& cc_number_other = value<uint32>(*p.clusters_, p.clusters_cc_number_, *cluster);
-				if (cc_numbers<=cc_number_other)
+				
+				PointVertex cluster = it.first;
+				if (neighbours.find(cluster) != neighbours.end())
+					continue;
+				auto& cc_number_other = value<uint32>(*p.clusters_, p.clusters_cc_number_, cluster);
+				auto& adj_info_other =
+					value<std::map<PointVertex, std::set<uint32>>>(*p.clusters_, p.clusters_adjacency_info_, cluster);
+				if (cc_numbers == 2)
 				{
-					if (it.second.size() == cc_number_other)
+					if (adj_info_other[pv].size() == 2)
 					{
-						value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv).insert(*cluster);
+						value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv).insert(cluster);
 					}
 				}
-				
+				else if (cc_number_other == 2)
+				{
+					if (it.second.size() == 2)
+					{
+						value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv).insert(cluster);
+					}
+				}
+				else {
+					value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv).insert(cluster);
+				}
 			}
+			
 			return true;
 		});
 
@@ -3831,9 +3926,11 @@ private:
 			value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, nmv) = center;
 			value<Scalar>(*p.non_manifold_, p.non_manifold_vertex_radius_, nmv) = radius;
 			value<Vec4>(*p.non_manifold_, p.non_manifold_sphere_info_, nmv) = Vec4(center.x(), center.y(), center.z(), radius);
+			
 			value<std::vector<SurfaceVertex>>(*p.non_manifold_, p.non_manifold_cluster_vertices_, nmv) =
 				value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
 			value<NonManifoldVertex>(*p.clusters_, spheres_skeleton_vertex_map, pv) = nmv;
+			
 			if (p.draw_enveloppe)
 			{
 				p.skel_drawer_.add_vertex(value<Vec3>(*p.clusters_, p.clusters_position_, pv),
@@ -3938,7 +4035,12 @@ private:
 			p.skel_drawer_.update();
 		}
 		remove_attribute<PointVertex>(*p.clusters_, spheres_skeleton_vertex_map);
-		
+
+		if (p.detect_volumn)
+		{
+
+			detect_cloest_triangle(p);
+		}
 	}
 
 	void init_delaunay(SURFACE& surface)
@@ -4068,17 +4170,7 @@ private:
 				if (ImGui::Button("Initialise Cluster"))
 					initialise_cluster(p);
 
-				if (picked_sphere_.is_valid())
-				{
-					ImGui::Text("Picked sphere:");
-					const Vec3& sp = value<Vec3>(*p.clusters_, p.clusters_position_, picked_sphere_);
-					ImGui::Text("Index: %d", index_of(*p.clusters_, picked_sphere_));
-					ImGui::Text("Radius: %f", value<Scalar>(*p.clusters_, p.clusters_radius_, picked_sphere_));
-				}
-				else
-				{
-					ImGui::Text("No sphere picked");
-				}
+				
 				ImGui::SliderInt("Update time", &(int)update_times, 1, 100);
 				ImGui::RadioButton("Average of medial points", (int*)&p.update_method_, MEAN_MEDIAL_SAMPLE);
 				ImGui::RadioButton("Average of sample points", (int*)&p.update_method_, MEAN_SURFACE_SAMPLE);
@@ -4153,6 +4245,7 @@ private:
 				ImGui::Checkbox("Auto split outside spheres", &p.auto_split_outside_spheres_);
 				ImGui::DragInt("Max split number", &(int)p.max_split_number, 1, 0, 100);
 				ImGui::Checkbox("Connectivity surgery", &p.connectivity_surgery);
+				ImGui::Checkbox("Detect volumn", &p.detect_volumn);
 				if (ImGui::Button("Split clusters"))
 					split_cluster(p);
 				ImGui::Separator();
@@ -4178,8 +4271,14 @@ private:
 				{
 					ImGui::Text("Picked sphere:");
 					const Vec3& sp = value<Vec3>(*p.clusters_, p.clusters_position_, picked_sphere_);
-					ImGui::Text("Center: (%f, %f, %f)", sp[0], sp[1], sp[2]);
+					ImGui::Text("Index: %d", index_of(*p.clusters_, picked_sphere_));
 					ImGui::Text("Radius: %f", value<Scalar>(*p.clusters_, p.clusters_radius_, picked_sphere_));
+					ImGui::Text("Error: %f", value<Scalar>(*p.clusters_, p.selected_clusters_error_, picked_sphere_));
+					ImGui::Text("CC number: %d", value<uint32>(*p.clusters_, p.clusters_cc_number_, picked_sphere_));
+				}
+				else
+				{
+					ImGui::Text("No sphere picked");
 				}
 				
 			}
