@@ -1788,7 +1788,7 @@ private:
 		auto filter_medial_axis_samples =
 			&surface_provider_->mesh_data(surface).template get_or_add_cells_set<SurfaceVertex>(
 				"filtered_medial_axis_samples");
-		CellMarker<Surface, SurfaceVertex> marker(surface);
+		CellMarker<SURFACE, SurfaceVertex> marker(surface);
 		selected_medial_axis_samples_set->foreach_cell([&](SurfaceVertex svc) {
 			Vec3 color = Vec3(rand()/double(RAND_MAX), rand()/double(RAND_MAX), rand()/double(RAND_MAX));
 			foreach_cell(surface, [&](SurfaceVertex svs) {
@@ -2407,9 +2407,10 @@ private:
 		std::shared_ptr<SurfaceAttribute<Scalar>> surface_distance_to_cluster_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<Scalar>> surface_distance_to_enveloppe= nullptr;
 		std::shared_ptr<SurfaceAttribute<PointVertex>> surface_cluster_info_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<uint32>> surface_clusters_cc_idx_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<std::vector<std::pair<Scalar, Vec3>>>> clusters_fuzzy_cluster_color_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<std::pair<SurfaceVertex,SurfaceVertex>>> medial_axis_closest_points_ = nullptr;
-		std::shared_ptr <SurfaceAttribute<Vec3>> medial_axis_cloest_point_color_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Vec3>> medial_axis_cloest_point_color_ = nullptr;
 		
 
 		std::vector<SurfaceFace> surface_bvh_faces_;
@@ -2432,12 +2433,15 @@ private:
 		std::shared_ptr<PointAttribute<Scalar>> clusters_error_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_deviation_ = nullptr;
 		std::shared_ptr<PointAttribute<std::set<PointVertex>>> clusters_neighbours_ = nullptr;
+		std::shared_ptr<PointAttribute<std::unordered_map<PointVertex*, std::set<uint32>>>> clusters_adjacency_info_ =
+			nullptr;
 		std::shared_ptr<PointAttribute<std::pair<SurfaceVertex, SurfaceVertex>>> clusters_cloest_sample_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_max_distance_ = nullptr;
 		std::shared_ptr<PointAttribute<SurfaceVertex>> clusters_max_vertex_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> correction_error_ = nullptr;
 		std::shared_ptr<PointAttribute<Vec3>> clusters_without_correction_position_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_without_correction_radius_ = nullptr;
+		std::shared_ptr<PointAttribute<uint32>> clusters_cc_number_ = nullptr;
 
 		NONMANIFOLD* non_manifold_ = nullptr;
 		std::shared_ptr<NonManifoldAttribute<Vec3>> non_manifold_vertex_position_ = nullptr;
@@ -2473,6 +2477,7 @@ private:
 		bool stopping_ = false;
 		bool slow_down_ = true;
 		bool fuzzy_clustering_ = false;
+		bool connectivity_surgery = false;
 		bool compute_enveloppe_distance_ = false;
 		Scalar dilation_factor = 0.02;
 
@@ -2560,6 +2565,7 @@ private:
 		p.surface_distance_to_cluster_ = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "surface_distance_to_cluster_");
 		p.surface_distance_to_enveloppe = get_or_add_attribute<Scalar, SurfaceVertex>(surface, "surface_distance_to_enveloppe");
 		p.surface_cluster_info_ = get_or_add_attribute<PointVertex, SurfaceVertex>(surface, "surface_cluster_info_");
+		p.surface_clusters_cc_idx_ = get_or_add_attribute<uint32, SurfaceVertex>(surface, "surface_clusters_cc_idx_");
 		p.medial_axis_closest_points_ = get_or_add_attribute<std::pair<SurfaceVertex, SurfaceVertex>, SurfaceVertex>(
 			surface, "medial_axis_closest_points_");
 		p.clusters_fuzzy_cluster_color_ = get_or_add_attribute<std::vector<std::pair<Scalar, Vec3>>, SurfaceVertex>(surface, "clusters_fuzzy_cluster_color_");
@@ -2605,6 +2611,9 @@ private:
 			*p.clusters_, "clusters_max_distance");
 		p.clusters_max_vertex_ = get_or_add_attribute<SurfaceVertex, PointVertex>(*p.clusters_, "cluster_max_vertex");
 		p.correction_error_ = get_or_add_attribute<Scalar, PointVertex>(*p.clusters_, "correction_error");
+		p.clusters_cc_number_ = get_or_add_attribute<uint32, PointVertex>(*p.clusters_, "clusters_cc_number");
+		p.clusters_adjacency_info_ = get_or_add_attribute<std::unordered_map<PointVertex*, std::set<uint32>>, PointVertex>(
+			*p.clusters_, "clusters_adjacency_info");
 		p.selected_clusters_error_ = p.clusters_error_.get();
 
 		
@@ -2800,7 +2809,16 @@ private:
 		remove_attribute<SurfaceVertex>(*p.surface_, sphere_info.get());
 		                          
 		assign_cluster(p);
-		update_clusters_neighbor(p);
+		if (p.connectivity_surgery)
+		{
+			compute_clusters_cc_numbers(p);
+			compute_correct_clusters_neighbor(p);
+		}
+		else
+		{
+
+			update_clusters_neighbor(p);
+		}
 		if (p.fuzzy_clustering_)
 		{
 			assign_fuzzy_clusters(p);
@@ -2817,8 +2835,12 @@ private:
 		CellMarker<SURFACE, SurfaceVertex> cluster_marker(*p.surface_);
 		cluster_marker.unmark_all();
 		std::queue<std::pair<SurfaceVertex, PointVertex>> vertex_queue;
-		foreach_cell(*p.clusters_, [&](PointVertex pv) {
+		parallel_foreach_cell(*p.clusters_, [&](PointVertex pv) {
 			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv).clear();
+			value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv).clear();
+			value<uint32>(*p.clusters_, p.clusters_cc_number_, pv) = 0;
+			value<std::unordered_map<PointVertex*, std::set<uint32>>>(*p.clusters_, p.clusters_adjacency_info_,
+																	  pv).clear();
 			return true;
 		});
 		MeshData<POINT>& md = point_provider_->mesh_data(*p.clusters_);
@@ -2871,18 +2893,95 @@ private:
 		
 	}
 	
+	void compute_clusters_cc_numbers(ClusterAxisParameter& p)
+	{
+		
+		CellMarker<SURFACE, SurfaceVertex> visited(*p.surface_);
+		foreach_cell(*p.surface_, [&](SurfaceVertex sv) {
+			uint32 nb_vertex = 0;
+			if (visited.is_marked(sv))
+				return true;
+			std::queue<SurfaceVertex> queue;
+			PointVertex cluster = value<PointVertex>(*p.surface_, p.surface_cluster_info_, sv);
+			if (!cluster.is_valid())
+				return true;
+			uint32 idx = value<uint32>(*p.clusters_, p.clusters_cc_number_, cluster);
+			queue.push(sv);
+			visited.mark(sv);
+			while (!queue.empty())
+			{
+				SurfaceVertex v = queue.front();
+				value<uint32>(*p.surface_, p.surface_clusters_cc_idx_, v) = idx;
+				queue.pop();
+				nb_vertex++;
+				foreach_adjacent_vertex_through_edge(*p.surface_, v, [&](SurfaceVertex n) {
+					PointVertex adjacent_cluster = value<PointVertex>(*p.surface_, p.surface_cluster_info_, n);
+					if (!visited.is_marked(n) && index_of(*p.clusters_, cluster) == index_of(*p.clusters_, adjacent_cluster))
+					{
+						queue.push(n);
+						visited.mark(n);
+					}
+					return true;
+				});
+			}
+			if (nb_vertex > 2)
+				value<uint32>(*p.clusters_, p.clusters_cc_number_, cluster) +=1;
+			return true;
+		});
+	}
+
+	void compute_correct_clusters_neighbor(ClusterAxisParameter& p)
+	{
+		foreach_cell(*p.surface_, [&](SurfaceEdge e) -> bool {
+			std::vector<SurfaceVertex> vertices = incident_vertices(*p.surface_, e);
+
+			PointVertex& v1_cluster = value<PointVertex>(*p.surface_, p.surface_cluster_info_, vertices[0]);
+			PointVertex& v2_cluster = value<PointVertex>(*p.surface_, p.surface_cluster_info_, vertices[1]);
+			if (v1_cluster.is_valid() && v2_cluster.is_valid() && v1_cluster != v2_cluster)
+			{
+				uint32 v1_cc_id = value<uint32>(*p.surface_, p.surface_clusters_cc_idx_, vertices[0]);
+				uint32 v2_cc_id = value<uint32>(*p.surface_, p.surface_clusters_cc_idx_, vertices[1]);
+				value<std::unordered_map<PointVertex*, std::set<uint32>>>(*p.clusters_, p.clusters_adjacency_info_,
+																		  v1_cluster)[&v2_cluster]
+					.insert(v2_cc_id);
+				value<std::unordered_map<PointVertex*, std::set<uint32>>>(*p.clusters_, p.clusters_adjacency_info_,
+																		  v2_cluster)[&v1_cluster]
+					.insert(v1_cc_id);
+			}
+			return true;
+		});
+		foreach_cell(*p.clusters_, [&](PointVertex pv) {
+			auto& adjacency_info = value<std::unordered_map<PointVertex*, std::set<uint32>>>(*p.clusters_, p.clusters_adjacency_info_, pv);
+			auto& cc_numbers = value<uint32>(*p.clusters_, p.clusters_cc_number_, pv);
+			
+			for (auto& it : adjacency_info)
+			{
+				PointVertex* cluster = it.first;
+				auto& cc_number_other = value<uint32>(*p.clusters_, p.clusters_cc_number_, *cluster);
+				if (cc_numbers<=cc_number_other)
+				{
+					if (it.second.size() == cc_number_other)
+					{
+						value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv).insert(*cluster);
+					}
+				}
+				
+			}
+			return true;
+		});
+
+
+	}
+
 	// Update the neighborhood of the clusters
 	void update_clusters_neighbor(ClusterAxisParameter& p)
 	{
-		parallel_foreach_cell(*p.clusters_, [&](PointVertex pv) {
-			value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv).clear();
-			return true;
-		});
 		foreach_cell(*p.surface_, [&](SurfaceEdge e) -> bool {
 			std::vector<SurfaceVertex> vertices = incident_vertices(*p.surface_, e);
 
 			PointVertex v1_cluster = value<PointVertex>(*p.surface_, p.surface_cluster_info_, vertices[0]);
 			PointVertex v2_cluster = value<PointVertex>(*p.surface_, p.surface_cluster_info_, vertices[1]);
+			
 			if (v1_cluster.is_valid() && v2_cluster.is_valid() && v1_cluster != v2_cluster)
 			{
 				value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, v1_cluster).insert(v2_cluster);
@@ -2890,6 +2989,8 @@ private:
 			}
 			return true;
 		});
+		
+		
 	}
 
 	void assign_fuzzy_clusters(ClusterAxisParameter& p)
@@ -3365,7 +3466,16 @@ private:
 		});
 
 		assign_cluster(p);
-		update_clusters_neighbor(p);
+		if (p.connectivity_surgery)
+		{
+			compute_clusters_cc_numbers(p);
+			compute_correct_clusters_neighbor(p);
+		}
+		else
+		{
+
+			update_clusters_neighbor(p);
+		}
 		if (p.fuzzy_clustering_)
 		{
 			assign_fuzzy_clusters(p);
@@ -3489,7 +3599,16 @@ private:
 		remove_vertex(*p.clusters_, v);
 
 		assign_cluster(p);
-		update_clusters_neighbor(p);
+		if (p.connectivity_surgery)
+		{
+			compute_clusters_cc_numbers(p);
+			compute_correct_clusters_neighbor(p);
+		}
+		else
+		{
+
+			update_clusters_neighbor(p);
+		}
 		if (p.fuzzy_clustering_)
 		{
 			assign_fuzzy_clusters(p);
@@ -3506,7 +3625,16 @@ private:
 		std::lock_guard<std::mutex> lock(p.mutex_);
 		split(p, candidate_cluster);
 		assign_cluster(p);
-		update_clusters_neighbor(p);
+		if (p.connectivity_surgery)
+		{
+			compute_clusters_cc_numbers(p);
+			compute_correct_clusters_neighbor(p);
+		}
+		else
+		{
+
+			update_clusters_neighbor(p);
+		}
 		if (p.fuzzy_clustering_)
 		{
 			assign_fuzzy_clusters(p);
@@ -3595,7 +3723,16 @@ private:
 		}
 
 		assign_cluster(p);
-		update_clusters_neighbor(p);
+		if (p.connectivity_surgery)
+		{
+			compute_clusters_cc_numbers(p);
+			compute_correct_clusters_neighbor(p);
+		}
+		else
+		{
+
+			update_clusters_neighbor(p);
+		}
 		if (p.fuzzy_clustering_)
 		{
 			assign_fuzzy_clusters(p);
@@ -4014,8 +4151,8 @@ private:
 
 				
 				ImGui::Checkbox("Auto split outside spheres", &p.auto_split_outside_spheres_);
-				ImGui::DragInt("Max split number", &(int)p.max_split_number, 1, 0, 20);
-				
+				ImGui::DragInt("Max split number", &(int)p.max_split_number, 1, 0, 100);
+				ImGui::Checkbox("Connectivity surgery", &p.connectivity_surgery);
 				if (ImGui::Button("Split clusters"))
 					split_cluster(p);
 				ImGui::Separator();
