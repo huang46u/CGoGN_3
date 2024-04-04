@@ -2819,7 +2819,6 @@ private:
 		}
 		else
 		{
-
 			update_clusters_neighbor(p);
 		}
 		if (p.fuzzy_clustering_)
@@ -2881,7 +2880,8 @@ private:
 			return true;
 		});
 		foreach_cell(*p.clusters_, [&](PointVertex pv) {
-			auto& clusters_surface_vertices =
+			std::vector<SurfaceVertex> clusters_surface_vertices;
+			clusters_surface_vertices =
 				value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
 			if (clusters_surface_vertices.size() < 4)
 			{
@@ -3101,11 +3101,10 @@ private:
 		foreach_cell(*p.surface_, [&](SurfaceVertex sv) {
 			if (value<Scalar>(*p.surface_, p.surface_distance_to_cluster_, sv) == 0)
 				return true;
+			PointVertex pv = value<PointVertex>(*p.surface_, p.surface_cluster_info_, sv);
 			auto& clusters_color =
 				value<std::vector<std::pair<Scalar, Vec3>>>(*p.surface_, p.clusters_fuzzy_cluster_color_, sv);
 			clusters_color.clear();
-			PointVertex pv = value<PointVertex>(*p.surface_, p.surface_cluster_info_, sv);
-			
 			Scalar dis = value<Scalar>(*p.surface_, p.surface_distance_to_cluster_, sv);
 			clusters_color.push_back({dis, value<Vec4>(*p.clusters_, p.clusters_surface_color_, pv).head<3>()});
 			for (auto& cluster :
@@ -3128,17 +3127,20 @@ private:
 
 		foreach_cell(*p.surface_, [&](SurfaceVertex sv) {
 			Vec3 color = Vec3(0, 0, 0);
-			Scalar w = 0;
+			Scalar inv_w = 0;
+			Scalar dist = 0;
 			for (auto& [weight, c] :
 				 value<std::vector<std::pair<Scalar, Vec3>>>(*p.surface_, p.clusters_fuzzy_cluster_color_, sv))
 			{
-			
-					w += 1 / weight;
-					color += 1 / weight * c;
-				
+				inv_w += 1 / weight;
+				dist += weight;
+				color += 1 / weight * c;
 			}
-			color /= w;
+			color /= inv_w;
+			dist /=
+				value<std::vector<std::pair<Scalar, Vec3>>>(*p.surface_, p.clusters_fuzzy_cluster_color_, sv).size();
 			value<Vec3>(*p.surface_, p.surface_vertex_color_, sv) = color;
+			value<Scalar>(*p.surface_, p.surface_distance_to_cluster_, sv) = dist;
 			return true;
 		});
 	}
@@ -3638,7 +3640,8 @@ private:
 		value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster) =
 			Vec4(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX,1);
 		value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, new_cluster).clear();
-		
+		if (p.fuzzy_clustering_)
+			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_fuzzy_surface_vertices_, new_cluster).clear();
 		value<Vec3>(*p.surface_, p.medial_axis_cloest_point_color_,
 					v3) = value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster).head<3>();
 		value<Vec3>(*p.surface_, p.medial_axis_cloest_point_color_,
