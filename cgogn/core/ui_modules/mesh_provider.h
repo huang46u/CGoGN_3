@@ -294,6 +294,9 @@ public:
 				if constexpr (has_edge_v<MESH>)
 					io::export_IG(m, vertex_position, filename + ".ig");
 			}
+			else if (filetype.compare("ply") == 0)
+				io::export_PLY(m, vertex_position, filename + ".ply");
+			
 		}
 	}
 

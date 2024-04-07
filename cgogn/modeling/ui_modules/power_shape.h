@@ -3194,7 +3194,7 @@ private:
 		p.min_error_ = std::numeric_limits<Scalar>::max();
 		p.max_error_ = std::numeric_limits<Scalar>::min();
 		p.total_error_ = 0.0;
-		for (Scalar e : *p.clusters_error_)
+		for (Scalar e : *p.selected_clusters_error_)
 		{
 			p.min_error_ = std::min(p.min_error_, e);
 			p.max_error_ = std::max(p.max_error_, e);
