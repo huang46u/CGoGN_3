@@ -1649,6 +1649,44 @@ public:
     getElement(faceName).addListProperty<IndType>("vertex_indices", intInds);
   }
 
+  template<typename T>
+  void addEdgeIndices(std::vector<std::array<T, 2>>& indices) {
+	std::string edgeName = "edge";
+	size_t N = indices.size();
+
+	// Create the element
+	if (!hasElement(edgeName)) {
+	  addElement(edgeName, N);
+	}
+
+	// Cast to 32 bit
+	typedef typename std::conditional<std::is_signed<T>::value, int32_t, uint32_t>::type IndType;
+	std::vector<IndType> intInds1;
+    std::vector<IndType> intInds2;
+	for (std::array<T, 2>& l : indices)
+	{
+	  IndType valConverted = static_cast<IndType>(l[0]);
+	  if (valConverted != l[0])
+	  {
+		throw std::runtime_error("Index value " + std::to_string(l[0]) +
+								 " could not be converted to a .ply integer without loss of data. Note that .ply "
+								 "only supports 32-bit ints.");
+	  }
+	  intInds1.push_back(valConverted);
+	  valConverted = static_cast<IndType>(l[1]);
+	  if (valConverted != l[1])
+	  {
+		throw std::runtime_error("Index value " + std::to_string(l[1]) +
+								 " could not be converted to a .ply integer without loss of data. Note that .ply "
+								 "only supports 32-bit ints.");
+	  }
+	  intInds2.push_back(valConverted);
+	}
+
+	// Store
+	getElement(edgeName).addProperty<IndType>("vertex1", intInds1);
+	getElement(edgeName).addProperty<IndType>("vertex2", intInds2);
+  }
 
   /**
    * @brief Comments for the file. When writing, each entry will be written as a sequential comment line.

@@ -82,8 +82,56 @@ void export_PLY(MESH& m, const typename mesh_traits<MESH>::template Attribute<ge
 {
 	static_assert(mesh_traits<MESH>::dimension == 2, "MESH dimension should be 2");
 
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+	using Edge = typename mesh_traits<MESH>::Edge;
+	using Face = typename mesh_traits<MESH>::Face;
+	using Vec3 = geometry::Vec3;
+
 	// TODO
-}
+	std::vector<std::array<double, 3>> position;
+	std::vector<std::vector<uint32>> face_indices;
+	std::vector<std::array<uint32, 2>> edge_indices;
+
+	uint32 nb_vertices = nb_cells<Vertex>(m);
+	uint32 nb_faces = nb_cells<Face>(m);
+	uint32 nb_edges = nb_cells<Edge>(m);
+
+	position.reserve(nb_vertices);
+	for (size_t i = 0; i < nb_vertices; i++)
+	{
+		Vec3 pos = (*vertex_position)[i];
+		position.push_back({pos.x(), pos.y(), pos.z()});
+	}
+
+	face_indices.reserve(nb_faces);
+	foreach_cell(m, [&](Face f) {
+		std::vector<uint32> face;
+		for (Vertex v : incident_vertices(m, f))
+		{
+			face.push_back(index_of(m, v));
+		}
+
+		face_indices.push_back(face);
+		return true;
+	});
+
+	edge_indices.reserve(nb_edges);
+	foreach_cell(m, [&](Edge e) {
+		auto& faces = incident_faces(m, e);
+		if (faces.size() != 0)
+			return true;
+		auto& vertices = incident_vertices(m, e);
+		
+		edge_indices.push_back({index_of(m, vertices[0]), index_of(m, vertices[1])});
+		return true;
+	});
+
+	happly::PLYData plyOut;
+	plyOut.addVertexPositions(position);
+	plyOut.addFaceIndices(face_indices);
+	plyOut.addEdgeIndices(edge_indices);
+	plyOut.write(filename);
+}	
 
 } // namespace io
 
