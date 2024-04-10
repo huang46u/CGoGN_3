@@ -58,9 +58,12 @@
 #include <CGAL/Min_sphere_of_points_d_traits_3.h>
 #include <CGAL/Min_sphere_of_spheres_d.h>
 #include <CGAL/double.h>
+#include <CGAL/point_generators_3.h>
 #include <CGAL/optimal_bounding_box.h>
+#include <CGAL/point_generators_3.h>
+
 #include <GLFW/glfw3.h>
-#include <Highs.h>
+#include <Highs.h>11
 
 #include <iomanip>
 #include <limits>
@@ -1717,6 +1720,11 @@ private:
 		std::vector<NonManifoldVertex> voronoi_kdt_vertices_;
 		std::shared_ptr<acc::KDTree<3, uint32>> voronoi_kdt_ = nullptr;
 
+		std::vector<SurfaceFace> surface_bvh_faces_;
+		std::vector<SurfaceVertex> surface_kdt_vertices_;
+		std::shared_ptr<acc::BVHTree<uint32, Vec3>> surface_bvh_ = nullptr;
+		std::shared_ptr<acc::KDTree<3, uint32>> surface_kdt_ = nullptr;
+
 		float dilation_factor = 0.02;
 		CandidateGenerationMethod candidate_generation_method = SHRINKING_BALL;
 
@@ -1911,8 +1919,40 @@ private:
 		p.voronoi_stability_color_ = get_or_add_attribute<Vec3, NonManifoldEdge>(*p.voronoi_, "stability_color");
 		p.voronoi_sphere_info_ = get_or_add_attribute<Vec4, NonManifoldVertex>(*p.voronoi_, "sphere_info");
 		p.voronoi_fixed_vertices_ = get_or_add_attribute<bool, NonManifoldVertex>(*p.voronoi_, "fixed_vertices");
-		
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(surface);
+		//Build bvh and kdt for surface
+		uint32 nb_vertices = md.template nb_cells<SurfaceVertex>();
+		uint32 nb_faces = md.template nb_cells<SurfaceFace>();
 
+		auto bvh_vertex_index = add_attribute<uint32, SurfaceVertex>(surface, "__bvh_vertex_index");
+
+		p.surface_kdt_vertices_.clear();
+		p.surface_kdt_vertices_.reserve(nb_vertices);
+		std::vector<Vec3> vertex_position_vector;
+		vertex_position_vector.reserve(nb_vertices);
+		uint32 idx = 0;
+		foreach_cell(surface, [&](SurfaceVertex v) -> bool {
+			p.surface_kdt_vertices_.push_back(v);
+			value<uint32>(surface, bvh_vertex_index, v) = idx++;
+			vertex_position_vector.push_back(value<Vec3>(surface, p.surface_vertex_position_, v));
+			return true;
+		});
+
+		p.surface_bvh_faces_.clear();
+		p.surface_bvh_faces_.reserve(nb_faces);
+		std::vector<uint32> face_vertex_indices;
+		face_vertex_indices.reserve(nb_faces * 3);
+		foreach_cell(surface, [&](SurfaceFace f) -> bool {
+			p.surface_bvh_faces_.push_back(f);
+			foreach_incident_vertex(surface, f, [&](SurfaceVertex v) -> bool {
+				face_vertex_indices.push_back(value<uint32>(surface, bvh_vertex_index, v));
+				return true;
+			});
+			return true;
+		});
+
+		p.surface_bvh_ = std::make_shared<acc::BVHTree<uint32, Vec3>>(face_vertex_indices, vertex_position_vector);
+		p.surface_kdt_ = std::make_shared<acc::KDTree<3, uint32>>(vertex_position_vector);
 		//Compute initalize non-manifold for Qmat
 
 		load_model_in_cgal(surface, p.csm_);
@@ -1922,24 +1962,57 @@ private:
 
 		//Construct non-manifold
 		compute_initial_non_manifold(p);
-		uint32 nb_vertices = nb_cells<NonManifoldVertex>(*p.voronoi_);
+		nb_vertices = nb_cells<NonManifoldVertex>(*p.voronoi_);
 		//build Kd-tree for the voronoi diagram
 		p.voronoi_kdt_vertices_.clear();
 		p.voronoi_kdt_vertices_.reserve(nb_vertices);
-		std::vector<Vec3> vertex_position_vector;
-		vertex_position_vector.reserve(nb_vertices);
-		uint32 idx = 0;
+		std::vector<Vec3> voronoi_vertex_position_vector;
+		voronoi_vertex_position_vector.reserve(nb_vertices);
+		idx = 0;
 		foreach_cell(*p.voronoi_, [&](NonManifoldVertex v) -> bool {
 			p.voronoi_kdt_vertices_.push_back(v);
-			vertex_position_vector.push_back(value<Vec3>(*p.voronoi_, p.voronoi_position_, v));
+			voronoi_vertex_position_vector.push_back(value<Vec3>(*p.voronoi_, p.voronoi_position_, v));
 			return true;
 		});
-		p.voronoi_kdt_ = std::make_shared<acc::KDTree<3, uint32>>(vertex_position_vector);
+		p.voronoi_kdt_ = std::make_shared<acc::KDTree<3, uint32>>(voronoi_vertex_position_vector);
 	
 	}
 	void random_sampling(CoverageAxisParameter& p)
 	{
-
+		Vec3 bias = Vec3(0.5, 0.5, 0.5);
+		std::vector<Vec3> samples;
+		CGAL::Random_points_in_cube_3<Point> generator(0.5);
+		while(samples.size()<20000)
+		{
+			Point s = *generator++;
+			Vec3 pos = Vec3(s.x(), s.y(), s.z()) + bias;
+			if (inside(*(p.inside_tester_.get()), Point(pos.x(), pos.y(),pos.z())))
+			{
+				samples.push_back(pos);
+			}
+		}
+		for (auto& pos : samples)
+		{
+			PointVertex new_candidate = add_vertex(*p.candidate_points_);
+			p.candidate_inner_points.push_back(new_candidate);
+			std::pair<uint32, Vec3> bvh_res;
+			p.surface_bvh_->closest_point(pos, &bvh_res);
+			Vec3 closest_surface_position = bvh_res.second;
+			value<Vec3>(*p.candidate_points_, p.candidate_points_position_, new_candidate) = pos;
+			value<Scalar>(*p.candidate_points_, p.candidate_points_radius_, new_candidate) =
+				(pos - closest_surface_position)
+					.norm();
+			//bind non-manifold vertex to candidate point
+			std::pair<uint32, Scalar> k_res;
+			if (!p.voronoi_kdt_->find_nn(pos, &k_res))
+			{
+				std::cout << "closest point not found !!!";
+				continue;
+			}
+			value<NonManifoldVertex>(*p.candidate_points_, p.candidate_points_associated_vertex_, new_candidate) =
+				p.voronoi_kdt_vertices_[k_res.first];
+		
+		}
 		//TODO
 	}
 
@@ -2010,6 +2083,7 @@ private:
 		}
 		break;
 		case RANDOM: {
+			random_sampling(p);
 		}
 		break;
 		case DELAUNAY: {
@@ -2113,10 +2187,13 @@ private:
 		std::vector<Vec3> inner_points;
 		std::vector<Scalar> weights;
 		std::vector<PointVertex> candidates;
-		foreach_cell(*p.surface_, [&](SurfaceVertex sv) {
-			sample_points.push_back(value<Vec3>(*p.surface_, p.surface_vertex_position_, sv));
-			return true;
-		});
+
+		std::vector<Point> points;
+		CGAL::Random_points_in_triangle_mesh_3<Cgal_Surface_mesh> generator(p.csm_);
+		std::copy_n(generator, 1500, std::back_inserter(points));
+		for(auto& pos: points) {
+			sample_points.push_back(Vec3(pos.x(), pos.y(), pos.z()));
+		}
 		foreach_cell(*p.candidate_points_, [&](PointVertex pv) {
 			candidates.push_back(pv);
 			inner_points.push_back(value<Vec3>(*p.candidate_points_, p.candidate_points_position_, pv));
