@@ -1674,187 +1674,7 @@ private:
 		surface_provider_->emit_cells_set_changed(s, twin_medial_axis_samples_set_);
 	}
 
-	HighsSolution shrinking_balls_coverage_axis(SURFACE& surface, Scalar dilation_factor)
-	{
-		typedef Eigen::SparseMatrix<Scalar> SpMat;
-		typedef Eigen::Triplet<Scalar> T;
-		std::unordered_map<uint32, uint32> local_index;
-		std::vector<T> triplets;
-
-		auto medial_axis_samples_dilated_radius =
-			add_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_dilated_radius");
-		auto medial_axis_position_ = get_attribute<Vec3, SurfaceVertex>(surface, "medial_axis_position_");
-		auto medial_axis_samples_radius = get_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_radius");
-		auto surface_vertex_position_ = get_attribute<Vec3, SurfaceVertex>(surface, "position");
-		auto filtered_medial_axis_samples_set =
-			&surface_provider_->mesh_data(surface).template get_or_add_cells_set<SurfaceVertex>(
-				"filtered_medial_axis_samples");
-		auto selected_medial_axis_samples_set =
-			&surface_provider_->mesh_data(surface).template get_or_add_cells_set<SurfaceVertex>(
-				"selected_medial_axis_samples");
-		uint32 nb_candidates = 0;
-		uint32 nb_surface_samples = 0;
-		std::vector<Vec3> sample_points;
-		std::vector<Vec3> inner_points;
-		std::vector<Scalar> weights;
-		filtered_medial_axis_samples_set->foreach_cell([&](SurfaceVertex sv) 
-			{
-			value<Scalar>(surface, medial_axis_samples_dilated_radius, sv) = value<Scalar>(surface, medial_axis_samples_radius, sv) /** (1 */+ 0.02;
-			sample_points.push_back(value<Vec3>(surface, surface_vertex_position_, sv));
-			inner_points.push_back(value<Vec3>(surface, medial_axis_position_, sv));
-			weights.push_back(value<Scalar>(surface, medial_axis_samples_dilated_radius, sv));
-			local_index.insert({index_of(surface, sv), nb_candidates});
-			nb_candidates++;
-			nb_surface_samples++;
-			return true;
-		});
-		for (size_t idx1 = 0; idx1 < nb_surface_samples; idx1++)
-		{
-			for (size_t idx2 = 0; idx2 < nb_candidates; idx2++)
-			{
-				if (inside_sphere(sample_points[idx1], inner_points[idx2], weights[idx2]))
-				{
-					triplets.push_back(T(idx1, idx2, 1.0));
-				}
-			}
-		}
-		std::cout << triplets.size() << std::endl;
-
-		SpMat A(nb_surface_samples, nb_candidates);
-		A.setFromTriplets(triplets.begin(), triplets.end());
-		A.makeCompressed();
-		HighsModel model;
-		model.lp_.a_matrix_.format_ = MatrixFormat::kColwise;
-		model.lp_.num_col_ = A.cols();
-		model.lp_.num_row_ = A.rows();
-		model.lp_.sense_ = ObjSense::kMinimize;
-		// Adding decision variable bounds
-		HighsVarType type = HighsVarType::kInteger;
-		model.lp_.col_cost_ = std::vector<double>(model.lp_.num_col_, 1.0);
-		model.lp_.col_lower_ = std::vector<double>(model.lp_.num_col_, 0.0);
-		model.lp_.col_upper_ = std::vector<double>(model.lp_.num_col_, 1.0);
-		model.lp_.row_lower_ = std::vector<double>(model.lp_.num_row_, 1.0);
-		model.lp_.row_upper_ = std::vector<double>(model.lp_.num_row_, 1e30);
-		model.lp_.integrality_ = std::vector<HighsVarType>(model.lp_.num_col_, type);
-
-		model.lp_.a_matrix_.num_col_ = model.lp_.num_col_;
-		model.lp_.a_matrix_.num_row_ = model.lp_.num_row_;
-		model.lp_.a_matrix_.start_.resize(A.cols() + 1);
-		model.lp_.a_matrix_.index_.resize(A.nonZeros());
-		model.lp_.a_matrix_.value_.resize(A.nonZeros());
-
-		// Copy the data from A to the vectors
-		std::copy(A.outerIndexPtr(), A.outerIndexPtr() + A.cols() + 1, model.lp_.a_matrix_.start_.begin());
-		std::copy(A.innerIndexPtr(), A.innerIndexPtr() + A.nonZeros(), model.lp_.a_matrix_.index_.begin());
-		std::copy(A.valuePtr(), A.valuePtr() + A.nonZeros(), model.lp_.a_matrix_.value_.begin());
-
-		Highs highs;
-		HighsStatus status = highs.passModel(model);
-		HighsSolution solution;
-		highs.setOptionValue("time_limit", 1000);
-		highs.setOptionValue("parallel", "on");
-		/*highs.setHighsOptionValue("solver", "simplex");*/
-		if (status == HighsStatus::kOk)
-		{
-			highs.run();
-
-			assert(status == HighsStatus::kOk);
-			solution = highs.getSolution();
-		}
-		filtered_medial_axis_samples_set->foreach_cell([&](SurfaceVertex sv) -> bool {
-			if (solution.col_value[local_index[index_of(surface, sv)]] > 1e-5)
-				selected_medial_axis_samples_set->select(sv);
-			return true;
-		});
-		shrinking_balls_coverage_color(surface);
-		return solution;
-	}
-
-	void shrinking_balls_coverage_color(SURFACE& surface)
-	{
-		auto coverage_color = add_attribute<Vec3, SurfaceVertex>(surface, "coverage_color");
-		foreach_cell(surface, [&](SurfaceVertex v) {
-			value<Vec3>(surface, coverage_color, v) = Vec3(0, 0, 0);
-			return true;
-		});
-		auto medial_axis_samples_dilated_radius =
-			get_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_dilated_radius");
-		auto medial_axis_position_ = get_attribute<Vec3, SurfaceVertex>(surface, "medial_axis_position_");
-		auto medial_axis_samples_radius = get_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_radius");
-		auto surface_vertex_position_ = get_attribute<Vec3, SurfaceVertex>(surface, "position");
-		auto selected_medial_axis_samples_set =
-			&surface_provider_->mesh_data(surface).template get_or_add_cells_set<SurfaceVertex>(
-				"selected_medial_axis_samples");
-		auto filter_medial_axis_samples =
-			&surface_provider_->mesh_data(surface).template get_or_add_cells_set<SurfaceVertex>(
-				"filtered_medial_axis_samples");
-		CellMarker<SURFACE, SurfaceVertex> marker(surface);
-		selected_medial_axis_samples_set->foreach_cell([&](SurfaceVertex svc) {
-			Vec3 color = Vec3(rand()/double(RAND_MAX), rand()/double(RAND_MAX), rand()/double(RAND_MAX));
-			foreach_cell(surface, [&](SurfaceVertex svs) {
-				if (marker.is_marked(svs))
-					return true;
-				if (inside_sphere(value<Vec3>(surface, surface_vertex_position_, svs),
-													  value<Vec3>(surface, medial_axis_position_, svc),
-								  value<Scalar>(surface, medial_axis_samples_dilated_radius, svc)))
-				{
-					value<Vec3>(surface, coverage_color, svs) = color;
-					marker.mark(svs);
-				}
-				return true;
-				});
-			return true;
-		});
-
-	}
-
-	void shrinking_balls_coverage_axis_PD(SURFACE& surface)
-	{
-		load_model_in_cgal(surface, csm);
-		Tree tree(faces(csm).first, faces(csm).second, csm);
-		tree.accelerate_distance_queries();
-		auto medial_axis_samples_dilated_radius =
-			get_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_dilated_radius");
-		auto medial_axis_position_ = get_attribute<Vec3, SurfaceVertex>(surface, "medial_axis_position_");
-		auto medial_axis_samples_radius = get_attribute<Scalar, SurfaceVertex>(surface, "medial_axis_samples_radius");
-		auto surface_vertex_position_ = get_attribute<Vec3, SurfaceVertex>(surface, "position");
-		auto selected_medial_axis_samples_set =
-			&surface_provider_->mesh_data(surface).template get_or_add_cells_set<SurfaceVertex>(
-				"selected_medial_axis_samples");
-		Regular power_shape;
-		std::cout << "collect selected points info" << std::endl;
-		selected_medial_axis_samples_set->foreach_cell([&](SurfaceVertex sv) {
-			Vec3 pos = value<Vec3>(surface, medial_axis_position_, sv);
-			power_shape.insert(
-				Weight_Point(Point(pos[0], pos[1], pos[2]),
-											(value<double>(surface, medial_axis_samples_radius, sv)+0.02) *
-												(value<double>(surface, medial_axis_samples_radius, sv)+0.02)));
-
-			return true;
-		});
-		std::cout << "collect surface samples info " << std::endl;
-		foreach_cell(surface, [&](SurfaceVertex v) {
-			Vec3 pos = value<Vec3>(surface, surface_vertex_position_, v);
-			power_shape.insert(
-				Weight_Point(Point(pos[0], pos[1], pos[2]), 0.02*0.02));
-			return true;
-		});
-		std::cout << "determine if the point is outside" << std::endl;
-		int count = 0;
-		for (auto vit = power_shape.finite_vertices_begin(); vit != power_shape.finite_vertices_end(); ++vit)
-		{
-			// if the point is inside
-			Point p = vit->point().point();
-			if (pointInside(tree, p))
-			{
-				vit->info().id = count;
-				vit->info().inside = true;
-				count++;
-			}
-		}
-		std::cout << "construct non manifold PD" << std::endl;
-		constrcut_power_shape_non_manifold(power_shape, "_coverage_axis" + surface_provider_->mesh_name(surface));
-	}
+	
 
 	
 	struct CoverageAxisParameter
@@ -2282,6 +2102,97 @@ private:
 		}
 	}
 
+	void coverage_axis(CoverageAxisParameter& p)
+	{
+		typedef Eigen::SparseMatrix<Scalar> SpMat;
+		typedef Eigen::Triplet<Scalar> T;
+		std::vector<T> triplets;
+		clear(*p.selected_points_);
+		p.selected_inner_points.clear();
+		std::vector<Vec3> sample_points;
+		std::vector<Vec3> inner_points;
+		std::vector<Scalar> weights;
+		std::vector<PointVertex> candidates;
+		foreach_cell(*p.surface_, [&](SurfaceVertex sv) {
+			sample_points.push_back(value<Vec3>(*p.surface_, p.surface_vertex_position_, sv));
+			return true;
+		});
+		foreach_cell(*p.candidate_points_, [&](PointVertex pv) {
+			candidates.push_back(pv);
+			inner_points.push_back(value<Vec3>(*p.candidate_points_, p.candidate_points_position_, pv));
+			weights.push_back(value<Scalar>(*p.candidate_points_, p.candidate_points_radius_, pv) );
+			return true;
+		});
+		uint32 nb_candidates = inner_points.size();
+		uint32 nb_surface_samples = sample_points.size();
+		for (size_t idx1 = 0; idx1 < nb_surface_samples; idx1++)
+		{
+			for (size_t idx2 = 0; idx2 < nb_candidates; idx2++)
+			{
+				if (inside_sphere(sample_points[idx1], inner_points[idx2], weights[idx2] + p.dilation_factor))
+				{
+					triplets.push_back(T(idx1, idx2, 1.0));
+				}
+			}
+		}
+
+		SpMat A(nb_surface_samples, nb_candidates);
+		A.setFromTriplets(triplets.begin(), triplets.end());
+		A.makeCompressed();
+		HighsModel model;
+		model.lp_.a_matrix_.format_ = MatrixFormat::kColwise;
+		model.lp_.num_col_ = A.cols();
+		model.lp_.num_row_ = A.rows();
+		model.lp_.sense_ = ObjSense::kMinimize;
+		// Adding decision variable bounds
+		HighsVarType type = HighsVarType::kInteger;
+		model.lp_.col_cost_ = std::vector<double>(model.lp_.num_col_, 1.0);
+		model.lp_.col_lower_ = std::vector<double>(model.lp_.num_col_, 0.0);
+		model.lp_.col_upper_ = std::vector<double>(model.lp_.num_col_, 1.0);
+		model.lp_.row_lower_ = std::vector<double>(model.lp_.num_row_, 1.0);
+		model.lp_.row_upper_ = std::vector<double>(model.lp_.num_row_, 1e30);
+		model.lp_.integrality_ = std::vector<HighsVarType>(model.lp_.num_col_, type);
+
+		model.lp_.a_matrix_.num_col_ = model.lp_.num_col_;
+		model.lp_.a_matrix_.num_row_ = model.lp_.num_row_;
+		model.lp_.a_matrix_.start_.resize(A.cols() + 1);
+		model.lp_.a_matrix_.index_.resize(A.nonZeros());
+		model.lp_.a_matrix_.value_.resize(A.nonZeros());
+
+		// Copy the data from A to the vectors
+		std::copy(A.outerIndexPtr(), A.outerIndexPtr() + A.cols() + 1, model.lp_.a_matrix_.start_.begin());
+		std::copy(A.innerIndexPtr(), A.innerIndexPtr() + A.nonZeros(), model.lp_.a_matrix_.index_.begin());
+		std::copy(A.valuePtr(), A.valuePtr() + A.nonZeros(), model.lp_.a_matrix_.value_.begin());
+
+		Highs highs;
+		HighsStatus status = highs.passModel(model);
+		HighsSolution solution;
+		highs.setOptionValue("time_limit", 60);
+		highs.setOptionValue("parallel", "on");
+		/*highs.setHighsOptionValue("solver", "simplex");*/
+		if (status == HighsStatus::kOk)
+		{
+			highs.run();
+
+			assert(status == HighsStatus::kOk);
+			solution = highs.getSolution();
+		}
+		for (size_t idx = 0; idx < nb_candidates; idx++)
+		{
+			if (solution.col_value[idx] > 0.5)
+			{
+				PointVertex new_selected = add_vertex(*p.selected_points_);
+				value<Vec3>(*p.selected_points_, p.selected_points_position_, new_selected) = inner_points[idx];
+				value<Scalar>(*p.selected_points_, p.selected_points_radius_, new_selected) = weights[idx];
+				value<NonManifoldVertex>(*p.selected_points_, p.selected_points_associated_vertex_, new_selected) =
+					value<NonManifoldVertex>(*p.candidate_points_, p.candidate_points_associated_vertex_, candidates[idx]);
+			}
+		}
+		point_provider_->emit_connectivity_changed(*p.selected_points_);
+		point_provider_->emit_attribute_changed(*p.selected_points_, p.selected_points_position_.get());
+		point_provider_->emit_attribute_changed(*p.selected_points_, p.selected_points_radius_.get());
+	}
+
 	void coverage_axis_plus_plus(CoverageAxisParameter& p)
 	{
 		clear(*p.selected_points_);
@@ -2332,7 +2243,40 @@ private:
 		point_provider_->emit_attribute_changed(*p.selected_points_, p.selected_points_radius_.get());
 	}
 
-	void coverage_axis_plus_plus_connectivity(CoverageAxisParameter& p)
+	void coverage_axis_connect_by_power_diagram(CoverageAxisParameter& p)
+	{
+		Regular power_shape;
+		foreach_cell(*p.selected_points_, [&](PointVertex pv) {
+			Vec3 pos = value<Vec3>(*p.selected_points_, p.selected_points_position_, pv);
+			Scalar radius = value<Scalar>(*p.selected_points_, p.selected_points_radius_, pv);
+			power_shape.insert(Weight_Point(Point(pos[0], pos[1], pos[2]),
+											(radius + p.dilation_factor) *
+												(radius + p.dilation_factor)));
+
+			return true;
+		});
+		foreach_cell(*p.surface_, [&](SurfaceVertex v) {
+			Vec3 pos = value<Vec3>(*p.surface_, p.surface_vertex_position_, v);
+			power_shape.insert(Weight_Point(Point(pos[0], pos[1], pos[2]), p.dilation_factor*p.dilation_factor));
+			return true;
+		});
+		std::cout << "determine if the point is outside" << std::endl;
+		int count = 0;
+		for (auto vit = power_shape.finite_vertices_begin(); vit != power_shape.finite_vertices_end(); ++vit)
+		{
+			// if the point is inside
+			Point po = vit->point().point();
+			if (inside(*(p.inside_tester_.get()), po))
+			{
+				vit->info().id = count;
+				vit->info().inside = true;
+				count++;
+			}
+		}
+		std::cout << "construct non manifold PD" << std::endl;
+		constrcut_power_shape_non_manifold(power_shape, "_coverage_axis" + surface_provider_->mesh_name(*p.surface_));
+	}
+	void coverage_axis_connect_by_Qmat(CoverageAxisParameter& p)
 	{
 		using QMatHelper = modeling::DecimationSQEM_Helper<NONMANIFOLD>;
 		using Slab_Quadric = geometry::Slab_Quadric;
@@ -3570,7 +3514,6 @@ private:
 		}
 		else
 		{
-
 			update_clusters_neighbor(p);
 		}
 		if (p.fuzzy_clustering_)
@@ -4303,44 +4246,28 @@ private:
 				if (c.candidates_valid)
 				{
 					ImGui::DragFloat("Dilation factor", &c.dilation_factor, 0.001f, 0.0f, 1.0f, "%.3f");
+					if (ImGui::Button("Compute Coverage axis"))
+					{
+						coverage_axis(c);
+					}
 					ImGui::DragInt("Max Vertices", (int*)&c.max_selected_number,1 ,0, 500);
 					if (ImGui::Button("Compute Coverage axis++"))
 					{
 						coverage_axis_plus_plus(c);
 					}
+					if (ImGui::Button("Generate connectivity by Power diagram"))
+					{
+						coverage_axis_connect_by_power_diagram(c);
+					}
 					if (ImGui::Button("Generate connectivity by Qmat"))
 					{
-						coverage_axis_plus_plus_connectivity(c);
+						coverage_axis_connect_by_Qmat(c);
 					}
 				}
 			}
 			ImGui::Separator();
 			
-			if (ImGui::Button("Coverage_axis"))
-			{
-				if (ImGui::Button("Sample medial axis"))
-					sample_medial_axis(*selected_surface_mesh_);
-				if (ImGui::SliderFloat("Min radius (log)", &radius_threshold_, min_radius_, max_radius_, "%.4f"))
-					filter_medial_axis_samples(*selected_surface_mesh_);
-				if (ImGui::SliderFloat("Min angle (log)", &angle_threshold_, min_angle_, max_angle_, "%.4f"))
-					filter_medial_axis_samples(*selected_surface_mesh_);
-				if (ImGui::Button("Filter medial axis samples"))
-					filter_medial_axis_samples(*selected_surface_mesh_);
-				if (ImGui::Button("Twin point"))
-					Twin_medial_axis_samples(*selected_surface_mesh_);
-		 
-				ImGui::DragFloat("Dilation factor", &dilation_factor, 0.0001f, 0.0f, 1.0f, "%.6f");
-				if (ImGui::Button("Shrinking Ball Coverage Axis"))
-				{
-					solution = shrinking_balls_coverage_axis(*selected_surface_mesh_, dilation_factor);
-				}
-				if (solution.col_value.size() > 0)
-				{
-					if (ImGui::Button("Shrinking balls PD"))
-						shrinking_balls_coverage_axis_PD(*selected_surface_mesh_);
-
-				}
-			}
+			
 			if (ImGui::Button("Delaunay based method"))
 			{
 
@@ -4352,94 +4279,50 @@ private:
 					tri_ = compute_delaunay_tredrahedron(*selected_surface_mesh_, csm, tree);
 				}
 
-				imgui_mesh_selector(point_provider_, selected_candidates_, "Candidates", [&](POINT& m) {
-					selected_candidates_ = &m;
-					point_provider_->mesh_data(m).outlined_until_ = App::frame_time_ + 1.0;
-				});
-				if (ImGui::Button("Coverage Axis"))
+				if (ImGui::Button("Power shape"))
 				{
-					ImGui::DragFloat("Dilation factor", &dilation_factor, 0.0001f, 0.0f, 1.0f, "%.6f");
-					if (ImGui::Button("Shrinking Ball Coverage Axis"))
+					compute_power_shape(*selected_surface_mesh_);
+				}
+				if (ImGui::Button("Original Medial Axis"))
+					compute_original_power_diagram(*selected_surface_mesh_);
+				imgui_mesh_selector(nonmanifold_provider_, selected_medial_axis_, "Medial_axis", [&](NONMANIFOLD& nm) {
+					selected_medial_axis_ = &nm;
+					nonmanifold_provider_->mesh_data(nm).outlined_until_ = App::frame_time_ + 1.0;
+				});
+				if (selected_medial_axis_)
+				{
+					if (ImGui::Button("Compute stability ratio"))
+						compute_stability_ratio(*selected_medial_axis_);
+					static int32 number_vertex_remain = 1;
+					static float k = 1e-5;
+					ImGui::DragInt("Vertices to delete", &number_vertex_remain, 1, 0,
+								   nb_cells<NonManifoldVertex>(*selected_medial_axis_));
+					ImGui::DragFloat("K", &k, 1e-5, 0.0f, 1.0f, "%.5f");
+					if (ImGui::Button("QMAT"))
 					{
-						solution = shrinking_balls_coverage_axis(*selected_surface_mesh_, dilation_factor);
-					}
-					if (solution.col_value.size() > 0)
-					{
-						if (ImGui::Button("Shrinking balls PD"))
-							shrinking_balls_coverage_axis_PD(*selected_surface_mesh_);
+						collapse_non_manifold_using_QMat(*selected_medial_axis_, number_vertex_remain, k);
 					}
 				}
 				if (selected_candidates_)
 				{
-					ImGui::Checkbox("Preseve only poles", &pole_filtering_);
-					ImGui::Checkbox("Filter by Angle", &angle_filtering_);
-					if (angle_filtering_)
+					ImGui::DragFloat("Dilation factor", &dilation_factor, 0.001f, 0.0f, 1.0f, "%.4f");
+					if (ImGui::Button("Coverage Axis"))
 					{
-						ImGui::DragFloat("angle", &(float)angle_threshold_, 0.01, 0.0, M_PI, "%.2f");
+						solution = point_selection_by_coverage_axis(*selected_surface_mesh_, *selected_candidates_,
+																	dilation_factor);
 					}
-
-					ImGui::Checkbox("Filter by circumradius", &circumradius_filtering_);
-					if (circumradius_filtering_)
+					if (solution.col_value.size() > 0)
 					{
-						ImGui::DragFloat("circumradius", &(float)radius_threshold_, (max_radius_ - min_radius_) / 100,
-										 min_radius_, max_radius_, "%.3f");
-					}
-					ImGui::Checkbox("Filter by distance", &distance_filtering_);
-					if (distance_filtering_)
-					{
-						ImGui::DragFloat("distance", &distance_threshold_, 1e-2, 0, 1, "%.4f");
-					}
-
-					if (ImGui::Button("Generate candidates"))
-					{
-						construct_candidates_points(*selected_surface_mesh_, tri_);
-					}
-					if (ImGui::Button("Power shape"))
-					{
-						compute_power_shape(*selected_surface_mesh_);
-					}
-					if (ImGui::Button("Original Medial Axis"))
-						compute_original_power_diagram(*selected_surface_mesh_);
-					imgui_mesh_selector(
-						nonmanifold_provider_, selected_medial_axis_, "Medial_axis", [&](NONMANIFOLD& nm) {
-							selected_medial_axis_ = &nm;
-							nonmanifold_provider_->mesh_data(nm).outlined_until_ = App::frame_time_ + 1.0;
-						});
-					if (selected_medial_axis_)
-					{
-						if (ImGui::Button("Compute stability ratio"))
-							compute_stability_ratio(*selected_medial_axis_);
-						static int32 number_vertex_remain = 1;
-						static float k = 1e-5;
-						ImGui::DragInt("Vertices to delete", &number_vertex_remain, 1, 0,
-									   nb_cells<NonManifoldVertex>(*selected_medial_axis_));
-						ImGui::DragFloat("K", &k, 1e-5, 0.0f, 1.0f, "%.5f");
-						if (ImGui::Button("QMAT"))
-						{
-							collapse_non_manifold_using_QMat(*selected_medial_axis_, number_vertex_remain, k);
-						}
-					}
-					if (selected_candidates_)
-					{
-						ImGui::DragFloat("Dilation factor", &dilation_factor, 0.001f, 0.0f, 1.0f, "%.4f");
-						if (ImGui::Button("Coverage Axis"))
-						{
-							solution = point_selection_by_coverage_axis(*selected_surface_mesh_, *selected_candidates_,
-																		dilation_factor);
-						}
-						if (solution.col_value.size() > 0)
-						{
-							if (ImGui::Button("Collpase"))
-								coverage_axis_collapse(*selected_surface_mesh_, *selected_candidates_, solution);
-							if (ImGui::Button("PD"))
-								coverage_axis_PD(*selected_surface_mesh_, *selected_candidates_, solution,
-												 dilation_factor);
-							if (ImGui::Button("RVD"))
-								coverage_axis_RVD(*selected_surface_mesh_, *selected_candidates_, solution);
-						}
+						if (ImGui::Button("Collpase"))
+							coverage_axis_collapse(*selected_surface_mesh_, *selected_candidates_, solution);
+						if (ImGui::Button("PD"))
+							coverage_axis_PD(*selected_surface_mesh_, *selected_candidates_, solution, dilation_factor);
+						if (ImGui::Button("RVD"))
+							coverage_axis_RVD(*selected_surface_mesh_, *selected_candidates_, solution);
 					}
 				}
 			}
+			
 		}
 	}
 	
