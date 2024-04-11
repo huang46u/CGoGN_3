@@ -178,7 +178,7 @@ typename mesh_traits<MESH>::template Attribute<std::pair<typename mesh_traits<ME
 	uint32 nb_vertices = nb_cells<Vertex>(m);
 	uint32 nb_faces = nb_cells<Face>(m);
 
-	auto bvh_vertex_index = add_attribute<uint32, Vertex>(m, "__bvh_vertex_index");
+	auto bvh_vertex_index = get_or_add_attribute<uint32, Vertex>(m, "__bvh_vertex_index");
 
 	std::vector<Vec3> vertex_position_vector;
 	vertex_position_vector.reserve(nb_vertices);

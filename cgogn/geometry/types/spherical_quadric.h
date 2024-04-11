@@ -62,6 +62,13 @@ public:
 		_c += q._c;
 		return *this;
 	}
+	Spherical_Quadric& operator*(const Scalar& s)
+	{
+		_A *= s;
+		_b *= s;
+		_c *= s;
+		return *this;
+	}
 
 	friend Spherical_Quadric operator+(Spherical_Quadric lhs, Spherical_Quadric& rhs)
 	{

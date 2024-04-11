@@ -158,13 +158,52 @@ struct ClusteringSQEM_Helper
 		}
 		return q.eval(p);
 	}
-
+	Scalar cluster_cost(std::vector<Vertex> cluster_vertices, Vec4& p, std::shared_ptr<Attribute<Scalar>> weights)
+	{
+		if (cluster_vertices.size() == 0)
+			return Scalar(0.0);
+		Spherical_Quadric q;
+		for (Vertex& v : cluster_vertices)
+		{
+			q += value<Spherical_Quadric>(m_, vertex_quadric_, v) * value<Scalar>(m_, weights, v);
+		}
+		return q.eval(p);
+	}
+	Scalar vertex_cost(Vertex v, Vec4& p, std::shared_ptr<Attribute<Scalar>> weights)
+	{
+		Spherical_Quadric q = value<Spherical_Quadric>(m_, vertex_quadric_, v) * value<Scalar>(m_, weights, v);
+		return q.eval(p);
+	}
 	Scalar vertex_cost(Vertex v, Vec4& p)
 	{
 		Spherical_Quadric q= value<Spherical_Quadric>(m_, vertex_quadric_, v);
 		return q.eval(p);
 	}
-
+	bool optimal_sphere(std::vector<Vertex>& cluster_vertices, Vec4& sphere, std::shared_ptr<Attribute<Scalar>> weights)
+	{
+		Spherical_Quadric q;
+		for (Vertex& v : cluster_vertices)
+		{
+			q += value<Spherical_Quadric>(m_, vertex_quadric_, v) * value<Scalar>(m_, weights, v);
+		}
+		if (q.optimized(sphere))
+		{
+			if (sphere.w() > 1e-4 && sphere.w() < 1)
+			{
+				return true;
+			}
+			else
+			{
+				std::cout << "negative radius" << std::endl;
+				return false;
+			}
+		}
+		else
+		{
+			std::cout << "can't inverse A" << std::endl;
+			return false;
+		}
+	}
 	bool optimal_sphere(std::vector<Vertex>& cluster_vertices, Vec4& sphere)
 	{
 		Spherical_Quadric q;
