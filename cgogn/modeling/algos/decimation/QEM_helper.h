@@ -230,6 +230,19 @@ struct ClusteringSQEM_Helper
 		}
 	}
 
+	Eigen::Matrix4d hessian(Vertex v)
+	{
+		Spherical_Quadric q = value<Spherical_Quadric>(m_, vertex_quadric_, v);
+		return q._A.transpose();
+	}
+	
+	Vec4 jacobian(Vertex v, Vec4 p)
+	{
+	Spherical_Quadric q = value<Spherical_Quadric>(m_, vertex_quadric_, v);
+		return q._A * p - q._b;
+	}
+
+
 	void print(Vertex v)
 	{
 		std::cout << value<Spherical_Quadric>(m_, vertex_quadric_, v) << std::endl;

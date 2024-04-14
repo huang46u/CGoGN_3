@@ -432,6 +432,8 @@ private:
 		surface_provider_->emit_attribute_changed(surface, attribute.get());
 	}
 
+	
+
 	std::pair<Vec3, Scalar> sphere_fitting_algo(SURFACE& surface, std::vector<SurfaceVertex> clusters_surface_vertices_)
 	{
 		ClusterAxisParameter& p = cluster_axis_parameters_[&surface];
@@ -478,8 +480,268 @@ private:
 		return {s2c, s2r};
 	}
 
- public:
 	
+
+ public:
+
+	 struct CoverageAxisParameter
+	 {
+		bool initialized_ = false;
+		bool candidates_valid = false;
+		Eigen::MatrixXi coverage_matrix;
+		SURFACE* surface_;
+		std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_position_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_normal_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Vec3>> medial_axis_position_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Scalar>> medial_axis_radius_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<std::pair<SurfaceVertex, SurfaceVertex>>> medial_axis_closest_points_ =
+			nullptr;
+		std::shared_ptr<SurfaceAttribute<Scalar>> medial_axis_angle_ = nullptr;
+
+		POINT* candidate_points_ = nullptr;
+
+		std::shared_ptr<PointAttribute<Vec3>> candidate_points_position_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> candidate_points_radius_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> candidate_points_score_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> candidate_points_coverage_score_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> candidate_points_uniformity_score_ = nullptr;
+		std::shared_ptr<PointAttribute<NonManifoldVertex>> candidate_points_associated_vertex_ = nullptr;
+
+		POINT* selected_points_ = nullptr;
+		std::shared_ptr<PointAttribute<Vec3>> selected_points_position_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> selected_points_radius_ = nullptr;
+		std::shared_ptr<PointAttribute<NonManifoldVertex>> selected_points_associated_vertex_ = nullptr;
+
+		NONMANIFOLD* voronoi_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Vec3>> voronoi_position_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Scalar>> voronoi_radius_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Scalar>> voronoi_stability_ratio_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Vec3>> voronoi_stability_color_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Vec4>> voronoi_sphere_info_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<bool>> voronoi_fixed_vertices_ = nullptr;
+
+		std::vector<NonManifoldVertex> voronoi_kdt_vertices_;
+		std::shared_ptr<acc::KDTree<3, uint32>> voronoi_kdt_ = nullptr;
+
+		std::vector<SurfaceFace> surface_bvh_faces_;
+		std::vector<SurfaceVertex> surface_kdt_vertices_;
+		std::shared_ptr<acc::BVHTree<uint32, Vec3>> surface_bvh_ = nullptr;
+		std::shared_ptr<acc::KDTree<3, uint32>> surface_kdt_ = nullptr;
+
+		float dilation_factor = 0.02;
+		CandidateGenerationMethod candidate_generation_method = SHRINKING_BALL;
+
+		uint32 surface_samples_number = 1500;
+		uint32 candidates_number = 20000;
+		uint32 max_selected_number = 200;
+		std::vector<PointVertex> selected_inner_points;
+		std::vector<PointVertex> candidate_inner_points;
+
+		Cgal_Surface_mesh csm_;
+		std::shared_ptr<Tree> tree_ = nullptr;
+		std::shared_ptr<Point_inside> inside_tester_ = nullptr;
+		Delaunay tri;
+		Scalar min_radius_ = std::numeric_limits<Scalar>::max();
+		Scalar max_radius_ = std::numeric_limits<Scalar>::min();
+		Scalar min_angle_ = std::numeric_limits<Scalar>::max();
+		Scalar max_angle_ = std::numeric_limits<Scalar>::min();
+	 };
+
+	struct ClusterAxisParameter
+	{
+		bool initialized_ = false;
+
+		SURFACE* surface_;
+		std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_position_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_normal_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Vec3>> surface_face_normal_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_color_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Scalar>> surface_vertex_area_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Vec3>> medial_axis_position_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Scalar>> medial_axis_radius_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Scalar>> surface_distance_to_cluster_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Scalar>> surface_sqem_error_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Scalar>> surface_mixed_distance_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Scalar>> surface_distance_to_enveloppe = nullptr;
+		std::shared_ptr<SurfaceAttribute<PointVertex>> surface_cluster_info_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<uint32>> surface_clusters_cc_idx_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<std::vector<std::pair<Scalar, Vec3>>>> clusters_fuzzy_cluster_color_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<std::pair<SurfaceVertex, SurfaceVertex>>> medial_axis_closest_points_ =
+			nullptr;
+		std::shared_ptr<SurfaceAttribute<Vec3>> medial_axis_cloest_point_color_ = nullptr;
+
+		std::vector<SurfaceFace> surface_bvh_faces_;
+		std::vector<SurfaceVertex> surface_kdt_vertices_;
+		std::shared_ptr<acc::BVHTree<uint32, Vec3>> surface_bvh_ = nullptr;
+		std::shared_ptr<acc::KDTree<3, uint32>> surface_kdt_ = nullptr;
+		Cgal_Surface_mesh csm_;
+		std::shared_ptr<Tree> tree_ = nullptr;
+		std::shared_ptr<Point_inside> inside_tester_ = nullptr;
+		std::shared_ptr<modeling::ClusteringSQEM_Helper<SURFACE>> sqem_helper_ = nullptr;
+
+		POINT* clusters_ = nullptr;
+
+		std::shared_ptr<PointAttribute<Vec3>> clusters_position_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> clusters_radius_ = nullptr;
+		std::shared_ptr<PointAttribute<Vec4>> clusters_color_ = nullptr;
+		std::shared_ptr<PointAttribute<Vec4>> clusters_surface_color_ = nullptr;
+		std::shared_ptr<PointAttribute<std::vector<SurfaceVertex>>> clusters_surface_vertices_ = nullptr;
+		std::shared_ptr<PointAttribute<std::vector<SurfaceVertex>>> clusters_fuzzy_surface_vertices_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> clusters_error_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> clusters_deviation_ = nullptr;
+		std::shared_ptr<PointAttribute<std::set<PointVertex>>> clusters_neighbours_ = nullptr;
+		std::shared_ptr<PointAttribute<std::map<PointVertex, std::set<uint32>>>> clusters_adjacency_info_ = nullptr;
+		std::shared_ptr<PointAttribute<std::pair<SurfaceVertex, SurfaceVertex>>> clusters_cloest_sample_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> clusters_max_distance_ = nullptr;
+		std::shared_ptr<PointAttribute<SurfaceVertex>> clusters_max_vertex_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> correction_error_ = nullptr;
+		std::shared_ptr<PointAttribute<Vec3>> clusters_without_correction_position_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> clusters_without_correction_radius_ = nullptr;
+		std::shared_ptr<PointAttribute<uint32>> clusters_cc_number_ = nullptr;
+
+		NONMANIFOLD* non_manifold_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Vec3>> non_manifold_vertex_position_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Scalar>> non_manifold_vertex_radius_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Vec4>> non_manifold_sphere_info_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<std::vector<SurfaceVertex>>> non_manifold_cluster_vertices_ = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Vec3>> non_manifold_cloest_surface_color = nullptr;
+
+		PointAttribute<Scalar>* selected_clusters_error_ = nullptr;
+		std::shared_ptr<CellMarkerStore<SURFACE, SurfaceVertex>> no_ball;
+		float init_min_radius_ = 0.01;
+		float init_cover_dist_ = 0.06;
+
+		UpdateMethod update_method_ = SPHERE_FITTING;
+		SplitMethod split_method_ = DEVIATION;
+		InitMethod init_method_ = CONSTANT;
+		float energy_lambda = 0.0;
+		float partition_lambda = 0.001;
+		float mean_update_curvature_weight_ = 0.2;
+		bool auto_split_outside_spheres_ = false;
+		float split_variance_threshold_ = 0.0001f;
+		float split_distance_threshold_ = 0.01f;
+		float split_distance_to_medial_axis_threshold_ = 0.0001f;
+		float split_hausdorff_distance_threshold_ = 0.0001f;
+		float fuzzy_distance_ = 0.001f;
+		Scalar total_error_ = 0.0;
+		Scalar min_error_ = 0.0;
+		Scalar max_error_ = 0.0;
+		float init_distance_ = 0.1f;
+		float init_factor_ = 0.8f;
+		Scalar hausdorff_distance_enveloppe_ = 0.0;
+		Scalar huasdorff_distance_cluster_ = 0.0;
+
+		std::mutex mutex_;
+		bool running_ = false;
+		bool stopping_ = false;
+		bool slow_down_ = true;
+		bool fuzzy_clustering_ = false;
+		bool connectivity_surgery = false;
+		bool compute_enveloppe_distance_ = false;
+		Scalar dilation_factor = 0.02;
+
+		uint32 update_rate_ = 20;
+		uint32 max_split_number = 1;
+
+		cgogn::rendering::SkelShapeDrawer skel_drawer_;
+		bool draw_enveloppe = false;
+		bool detect_volumn = false;
+	};
+	
+	//E1 = ((p-q)^t*n - r)^2 J = |dE1/dq, dE1/dr|
+	 Eigen::Matrix4d E1_hessian(ClusterAxisParameter& p, SurfaceVertex v)
+	 {
+		return p.sqem_helper_->hessian(v);
+	 }
+
+	 Vec4 E1_jacobian(ClusterAxisParameter& p, SurfaceVertex v, Vec4 s)
+	 {
+		return p.sqem_helper_->jacobian(v, s);
+	 }
+
+	 //E2 = (||p-q||-r)^2 H = |dE2/(dq^2), dE2dr     |
+	 //						  |dE2/(dqdr), dE2/(dr^2)|
+	 Eigen::Matrix4d E2_hessian(ClusterAxisParameter& p, Vec3 qp, Scalar radius)
+	 {
+		Eigen::Matrix3d I = Eigen::Matrix3d::Identity();
+		Eigen::Matrix3d N = 2 * I+ 2 * I / qp.norm() - (qp * qp.transpose()) / std::pow(qp.norm(), 3);
+		Eigen::Matrix4d H = Eigen::Matrix4d::Zero();
+		Vec3 pq = -qp;
+		H.block(0, 0, 3, 3) = N;
+		H(3, 3) = 2;
+		H.block(0, 3, 3, 1) = 2 * qp.normalized();
+		H.block(3, 0, 1, 3) = 2 * pq.normalized().transpose();
+		return H;
+	 }
+
+	 Vec4 E2_jacobian(ClusterAxisParameter& p, Vec3 qp, Scalar radius)
+	 {
+		Vec3 dE2dq = 2 * qp + 2 * qp.normalized() * radius;
+		Scalar dE2dr = 2 * radius - 2 * qp.norm();
+		return Vec4(dE2dq[0], dE2dq[1], dE2dq[2], dE2dr);
+	 }
+
+	 Eigen::Matrix4d compute_hessian(ClusterAxisParameter& p, Vec3 center, Scalar radius,
+									 std::vector<SurfaceVertex>& clusters_surface_vertices_, Scalar lambda)
+	 {
+		Eigen::Matrix4d H = Eigen::Matrix4d::Zero();
+		for (SurfaceVertex v : clusters_surface_vertices_)
+		{
+			Vec3& pos = value<Vec3>(*p.surface_, p.surface_vertex_position_, v);
+			Vec4& s = Vec4(center[0], center[1], center[2], radius);
+			Vec3 qp = center - pos;
+			H += E1_hessian(p, v) + lambda * E2_hessian(p, qp, radius);
+		}
+		return H;
+	 }
+
+	 Vec4 comptue_jacobian(ClusterAxisParameter& p, Vec3 center, Scalar radius,
+						   std::vector<SurfaceVertex> clusters_surface_vertices_, Scalar lambda)
+	 {
+		Vec4 J = Vec4::Zero();
+		for (SurfaceVertex v : clusters_surface_vertices_)
+		{
+			Vec3 pos = value<Vec3>(*p.surface_, p.surface_vertex_position_, v);
+			Vec3 qp = center - pos;
+			Vec4 s = Vec4(center[0], center[1], center[2], radius);
+			J += E1_jacobian(p, v, s) + lambda * E2_jacobian(p, qp, radius);
+		}
+		return J;
+	 }
+
+	 std::pair<Vec3, Scalar> Newton_method(ClusterAxisParameter& p, PointVertex pv)
+	 {
+		Vec3& center = value<Vec3>(*p.clusters_, p.clusters_position_, pv);
+		Scalar& radius = value<Scalar>(*p.clusters_, p.clusters_radius_, pv);
+		std::vector<SurfaceVertex> clusters_surface_vertices_ =
+			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
+		Vec4 s = Vec4(center[0], center[1], center[2], radius);
+		for (int i = 0; i < 10; i++)
+		{
+			auto& H = compute_hessian(p, center, radius, clusters_surface_vertices_, p.energy_lambda);
+			auto& J = comptue_jacobian(p, center, radius, clusters_surface_vertices_, p.energy_lambda);
+			Eigen::Matrix4d inverse;
+			inverse.setZero();
+			Scalar determinant;
+			bool invertible;
+			H.computeInverseAndDetWithCheck(inverse, determinant, invertible, 0.01);
+			if (invertible)
+			{
+				s = s - inverse * J;
+				center = Vec3(s[0], s[1], s[2]);
+				radius = s[3];
+				//std::cout << s.x() << ", " << s.y() << ", " << s.z() << ", " << s.w() << std::endl;
+			}
+			else
+			{
+				std::cout << "Hessian is not invertible" << std::endl;
+				break;
+			}
+			
+		}
+		//std::cout << "-----------------" << std::endl;
+		return {Vec3(s.x(), s.y(), s.z()), s.w()};
+	 }
 	std::array<std::array<double, 3>, 8> compute_big_box(SURFACE& surface, Cgal_Surface_mesh& csm)
 	{
 		std::array<Point, 8> obb_points;
@@ -1672,69 +1934,7 @@ private:
 	
 
 	
-	struct CoverageAxisParameter
-	{
-		bool initialized_ = false;
-		bool candidates_valid = false;
-		Eigen::MatrixXi coverage_matrix;
-		SURFACE* surface_;
-		std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_position_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_normal_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Vec3>> medial_axis_position_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Scalar>> medial_axis_radius_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<std::pair<SurfaceVertex, SurfaceVertex>>> medial_axis_closest_points_ =
-			nullptr;
-		std::shared_ptr<SurfaceAttribute<Scalar>> medial_axis_angle_ = nullptr;
-
-
-		POINT* candidate_points_ = nullptr;
-		
-		std::shared_ptr<PointAttribute<Vec3>> candidate_points_position_ = nullptr;
-		std::shared_ptr<PointAttribute<Scalar>> candidate_points_radius_ = nullptr;
-		std::shared_ptr<PointAttribute<Scalar>> candidate_points_score_ = nullptr;
-		std::shared_ptr<PointAttribute<Scalar>> candidate_points_coverage_score_ = nullptr;
-		std::shared_ptr<PointAttribute<Scalar>> candidate_points_uniformity_score_ = nullptr;
-		std::shared_ptr<PointAttribute<NonManifoldVertex>> candidate_points_associated_vertex_ = nullptr;
-
-		POINT* selected_points_ = nullptr;
-		std::shared_ptr<PointAttribute<Vec3>> selected_points_position_ = nullptr;
-		std::shared_ptr<PointAttribute<Scalar>> selected_points_radius_ = nullptr;
-		std::shared_ptr<PointAttribute<NonManifoldVertex>> selected_points_associated_vertex_ = nullptr;
-
-		NONMANIFOLD* voronoi_ = nullptr;
-		std::shared_ptr<NonManifoldAttribute<Vec3>> voronoi_position_ = nullptr;
-		std::shared_ptr<NonManifoldAttribute<Scalar>> voronoi_radius_ = nullptr;
-		std::shared_ptr<NonManifoldAttribute<Scalar>> voronoi_stability_ratio_ = nullptr;
-		std::shared_ptr<NonManifoldAttribute<Vec3>> voronoi_stability_color_ = nullptr;
-		std::shared_ptr<NonManifoldAttribute<Vec4>> voronoi_sphere_info_ = nullptr;
-		std::shared_ptr<NonManifoldAttribute<bool>> voronoi_fixed_vertices_ = nullptr;
-
-		std::vector<NonManifoldVertex> voronoi_kdt_vertices_;
-		std::shared_ptr<acc::KDTree<3, uint32>> voronoi_kdt_ = nullptr;
-
-		std::vector<SurfaceFace> surface_bvh_faces_;
-		std::vector<SurfaceVertex> surface_kdt_vertices_;
-		std::shared_ptr<acc::BVHTree<uint32, Vec3>> surface_bvh_ = nullptr;
-		std::shared_ptr<acc::KDTree<3, uint32>> surface_kdt_ = nullptr;
-
-		float dilation_factor = 0.02;
-		CandidateGenerationMethod candidate_generation_method = SHRINKING_BALL;
-
-		uint32 surface_samples_number = 1500;
-		uint32 candidates_number = 20000;
-		uint32 max_selected_number = 200;
-		std::vector<PointVertex> selected_inner_points;
-		std::vector<PointVertex> candidate_inner_points;
-
-		Cgal_Surface_mesh csm_;
-		std::shared_ptr<Tree> tree_ = nullptr;
-		std::shared_ptr<Point_inside> inside_tester_ = nullptr;
-		Delaunay tri;
-		Scalar min_radius_ = std::numeric_limits<Scalar>::max();
-		Scalar max_radius_ = std::numeric_limits<Scalar>::min();
-		Scalar min_angle_ = std::numeric_limits<Scalar>::max();
-		Scalar max_angle_ = std::numeric_limits<Scalar>::min();
-	};
+	
 
 	
 
@@ -2416,106 +2616,7 @@ private:
 	using SphereInfo = std::pair<bool, SphereQueueIt>;
 
 	
-	struct ClusterAxisParameter
-	{
-		bool initialized_ = false;
-
-		SURFACE* surface_;
-		std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_position_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_normal_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Vec3>> surface_face_normal_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_color_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Scalar>> surface_vertex_area_ = nullptr; 
-		std::shared_ptr<SurfaceAttribute<Vec3>> medial_axis_position_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Scalar>> medial_axis_radius_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Scalar>> surface_distance_to_cluster_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Scalar>> surface_sqem_error_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Scalar>> surface_mixed_distance_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Scalar>> surface_distance_to_enveloppe= nullptr;
-		std::shared_ptr<SurfaceAttribute<PointVertex>> surface_cluster_info_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<uint32>> surface_clusters_cc_idx_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<std::vector<std::pair<Scalar, Vec3>>>> clusters_fuzzy_cluster_color_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<std::pair<SurfaceVertex,SurfaceVertex>>> medial_axis_closest_points_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Vec3>> medial_axis_cloest_point_color_ = nullptr;
-		
-
-		std::vector<SurfaceFace> surface_bvh_faces_;
-		std::vector<SurfaceVertex> surface_kdt_vertices_;
-		std::shared_ptr<acc::BVHTree<uint32, Vec3>> surface_bvh_ = nullptr;
-		std::shared_ptr < acc::KDTree<3, uint32>> surface_kdt_ = nullptr;
-		Cgal_Surface_mesh csm_;
-		std::shared_ptr<Tree> tree_ = nullptr;
-		std::shared_ptr<Point_inside> inside_tester_ = nullptr;
-		std::shared_ptr<modeling::ClusteringSQEM_Helper<SURFACE>> sqem_helper_ = nullptr;
-		
-		POINT* clusters_ = nullptr;
-		
-		std::shared_ptr<PointAttribute<Vec3>> clusters_position_ = nullptr;
-		std::shared_ptr<PointAttribute<Scalar>> clusters_radius_ = nullptr;
-		std::shared_ptr<PointAttribute<Vec4>> clusters_color_ = nullptr;
-		std::shared_ptr<PointAttribute<Vec4>> clusters_surface_color_ = nullptr;
-		std::shared_ptr<PointAttribute<std::vector<SurfaceVertex>>> clusters_surface_vertices_ = nullptr;
-		std::shared_ptr<PointAttribute<std::vector<SurfaceVertex>>> clusters_fuzzy_surface_vertices_ = nullptr;
-		std::shared_ptr<PointAttribute<Scalar>> clusters_error_ = nullptr;
-		std::shared_ptr<PointAttribute<Scalar>> clusters_deviation_ = nullptr;
-		std::shared_ptr<PointAttribute<std::set<PointVertex>>> clusters_neighbours_ = nullptr;
-		std::shared_ptr<PointAttribute<std::map<PointVertex, std::set<uint32>>>> clusters_adjacency_info_ =
-			nullptr;
-		std::shared_ptr<PointAttribute<std::pair<SurfaceVertex, SurfaceVertex>>> clusters_cloest_sample_ = nullptr;
-		std::shared_ptr<PointAttribute<Scalar>> clusters_max_distance_ = nullptr;
-		std::shared_ptr<PointAttribute<SurfaceVertex>> clusters_max_vertex_ = nullptr;
-		std::shared_ptr<PointAttribute<Scalar>> correction_error_ = nullptr;
-		std::shared_ptr<PointAttribute<Vec3>> clusters_without_correction_position_ = nullptr;
-		std::shared_ptr<PointAttribute<Scalar>> clusters_without_correction_radius_ = nullptr;
-		std::shared_ptr<PointAttribute<uint32>> clusters_cc_number_ = nullptr;
-
-		NONMANIFOLD* non_manifold_ = nullptr;
-		std::shared_ptr<NonManifoldAttribute<Vec3>> non_manifold_vertex_position_ = nullptr;
-		std::shared_ptr<NonManifoldAttribute<Scalar>> non_manifold_vertex_radius_ = nullptr;
-		std::shared_ptr<NonManifoldAttribute<Vec4>> non_manifold_sphere_info_ = nullptr;
-		std::shared_ptr<NonManifoldAttribute<std::vector<SurfaceVertex>>> non_manifold_cluster_vertices_ = nullptr;
-		std::shared_ptr<NonManifoldAttribute<Vec3>> non_manifold_cloest_surface_color = nullptr;						
-
-		PointAttribute<Scalar>* selected_clusters_error_ = nullptr;
-		std::shared_ptr<CellMarkerStore<SURFACE, SurfaceVertex>> no_ball;
-		float init_min_radius_ = 0.01;
-		float init_cover_dist_ = 0.06;
-
-		UpdateMethod update_method_ = SPHERE_FITTING;
-		SplitMethod split_method_  = DEVIATION;
-		InitMethod init_method_ = CONSTANT;
-		float lambda = 0.001;
-		float mean_update_curvature_weight_ = 0.2;
-		bool auto_split_outside_spheres_ = false;
-		float split_variance_threshold_ = 0.0001f;
-		float split_distance_threshold_ = 0.01f;
-		float split_distance_to_medial_axis_threshold_ = 0.0001f;
-		float split_hausdorff_distance_threshold_ = 0.0001f;
-		float fuzzy_distance_ = 0.001f;
-		Scalar total_error_ = 0.0;
-		Scalar min_error_ = 0.0;
-		Scalar max_error_ = 0.0;
-		float init_distance_ = 0.1f;
-		float init_factor_ = 0.8f;
-		Scalar hausdorff_distance_enveloppe_ = 0.0;
-		Scalar huasdorff_distance_cluster_ = 0.0;
-
-		std::mutex mutex_;
-		bool running_ = false;
-		bool stopping_ = false;
-		bool slow_down_ = true;
-		bool fuzzy_clustering_ = false;
-		bool connectivity_surgery = false;
-		bool compute_enveloppe_distance_ = false;
-		Scalar dilation_factor = 0.02;
-
-		uint32 update_rate_ = 20;
-		uint32 max_split_number = 1;
-
-		cgogn::rendering::SkelShapeDrawer skel_drawer_;
-		bool draw_enveloppe = false;
-		bool detect_volumn = false;
-	};
+	
 
 	void cluster_axis_init(SURFACE& surface)
 	{
@@ -2916,7 +3017,7 @@ private:
 					Vec4 sphere_homo = Vec4(sphere_center.x(), sphere_center.y(), sphere_center.z(), sphere_radius);
 					Scalar dis_eucl = fabs((pos - sphere_center).norm() - sphere_radius);
 					Scalar dis_sqem = p.sqem_helper_->vertex_cost(sv, sphere_homo/*, p.surface_vertex_area_*/);
-					Scalar dist = dis_eucl * p.lambda + dis_sqem;
+					Scalar dist = dis_eucl * p.partition_lambda+ dis_sqem;
 					if (min_distance > dist)
 					{
 						min_distance = dist;
@@ -3342,15 +3443,21 @@ private:
 					
 					opti_coord = center;
 					rad = r;
+					
 				}
 			}
 			break;
 			
 			case SQEM: {
-				Vec4 opti_sphere;
-				/*	std::cout << "cluster " << index_of(*p.clusters_, svc) << std::endl;*/
+
+				auto [center, r] = Newton_method(p, pv);
+				opti_coord = center;
+				rad = r;
+				/*Vec4 opti_sphere;
+				/ * std::cout << "cluster " << index_of(*p.clusters_, svc) << std::endl;* /
 				bool find_optimal = p.sqem_helper_->optimal_sphere(
-					value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv), opti_sphere/*, p.surface_vertex_area_*/);
+					value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv), opti_sphere / *,
+					p.surface_vertex_area_* /);
 				if (find_optimal)
 				{
 					opti_coord = Vec3(opti_sphere[0], opti_sphere[1], opti_sphere[2]);
@@ -3360,8 +3467,19 @@ private:
 				else
 				{
 					std::cout << "can't find optimal sphere" << std::endl;
-				}
-				
+					auto [center, r] = sphere_fitting_algo(
+						*p.surface_,
+						value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_fuzzy_surface_vertices_, pv));
+
+					opti_coord = center;
+					rad = r;
+				}*/
+				/*	auto[center, r] = sphere_fitting_with_SQEM(
+						*p.surface_,
+						value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_fuzzy_surface_vertices_, pv));
+
+					opti_coord = center;
+					rad = r;*/
 			}
 			break;
 			default:
@@ -4022,10 +4140,9 @@ private:
 			{
 				
 				ImGui::RadioButton("Init method: Dilation Constant", (int*)&p.init_method_, CONSTANT);
-				ImGui::SameLine();
 				ImGui::DragFloat("Init Distance", &p.init_distance_, 0.01f,0.0f, 5.0f, "%.2f" );
 				ImGui::RadioButton("Init method: Dilation Factor", (int*)&p.init_method_, FACTOR);
-				ImGui::SameLine();
+			
 				ImGui::DragFloat("Init factor", &p.init_factor_, 0.01f, 0.0f, 5.0f, "%.2f");
 				if (ImGui::Button("Initialise Cluster"))
 					initialise_cluster(p);
@@ -4033,7 +4150,8 @@ private:
 				
 				ImGui::SliderInt("Update time", &(int)update_times, 1, 100);
 				ImGui::RadioButton("Sphere fitting", (int*)&p.update_method_, SPHERE_FITTING);
-				ImGui::DragFloat("Lambde", &p.lambda, 0.00001f, 0.0f, 1.0f, "%.6f");
+				ImGui::DragFloat("Partition Lambda", &p.partition_lambda, 0.0001f, 0.0f, 1.0f, "%.6f");
+				ImGui::DragFloat("Energy Lambda", &p.energy_lambda, 0.0001f, 0.0f, 1.0f, "%.6f");
 				ImGui::RadioButton("SQEM", (int*)&p.update_method_, SQEM);
 				
 
