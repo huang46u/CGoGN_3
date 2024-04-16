@@ -614,8 +614,9 @@ private:
 		UpdateMethod update_method_ = SPHERE_FITTING;
 		SplitMethod split_method_ = DEVIATION;
 		InitMethod init_method_ = CONSTANT;
-		float energy_lambda = 0.0;
-		float partition_lambda = 0.001;
+		float energy_lambda_E2 = 0.008;
+		float partition_lambda = 0.01;
+		float energy_lambda_E1 = 1; 
 		float mean_update_curvature_weight_ = 0.2;
 		bool auto_split_outside_spheres_ = false;
 		float split_variance_threshold_ = 0.0001f;
@@ -666,7 +667,6 @@ private:
 		Eigen::Matrix3d I = Eigen::Matrix3d::Identity();
 		Eigen::Matrix3d N = 2 * I+ 2 * I / qp.norm() - (qp * qp.transpose()) / std::pow(qp.norm(), 3);
 		Eigen::Matrix4d H = Eigen::Matrix4d::Zero();
-		Vec3 pq = -qp;
 		H.block(0, 0, 3, 3) = N;
 		H(3, 3) = 2;
 		H.block(0, 3, 3, 1) = 2 * qp.normalized();
@@ -682,7 +682,7 @@ private:
 	 }
 
 	 Eigen::Matrix4d compute_hessian(ClusterAxisParameter& p, Vec3 center, Scalar radius,
-									 std::vector<SurfaceVertex>& clusters_surface_vertices_, Scalar lambda)
+									 std::vector<SurfaceVertex>& clusters_surface_vertices_, Scalar lambda1, Scalar lambda2)
 	 {
 		Eigen::Matrix4d H = Eigen::Matrix4d::Zero();
 		for (SurfaceVertex v : clusters_surface_vertices_)
@@ -690,13 +690,13 @@ private:
 			Vec3& pos = value<Vec3>(*p.surface_, p.surface_vertex_position_, v);
 			Vec4& s = Vec4(center[0], center[1], center[2], radius);
 			Vec3 qp = center - pos;
-			H += E1_hessian(p, v) + lambda * E2_hessian(p, qp, radius);
+			H += lambda1*E1_hessian(p, v) + lambda2 * E2_hessian(p, qp, radius);
 		}
 		return H;
 	 }
 
 	 Vec4 comptue_jacobian(ClusterAxisParameter& p, Vec3 center, Scalar radius,
-						   std::vector<SurfaceVertex> clusters_surface_vertices_, Scalar lambda)
+						   std::vector<SurfaceVertex> clusters_surface_vertices_, Scalar lambda1, Scalar lambda2)
 	 {
 		Vec4 J = Vec4::Zero();
 		for (SurfaceVertex v : clusters_surface_vertices_)
@@ -704,7 +704,7 @@ private:
 			Vec3 pos = value<Vec3>(*p.surface_, p.surface_vertex_position_, v);
 			Vec3 qp = center - pos;
 			Vec4 s = Vec4(center[0], center[1], center[2], radius);
-			J += E1_jacobian(p, v, s) + lambda * E2_jacobian(p, qp, radius);
+			J += lambda1 * E1_jacobian(p, v, s) + lambda2 * E2_jacobian(p, qp, radius);
 		}
 		return J;
 	 }
@@ -718,8 +718,9 @@ private:
 		Vec4 s = Vec4(center[0], center[1], center[2], radius);
 		for (int i = 0; i < 10; i++)
 		{
-			auto& H = compute_hessian(p, center, radius, clusters_surface_vertices_, p.energy_lambda);
-			auto& J = comptue_jacobian(p, center, radius, clusters_surface_vertices_, p.energy_lambda);
+			auto& H = compute_hessian(p, center, radius, clusters_surface_vertices_, p.energy_lambda_E1, p.energy_lambda_E2);
+			auto& J =
+				comptue_jacobian(p, center, radius, clusters_surface_vertices_, p.energy_lambda_E1, p.energy_lambda_E2);
 			Eigen::Matrix4d inverse;
 			inverse.setZero();
 			Scalar determinant;
@@ -4151,7 +4152,8 @@ private:
 				ImGui::SliderInt("Update time", &(int)update_times, 1, 100);
 				ImGui::RadioButton("Sphere fitting", (int*)&p.update_method_, SPHERE_FITTING);
 				ImGui::DragFloat("Partition Lambda", &p.partition_lambda, 0.0001f, 0.0f, 1.0f, "%.6f");
-				ImGui::DragFloat("Energy Lambda", &p.energy_lambda, 0.0001f, 0.0f, 1.0f, "%.6f");
+				ImGui::DragFloat("SQEM Energy Lambda", &p.energy_lambda_E1, 0.0001f, 0.0f, 1.0f, "%.4f");
+				ImGui::DragFloat("Fitting Energy Lambda", &p.energy_lambda_E2, 0.0001f, 0.0f, 1.0f, "%.4f");
 				ImGui::RadioButton("SQEM", (int*)&p.update_method_, SQEM);
 				
 
