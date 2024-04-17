@@ -709,7 +709,41 @@ private:
 		return J;
 	 }
 
-	 std::pair<Vec3, Scalar> Newton_method(ClusterAxisParameter& p, PointVertex pv)
+	 std::pair<Vec3, Scalar> SQEM_with_fitting(ClusterAxisParameter& p, PointVertex pv)
+	 {
+		
+		Vec3& center = value<Vec3>(*p.clusters_, p.clusters_position_, pv);
+		Scalar& radius = value<Scalar>(*p.clusters_, p.clusters_radius_, pv);
+		std::vector<SurfaceVertex> clusters_surface_vertices_ =
+			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
+		Eigen::MatrixXd J(2 * clusters_surface_vertices_.size(), 4);
+		Eigen::VectorXd b(2 * clusters_surface_vertices_.size());
+		uint32 idx = 0;
+		Vec4 s = Vec4(center[0], center[1], center[2], radius);
+		for (int i = 0; i < 5; i++)
+		{
+			idx = 0;
+			for (SurfaceVertex v : clusters_surface_vertices_)
+			{
+				const Vec3& pos = value<Vec3>(*p.surface_, p.surface_vertex_position_, v);
+				Vec4 ji = p.sqem_helper_->jacobian(v, s);
+				J.row(idx) = ji.transpose() * p.energy_lambda_E1;
+				b(idx) = -1.0 * p.sqem_helper_->vertex_cost(v, s) * p.energy_lambda_E1;
+				++idx;
+				// distance energy
+				Vec3 d = pos - Vec3(s(0), s(1), s(2));
+				Scalar l = d.norm();
+				J.row(idx) = Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * p.energy_lambda_E2;
+				b(idx) = -(l - s(3)) * p.energy_lambda_E2; // scale the row by the update lambda
+				++idx;
+			};
+			Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
+			s += solver.solve(J.transpose() * b);
+		}
+		return {Vec3(s.x(), s.y(), s.z()), s.w()};
+	 }
+
+	 /*std::pair<Vec3, Scalar> Newton_method(ClusterAxisParameter& p, PointVertex pv)
 	 {
 		Vec3& center = value<Vec3>(*p.clusters_, p.clusters_position_, pv);
 		Scalar& radius = value<Scalar>(*p.clusters_, p.clusters_radius_, pv);
@@ -3451,36 +3485,9 @@ private:
 			
 			case SQEM: {
 
-				auto [center, r] = Newton_method(p, pv);
+				auto [center, r] = SQEM_with_fitting(p, pv);
 				opti_coord = center;
 				rad = r;
-				/*Vec4 opti_sphere;
-				/ * std::cout << "cluster " << index_of(*p.clusters_, svc) << std::endl;* /
-				bool find_optimal = p.sqem_helper_->optimal_sphere(
-					value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv), opti_sphere / *,
-					p.surface_vertex_area_* /);
-				if (find_optimal)
-				{
-					opti_coord = Vec3(opti_sphere[0], opti_sphere[1], opti_sphere[2]);
-					rad = opti_sphere[3];
-					break;
-				}
-				else
-				{
-					std::cout << "can't find optimal sphere" << std::endl;
-					auto [center, r] = sphere_fitting_algo(
-						*p.surface_,
-						value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_fuzzy_surface_vertices_, pv));
-
-					opti_coord = center;
-					rad = r;
-				}*/
-				/*	auto[center, r] = sphere_fitting_with_SQEM(
-						*p.surface_,
-						value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_fuzzy_surface_vertices_, pv));
-
-					opti_coord = center;
-					rad = r;*/
 			}
 			break;
 			default:
