@@ -614,7 +614,7 @@ private:
 		UpdateMethod update_method_ = SQEM;
 		SplitMethod split_method_ = SQEM_MIXED_DISTANCE;
 		InitMethod init_method_ = CONSTANT;
-		float energy_lambda_E2 = 0.01;
+		float energy_lambda_E2 = 0.0002;
 		float partition_lambda = 0.1;
 		float energy_lambda_E1 = 1; 
 		float mean_update_curvature_weight_ = 0.2;
@@ -3062,8 +3062,9 @@ private:
 
 					Vec4 sphere_homo = Vec4(sphere_center.x(), sphere_center.y(), sphere_center.z(), sphere_radius);
 					Scalar dis_eucl = fabs((pos - sphere_center).norm() - sphere_radius);
+					dis_eucl*=dis_eucl;
 					Scalar dis_sqem = p.sqem_helper_->vertex_cost(sv, sphere_homo/*, p.surface_vertex_area_*/);
-					Scalar dist = p.energy_lambda_E1 * dis_sqem + p.energy_lambda_E2 * dis_eucl;
+					Scalar dist =  dis_sqem + p.partition_lambda * dis_eucl;
 					if (min_distance > dist)
 					{
 						min_distance = dist;
@@ -3072,9 +3073,11 @@ private:
 						value<Scalar>(*p.surface_, p.surface_distance_to_cluster_, sv) = dis_eucl;
 						value<Scalar>(*p.surface_, p.surface_sqem_error_, sv) = dis_sqem;
 						value<Scalar>(*p.surface_, p.surface_mixed_distance_, sv) = dist;
+						
 					}
 					return true;
 					});
+
 				value<PointVertex>(*p.surface_, p.surface_cluster_info_, sv) = closest_sphere;
 				value<Vec3>(*p.surface_, p.surface_vertex_color_, sv) =
 					value<Vec4>(*p.clusters_, p.clusters_surface_color_, closest_sphere).head<3>();
@@ -3378,7 +3381,8 @@ private:
 			for (SurfaceVertex sv : cluster)
 			{
 				sqem_error += value<Scalar>(*p.surface_, p.surface_sqem_error_, sv);
-				combined_error += value<Scalar>(*p.surface_, p.surface_mixed_distance_, sv);
+				combined_error += value<Scalar>(*p.surface_, p.surface_mixed_distance_, sv) * p.energy_lambda_E2+ 
+					value<Scalar>(*p.surface_, p.surface_sqem_error_,sv) * p.energy_lambda_E1;
 			}
 			(*p.clusters_sqem_error_)[v_index] = sqem_error;
 			(*p.clusters_combined_error_)[v_index] = combined_error;
@@ -4105,7 +4109,7 @@ private:
 				ImGui::Separator();
 
 				ImGui::Checkbox("Auto split", &p.auto_split_);
-				ImGui::SliderFloat("Auto split threshold", &p.auto_split_threshold_, 0.0001f, 0.5f, "%.4f");
+				ImGui::SliderFloat("Auto split threshold", &p.auto_split_threshold_, 0.00001f,0.1f, "%.5f");
 				ImGui::Separator();
 
 				if (ImGui::RadioButton("Distance               ", (int*)&p.split_method_, DISTANCE_POINT_SPHERE))
