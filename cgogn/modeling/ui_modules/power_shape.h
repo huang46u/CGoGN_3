@@ -505,6 +505,7 @@ private:
 		std::shared_ptr<PointAttribute<Scalar>> candidate_points_score_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> candidate_points_coverage_score_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> candidate_points_uniformity_score_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> candidate_points_centrality_score_ = nullptr;
 		std::shared_ptr<PointAttribute<NonManifoldVertex>> candidate_points_associated_vertex_ = nullptr;
 
 		POINT* selected_points_ = nullptr;
@@ -2141,6 +2142,7 @@ private:
 		p.candidate_points_score_ = get_or_add_attribute<Scalar, PointVertex>(*p.candidate_points_, "score");
 		p.candidate_points_coverage_score_ = get_or_add_attribute<Scalar, PointVertex>(*p.candidate_points_, "coverage_score");
 		p.candidate_points_uniformity_score_ = get_or_add_attribute<Scalar, PointVertex>(*p.candidate_points_, "uniformity_score");
+		p.candidate_points_centrality_score_ = get_or_add_attribute<Scalar, PointVertex>(*p.candidate_points_, "centrality_score");
 		p.candidate_points_associated_vertex_ = get_or_add_attribute<NonManifoldVertex, PointVertex>(*p.candidate_points_, "associated_vertex");
 
 
@@ -2365,6 +2367,11 @@ private:
 		}
 	}
 
+	Scalar compute_centrality_score(CoverageAxisParameter& p, PointVertex pv)
+	{
+		return -1/value<Scalar>(*p.candidate_points_, p.candidate_points_radius_, pv);
+	}
+
 	Scalar compute_coverage_score(CoverageAxisParameter& p, PointVertex pv)
 	{
 		return p.coverage_matrix.col(index_of(*p.candidate_points_, pv)).sum();
@@ -2386,40 +2393,49 @@ private:
 	{
 		Scalar coverage_sum = 0;
 		Scalar uniform_sum = 0;
+		Scalar centrality_sum = 0;
 		for (PointVertex& p_minus : candidate_points)
 		{
-			value<Scalar>(*p.candidate_points_, p.candidate_points_coverage_score_, p_minus) =
-				compute_coverage_score(p, p_minus);
-			coverage_sum += value<Scalar>(*p.candidate_points_, p.candidate_points_coverage_score_, p_minus);
-			value<Scalar>(*p.candidate_points_, p.candidate_points_uniformity_score_, p_minus) =
-				compute_uniform_score(p, p_minus);
-			uniform_sum += value<Scalar>(*p.candidate_points_, p.candidate_points_uniformity_score_, p_minus);
+			uint32 v_index = index_of(*p.candidate_points_, p_minus);
+			(*p.candidate_points_coverage_score_)[v_index] = compute_coverage_score(p, p_minus);
+			coverage_sum += (*p.candidate_points_coverage_score_)[v_index];
+			(*p.candidate_points_uniformity_score_)[v_index] = compute_uniform_score(p, p_minus);
+			uniform_sum += (*p.candidate_points_uniformity_score_)[v_index];
+			(*p.candidate_points_centrality_score_)[v_index] = compute_centrality_score(p, p_minus);
+			centrality_sum += (*p.candidate_points_centrality_score_)[v_index];
 		}
 		Scalar mean_coverage = coverage_sum / candidate_points.size();
 		Scalar mean_uniform = uniform_sum / candidate_points.size();
+		Scalar mean_centrality = centrality_sum / candidate_points.size();
 		Scalar deviation_coverage = 0;
 		Scalar deviation_uniform = 0;
-		
-		for (PointVertex& p_minus : candidate_points)
-		{
-			Scalar& coverage_score = value<Scalar>(*p.candidate_points_, p.candidate_points_coverage_score_, p_minus);
-			Scalar& uniform_score = value<Scalar>(*p.candidate_points_, p.candidate_points_uniformity_score_, p_minus);
-			deviation_coverage += (coverage_score - mean_coverage) * (coverage_score - mean_coverage);
-			deviation_uniform += (uniform_score - mean_uniform) * (uniform_score - mean_uniform);
-		}
-		deviation_coverage = sqrt(deviation_coverage);
-		deviation_uniform = sqrt(deviation_uniform);
+		Scalar deviation_centrality = 0;
 
 		for (PointVertex& p_minus : candidate_points)
 		{
-			Scalar coverage_normalised=  
-				(value<Scalar>(*p.candidate_points_, p.candidate_points_coverage_score_, p_minus) - mean_coverage) /
-				deviation_coverage;
+			uint32 v_index = index_of(*p.candidate_points_, p_minus);
+			Scalar& coverage_score = (*p.candidate_points_coverage_score_)[v_index];
+			Scalar& uniform_score = (*p.candidate_points_uniformity_score_)[v_index];
+			Scalar& centrality_score = (*p.candidate_points_centrality_score_)[v_index];
+			deviation_coverage += (coverage_score - mean_coverage) * (coverage_score - mean_coverage);
+			deviation_uniform += (uniform_score - mean_uniform) * (uniform_score - mean_uniform);
+			deviation_centrality += (centrality_score - mean_centrality) * (centrality_score - mean_centrality);
+		}
+		deviation_coverage = sqrt(deviation_coverage);
+		deviation_uniform = sqrt(deviation_uniform);
+		deviation_centrality = sqrt(deviation_centrality);
+
+		for (PointVertex& p_minus : candidate_points)
+		{
+			uint32 v_index = index_of(*p.candidate_points_, p_minus);
+			Scalar coverage_normalised =
+				((*p.candidate_points_coverage_score_)[v_index] - mean_coverage) / deviation_coverage;
 			Scalar uniform_normalised =
-				(value<Scalar>(*p.candidate_points_, p.candidate_points_uniformity_score_, p_minus) - mean_uniform) /
-				deviation_uniform;
+				((*p.candidate_points_uniformity_score_)[v_index] - mean_uniform) / deviation_uniform;
+			Scalar centrality_normalised =
+				((*p.candidate_points_centrality_score_)[v_index] - mean_centrality) / deviation_centrality;
 			value<Scalar>(*p.candidate_points_, p.candidate_points_score_, p_minus) =
-				coverage_normalised + uniform_normalised;
+				coverage_normalised + uniform_normalised + centrality_normalised;
 		}
 	}
 
