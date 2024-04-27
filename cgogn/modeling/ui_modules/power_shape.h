@@ -32,6 +32,7 @@
 #include <cgogn/core/types/maps/gmap/gmap_base.h>
 #include <cgogn/geometry/types/slab_quadric.h>
 #include <libacc/bvh_trees_spheres.h>
+#include <cgogn/modeling/skeleton_sampling.h>
 
 #include <cgogn/io/point/point_import.h>
 #include <cgogn/geometry/algos/medial_axis.h>
@@ -632,7 +633,8 @@ private:
 		float init_factor_ = 0.8f;
 		float last_total_error_ = std::numeric_limits<Scalar>::max();
 		float auto_split_threshold_ = 0.15f;
-		Scalar hausdorff_distance_enveloppe_ = 0.0;
+		Scalar hausdorff_distance_shape_to_enveloppe_ = 0.0;
+		Scalar hausdorff_distance_enveloppe_to_shape_ = 0.0;
 		Scalar huasdorff_distance_cluster_ = 0.0;
 
 		std::mutex mutex_;
@@ -652,7 +654,8 @@ private:
 		uint32 iteration_count_ = 0;
 		
 
-		cgogn::rendering::SkelShapeDrawer skel_drawer_;
+		cgogn::rendering::SkelShapeDrawer skeleton_drawer_;
+		cgogn::modeling::SkeletonSampler<Vec4, Vec3, Scalar> skeleton_sampler_;
 		bool draw_enveloppe = false;
 		bool detect_volumn = false;
 	};
@@ -2820,8 +2823,8 @@ private:
 			get_or_add_attribute<std::vector<SurfaceVertex>, NonManifoldVertex>(*p.non_manifold_, "cluster_vertices");
 		p.non_manifold_cloest_surface_color = get_or_add_attribute<Vec3, NonManifoldFace>(*p.non_manifold_, "volumn_detected_color");
 
-		p.skel_drawer_.set_color({1, 0, 0, 0.5});
-		p.skel_drawer_.set_subdiv(40);
+		p.skeleton_drawer_.set_color({1, 0, 0, 0.5});
+		p.skeleton_drawer_.set_subdiv(40);
 
 		p.initialized_ = true;
 	}
@@ -3817,13 +3820,16 @@ private:
 			nonmanifold_provider_->emit_attribute_changed(*p.non_manifold_, p.non_manifold_vertex_position_.get());
 		}
 	}
+
+	
+
 	void compute_skeleton(ClusterAxisParameter& p)
 	{
 		//Reindex the cluster
 		uint32 index = 0;
 		clear(*p.non_manifold_);
 		if (p.draw_enveloppe)
-			p.skel_drawer_.clear();
+			p.skeleton_drawer_.clear();
 		auto spheres_skeleton_vertex_map =
 			add_attribute<NonManifoldVertex, PointVertex>(*p.clusters_, "__spheres_skeleton_vertex_map");
 		//Add vertex
@@ -3841,7 +3847,7 @@ private:
 			
 			if (p.draw_enveloppe)
 			{
-				p.skel_drawer_.add_vertex(value<Vec3>(*p.clusters_, p.clusters_position_, pv),
+				p.skeleton_drawer_.add_vertex(value<Vec3>(*p.clusters_, p.clusters_position_, pv),
 										  value<Scalar>(*p.clusters_, p.clusters_radius_, pv));
 			}
 			return true;
@@ -3864,7 +3870,7 @@ private:
 					if (p.draw_enveloppe)
 					{
 					
-					p.skel_drawer_.add_edge(value<Vec3>(*p.clusters_, p.clusters_position_, pv),
+					p.skeleton_drawer_.add_edge(value<Vec3>(*p.clusters_, p.clusters_position_, pv),
 												value<Scalar>(*p.clusters_, p.clusters_radius_, pv),
 												value<Vec3>(*p.clusters_, p.clusters_position_, neighbor),
 												value<Scalar>(*p.clusters_, p.clusters_radius_, neighbor));
@@ -3903,7 +3909,7 @@ private:
 							add_face(*p.non_manifold_, edges);
 							if (p.draw_enveloppe)
 							{
-								p.skel_drawer_.add_triangle(value<Vec3>(*p.clusters_, p.clusters_position_, pv),
+								p.skeleton_drawer_.add_triangle(value<Vec3>(*p.clusters_, p.clusters_position_, pv),
 														value<Scalar>(*p.clusters_, p.clusters_radius_, pv),
 														value<Vec3>(*p.clusters_, p.clusters_position_, ne1),
 														value<Scalar>(*p.clusters_, p.clusters_radius_, ne1),
@@ -3918,29 +3924,11 @@ private:
 			
 			return true;
 		});
-		if (p.compute_enveloppe_distance_)
-		{
-			modeling::SphereMeshConstructor<SURFACE, NONMANIFOLD> sphere_mesh_constructor(
-				*p.surface_, *p.non_manifold_, p.surface_vertex_position_, p.non_manifold_sphere_info_,
-				p.non_manifold_cluster_vertices_);
-			Scalar max_dist = 0.0;
-			foreach_cell(*p.non_manifold_, [&](NonManifoldVertex nv){
-				for (SurfaceVertex sv :
-					 value<std::vector<SurfaceVertex>>(*p.non_manifold_, p.non_manifold_cluster_vertices_, nv))
-				{
-					Scalar min_dist = sphere_mesh_constructor.min_distance_to_enveloppe(nv, sv);
-					value<Scalar>(*p.surface_, p.surface_distance_to_enveloppe, sv) = min_dist;
-					max_dist = std::max(max_dist, min_dist);
-				}
-				return true;
-			});
-			p.hausdorff_distance_enveloppe_ = max_dist;
-
-		}
+		
 		
 		if (p.draw_enveloppe)
 		{
-			p.skel_drawer_.update();
+			p.skeleton_drawer_.update();
 		}
 		remove_attribute<PointVertex>(*p.clusters_, spheres_skeleton_vertex_map);
 
@@ -3948,6 +3936,70 @@ private:
 		{
 			detect_cloest_triangle(p);
 		}
+	}
+
+	void samples_skeleton(ClusterAxisParameter& p)
+	{
+		p.skeleton_sampler_.clear();
+			
+		parallel_foreach_cell(*p.non_manifold_, [&](NonManifoldVertex nv) {
+			p.skeleton_sampler_.add_vertex(value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, nv),
+											value<Scalar>(*p.non_manifold_,p.non_manifold_vertex_radius_, nv));
+			return true;
+		});
+		parallel_foreach_cell(*p.non_manifold_, [&](NonManifoldEdge ne) {
+			auto& v_vec = incident_vertices(*p.non_manifold_, ne);
+			p.skeleton_sampler_.add_edge(value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, v_vec[0]),
+										 value<Scalar>(*p.non_manifold_, p.non_manifold_vertex_radius_, v_vec[0]),
+										 value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, v_vec[1]),
+										 value<Scalar>(*p.non_manifold_, p.non_manifold_vertex_radius_, v_vec[1]));
+			return true;
+		});
+		parallel_foreach_cell(*p.non_manifold_, [&](NonManifoldFace nf) {
+			auto& v_vec = incident_vertices(*p.non_manifold_, nf);
+			p.skeleton_sampler_.add_triangle(value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, v_vec[0]),
+											 value<Scalar>(*p.non_manifold_, p.non_manifold_vertex_radius_, v_vec[0]),
+											 value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, v_vec[1]),
+											 value<Scalar>(*p.non_manifold_, p.non_manifold_vertex_radius_, v_vec[1]),
+											 value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, v_vec[2]),
+											 value<Scalar>(*p.non_manifold_, p.non_manifold_vertex_radius_, v_vec[2]));
+			return true;
+		});
+		
+		Vec3 bbw = p.skeleton_sampler_.BBwidth();
+		float step = std::min(std::min(bbw.x(), bbw.y()), bbw.z()) / 200;
+		 p.skeleton_sampler_.sample(step);
+	}
+
+	void compute_hausdorff_distance(ClusterAxisParameter& p)
+	{
+		samples_skeleton(p);
+		// Compute the distance from the shape to the enveloppe
+		modeling::SphereMeshConstructor<SURFACE, NONMANIFOLD> sphere_mesh_constructor(
+			*p.surface_, *p.non_manifold_, p.surface_vertex_position_, p.non_manifold_sphere_info_,
+			p.non_manifold_cluster_vertices_);
+		Scalar max_dist = 0.0;
+		foreach_cell(*p.non_manifold_, [&](NonManifoldVertex nv) {
+			for (SurfaceVertex sv :
+				 value<std::vector<SurfaceVertex>>(*p.non_manifold_, p.non_manifold_cluster_vertices_, nv))
+			{
+				Scalar min_dist = sphere_mesh_constructor.min_distance_to_enveloppe(nv, sv);
+				value<Scalar>(*p.surface_, p.surface_distance_to_enveloppe, sv) = min_dist;
+				max_dist = std::max(max_dist, min_dist);
+			}
+			return true;
+		});
+		p.hausdorff_distance_shape_to_enveloppe_ = max_dist;
+		max_dist = 0.0;
+		std::vector<Vec3> enveloppe_points = p.skeleton_sampler_.samples();
+		std::pair<uint32, Vec3> bvh_res;
+		for (Vec3 v : enveloppe_points) {
+			p.surface_bvh_->closest_point(v, &bvh_res);
+			Vec3 closest_point_position = bvh_res.second;
+			Scalar dist = (closest_point_position - v).norm();
+			max_dist = std::max(max_dist, dist);
+		}
+		p.hausdorff_distance_enveloppe_to_shape_ = max_dist;
 	}
 
 	void init_delaunay(SURFACE& surface)
@@ -3977,7 +4029,7 @@ private:
 		auto& proj_matrix = view->projection_matrix();
 		auto& view_matrix = view->modelview_matrix();
 		if(p.draw_enveloppe)
-			p.skel_drawer_.draw(proj_matrix, view_matrix);
+			p.skeleton_drawer_.draw(proj_matrix, view_matrix);
 	}
 
 	void key_press_event(View* view, int32 keycode) override{
@@ -4166,7 +4218,11 @@ private:
 				if (ImGui::Button("Split clusters"))
 					split_cluster(p);
 				ImGui::Separator();
-				ImGui::Checkbox("Compute one sided hausdorff distance", &p.compute_enveloppe_distance_);
+			
+				if (ImGui::Button("Compute two-sided hausdorff distance"))
+				{
+					compute_hausdorff_distance(p);
+				}
 				if (ImGui::Checkbox("Draw reconstruction", &p.draw_enveloppe))
 				{
 					update_render_data(p);
@@ -4177,10 +4233,10 @@ private:
 				ImGui::Text("Min error: %f", p.min_error_);
 				ImGui::Text("Max error: %f", p.max_error_);
 				MeshData<SURFACE>& md = surface_provider_->mesh_data(*selected_surface_mesh_);
-				ImGui::Text("One sided hausdorff distance to enveloppe: %f \% ",
-							p.hausdorff_distance_enveloppe_ / md.diangonal_length() * 100);
-				ImGui::Text("One sided hausdorff distance to sphere: %f \% ",
-							p.huasdorff_distance_cluster_ / md.diangonal_length() * 100);
+				ImGui::Text("One sided hausdorff distance shape to enveloppe: %f \% ",
+							p.hausdorff_distance_shape_to_enveloppe_ / md.diangonal_length() * 100);
+				ImGui::Text("One sided hausdorff distance enveloppe to shape: %f \% ",
+							p.hausdorff_distance_enveloppe_to_shape_ / md.diangonal_length() * 100);
 				ImGui::Separator();
 
 				ImGui::Text("Pick the sphere under the mouse with I, split it with S and delete it with D");

@@ -45,6 +45,14 @@ public:
 	{
 	}
 
+	void clear()
+	{
+		vertices_.clear();
+		edges_.clear();
+		triangles_.clear();
+		samples_.clear();
+	}
+
 	void add_vertex(const VEC4& v)
 	{
 		vertices_.push_back(v);
@@ -80,6 +88,15 @@ public:
 	{
 		add_edge(A.template topRows<3>(), A[3], B.template topRows<3>(), B[3]);
 	}
+
+	inline void add_triangle(const VEC3& A, SCALAR Ra, const VEC3& B, SCALAR Rb, const VEC3& C, SCALAR Rc)
+	{
+		Vec4 A4(A[0], A[1], A[2], Ra);
+		Vec4 B4(B[0], B[1], B[2], Rb);
+		Vec4 C4(C[0], C[1], C[2], Rc);
+		add_triangle(A4, B4, C4);
+	}
+
 
 	inline void add_triangle(const VEC4& A, const VEC4& B, const VEC4& C)
 	{
