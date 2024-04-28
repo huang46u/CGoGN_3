@@ -43,15 +43,21 @@ void import_incidence_graph_data(IncidenceGraph& ig, IncidenceGraphImportData& i
 	using Edge = IncidenceGraph::Edge;
 	using Face = IncidenceGraph::Face;
 
+	
 	auto position =
 		get_or_add_attribute<geometry::Vec3, Vertex>(ig, incidence_graph_data.vertex_position_attribute_name_);
-
+	
+	auto radius = get_or_add_attribute<Scalar, Vertex>(ig, incidence_graph_data.vertex_radius_attribute_name_);
+	bool has_radius = incidence_graph_data.vertex_radius_.size() > 0;
 	std::vector<Vertex> vertices;
 	vertices.reserve(incidence_graph_data.nb_vertices_);
+		
 	for (uint32 i = 0u; i < incidence_graph_data.nb_vertices_; ++i)
 	{
 		Vertex v = add_vertex(ig);
 		(*position)[v.index_] = incidence_graph_data.vertex_position_[i];
+		if(has_radius)
+			(*radius)[v.index_] = incidence_graph_data.vertex_radius_[i];
 		vertices.push_back(v);
 	}
 

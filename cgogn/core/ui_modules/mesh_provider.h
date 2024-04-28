@@ -256,6 +256,11 @@ public:
 				if constexpr (std::is_same_v<MESH, IncidenceGraph>)
 					imported = io::import_IG(*m, filename);
 			}
+			else if (ext.compare("ma") == 0)
+			{
+				if constexpr (std::is_same_v<MESH, IncidenceGraph>)
+					imported = io::import_MA(*m, filename);
+			}
 
 			if (imported)
 			{
@@ -741,8 +746,8 @@ private:
 	std::vector<std::string> supported_graph_formats_ = {"cg", "ig", "cgr", "skel"};
 	std::vector<std::string> supported_graph_files_ = {"Graph", "*.cg *.ig *.cgr *.skel"};
 
-	std::vector<std::string> supported_surface_formats_ = {"off", "obj", "ply", "ig"};
-	std::vector<std::string> supported_surface_files_ = {"Surface", "*.off *.obj *.ply *.ig"};
+	std::vector<std::string> supported_surface_formats_ = {"off", "obj", "ply", "ig", "stl", "ma"};
+	std::vector<std::string> supported_surface_files_ = {"Surface", "*.off *.obj *.ply *.ig *.ma *.stl" };
 
 	std::vector<std::string> supported_volume_formats_ = {"mesh"};			 //, "cgns"};
 	std::vector<std::string> supported_volume_files_ = {"Volume", "*.mesh"}; // *.cgns"};

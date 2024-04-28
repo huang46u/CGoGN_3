@@ -37,6 +37,21 @@ namespace cgogn
 namespace io
 {
 
+struct edge_hash
+{
+	std::size_t operator()(const std::pair<uint32, uint32>& edge) const
+	{
+		return std::hash<uint32>()(edge.first) + std::hash<uint32>()(edge.second);
+	}
+};
+struct edge_equal
+{
+	bool operator()(const std::pair<uint32, uint32>& edge1, const std::pair<uint32, uint32>& edge2) const
+	{
+		return ((edge1.first == edge2.first && edge1.second == edge2.second) ||
+				(edge1.first == edge2.second && edge1.second == edge2.first));
+	}
+};
 template <typename MESH>
 bool import_IG(MESH& m, const std::string& filename)
 {
@@ -103,6 +118,94 @@ bool import_IG(MESH& m, const std::string& filename)
 			const uint32 e = read_uint(fp, line);
 			incidence_graph_data.faces_edge_indices_.push_back(e);
 		}
+	}
+
+	import_incidence_graph_data(m, incidence_graph_data);
+
+	return true;
+}
+
+template <typename MESH>
+bool import_MA(MESH& m, const std::string& filename)
+{
+	static_assert(mesh_traits<MESH>::dimension >= 1, "MESH dimension should be at least 1");
+
+	using Vertex = typename MESH::Vertex;
+
+	Scoped_C_Locale loc;
+
+	IncidenceGraphImportData incidence_graph_data;
+
+	std::ifstream fp(filename.c_str(), std::ios::in);
+
+	std::string line;
+	line.reserve(512);
+
+	// read number of vertices, edges, faces
+	const uint32 nb_vertices = read_uint(fp, line);
+	const uint32 nb_edges = read_uint(fp, line);
+	const uint32 nb_faces = read_uint(fp, line);
+	std::unordered_map<std::pair<uint32, uint32>, size_t, edge_hash, edge_equal> edge_indices;
+	std::cout << "import medial axis into incidence graph: " << nb_vertices << " " << nb_edges << " " << nb_faces << std::endl;
+
+	if (nb_vertices == 0u)
+	{
+		std::cerr << "File \"" << filename << " has no vertices." << std::endl;
+		return false;
+	}
+
+	incidence_graph_data.reserve(nb_vertices, nb_edges, nb_faces);
+
+	// read vertices position
+	for (uint32 i = 0u; i < nb_vertices; ++i)
+	{
+		fp >> line;
+		if (line != "v")
+		{
+			std::cerr << "Error reading vertex position." << std::endl;
+			return false;
+		}
+		float64 x = read_double(fp, line);
+		float64 y = read_double(fp, line);
+		float64 z = read_double(fp, line);
+		float64 r = read_double(fp, line);
+		incidence_graph_data.vertex_position_.push_back({x, y, z});
+		incidence_graph_data.vertex_radius_.push_back(r);
+	}
+
+	// read edges
+	for (uint32 i = 0; i < nb_edges; ++i)
+	{
+		fp >> line;
+		if (line != "e")
+		{
+			std::cerr << "Error reading edge." << std::endl;
+			return false;
+		}
+		const uint32 a = read_uint(fp, line);
+		const uint32 b = read_uint(fp, line);
+		incidence_graph_data.edges_vertex_indices_.push_back(a);
+		incidence_graph_data.edges_vertex_indices_.push_back(b);
+		edge_indices[{a, b}] = i;
+	}
+
+	// read faces
+	for (uint32 i = 0; i < nb_faces; ++i)
+	{
+		fp >> line;
+		if (line != "f")
+		{
+			std::cerr << "Error reading face." << std::endl;
+			return false;
+		}
+		const uint32 a = read_uint(fp, line);
+		const uint32 b = read_uint(fp, line);
+		const uint32 c = read_uint(fp, line);
+		incidence_graph_data.faces_nb_edges_.push_back(3);
+		incidence_graph_data.faces_edge_indices_.push_back(edge_indices[{a,b}]);
+		incidence_graph_data.faces_edge_indices_.push_back(edge_indices[{b,c}]);
+		incidence_graph_data.faces_edge_indices_.push_back(edge_indices[{c,a}]);
+		
 	}
 
 	import_incidence_graph_data(m, incidence_graph_data);

@@ -41,6 +41,7 @@ namespace io
 {
 
 using geometry::Vec3;
+using geometry::Scalar;
 
 struct IncidenceGraphImportData
 {
@@ -50,6 +51,9 @@ struct IncidenceGraphImportData
 
 	std::vector<Vec3> vertex_position_;
 	std::string vertex_position_attribute_name_ = "position";
+
+	std::vector<Scalar> vertex_radius_;
+	std::string vertex_radius_attribute_name_ = "radius";
 
 	std::vector<uint32> edges_vertex_indices_;
 	std::vector<uint32> faces_nb_edges_;
