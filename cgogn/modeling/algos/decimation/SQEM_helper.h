@@ -233,28 +233,40 @@ public:
 	Vec3 p2;
 	Vec3 p3;
 	Vec3 n;
+	bool SameSide(const Vec3& v1, const Vec3& v2, const Vec3& a, const Vec3& b)
+	{
+		Vec3 cv1 = (b - a).cross(v1 - a);;
+		Vec3 cv2 = (b - a).cross(v2 - a);
+		if (cv1.dot(cv2) >= 1e-12)
+			return true;
+		else
+			return false;
+	}
 
+	bool InsideTriangle(Vec3& p, Vec3& v0, Vec3& v1,
+						Vec3& v2)
+	{
+		if (SameSide(p, v0, v1, v2) && SameSide(p, v1, v0, v2) && SameSide(p, v2, v0, v1))
+			return true;
+		else
+			return false;
+	}
 	bool ProjectontoTriangle(const Vec3& p, Vec3& fp, Scalar& dist)
 	{
-		Vec3 e1 = p2 - p1;
-		Vec3 e2 = p3 - p1;
-		Vec3 e3 = p - p1;
-		Vec3 n = e1.cross(e2);
-		if (n.norm() < 1e-12)
-			return false;
-		Scalar d = n.dot(n);
-		Scalar u = n.dot(e2.cross(e3)) / d;
-		Scalar v = n.dot(e3.cross(e1)) / d;
-		if ((u >= 0) && (v >= 0) && (u + v <= 1))
+		Vec3 e1 = p1 - p2;
+		Vec3 e2 = p1 - p3;
+		Vec3 norm = e1.cross(e2);
+		norm.normalize();
+		fp = p - (p - p2).dot(norm) * norm;
+		if (InsideTriangle(fp, p1, p2, p3))
 		{
-			fp = p - n * n.dot(e3) / d;
-			dist = (p - fp).norm();
+			dist = (fp - p).norm();
 			return true;
 		}
 		else
 		{
 			Vec3 fp01, fp02, fp12;
-			double dist01, dist02, dist12;
+			Scalar dist01, dist02, dist12;
 			ProjectOntoLineSegment(p, p1, p2, fp01, dist01);
 			ProjectOntoLineSegment(p, p1, p3, fp02, dist02);
 			ProjectOntoLineSegment(p, p2, p3, fp12, dist12);
@@ -347,7 +359,7 @@ struct SphereMeshConstructor
 		});
 	}
 	
-	bool slab_mesh_triangle(Vec4& p1, Vec4& p2, Vec4& p3, Triangle t1, Triangle& t2)
+	bool slab_mesh_triangle(Vec4& p1, Vec4& p2, Vec4& p3, Triangle& t1, Triangle& t2)
 	{
 		Vec3 c1 = p1.head<3>();
 		Vec3 c2 = p2.head<3>();
