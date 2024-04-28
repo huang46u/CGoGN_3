@@ -35,6 +35,22 @@ if (CGOGN_USE_CGAL)
 	)
 endif()
 
+if (CGOGN_USE_CGAL)
+	find_package(CGAL REQUIRED)
+	add_executable(coverage_axis coverage_axis.cpp)
+	target_link_libraries(coverage_axis highs::highs
+		${nlopt_lib}
+		CGAL::CGAL
+		cgogn::core
+		cgogn::ui
+		cgogn::io
+		cgogn::rendering
+		cgogn::modeling
+		Blossom5
+		${CMAKE_DL_LIBS}
+	)
+endif()
+
 add_executable(tubular_mesh tubular_mesh.cpp)
 target_link_libraries(tubular_mesh
 	cgogn::core

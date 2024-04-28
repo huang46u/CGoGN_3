@@ -93,11 +93,6 @@ enum InitMethod
 	CONSTANT,
 	FACTOR
 };
-enum CandidateGenerationMethod
-{
-	RANDOM,
-	SHRINKING_BALL,
-	DELAUNAY
 
 };
 
@@ -4134,7 +4129,7 @@ private:
 			imgui_combo_attribute<SurfaceVertex, Vec3>(*selected_surface_mesh_, p.surface_vertex_position_, "Position",
 													   [&](const std::shared_ptr<SurfaceAttribute<Vec3>>& attribute) {
 														   p.surface_vertex_position_ = attribute;
-														   c.surface_vertex_position_ = attribute;
+														   
 													   });
 			if (ImGui::Button("Cluster Axis"))
 			{
