@@ -3236,10 +3236,10 @@ private:
 		 p.skeleton_sampler_.sample(step);
 	}
 
-	void export_spheres_OBJ(ClusterAxisParameter& p)
+	void export_spheres_OBJ(ClusterAxisParameter& p, const std::string& directory)
 	{
 		auto& mesh_name = surface_provider_->mesh_name(*p.surface_);
-		 std::ofstream file(mesh_name +"_spheres.obj");
+		 std::ofstream file(directory + "/"+ mesh_name + ".obj");
 		if (!file.is_open())
 		{
 			std::cerr << "Error opening file" << std::endl;
@@ -3252,6 +3252,7 @@ private:
 			return true;
 		});
 		file.close();
+		std::cout << "save .obj file successfully" << std::endl;
 	}
 
 	
@@ -3658,7 +3659,9 @@ private:
 				}
 				if (ImGui::Button("Export spheres in obj"))
 				{
-					export_spheres_OBJ(p);
+					auto destination = pfd::select_folder("Select a file").result();
+					export_spheres_OBJ(p, destination);
+					
 				}
 				if (ImGui::Checkbox("Draw reconstruction", &p.draw_enveloppe))
 				{
