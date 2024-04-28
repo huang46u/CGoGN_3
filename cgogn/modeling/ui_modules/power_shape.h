@@ -3971,6 +3971,23 @@ private:
 		 p.skeleton_sampler_.sample(step);
 	}
 
+	void export_spheres_OBJ(ClusterAxisParameter& p)
+	{
+		auto& mesh_name = surface_provider_->mesh_name(*p.surface_);
+		 std::ofstream file(mesh_name +"_spheres.obj");
+		if (!file.is_open())
+		{
+			std::cerr << "Error opening file" << std::endl;
+			return;
+		}
+		foreach_cell(*p.clusters_, [&](PointVertex pv) {
+			Vec3 center = value<Vec3>(*p.clusters_, p.clusters_position_, pv);
+			Scalar radius = value<Scalar>(*p.clusters_, p.clusters_radius_, pv);
+			file << "v " << center.x() << " " << center.y() << " " << center.z() << " " <<radius << std::endl;
+			return true;
+		});
+		file.close();
+	}
 	void compute_hausdorff_distance(ClusterAxisParameter& p)
 	{
 		samples_skeleton(p);
@@ -4222,6 +4239,10 @@ private:
 				if (ImGui::Button("Compute two-sided hausdorff distance"))
 				{
 					compute_hausdorff_distance(p);
+				}
+				if (ImGui::Button("Export spheres in obj"))
+				{
+					export_spheres_OBJ(p);
 				}
 				if (ImGui::Checkbox("Draw reconstruction", &p.draw_enveloppe))
 				{
