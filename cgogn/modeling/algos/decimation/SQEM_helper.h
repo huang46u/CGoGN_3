@@ -454,7 +454,7 @@ struct SphereMeshConstructor
 	Scalar min_distance_to_enveloppe(NVertex nv, SVertex sv)
 	{
 		Scalar min_dist = std::numeric_limits<Scalar>::max();
-		foreach_incident_face(m_, nv, [&](NFace f) { 
+		foreach_cell(m_, [&](NFace f) { 
 			if (slab_marker_->is_marked(f))
 			{
 				for (Triangle t : value<std::vector<Triangle>>(m_, slabs_, f))
@@ -470,7 +470,7 @@ struct SphereMeshConstructor
 			}
 			return true;
 			});
-		foreach_incident_edge(m_, nv, [&](NEdge e) {
+		foreach_cell(m_, [&](NEdge e) {
 			if (cone_marker_->is_marked(e))
 			{
 				Vec3 fp;
@@ -481,10 +481,18 @@ struct SphereMeshConstructor
 			}
 			return true;
 		});
-		Vec3 sphere_center = value<Vec4>(m_, sphere_info_, nv).head<3>();
-		Scalar sphere_radius = value<Vec4>(m_, sphere_info_, nv).w();
-		Scalar distance_to_sphere  = (sphere_center - value<Vec3>(surface_, vertex_position_, sv)).norm() - sphere_radius;
-		return std::min(distance_to_sphere, min_dist);
+		foreach_cell(m_, [&](NVertex nv) {
+			Scalar dist;
+			Vec3 sphere_center = value<Vec4>(m_, sphere_info_, nv).head<3>();
+			Scalar sphere_radius = value<Vec4>(m_, sphere_info_, nv).w();
+			Scalar distance_to_sphere =
+				(sphere_center - value<Vec3>(surface_, vertex_position_, sv)).norm() - sphere_radius;
+			dist = fabs(distance_to_sphere);
+			min_dist = std::min(min_dist, dist);
+			return true;
+			});
+		
+		return min_dist;
 	}
 
 
