@@ -62,20 +62,28 @@ public:
 		_c += q._c;
 		return *this;
 	}
-	Spherical_Quadric& operator*(const Scalar& s)
+	Spherical_Quadric& operator*=(const Scalar& s)
 	{
 		_A *= s;
 		_b *= s;
 		_c *= s;
 		return *this;
 	}
-
+	friend Spherical_Quadric operator*(const Spherical_Quadric& q, Scalar s)
+	{
+		Spherical_Quadric result(q);
+		result *= s;
+		return result;
+	}
 	friend Spherical_Quadric operator+(Spherical_Quadric lhs, Spherical_Quadric& rhs)
 	{
 		lhs += rhs;
 		return lhs;
 	}
-
+	Vec4 gradient(const Vec4& p) const
+	{
+		return _A * p - _b;
+	}
 	Scalar eval(const Vec4& p) const
 	{
 		return (0.5 * p.transpose() * _A * p) - (Scalar)(_b.transpose() * p) + _c;
