@@ -29,7 +29,7 @@
 #include <cgogn/ui/camera.h>
 #include <cgogn/ui/cgogn_ui_export.h>
 #include <cgogn/ui/inputs.h>
-
+#include <cgogn/ui/portable-file-dialogs.h>
 #include <fstream>
 
 namespace cgogn
@@ -69,6 +69,30 @@ public:
 		}
 		camera_saved_ = camera_;
 	}
+	inline void save_camera_in_file()
+	{
+		std::ofstream out_file;
+		auto destination = pfd::select_folder("Select a file").result();
+		out_file.open(destination  + "/saved.camera");
+		if (out_file.is_open())
+		{
+			out_file << camera_;
+			out_file.close();
+		}
+		camera_saved_ = camera_;
+	}
+	inline void load_camera_from_file()
+	{
+		auto destination = pfd::open_file("Select a file", "", {"*.camera"}).result();
+		std::ifstream in_file(destination[0], std::ios::in);
+		if (in_file.is_open())
+		{
+			in_file >> camera_;
+			in_file.close();
+		}
+		need_redraw_ = true;
+	}
+
 	inline void restore_camera()
 	{
 		camera_ = camera_saved_;
