@@ -747,61 +747,6 @@ private:
 						 p.energy_lambda_fitting; // scale the row by the update lambda
 				++idx;
 			}
-			Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J + I*lambda);
-			Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
-			s += delta_s ;
-			if (i > 0 )
-			{
-				if (delta_s.norm() < last_delta_s.norm())
-				{
-					lambda /= 9;
-				}
-				else
-				{
-					lambda *= 5;
-				}
-			}
-			//std::cout << "s: " << s.x() << ", " << s.y() << ", " << s.z() << ", " << s.w() << 
-				//"lambda: " << lambda
-				//<<std::endl;
-			if (delta_s.norm() < 1e-6)
-			{
-				break;
-			}
-		}
-		//std::cout << "-----------------" << std::endl;
-		return {Vec3(s.x(), s.y(), s.z()), s.w()};
-	 }
-	 /*std::pair<Vec3, Scalar> SQEM_with_fitting(ClusterAxisParameter& p, PointVertex pv)
-	 {
-
-		Vec3& center = value<Vec3>(*p.clusters_, p.clusters_position_, pv);
-		Scalar& radius = value<Scalar>(*p.clusters_, p.clusters_radius_, pv);
-		std::vector<SurfaceVertex> clusters_surface_vertices_ =
-			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
-		Eigen::MatrixXd J(2 * clusters_surface_vertices_.size(), 4);
-		Eigen::MatrixXd I = Eigen::MatrixXd::Identity(4, 4);
-		Eigen::VectorXd b(2 * clusters_surface_vertices_.size());
-		uint32 idx = 0;
-		Vec4 s = Vec4(center[0], center[1], center[2], radius);
-		for (int i = 0; i < 10; i++)
-		{
-			idx = 0;
-			for (SurfaceVertex v : clusters_surface_vertices_)
-			{
-				const Vec3& pos = value<Vec3>(*p.surface_, p.surface_vertex_position_, v);
-				Spherical_Quadric& q = value<Spherical_Quadric>(*p.surface_, p.surface_vertex_quadric_, v);
-				Vec4 ji = q.gradient(s);
-				J.row(idx) = ji.transpose() * p.energy_lambda_sqem;
-				b(idx) = -1.0 * q.eval(s) * p.energy_lambda_sqem;
-				++idx;
-				// distance energy
-				Vec3 d = pos - Vec3(s(0), s(1), s(2));
-				Scalar l = d.norm();
-				J.row(idx) = Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * p.energy_lambda_fitting;
-				b(idx) = -(l - s(3)) * p.energy_lambda_fitting; // scale the row by the update lambda
-				++idx;
-			};
 			Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
 			Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
 			s += delta_s;
@@ -3169,6 +3114,9 @@ private:
 		Scalar dia_length = bbw.norm();
 		float step = std::min(std::min(bbw.x(), bbw.y()), bbw.z()) / 50;
 		skeleton_sampler.sample(step);
+		POINT* sample_points = point_provider_->add_mesh("Skeleton_samples");
+		auto& position = add_attribute<Vec3, PointVertex>(*sample_points, "position");
+		std::cout << "add samples MESH"<< std::endl;
 		std::vector<Vec3> enveloppe_points = skeleton_sampler.samples();
 
 		// Build bvh
@@ -3176,11 +3124,15 @@ private:
 		std::pair<uint32, Vec3> bvh_res;
 		for (Vec3 v : enveloppe_points)
 		{
+			PointVertex pv = add_vertex(*sample_points);
+			value<Vec3>(*sample_points, position, pv) = v;
 			surface_bvh->closest_point(v, &bvh_res);
 			Vec3 closest_point_position = bvh_res.second;
 			Scalar dist = (closest_point_position - v).norm();
 			max_dist_enveloppe_to_shape = std::max(max_dist_enveloppe_to_shape, dist);
 		}
+		point_provider_->emit_connectivity_changed(*sample_points);
+		point_provider_->emit_attribute_changed(*sample_points, position.get());
 		std::cout << "hausdorff distance shape to enveloppe:" << max_dist_shpae_to_enveloppe / dia_length * 100 << "%"
 				  << std::endl;
 		std::cout << "hausdorff distance enveloppe to shape:" << max_dist_enveloppe_to_shape / dia_length * 100 << "%"
@@ -3213,8 +3165,10 @@ private:
 		ClusterAxisParameter& p = cluster_axis_parameters_[selected_surface_mesh_];
 		auto& proj_matrix = view->projection_matrix();
 		auto& view_matrix = view->modelview_matrix();
-		if(p.draw_enveloppe)
+		if (p.draw_enveloppe)
+		{
 			p.skeleton_drawer_.draw(proj_matrix, view_matrix);
+		}
 		if (draw_enveloppe)
 			skeleton_drawer.draw(proj_matrix,view_matrix);
 	}
@@ -3548,8 +3502,10 @@ private :
 	double max_radius_ = std::numeric_limits<double>::min();
 	double min_angle_ = std::numeric_limits<double>::max();
 	double max_angle_ = std::numeric_limits<double>::min();
-
+	std::unique_ptr<cgogn::rendering::ShaderPointSprite::Param> param_point_sprite_;
+	cgogn::rendering::VBO vbo_samples_;
 	std::shared_ptr<boost::synapse::connection> timer_connection_;
+	cgogn::modeling::SkeletonSampler<Vec4, Vec3, Scalar> skeleton_sampler;
 	};
 
 } // namespace ui
