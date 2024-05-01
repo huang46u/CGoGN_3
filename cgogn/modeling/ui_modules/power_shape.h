@@ -534,6 +534,8 @@ private:
 		std::shared_ptr<PointAttribute<Scalar>> clusters_without_correction_radius_ = nullptr;
 		std::shared_ptr<PointAttribute<uint32>> clusters_cc_number_ = nullptr;
 
+		POINT* skeleton_samples_ = nullptr;
+		std::shared_ptr<PointAttribute<Vec3>> skeleton_samples_position_ = nullptr;
 		NONMANIFOLD* non_manifold_ = nullptr;
 		std::shared_ptr<NonManifoldAttribute<Vec3>> non_manifold_vertex_position_ = nullptr;
 		std::shared_ptr<NonManifoldAttribute<Scalar>> non_manifold_vertex_radius_ = nullptr;
@@ -1708,6 +1710,9 @@ private:
 		p.clusters_without_correction_radius_ =
 			get_or_add_attribute<Scalar, PointVertex>(*p.clusters_, "clusters_without_correction_radius");
 
+		p.skeleton_samples_ = point_provider_->add_mesh(point_provider_->mesh_name(*p.surface_) + "skeleton_samples");
+		p.skeleton_samples_position_ = get_or_add_attribute<Vec3, PointVertex>(*p.skeleton_samples_, "position");
+
 		p.non_manifold_ =
 			nonmanifold_provider_->add_mesh("skeleton" + std::to_string(nonmanifold_provider_->number_of_meshes()));
 		p.non_manifold_vertex_position_ = get_or_add_attribute<Vec3, NonManifoldVertex>(*p.non_manifold_, "position");
@@ -2844,6 +2849,14 @@ private:
 		Vec3 bbw = p.skeleton_sampler_.BBwidth();
 		float step = std::min(std::min(bbw.x(), bbw.y()), bbw.z()) / 200;
 		 p.skeleton_sampler_.sample(step);
+		clear(*p.skeleton_samples_);
+		for (Vec3 v: p.skeleton_sampler_.samples())
+		{
+			PointVertex pv = add_vertex(*p.skeleton_samples_);
+			value<Vec3>(*p.skeleton_samples_, p.skeleton_samples_position_, pv) = v;
+		}
+		point_provider_->emit_connectivity_changed(*p.skeleton_samples_);
+		point_provider_ ->emit_attribute_changed(*p.skeleton_samples_, p.skeleton_samples_position_.get());
 	}
 
 	void export_spheres_OBJ(ClusterAxisParameter& p, const std::string& directory)
