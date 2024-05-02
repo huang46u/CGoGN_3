@@ -32,7 +32,7 @@
 #include <cgogn/geometry/types/slab_quadric.h>
 #include <libacc/bvh_trees_spheres.h>
 #include <cgogn/modeling/skeleton_sampling.h>
-
+#include <cgogn/rendering/shaders/shader_point_sprite.h>
 #include <cgogn/io/point/point_import.h>
 #include <cgogn/geometry/algos/medial_axis.h>
 #include <cgogn/modeling/algos/decimation/SQEM_helper.h>
@@ -2519,7 +2519,7 @@ private:
 
 			return true;
 		});
-		if (p.auto_split_ && (p.total_error_diff_ / p.total_error_ < 5e-1))
+		if (p.auto_split_ && (p.total_error_diff_ / p.total_error_ < 5e-2))
 		{
 			std::vector<PointVertex> sorted_spheres;
 			MeshData<POINT>& md = point_provider_->mesh_data(*p.clusters_);
