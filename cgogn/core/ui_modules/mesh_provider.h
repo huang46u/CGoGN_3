@@ -638,12 +638,14 @@ protected:
 				{
 					if (ImGui::Button("Save", ImVec2(120, 0)))
 					{
+						auto destination = pfd::select_folder("Select location").result();
+						std::string fullpath = destination + "/" + filename;
 						if constexpr (mesh_traits<MESH>::dimension == 1)
-							save_graph_to_file(*selected_mesh, selected_vertex_position.get(), filetype, filename);
+							save_graph_to_file(*selected_mesh, selected_vertex_position.get(), filetype, fullpath);
 						if constexpr (mesh_traits<MESH>::dimension == 2)
-							save_surface_to_file(*selected_mesh, selected_vertex_position.get(), filetype, filename);
+							save_surface_to_file(*selected_mesh, selected_vertex_position.get(), filetype, fullpath);
 						if constexpr (mesh_traits<MESH>::dimension == 3)
-							save_volume_to_file(*selected_mesh, selected_vertex_position.get(), filetype, filename);
+							save_volume_to_file(*selected_mesh, selected_vertex_position.get(), filetype, fullpath);
 						close_popup = true;
 					}
 				}

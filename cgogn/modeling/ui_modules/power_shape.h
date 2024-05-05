@@ -550,7 +550,7 @@ private:
 		UpdateMethod update_method_ = SQEM;
 		SplitMethod split_method_ = SQEM_MIXED_DISTANCE;
 		InitMethod init_method_ = CONSTANT;
-		float energy_lambda_fitting = 0.009;
+		float energy_lambda_fitting = 0.2;
 		float partition_lambda = 0.2;
 		float energy_lambda_sqem = 1; 
 		float mean_update_curvature_weight_ = 0.2;
@@ -578,7 +578,7 @@ private:
 		bool slow_down_ = true;
 		bool auto_split_ = false;
 		bool auto_stop_ = false;
-
+		bool logging = false;
 		bool fuzzy_clustering_ = false;
 		bool connectivity_surgery = false;
 		bool compute_enveloppe_distance_ = false;
@@ -656,8 +656,9 @@ private:
 		}
 		return J;
 	 }*/
+	
 
-	 std::pair<Vec3, Scalar> SQEM_with_fitting(ClusterAxisParameter& p, PointVertex pv)
+	/* std::pair<Vec3, Scalar> SQEM_with_fitting(ClusterAxisParameter& p, PointVertex pv)
 	 {
 		
 		Vec3& center = value<Vec3>(*p.clusters_, p.clusters_position_, pv);
@@ -670,64 +671,10 @@ private:
 		uint32 idx = 0;
 		Vec4 s = Vec4(center[0], center[1], center[2], radius);
 		Scalar lambda = 1e-15;
-		Eigen::VectorXd last_delta_s;
+		Eigen::VectorXd delta_s;
+		Scalar cost;
+		Scalar last_cost;
 		for (int i = 0; i < 100; i++)
-		{
-			idx = 0;
-			for (SurfaceVertex v : clusters_surface_vertices_)
-			{
-				const Vec3& pos = value<Vec3>(*p.surface_, p.surface_vertex_position_, v);
-				Spherical_Quadric& q = value<Spherical_Quadric>(*p.surface_, p.surface_vertex_quadric_, v);
-				Vec4 ji = q.gradient(s);
-				J.row(idx) = ji.transpose() * p.energy_lambda_sqem;
-				b(idx) = -1.0 * q.eval(s) * p.energy_lambda_sqem;
-				++idx;
-				// distance energy
-				Vec3 d = pos - Vec3(s(0), s(1), s(2));
-				Scalar l = d.norm();
-				J.row(idx) = value<Scalar>(*p.surface_, p.surface_vertex_area_, v) * Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * p.energy_lambda_fitting;
-				b(idx) = -value<Scalar>(*p.surface_, p.surface_vertex_area_, v) * (l - s(3)) *
-						 p.energy_lambda_fitting; // scale the row by the update lambda
-				++idx;
-			}
-			Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J + I*lambda);
-			Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
-			s += delta_s ;
-			if (i > 0 )
-			{
-				if (delta_s.norm() < last_delta_s.norm())
-				{
-					lambda /= 9;
-				}
-				else
-				{
-					lambda *= 5;
-				}
-			}
-			//std::cout << "s: " << s.x() << ", " << s.y() << ", " << s.z() << ", " << s.w() << 
-				//"lambda: " << lambda
-				//<<std::endl;
-			if (delta_s.norm() < 1e-6)
-			{
-				break;
-			}
-		}
-		//std::cout << "-----------------" << std::endl;
-		return {Vec3(s.x(), s.y(), s.z()), s.w()};
-	 }
-	 /*std::pair<Vec3, Scalar> SQEM_with_fitting(ClusterAxisParameter& p, PointVertex pv)
-	 {
-
-		Vec3& center = value<Vec3>(*p.clusters_, p.clusters_position_, pv);
-		Scalar& radius = value<Scalar>(*p.clusters_, p.clusters_radius_, pv);
-		std::vector<SurfaceVertex> clusters_surface_vertices_ =
-			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
-		Eigen::MatrixXd J(2 * clusters_surface_vertices_.size(), 4);
-		Eigen::MatrixXd I = Eigen::MatrixXd::Identity(4, 4);
-		Eigen::VectorXd b(2 * clusters_surface_vertices_.size());
-		uint32 idx = 0;
-		Vec4 s = Vec4(center[0], center[1], center[2], radius);
-		for (int i = 0; i < 10; i++)
 		{
 			idx = 0;
 			for (SurfaceVertex v : clusters_surface_vertices_)
@@ -747,18 +694,98 @@ private:
 						 p.energy_lambda_fitting; // scale the row by the update lambda
 				++idx;
 			}
-			Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
-			Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
+			Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J / *+ I*lambda* /);
+			delta_s = solver.solve(J.transpose() * b);
 			s += delta_s;
-			//std::cout << "s: " << s.x() << ", " << s.y() << ", " << s.z() << ", " << s.w() << std::endl;
+			/ * cost = cost_function(p, Vec3(s.x(), s.y(), s.z()), s.w(), clusters_surface_vertices_,
+									 p.energy_lambda_sqem, p.energy_lambda_fitting);
+			if (i > 0 )
+			{
+				if (cost < last_cost)
+				{
+					lambda /= 9;
+				}
+				else
+				{
+					lambda *=11 ;
+				}
+				std::cout << "s: " << s.x() << ", " << s.y() << ", " << s.z() << ", " << s.w() << "lambda: " << lambda
+						  << std::endl;
+			
+			}
+			
+			last_cost = cost;* /
+			
+			 std::cout << "s: " << s.x() << ", " << s.y() << ", " << s.z() << ", " << s.w() << "lambda: " << lambda
+					  << std::endl;
 			if (delta_s.norm() < 1e-6)
 			{
 				break;
 			}
 		}
-		//std::cout << "-----------------" << std::endl;
+		std::cout << "-----------------" << std::endl;
 		return {Vec3(s.x(), s.y(), s.z()), s.w()};
 	 }*/
+	 std::pair<Vec3, Scalar> SQEM_with_fitting(ClusterAxisParameter& p, PointVertex pv)
+	 {
+
+		Vec3& center = value<Vec3>(*p.clusters_, p.clusters_position_, pv);
+		Scalar& radius = value<Scalar>(*p.clusters_, p.clusters_radius_, pv);
+		std::vector<SurfaceVertex> clusters_surface_vertices_ =
+			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
+		Eigen::MatrixXd J(2 * clusters_surface_vertices_.size(), 4);
+		
+		Eigen::MatrixXd I = Eigen::MatrixXd::Identity(4, 4);
+		Eigen::VectorXd b(2 * clusters_surface_vertices_.size());
+		uint32 idx = 0;
+		Vec4 s = Vec4(center[0], center[1], center[2], radius);
+		for (int i = 0; i < 100; i++)
+		{
+			J.setZero();
+			b.setZero();
+			idx = 0;
+			for (SurfaceVertex v : clusters_surface_vertices_)
+			{
+				const Vec3& pos = value<Vec3>(*p.surface_, p.surface_vertex_position_, v);
+				const Vec4 p4 = Vec4(pos.x(), pos.y(), pos.z(), 0.0);
+				const Scalar area = value<Scalar>(*p.surface_, p.surface_vertex_area_, v);
+				foreach_incident_face(*p.surface_, v, [&](SurfaceFace f) {
+					Vec3& n = value<Vec3>(*p.surface_, p.surface_face_normal_, f);
+					Vec4 n4 = Vec4(n.x(), n.y(), n.z(), 1.0);
+					Scalar a = value<Scalar>(*p.surface_, p.surface_face_area_, f);
+					J.row(idx) += (-n4) * sqrt(a / 3.0);
+					b(idx) += -((pos - Vec3(s(0), s(1), s(2))).dot(n)-s(3)) * sqrt(a / 3.0);
+					return true;
+				});
+				++idx;
+				// distance energy
+				Vec3 d = pos - Vec3(s(0), s(1), s(2));
+				Scalar l = d.norm();
+				J.row(idx) =
+					sqrt(area) * Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * p.energy_lambda_fitting;
+				b(idx) = -sqrt(area) * (l - s(3)) *
+						 p.energy_lambda_fitting; // scale the row by the update lambda
+				++idx;
+			}
+			Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
+			Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
+			s += delta_s;
+			if (p.logging)
+			{
+				std::cout << "s: " << s.x() << ", " << s.y() << ", " << s.z() << ", " << s.w() << std::endl;
+			}
+			if (delta_s.norm() < 1e-6)
+			{
+				break;
+			}
+		}
+		if (p.logging)
+		{
+			std::cout << "-----------------" << std::endl;
+		}
+	 
+		return {Vec3(s.x(), s.y(), s.z()), s.w()};
+	 }
 
 	 /*std::pair<Vec3, Scalar> Newton_method(ClusterAxisParameter& p, PointVertex pv)
 	 {
@@ -1768,8 +1795,6 @@ private:
 		p.clusters_adjacency_info_ = get_or_add_attribute<std::map<PointVertex, std::set<uint32>>, PointVertex>(
 			*p.clusters_, "clusters_adjacency_info");
 		p.selected_clusters_error_ = p.clusters_combined_error_.get();
-
-		
 		p.clusters_without_correction_position_ =
 			get_or_add_attribute<Vec3, PointVertex>(*p.clusters_, "clusters_without_correction_position");
 		p.clusters_without_correction_radius_ =
@@ -2133,13 +2158,14 @@ private:
 			Scalar distance_error = 0.0;
 			Scalar sqem_error = 0.0;
 			Scalar combined_error = 0.0;
+			Scalar cluster_area = 0.0;
 			for (SurfaceVertex sv : cluster)
 			{
 				Scalar dist = fabs(value<Scalar>(*p.surface_, p.surface_distance_to_cluster_, sv));
 				distance_error += dist;
 				sqem_error += value<Scalar>(*p.surface_, p.surface_sqem_error_, sv);
 				combined_error += value<Scalar>(*p.surface_, p.surface_mixed_distance_, sv);
-				
+				//cluster_area += value<Scalar>(*p.surface_, p.surface_vertex_area_, sv);
 				/*std::cout << "eulidean distance: " << dist
 						  << ", sqem distance: " << value<Scalar>(*p.surface_, p.surface_sqem_error_, sv)
 						  << ", combined distance: " << value<Scalar>(*p.surface_, p.surface_mixed_distance_, sv)
@@ -2149,12 +2175,11 @@ private:
 					(*p.clusters_max_vertex_)[v_index] = sv;
 					(*p.clusters_max_distance_)[v_index] = dist;
 				}
-				
 			}
 
-			(*p.clusters_sqem_error_)[v_index] = sqem_error;
-			(*p.clusters_combined_error_)[v_index] = combined_error;
-			(*p.clusters_distance_error_)[v_index] = distance_error;
+			(*p.clusters_sqem_error_)[v_index] = sqem_error;			/// cluster_area;
+			(*p.clusters_combined_error_)[v_index] = combined_error; // / cluster_area;
+			(*p.clusters_distance_error_)[v_index] = distance_error;	/// cluster_area;
 			return true;
 		});
 
@@ -2314,7 +2339,6 @@ private:
 			auto & neighbours = value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv);
 			for (auto& it : adjacency_info)
 			{
-				
 				PointVertex cluster = it.first;
 				if (neighbours.find(cluster) != neighbours.end())
 					continue;
@@ -2513,7 +2537,7 @@ private:
 			value<Scalar>(*p.clusters_, p.correction_error_, pv) = (c - last_coord).norm();
 			value<Vec3>(*p.clusters_, p.clusters_without_correction_position_, pv) = opti_coord;
 			value<Scalar>(*p.clusters_, p.clusters_without_correction_radius_, pv) = rad;
-
+			
 			value<Vec3>(*p.clusters_, p.clusters_position_, pv) = c;
 			value<Scalar>(*p.clusters_, p.clusters_radius_, pv) = r;
 
@@ -2527,6 +2551,7 @@ private:
 			sorted_spheres.reserve(nb_spheres);
 			foreach_cell(*p.clusters_, [&](PointVertex v) -> bool {
 				sorted_spheres.push_back(v);
+
 				return true;
 			});
 			std::sort(sorted_spheres.begin(), sorted_spheres.end(), [&](PointVertex a, PointVertex b) {
@@ -2541,7 +2566,8 @@ private:
 					split_one_cluster(p, sphere, false);
 					split_count++;
 				}
-				if (split_count > 10) {
+				if (split_count > 10)
+				{
 					break;
 				}
 				else
@@ -2550,6 +2576,7 @@ private:
 		}
 		compute_clusters(p);
 	}
+
 
 	void split(ClusterAxisParameter& p, PointVertex& candidate_cluster)
 	{
@@ -2690,10 +2717,8 @@ private:
 					std::this_thread::yield();
 				if (p.auto_stop_)
 				{
-					Scalar error_diff = fabs(p.total_error_ - p.last_total_error_);
-					p.last_total_error_ = p.total_error_;
 					auto [max_sphere, max_error] = max_error_sphere(p, p.selected_clusters_error_);
-					if (p.total_error_diff_ < 1e-7 && max_error < p.auto_split_threshold_)
+					if (p.total_error_diff_/p.total_error_ < 1e-3 && max_error < p.auto_split_threshold_)
 						p.stopping_ = true;
 				}
 
@@ -3118,7 +3143,6 @@ private:
 		auto& position = add_attribute<Vec3, PointVertex>(*sample_points, "position");
 		std::cout << "add samples MESH"<< std::endl;
 		std::vector<Vec3> enveloppe_points = skeleton_sampler.samples();
-
 		// Build bvh
 		auto surface_bvh = build_bvh(surface);
 		std::pair<uint32, Vec3> bvh_res;
@@ -3167,7 +3191,7 @@ private:
 		auto& view_matrix = view->modelview_matrix();
 		if (p.draw_enveloppe)
 		{
-			p.skeleton_drawer_.draw(proj_matrix, view_matrix);
+			p.skeleton_drawer_.draw(proj_matrix, view_matrix);					
 		}
 		if (draw_enveloppe)
 			skeleton_drawer.draw(proj_matrix,view_matrix);
@@ -3295,11 +3319,11 @@ private:
 				
 				ImGui::SliderInt("Update time", &(int)update_times, 1, 100);
 				ImGui::RadioButton("Sphere fitting", (int*)&p.update_method_, SPHERE_FITTING);
-				ImGui::DragFloat("Partition Lambda", &p.partition_lambda, 0.0001f, 0.f, 1.f, "%.4f"
+				ImGui::DragFloat("Partition Lambda", &p.partition_lambda, 0.0001f, 0.f, 10.f, "%.4f"
 								 );
-				ImGui::DragFloat("SQEM Energy Lambda", &p.energy_lambda_sqem, 0.0001f, 0.f, 1.f, "%.4f"
+				ImGui::DragFloat("SQEM Energy Lambda", &p.energy_lambda_sqem, 0.001f, 0.f, 1.f, "%.3f"
 								 );
-				ImGui::DragFloat("Fitting Energy Lambda", &p.energy_lambda_fitting, 0.0001f, 0.f, 1.f, "%.4f");
+				ImGui::DragFloat("Fitting Energy Lambda", &p.energy_lambda_fitting, 0.001f, 0.f, 10.f, "%.3f");
 				ImGui::RadioButton("SQEM", (int*)&p.update_method_, SQEM);
 				
 
@@ -3391,7 +3415,8 @@ private:
 				{
 					update_render_data(p);
 				}
-			
+				ImGui::Separator();
+				ImGui::Checkbox("Logging", &p.logging);
 				ImGui::Text("Total error: %.9f", p.total_error_);
 				ImGui::Text("Min error: %.9f", p.min_error_);
 				ImGui::Text("Max error: %.9f", p.max_error_);
