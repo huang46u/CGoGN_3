@@ -82,9 +82,9 @@ enum UpdateMethod
 
 enum SplitMethod
 {
-	SQEM_MIXED_DISTANCE,
+	SQEM_DISTANCE,
 	DISTANCE_POINT_SPHERE,
-	DISTANCE_TO_MEDIAL_AXIS,
+	SQEM_MIXED_DISTANCE,
 	HAUSDORFF_DISTANCE,
 };
 
@@ -548,16 +548,16 @@ private:
 		float init_cover_dist_ = 0.06;
 
 		UpdateMethod update_method_ = SQEM;
-		SplitMethod split_method_ = SQEM_MIXED_DISTANCE;
+		SplitMethod split_method_ = SQEM_DISTANCE;
 		InitMethod init_method_ = CONSTANT;
 		float energy_lambda_fitting = 0.2;
 		float partition_lambda = 0.2;
 		float energy_lambda_sqem = 1; 
 		float mean_update_curvature_weight_ = 0.2;
 		bool auto_split_outside_spheres_ = false;
-		float split_sqem_combined_threshold_ = 0.001f;
+		float split_sqem_threshold_ = 0.0f;
 		float split_distance_threshold_ = 0.01f;
-		float split_distance_to_medial_axis_threshold_ = 0.0001f;
+		float split_sqem_combined_threshold_ = 0.001f;
 		float split_hausdorff_distance_threshold_ = 0.0001f;
 		float fuzzy_distance_ = 0.001f;
 		Scalar total_error_ = 0.0;
@@ -568,6 +568,7 @@ private:
 		float init_factor_ = 0.8f;
 		float last_total_error_ = std::numeric_limits<Scalar>::max();
 		float auto_split_threshold_ = 0.15f;
+		uint32 vertex_count_ = 0;
 		Scalar hausdorff_distance_shape_to_enveloppe_ = 0.0;
 		Scalar hausdorff_distance_enveloppe_to_shape_ = 0.0;
 		Scalar huasdorff_distance_cluster_ = 0.0;
@@ -739,7 +740,7 @@ private:
 		Eigen::VectorXd b(2 * clusters_surface_vertices_.size());
 		uint32 idx = 0;
 		Vec4 s = Vec4(center[0], center[1], center[2], radius);
-		for (int i = 0; i < 100; i++)
+		for (int i = 0; i < 20; i++)
 		{
 			J.setZero();
 			b.setZero();
@@ -763,8 +764,7 @@ private:
 				Scalar l = d.norm();
 				J.row(idx) =
 					sqrt(area) * Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * p.energy_lambda_fitting;
-				b(idx) = -sqrt(area) * (l - s(3)) *
-						 p.energy_lambda_fitting; // scale the row by the update lambda
+				b(idx) = -sqrt(area) * (l - s(3)) * p.energy_lambda_fitting; // scale the row by the update lambda
 				++idx;
 			}
 			Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
@@ -2165,7 +2165,7 @@ private:
 				distance_error += dist;
 				sqem_error += value<Scalar>(*p.surface_, p.surface_sqem_error_, sv);
 				combined_error += value<Scalar>(*p.surface_, p.surface_mixed_distance_, sv);
-				//cluster_area += value<Scalar>(*p.surface_, p.surface_vertex_area_, sv);
+				cluster_area += value<Scalar>(*p.surface_, p.surface_vertex_area_, sv);
 				/*std::cout << "eulidean distance: " << dist
 						  << ", sqem distance: " << value<Scalar>(*p.surface_, p.surface_sqem_error_, sv)
 						  << ", combined distance: " << value<Scalar>(*p.surface_, p.surface_mixed_distance_, sv)
@@ -2177,9 +2177,9 @@ private:
 				}
 			}
 
-			(*p.clusters_sqem_error_)[v_index] = sqem_error;			/// cluster_area;
-			(*p.clusters_combined_error_)[v_index] = combined_error; // / cluster_area;
-			(*p.clusters_distance_error_)[v_index] = distance_error;	/// cluster_area;
+			(*p.clusters_sqem_error_)[v_index] = sqem_error/ cluster_area;
+			(*p.clusters_combined_error_)[v_index] = combined_error/ cluster_area;
+			(*p.clusters_distance_error_)[v_index] = distance_error/ cluster_area;
 			return true;
 		});
 
@@ -2540,10 +2540,10 @@ private:
 			
 			value<Vec3>(*p.clusters_, p.clusters_position_, pv) = c;
 			value<Scalar>(*p.clusters_, p.clusters_radius_, pv) = r;
-
+			
 			return true;
 		});
-		if (p.auto_split_ && (p.total_error_diff_ / p.total_error_ < 5e-2))
+		if (p.auto_split_ && (p.total_error_diff_ / p.total_error_ <1e-2))
 		{
 			std::vector<PointVertex> sorted_spheres;
 			MeshData<POINT>& md = point_provider_->mesh_data(*p.clusters_);
@@ -2561,17 +2561,17 @@ private:
 			for (PointVertex sphere : sorted_spheres)
 			{
 				Scalar error = value<Scalar>(*p.clusters_, p.selected_clusters_error_, sphere);
-				if (error > p.auto_split_threshold_)
+
+				if ((error > p.auto_split_threshold_) || (nb_cells<PointVertex>(*p.clusters_) < p.vertex_count_))
 				{
 					split_one_cluster(p, sphere, false);
 					split_count++;
 				}
-				if (split_count > 10)
+				if (split_count > 0.1 * nb_cells<PointVertex>(*p.clusters_))
 				{
 					break;
 				}
-				else
-					break;
+				
 			}
 		}
 		compute_clusters(p);
@@ -2650,14 +2650,14 @@ private:
 		// Test if the cluster can be split
 		switch (p.split_method_)
 		{
-		case SQEM_MIXED_DISTANCE:
-			threshold = p.split_sqem_combined_threshold_;
+		case SQEM_DISTANCE:
+			threshold = p.split_sqem_threshold_;
 			break;
 		case DISTANCE_POINT_SPHERE:
 			threshold = p.split_distance_threshold_;
 			break;
-		case DISTANCE_TO_MEDIAL_AXIS:
-			threshold = p.split_distance_to_medial_axis_threshold_;
+		case SQEM_MIXED_DISTANCE:
+			threshold = p.split_sqem_combined_threshold_;
 			break;
 		case HAUSDORFF_DISTANCE:
 			threshold = p.split_hausdorff_distance_threshold_;
@@ -2718,7 +2718,8 @@ private:
 				if (p.auto_stop_)
 				{
 					auto [max_sphere, max_error] = max_error_sphere(p, p.selected_clusters_error_);
-					if (p.total_error_diff_/p.total_error_ < 1e-3 && max_error < p.auto_split_threshold_)
+					if (p.total_error_diff_ / p.total_error_ < 1e-3 && max_error < p.auto_split_threshold_ &&
+						nb_cells<PointVertex>(*p.clusters_) == p.vertex_count_)
 						p.stopping_ = true;
 				}
 
@@ -2962,7 +2963,7 @@ private:
 		});
 		
 		Vec3 bbw = p.skeleton_sampler_.BBwidth();
-		float step = std::min(std::min(bbw.x(), bbw.y()), bbw.z()) / 200;
+		float step = std::min(std::min(bbw.x(), bbw.y()), bbw.z()) / 150;
 		 p.skeleton_sampler_.sample(step);
 		clear(*p.skeleton_samples_);
 		for (Vec3 v: p.skeleton_sampler_.samples())
@@ -3319,11 +3320,11 @@ private:
 				
 				ImGui::SliderInt("Update time", &(int)update_times, 1, 100);
 				ImGui::RadioButton("Sphere fitting", (int*)&p.update_method_, SPHERE_FITTING);
-				ImGui::DragFloat("Partition Lambda", &p.partition_lambda, 0.0001f, 0.f, 10.f, "%.4f"
+				ImGui::DragFloat("Partition Lambda", &p.partition_lambda, 0.001f, 0.f, 10.f, "%.3f"
 								 );
-				ImGui::DragFloat("SQEM Energy Lambda", &p.energy_lambda_sqem, 0.001f, 0.f, 1.f, "%.3f"
+				ImGui::DragFloat("SQEM Energy Lambda", &p.energy_lambda_sqem, 0.0001f, 0.f, 1.f, "%.4f"
 								 );
-				ImGui::DragFloat("Fitting Energy Lambda", &p.energy_lambda_fitting, 0.001f, 0.f, 10.f, "%.3f");
+				ImGui::DragFloat("Fitting Energy Lambda", &p.energy_lambda_fitting, 0.0001f, 0.f, 10.f, "%.4f");
 				ImGui::RadioButton("SQEM", (int*)&p.update_method_, SQEM);
 				
 
@@ -3360,7 +3361,15 @@ private:
 
 				ImGui::Checkbox("Auto split", &p.auto_split_);
 				ImGui::SliderFloat("Auto split threshold", &p.auto_split_threshold_, 0.0f,0.0001f, "%.9f", ImGuiSliderFlags_Logarithmic);
+				ImGui::SliderInt("Auto split number", &(int)p.vertex_count_, 1, 2000);
 				ImGui::Separator();
+
+				if (ImGui::RadioButton("SQEM distance     ", (int*)&p.split_method_, SQEM_DISTANCE))
+				{
+					set_selected_clusters_error(p, p.correction_error_.get());
+				}
+				ImGui::SameLine();
+				ImGui::DragFloat("SQEM threshold", &p.split_sqem_threshold_, 0.000001f, 0.0f, 0.1f, "%.6f");
 
 				if (ImGui::RadioButton("Distance               ", (int*)&p.split_method_, DISTANCE_POINT_SPHERE))
 				{
@@ -3375,16 +3384,8 @@ private:
 					set_selected_clusters_error(p, p.clusters_combined_error_.get());
 				}
 				ImGui::SameLine();
-				ImGui::DragFloat("SQEM threshold", &p.split_sqem_combined_threshold_, 0.0001f, 0.0f, 0.1f, "%.6f");
+				ImGui::DragFloat("Mixed SQEM threshold", &p.split_sqem_combined_threshold_, 0.0001f, 0.0f, 0.1f, "%.6f");
 				
-				if(ImGui::RadioButton("Correction distance     ", (int*)&p.split_method_, DISTANCE_TO_MEDIAL_AXIS))
-				{
-					set_selected_clusters_error(p, p.correction_error_.get());
-				}
-				ImGui::SameLine();
-				ImGui::DragFloat("Correction distance threshold", &p.split_distance_to_medial_axis_threshold_,
-								 0.000001f, 0.0f, 0.1f, "%.6f");
-
 				if(ImGui::RadioButton("Hausdorff distance ", (int*)&p.split_method_, HAUSDORFF_DISTANCE))
 				{
 					set_selected_clusters_error(p, p.clusters_max_distance_.get());
