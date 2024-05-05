@@ -2132,7 +2132,7 @@ private:
 			std::vector<SurfaceVertex> clusters_surface_vertices;
 			clusters_surface_vertices =
 				value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
-			if (clusters_surface_vertices.size() < 4)
+			if (clusters_surface_vertices.size() < 1)
 			{
 				const std::vector<SurfaceVertex>& cluster = value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
 				for (SurfaceVertex sv : cluster)
@@ -2719,7 +2719,7 @@ private:
 				{
 					auto [max_sphere, max_error] = max_error_sphere(p, p.selected_clusters_error_);
 					if (p.total_error_diff_ / p.total_error_ < 1e-3 && max_error < p.auto_split_threshold_ &&
-						nb_cells<PointVertex>(*p.clusters_) == p.vertex_count_)
+							nb_cells<PointVertex>(*p.clusters_)>= p.vertex_count_)
 						p.stopping_ = true;
 				}
 
