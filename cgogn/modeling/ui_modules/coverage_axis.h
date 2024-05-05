@@ -1069,9 +1069,9 @@ public:
 			std::cerr << "Error opening file" << std::endl;
 			return;
 		}
-		foreach_cell(*p.selected_inner_points, [&](PointVertex pv) {
-			Vec3 center = value<Vec3>(*p.selected_inner_points, p.selected_points_position_, pv);
-			Scalar radius = value<Scalar>(*p.selected_inner_points, p.selected_points_radius_, pv);
+		foreach_cell(*p.selected_points_, [&](PointVertex pv) {
+			Vec3 center = value<Vec3>(*p.selected_points_, p.selected_points_position_, pv);
+			Scalar radius = value<Scalar>(*p.selected_points_, p.selected_points_radius_, pv);
 			file << "v " << center.x() << " " << center.y() << " " << center.z() << " " << radius << std::endl;
 			return true;
 		});
@@ -1294,6 +1294,10 @@ protected:
 					if (ImGui::Button("Generate connectivity by Qmat"))
 					{
 						coverage_axis_connect_by_Qmat(c);
+					}
+					if (ImGui::Button("Export spheres"))
+					{
+						export_spheres_OBJ(c);
 					}
 				}
 			}
