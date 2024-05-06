@@ -713,7 +713,7 @@ public:
 		uint32 idx = 0;
 		for (auto& pos : p.sample_points)
 		{
-			foreach_cell(*p.candidate_points_, [&](PointVertex candidate) {
+			parallel_foreach_cell(*p.candidate_points_, [&](PointVertex candidate) {
 				Vec3 center = value<Vec3>(*p.candidate_points_, p.candidate_points_position_, candidate);
 				Scalar radius = value<Scalar>(*p.candidate_points_, p.candidate_points_radius_, candidate);
 				if (inside_sphere(pos, center, radius + p.dilation_factor))
@@ -896,6 +896,7 @@ public:
 
 	void coverage_axis_plus_plus(CoverageAxisParameter& p)
 	{
+		auto start = std::chrono::high_resolution_clock::now();
 		clear(*p.selected_points_);
 		compute_coverage_matrix(p);
 		p.selected_inner_points.clear();
@@ -937,6 +938,9 @@ public:
 											 max_score_vertex);
 			}
 		}
+		auto end = std::chrono::high_resolution_clock::now();
+		std::chrono::duration<double> elapsed_seconds = end - start;
+		std::cout << "time: " << elapsed_seconds.count() << "s\n";
 		point_provider_->emit_connectivity_changed(*p.selected_points_);
 		point_provider_->emit_attribute_changed(*p.selected_points_, p.selected_points_position_.get());
 		point_provider_->emit_attribute_changed(*p.selected_points_, p.selected_points_radius_.get());
@@ -1063,7 +1067,8 @@ public:
 	void export_spheres_OBJ(CoverageAxisParameter& p)
 	{
 		auto& mesh_name = surface_provider_->mesh_name(*p.surface_);
-		std::ofstream file(mesh_name + "_spheres.obj");
+		auto destination = pfd::select_folder("Select a file").result();
+		std::ofstream file(destination + "/"+ mesh_name + "_spheres.obj");
 		if (!file.is_open())
 		{
 			std::cerr << "Error opening file" << std::endl;
