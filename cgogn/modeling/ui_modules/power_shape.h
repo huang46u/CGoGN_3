@@ -2908,12 +2908,12 @@ private:
 		skeleton_drawer.clear();
 		skeleton_drawer.set_color({1.0, 1.0, 1.0, 0.5});
 		skeleton_drawer.set_subdiv(40);
-		parallel_foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
+		foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
 			skeleton_drawer.add_vertex(value<Vec3>(non_manifold, non_manifold_vertex_position, nv),
 										value<Scalar>(non_manifold, non_manifold_vertex_radius, nv));
 			return true;
 		});
-		parallel_foreach_cell(non_manifold, [&](NonManifoldEdge ne) {
+		foreach_cell(non_manifold, [&](NonManifoldEdge ne) {
 			auto& v_vec = incident_vertices(non_manifold, ne);
 			skeleton_drawer.add_edge(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
 									  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
@@ -2921,7 +2921,7 @@ private:
 									  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[1]));
 			return true;
 		});
-		parallel_foreach_cell(non_manifold, [&](NonManifoldFace nf) {
+		foreach_cell(non_manifold, [&](NonManifoldFace nf) {
 			auto& v_vec = incident_vertices(non_manifold, nf);
 			skeleton_drawer.add_triangle(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
 										  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
@@ -2938,12 +2938,12 @@ private:
 	{
 		p.skeleton_sampler_.clear();
 			
-		parallel_foreach_cell(*p.non_manifold_, [&](NonManifoldVertex nv) {
+		foreach_cell(*p.non_manifold_, [&](NonManifoldVertex nv) {
 			p.skeleton_sampler_.add_vertex(value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, nv),
 											value<Scalar>(*p.non_manifold_,p.non_manifold_vertex_radius_, nv));
 			return true;
 		});
-		parallel_foreach_cell(*p.non_manifold_, [&](NonManifoldEdge ne) {
+		foreach_cell(*p.non_manifold_, [&](NonManifoldEdge ne) {
 			auto& v_vec = incident_vertices(*p.non_manifold_, ne);
 			p.skeleton_sampler_.add_edge(value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, v_vec[0]),
 										 value<Scalar>(*p.non_manifold_, p.non_manifold_vertex_radius_, v_vec[0]),
@@ -2951,7 +2951,7 @@ private:
 										 value<Scalar>(*p.non_manifold_, p.non_manifold_vertex_radius_, v_vec[1]));
 			return true;
 		});
-		parallel_foreach_cell(*p.non_manifold_, [&](NonManifoldFace nf) {
+		foreach_cell(*p.non_manifold_, [&](NonManifoldFace nf) {
 			auto& v_vec = incident_vertices(*p.non_manifold_, nf);
 			p.skeleton_sampler_.add_triangle(value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, v_vec[0]),
 											 value<Scalar>(*p.non_manifold_, p.non_manifold_vertex_radius_, v_vec[0]),
@@ -3112,12 +3112,12 @@ private:
 		Scalar max_dist_enveloppe_to_shape = 0.0;
 		
 
-		parallel_foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
+		foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
 			skeleton_sampler.add_vertex(value<Vec3>(non_manifold, non_manifold_vertex_position, nv),
 										value<Scalar>(non_manifold, non_manifold_vertex_radius, nv));
 			return true;
 		});
-		parallel_foreach_cell(non_manifold, [&](NonManifoldEdge ne) {
+		foreach_cell(non_manifold, [&](NonManifoldEdge ne) {
 			auto& v_vec = incident_vertices(non_manifold, ne);
 			skeleton_sampler.add_edge(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
 									  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
@@ -3125,7 +3125,7 @@ private:
 									  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[1]));
 			return true;
 		});
-		parallel_foreach_cell(non_manifold, [&](NonManifoldFace nf) {
+		foreach_cell(non_manifold, [&](NonManifoldFace nf) {
 			auto& v_vec = incident_vertices(non_manifold, nf);
 			skeleton_sampler.add_triangle(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
 										  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
