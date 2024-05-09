@@ -312,9 +312,8 @@ struct SphereMeshConstructor
 
 	
 	SphereMeshConstructor(SURFACE& surface, NONMANIFOLD& m, std::shared_ptr<SAttribute<Vec3>>& vertex_position,
-						  std::shared_ptr<NAttribute<Vec4>>& sphere_info,
-						  std::shared_ptr<NAttribute<std::vector<SVertex>>>& clusters_vertices)
-		: surface_(surface), m_(m), sphere_info_(sphere_info), vertex_position_(vertex_position), clusters_vertices_(clusters_vertices)
+						  std::shared_ptr<NAttribute<Vec4>>& sphere_info)
+		: surface_(surface), m_(m), sphere_info_(sphere_info), vertex_position_(vertex_position)
 	{
 		cones_ = add_attribute<Cone, NEdge>(m_, "sphere_cone");
 		slabs_ = add_attribute<std::vector<Triangle>, NFace>(m_, "slab_triangles");
@@ -332,7 +331,7 @@ struct SphereMeshConstructor
 
 	void construct_sphere_mesh()
 	{
-		parallel_foreach_cell(m_, [&](NEdge e) -> bool {
+		foreach_cell(m_, [&](NEdge e) -> bool {
 			auto iv = incident_vertices(m_, e);
 			Vec4 p1 = value<Vec4>(m_, sphere_info_, iv[0]);
 			Vec4 p2 = value<Vec4>(m_, sphere_info_, iv[1]);
@@ -343,7 +342,7 @@ struct SphereMeshConstructor
 			}
 			return true;
 		});
-		parallel_foreach_cell(m_, [&](NFace f) -> bool {
+		foreach_cell(m_, [&](NFace f) -> bool {
 			auto ifv = incident_vertices(m_, f);
 			Vec4 p1 = value<Vec4>(m_, sphere_info_, ifv[0]);
 			Vec4 p2 = value<Vec4>(m_, sphere_info_, ifv[1]);
@@ -451,7 +450,7 @@ struct SphereMeshConstructor
 		}
 		return false;
 	}
-	Scalar min_distance_to_enveloppe(NVertex nv, SVertex sv)
+	Scalar min_distance_to_enveloppe(SVertex sv)
 	{
 		Scalar min_dist = std::numeric_limits<Scalar>::max();
 		foreach_cell(m_, [&](NFace f) { 

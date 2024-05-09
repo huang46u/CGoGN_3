@@ -3000,17 +3000,12 @@ private:
 		samples_skeleton(p);
 		// Compute the distance from the shape to the enveloppe
 		modeling::SphereMeshConstructor<SURFACE, NONMANIFOLD> sphere_mesh_constructor(
-			*p.surface_, *p.non_manifold_, p.surface_vertex_position_, p.non_manifold_sphere_info_,
-			p.non_manifold_cluster_vertices_);
+			*p.surface_, *p.non_manifold_, p.surface_vertex_position_, p.non_manifold_sphere_info_);
 		Scalar max_dist = 0.0;
-		foreach_cell(*p.non_manifold_, [&](NonManifoldVertex nv) {
-			for (SurfaceVertex sv :
-				 value<std::vector<SurfaceVertex>>(*p.non_manifold_, p.non_manifold_cluster_vertices_, nv))
-			{
-				Scalar min_dist = sphere_mesh_constructor.min_distance_to_enveloppe(nv, sv);
-				value<Scalar>(*p.surface_, p.surface_distance_to_enveloppe, sv) = min_dist;
-				max_dist = std::max(max_dist, min_dist);
-			}
+		foreach_cell(*p.surface_, [&](SurfaceVertex sv) {
+			Scalar min_dist = sphere_mesh_constructor.min_distance_to_enveloppe(sv);
+			value<Scalar>(*p.surface_, p.surface_distance_to_enveloppe, sv) = min_dist;
+			max_dist = std::max(max_dist, min_dist);
 			return true;
 		});
 		p.hausdorff_distance_shape_to_enveloppe_ = max_dist;
@@ -3067,28 +3062,8 @@ private:
 		auto& non_manifold_vertex_position = get_or_add_attribute<Vec3, NonManifoldVertex>(non_manifold, "position");
 		auto& non_manifold_vertex_radius = get_or_add_attribute<Scalar, NonManifoldVertex>(non_manifold, "radius");
 		auto& non_manifold_sphere_info =
-			get_or_add_attribute<Vec4, NonManifoldVertex>(non_manifold, "non_manifold_sphere_info");
-		auto& nonmanifold_cluster_vertices = get_or_add_attribute<std::vector<SurfaceVertex>, NonManifoldVertex>(
-			non_manifold, "nonmanifold_cluster_vertices");
-		foreach_cell(surface, [&](SurfaceVertex sv) {
-			Scalar min_dist = std::numeric_limits<Scalar>::max();
-			Vec3& pos = value<Vec3>(surface, surface_vertex_position, sv);
-			NonManifoldVertex non_manifold_vertex;
-			foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
-				Vec3 center = value<Vec3>(non_manifold, non_manifold_vertex_position, nv);
-				Scalar radius = value<Scalar>(non_manifold, non_manifold_vertex_radius, nv);
-				Scalar dist = (center - pos).norm() - radius;
-				if (dist < min_dist)
-				{
-					min_dist = dist;
-					non_manifold_vertex = nv;
-				}
-				return true;
-			});
-			value<std::vector<SurfaceVertex>>(non_manifold, nonmanifold_cluster_vertices, non_manifold_vertex)
-				.push_back(sv);
-			return true;
-		});
+			add_attribute<Vec4, NonManifoldVertex>(non_manifold, "non_manifold_sphere_info");
+		
 		foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
 			Vec3 center = value<Vec3>(non_manifold, non_manifold_vertex_position, nv);
 			Scalar radius = value<Scalar>(non_manifold, non_manifold_vertex_radius, nv);
@@ -3098,19 +3073,17 @@ private:
 
 		// Compute the distance from the enveloppe to the shape
 		modeling::SphereMeshConstructor<SURFACE, NONMANIFOLD> sphere_mesh_constructor(
-			surface, non_manifold, surface_vertex_position, non_manifold_sphere_info, nonmanifold_cluster_vertices);
+			surface, non_manifold, surface_vertex_position, non_manifold_sphere_info);
 		Scalar max_dist_shpae_to_enveloppe = 0.0;
-		foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
-			for (SurfaceVertex sv : value<std::vector<SurfaceVertex>>(non_manifold, nonmanifold_cluster_vertices, nv))
-			{
-				Scalar min_dist = sphere_mesh_constructor.min_distance_to_enveloppe(nv, sv);
-				max_dist_shpae_to_enveloppe = std::max(max_dist_shpae_to_enveloppe, min_dist);
-			}
+		foreach_cell(surface, [&](SurfaceVertex sv) {
+			Scalar min_dist = sphere_mesh_constructor.min_distance_to_enveloppe(sv);
+			max_dist_shpae_to_enveloppe = std::max(max_dist_shpae_to_enveloppe, min_dist);
 			return true;
 		});
 
+
 		Scalar max_dist_enveloppe_to_shape = 0.0;
-		
+		skeleton_sampler.clear();
 
 		foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
 			skeleton_sampler.add_vertex(value<Vec3>(non_manifold, non_manifold_vertex_position, nv),
@@ -3137,11 +3110,10 @@ private:
 		});
 
 		Vec3 bbw = skeleton_sampler.BBwidth();
-		Scalar dia_length = bbw.norm();
-		float step = std::min(std::min(bbw.x(), bbw.y()), bbw.z()) / 50;
+		//Scalar dia_length = bbw.norm();
+		float step = std::min(std::min(bbw.x(), bbw.y()), bbw.z()) / 150;
 		skeleton_sampler.sample(step);
-		POINT* sample_points = point_provider_->add_mesh("Skeleton_samples");
-		auto& position = add_attribute<Vec3, PointVertex>(*sample_points, "position");
+
 		std::cout << "add samples MESH"<< std::endl;
 		std::vector<Vec3> enveloppe_points = skeleton_sampler.samples();
 		// Build bvh
@@ -3149,20 +3121,21 @@ private:
 		std::pair<uint32, Vec3> bvh_res;
 		for (Vec3 v : enveloppe_points)
 		{
-			PointVertex pv = add_vertex(*sample_points);
-			value<Vec3>(*sample_points, position, pv) = v;
+			
 			surface_bvh->closest_point(v, &bvh_res);
 			Vec3 closest_point_position = bvh_res.second;
 			Scalar dist = (closest_point_position - v).norm();
 			max_dist_enveloppe_to_shape = std::max(max_dist_enveloppe_to_shape, dist);
 		}
-		point_provider_->emit_connectivity_changed(*sample_points);
-		point_provider_->emit_attribute_changed(*sample_points, position.get());
+		
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(surface);
+		Scalar dia_length = md.diangonal_length();
 		std::cout << "hausdorff distance shape to enveloppe:" << max_dist_shpae_to_enveloppe / dia_length * 100 << "%"
 				  << std::endl;
 		std::cout << "hausdorff distance enveloppe to shape:" << max_dist_enveloppe_to_shape / dia_length * 100 << "%"
 				  << std::endl;
 		delete surface_bvh;
+		remove_attribute<NonManifoldVertex>(non_manifold, non_manifold_sphere_info);
 	}
 	void init_delaunay(SURFACE& surface)
 	{

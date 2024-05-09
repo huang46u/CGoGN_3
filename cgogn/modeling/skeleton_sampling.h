@@ -51,6 +51,10 @@ public:
 		edges_.clear();
 		triangles_.clear();
 		samples_.clear();
+		bb_min_ = Vec3(std::numeric_limits<SCALAR>::max(), std::numeric_limits<SCALAR>::max(),
+					   std::numeric_limits<SCALAR>::max());
+		bb_max_ = Vec3(std::numeric_limits<SCALAR>::min(), std::numeric_limits<SCALAR>::min(),
+					   std::numeric_limits<SCALAR>::min());
 	}
 
 	void add_vertex(const VEC4& v)

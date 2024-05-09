@@ -79,7 +79,7 @@ bool InsideTriangle(const Vec3& p, const Vec3& v0, const Vec3& v1, const Vec3& v
 	else
 		return false;
 }
-const Scalar denoise_preserve = 30.0 * M_PI / 180.0;
+const Scalar denoise_preserve = 20.0 * M_PI / 180.0;
 const Scalar denoise_planar = 32.0 * M_PI / 180.0;
 const Scalar delta_convergence = 1e-5;
 const uint32 iteration_limit = 30;
@@ -100,11 +100,12 @@ std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_cent
 	acc::Ray<Vec3> ray{p, -n, 1e-10, acc::inf};
 	acc::BVHTree<uint32, Vec3>::Hit h1;
 	acc::BVHTree<uint32, Vec3>::Hit h2;
+	Vec3 ip;
 	if (surface_bvh->intersect(ray, &h1))
 	{
 		Face f = bvh_faces[h1.idx];
 		std::vector<Vertex> vertices = incident_vertices(m, f);
-		Vec3 ip = h1.bcoords[0] * value<Vec3>(m, vertex_position, vertices[0]) +
+		ip = h1.bcoords[0] * value<Vec3>(m, vertex_position, vertices[0]) +
 				  h1.bcoords[1] * value<Vec3>(m, vertex_position, vertices[1]) +
 				  h1.bcoords[2] * value<Vec3>(m, vertex_position, vertices[2]);
 		r = (p - ip).norm() * 0.75;
@@ -125,7 +126,7 @@ std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_cent
 	while (true)
 	{
 		// Find closest point to c
-		Vertex q_next_v;
+		/* Vertex q_next_v;
 		Vec3 q_next;
 		Scalar d = std::numeric_limits<Scalar>::max();
 		std::pair<uint32, Scalar> k_res;
@@ -155,18 +156,19 @@ std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_cent
 				
 				return true;
 			});
+		}*/
+		std::pair<uint32, Scalar> k_res;
+		if (!surface_kdt->find_nn(c, &k_res))
+		{
+			std::cout << "closest point not found !!!";
+			return {Vec3(0, 0, 0), 0, Vertex()};
 		}
-		/*const Vec3& q_next = surface_kdt->vertex(k_res.first);
+		const Vec3& q_next = surface_kdt->vertex(k_res.first);
 		Scalar d = k_res.second;
-		Vertex q_next_v = kdt_vertices[k_res.first];*/
+		Vertex q_next_v = kdt_vertices[k_res.first];
+	
 
-		 /* std::pair<uint32, Vec3> cp_res;
-		 surface_bvh->closest_point(c, &cp_res);
-		 Vec3 q_next = cp_res.second;
-		 Scalar d = (q_next - c).norm();
-		 Vertex q_next_v;
-
-		ray = acc::Ray<Vec3>{c, q_next - c, 1e-10, acc::inf};
+		/* ray = acc::Ray<Vec3>{c, q_next - c, 1e-10, acc::inf};
 		 if(surface_bvh->intersect(ray, &h2)){
 			Face f = bvh_faces[h2.idx];
 			std::vector<Vertex> vertices = incident_vertices(m, f);
