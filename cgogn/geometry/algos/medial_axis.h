@@ -156,19 +156,18 @@ std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_cent
 				
 				return true;
 			});
-		}*/
-		std::pair<uint32, Scalar> k_res;
-		if (!surface_kdt->find_nn(c, &k_res))
-		{
-			std::cout << "closest point not found !!!";
-			return {Vec3(0, 0, 0), 0, Vertex()};
 		}
-		const Vec3& q_next = surface_kdt->vertex(k_res.first);
+		/*const Vec3& q_next = surface_kdt->vertex(k_res.first);
 		Scalar d = k_res.second;
-		Vertex q_next_v = kdt_vertices[k_res.first];
-	
+		Vertex q_next_v = kdt_vertices[k_res.first];*/
 
-		/* ray = acc::Ray<Vec3>{c, q_next - c, 1e-10, acc::inf};
+		 /* std::pair<uint32, Vec3> cp_res;
+		 surface_bvh->closest_point(c, &cp_res);
+		 Vec3 q_next = cp_res.second;
+		 Scalar d = (q_next - c).norm();
+		 Vertex q_next_v;
+
+		ray = acc::Ray<Vec3>{c, q_next - c, 1e-10, acc::inf};
 		 if(surface_bvh->intersect(ray, &h2)){
 			Face f = bvh_faces[h2.idx];
 			std::vector<Vertex> vertices = incident_vertices(m, f);
@@ -187,6 +186,16 @@ std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_cent
 				 Vec3(0, 0, 0), 0, Vertex()
 			 };
 		 }*/
+
+		std::pair<uint32, Scalar> k_res;
+		if (!surface_kdt->find_nn(c, &k_res))
+		{
+			std::cout << "closest point not found !!!";
+			return {Vec3(0, 0, 0), 0, Vertex()};
+		}
+		const Vec3& q_next = surface_kdt->vertex(k_res.first);
+		Scalar d = k_res.second;
+		Vertex q_next_v = kdt_vertices[k_res.first];
 		// If the closest point is (almost) the same as the previous one, or if the ball no longer shrinks, we stop
 		if ((d >= r - delta_convergence) || (q_next - q).norm() < delta_convergence)
 		{

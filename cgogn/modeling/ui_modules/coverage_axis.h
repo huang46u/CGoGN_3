@@ -1039,12 +1039,12 @@ public:
 		skeleton_drawer.clear();
 		skeleton_drawer.set_color({1.0, 1.0, 1.0, 0.5});
 		skeleton_drawer.set_subdiv(40);
-		parallel_foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
+		foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
 			skeleton_drawer.add_vertex(value<Vec3>(non_manifold, non_manifold_vertex_position, nv),
 									   value<Scalar>(non_manifold, non_manifold_vertex_radius, nv));
 			return true;
 		});
-		parallel_foreach_cell(non_manifold, [&](NonManifoldEdge ne) {
+		foreach_cell(non_manifold, [&](NonManifoldEdge ne) {
 			auto& v_vec = incident_vertices(non_manifold, ne);
 			skeleton_drawer.add_edge(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
 									 value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
@@ -1052,7 +1052,7 @@ public:
 									 value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[1]));
 			return true;
 		});
-		parallel_foreach_cell(non_manifold, [&](NonManifoldFace nf) {
+		foreach_cell(non_manifold, [&](NonManifoldFace nf) {
 			auto& v_vec = incident_vertices(non_manifold, nf);
 			skeleton_drawer.add_triangle(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
 										 value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
@@ -1169,12 +1169,12 @@ public:
 		Scalar max_dist_enveloppe_to_shape = 0.0;
 		cgogn::modeling::SkeletonSampler<Vec4, Vec3, Scalar> skeleton_sampler;
 
-		parallel_foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
+		foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
 			skeleton_sampler.add_vertex(value<Vec3>(non_manifold, non_manifold_vertex_position, nv),
 										value<Scalar>(non_manifold, non_manifold_vertex_radius, nv));
 			return true;
 		});
-		parallel_foreach_cell(non_manifold, [&](NonManifoldEdge ne) {
+		foreach_cell(non_manifold, [&](NonManifoldEdge ne) {
 			auto& v_vec = incident_vertices(non_manifold, ne);
 			skeleton_sampler.add_edge(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
 									  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
@@ -1182,7 +1182,7 @@ public:
 									  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[1]));
 			return true;
 		});
-		parallel_foreach_cell(non_manifold, [&](NonManifoldFace nf) {
+		foreach_cell(non_manifold, [&](NonManifoldFace nf) {
 			auto& v_vec = incident_vertices(non_manifold, nf);
 			skeleton_sampler.add_triangle(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
 										  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
