@@ -201,7 +201,7 @@ std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_cent
 		{
 			if (j == 0)
 			{
-				std::cout << "the closest point is (almost) the same as the previous one, or if the ball no longer shrinks, we stop!!!"<<std::endl;
+				//std::cout << "the closest point is (almost) the same as the previous one, or if the ball no longer shrinks, we stop!!!"<<std::endl;
 				q_v = q_next_v;
 			}
 			break;

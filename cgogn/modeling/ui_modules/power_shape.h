@@ -85,6 +85,12 @@ enum AutoSplitMode
 	MAX_NB_SPHERES,
 	ERROR_THRESHOLD
 };
+enum CorrectionMode : uint32
+{
+	NO_CORRECTION = 0,
+	SPHERE_CORRECTION_AT_EACH_STEP,
+	SPHERE_CORRECTION_BEFORE_SPLIT
+};
 
 
 template <typename POINT, typename SURFACE, typename NONMANIFOLD>
@@ -533,7 +539,8 @@ private:
 	
 		InitMethod init_method_ = CONSTANT;
 		AutoSplitMode auto_split_mode_ = MAX_NB_SPHERES;
-		float energy_lambda_fitting = 0.2;
+		CorrectionMode correction_mode_ = SPHERE_CORRECTION_AT_EACH_STEP;
+		float energy_lambda_fitting = 0.5;
 		float partition_lambda = 0.2;
 		float energy_lambda_sqem = 1; 
 
@@ -543,7 +550,7 @@ private:
 		Scalar min_error_ = 0.0;
 		Scalar max_error_ = 0.0;
 		Scalar total_error_diff_ = 0;
-		float init_distance_ = 0.1f;
+		float init_distance_ = 5.0f;
 		float init_factor_ = 0.8f;
 		float last_total_error_ = 0;
 		float auto_split_threshold_ = 0.15f;
@@ -556,11 +563,11 @@ private:
 		std::mutex mutex_;
 		bool running_ = false;
 		bool stopping_ = false;
-		bool slow_down_ = true;
-		bool auto_split_ = false;
-		bool auto_stop_ = false;
+		bool slow_down_ = false;
+		bool auto_split_ = true;
+		bool auto_stop_ = true;
 		bool logging = false;
-	
+
 		bool connectivity_surgery = false;
 		bool compute_enveloppe_distance_ = false;
 		Scalar dilation_factor = 0.02;
@@ -1712,14 +1719,14 @@ private:
 			}
 			return true;
 		});
-		std::cout << "finish pushing spheres" << std::endl;
+		//std::cout << "finish pushing spheres" << std::endl;
 
 		CellMarker<SURFACE, SurfaceVertex> bfs_marker(*p.surface_);
 		bfs_marker.unmark_all();
 		std::queue<SurfaceVertex> vertex_queue;
 		//Start from the biggest sphere, affect the surface points to the sphere if the distance 
 		// between surface point and sphere is less than threshold
-		std::cout << "start BFS " << std::endl;
+		//std::cout << "start BFS " << std::endl;
 		while (sphere_queue.size() > 0)
 		{
 			uint32 size = sphere_queue.size();
@@ -1908,7 +1915,7 @@ private:
 				const std::vector<SurfaceVertex>& cluster = value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv);
 				for (SurfaceVertex sv : cluster)
 					value<PointVertex>(*p.surface_, p.surface_cluster_info_, sv) = PointVertex();
-				std::cout << "delete cluster:" << index_of(*p.clusters_, pv) << std::endl;
+				//std::cout << "delete cluster:" << index_of(*p.clusters_, pv) << std::endl;
 				remove_vertex(*p.clusters_, pv);
 				p.nb_spheres_--;
 			}
@@ -2020,6 +2027,38 @@ private:
 		return Vec4(1.0, 0.0, 0.0, 0.5);
 	}
 
+	void correct_clusters(ClusterAxisParameter& p)
+	{
+		parallel_foreach_cell(*p.clusters_, [&](PointVertex pv) {
+			uint32 p_index = index_of(*p.clusters_, pv);
+			Vec3 pos = (*p.clusters_position_)[p_index];
+			Scalar radius = (*p.clusters_radius_)[p_index];
+			Vec3 last_coord = pos;
+			std::pair<uint32, Vec3> bvh_res;
+			p.surface_bvh_->closest_point(pos, &bvh_res);
+			Vec3 closest_point_position = bvh_res.second;
+			Vec3 closest_point_dir = (closest_point_position - pos).normalized();
+			const Vec3& closest_face_normal =
+				value<Vec3>(*p.surface_, p.surface_face_normal_, p.surface_bvh_faces_[bvh_res.first]);
+
+			if (!inside(*(p.inside_tester_.get()), K::Point_3(pos.x(), pos.y(), pos.z())))
+			{
+				closest_point_dir = -closest_point_dir;
+			}
+
+			auto [c, r, v2] = geometry::shrinking_ball_center(
+				*p.surface_, closest_point_position, closest_point_dir, p.surface_vertex_position_.get(),
+				p.surface_bvh_.get(), p.surface_bvh_faces_, p.surface_kdt_.get(), p.surface_kdt_vertices_);
+			(*p.clusters_without_correction_position_)[p_index] = pos;
+			(*p.clusters_without_correction_radius_)[p_index] = radius;
+			(*p.clusters_position_)[p_index] = c;
+			(*p.clusters_radius_)[p_index] = r;
+			(*p.clusters_do_not_split_)[p_index] = false;
+			
+			return true;
+		});
+	}
+
 	void update_clusters(ClusterAxisParameter& p)
 	{	
 		assign_cluster(p);
@@ -2031,31 +2070,35 @@ private:
 		parallel_foreach_cell(*p.clusters_, [&](PointVertex pv) {
 			uint32 p_index = index_of(*p.clusters_, pv);
 			auto [opti_coord, rad] = SQEM_with_fitting(p, pv);
-			
-			Vec3 last_coord = opti_coord;
-			std::pair<uint32, Vec3> bvh_res;
-			p.surface_bvh_->closest_point(opti_coord, &bvh_res);
-			Vec3 closest_point_position = bvh_res.second;
-			Vec3 closest_point_dir = (closest_point_position - opti_coord).normalized();
-			const Vec3& closest_face_normal =
-				value<Vec3>(*p.surface_, p.surface_face_normal_, p.surface_bvh_faces_[bvh_res.first]);
-			
-			if (!inside(*(p.inside_tester_.get()), K::Point_3(opti_coord.x(), opti_coord.y(), opti_coord.z())))
+			if (p.correction_mode_ == SPHERE_CORRECTION_AT_EACH_STEP)
 			{
-				closest_point_dir = -closest_point_dir;
-			}
+				Vec3 last_coord = opti_coord;
+				std::pair<uint32, Vec3> bvh_res;
+				p.surface_bvh_->closest_point(opti_coord, &bvh_res);
+				Vec3 closest_point_position = bvh_res.second;
+				Vec3 closest_point_dir = (closest_point_position - opti_coord).normalized();
+				const Vec3& closest_face_normal =
+					value<Vec3>(*p.surface_, p.surface_face_normal_, p.surface_bvh_faces_[bvh_res.first]);
 
-			auto [c, r, v2] = geometry::shrinking_ball_center(
-				*p.surface_, closest_point_position, closest_point_dir, p.surface_vertex_position_.get(),
-				p.surface_bvh_.get(), p.surface_bvh_faces_, p.surface_kdt_.get(), p.surface_kdt_vertices_);
-			(*p.clusters_without_correction_position_)[p_index] = opti_coord;
-			(*p.clusters_without_correction_radius_)[p_index] = rad;
+				if (!inside(*(p.inside_tester_.get()), K::Point_3(opti_coord.x(), opti_coord.y(), opti_coord.z())))
+				{
+					closest_point_dir = -closest_point_dir;
+				}
 			
-			(*p.clusters_position_)[p_index] = c;
-			(*p.clusters_radius_)[p_index] = r;
+				auto [c, r, v2] = geometry::shrinking_ball_center(
+					*p.surface_, closest_point_position, closest_point_dir, p.surface_vertex_position_.get(),
+					p.surface_bvh_.get(), p.surface_bvh_faces_, p.surface_kdt_.get(), p.surface_kdt_vertices_);
+				(*p.clusters_without_correction_position_)[p_index] = opti_coord;
+				(*p.clusters_without_correction_radius_)[p_index] = rad;
+				opti_coord = c;
+				rad = r;
+			}
+			(*p.clusters_position_)[p_index] = opti_coord;
+			(*p.clusters_radius_)[p_index] = rad;
 			(*p.clusters_do_not_split_)[p_index] = false;
 			return true;
 		});
+		update_clusters_error(p); // compute spheres error 
 		if (p.auto_split_ && (p.total_error_diff_ < 1e-5 || p.iteration_count_ % 5== 0))
 		{
 			switch (p.auto_split_mode_)
@@ -2063,7 +2106,11 @@ private:
 			case ERROR_THRESHOLD : {
 				if (p.max_error_ > p.auto_split_threshold_)
 				{
-					update_clusters_error(p);	 // compute spheres error and neigbors
+					if (p.correction_mode_ == SPHERE_CORRECTION_BEFORE_SPLIT)
+					{
+						correct_clusters(p);
+						update_clusters_error(p);
+					}
 					update_clusters_neighbor(p); // only when needed for a possible split
 					std::vector<PointVertex> sorted_spheres;
 					MeshData<POINT>& md = point_provider_->mesh_data(*p.clusters_);
@@ -2099,7 +2146,11 @@ private:
 			case MAX_NB_SPHERES: {
 				if (p.nb_spheres_ < p.auto_split_max_nb_spheres_)
 				{
-					update_clusters_error(p);	 // compute spheres error and neigbors
+					if (p.correction_mode_ == SPHERE_CORRECTION_BEFORE_SPLIT)
+					{
+						correct_clusters(p);
+						update_clusters_error(p);
+					}
 					update_clusters_neighbor(p); // only when needed for a possible split
 					std::vector<PointVertex> sorted_spheres;
 					MeshData<POINT>& md = point_provider_->mesh_data(*p.clusters_);
@@ -2155,24 +2206,6 @@ private:
 
 	}
 
-
-	std::pair<PointVertex, Scalar> max_error_sphere(ClusterAxisParameter& p, PointAttribute<Scalar>* attribute)
-	{
-		// find sphere with maximal error according to the selected error attribute
-		PointVertex max_sphere;
-		Scalar max_error = 0.0;
-		foreach_cell(*p.clusters_, [&](PointVertex v) -> bool {
-			Scalar error = value<Scalar>(*p.clusters_, attribute, v);
-			if (error > max_error)
-			{
-				max_error = error;
-				max_sphere = v;
-			}
-			return true;
-		});
-
-		return {max_sphere, max_error};
-	}
 	void remove_one_cluster(ClusterAxisParameter& p, PointVertex v)
 	{
 		const std::vector<SurfaceVertex>& clusters_vertices = value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, v);
@@ -2279,6 +2312,10 @@ private:
 
 				if (p.stopping_)
 				{
+					if (p.correction_mode_ != SPHERE_CORRECTION_AT_EACH_STEP)
+					{
+						correct_clusters(p);
+					}
 					p.running_ = false;
 					p.stopping_ = false;
 					
@@ -2342,7 +2379,27 @@ private:
 		}
 	}
 
-	
+	/*void script_experiments(ClusterAxisParameter& p)
+	{
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(*p.surface_);
+		Scalar dia_len = md.diangonal_length();
+		p.init_distance_ = 5.0f;
+		for (uint32 idx = 0; idx < 3; idx++)
+		{
+			p.auto_split_ = true;
+			p.auto_stop_ = true;
+			p.slow_down_ = false;
+			p.correction_mode_ = (CorrectionMode)idx;
+			initialise_cluster(p);
+			start_clusters_update(p);
+			
+			compute_hausdorff_distance(p);
+			std::cout << "One sided hausdorff distance shape to enveloppe: "
+					  << p.hausdorff_distance_shape_to_enveloppe_ / dia_len * 100 << "%" << std::endl;
+			std::cout << "One sided hausdorff distance enveloppe to shape: "
+					  << p.hausdorff_distance_enveloppe_to_shape_ / dia_len * 100 << "%" << std::endl;
+		}
+	}*/
 
 	void compute_skeleton(ClusterAxisParameter& p)
 	{
@@ -2550,6 +2607,8 @@ private:
 	
 	void compute_hausdorff_distance(ClusterAxisParameter& p)
 	{
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(*p.surface_);
+		Scalar dia_len = md.diangonal_length();
 		samples_skeleton(p);
 		// Compute the distance from the shape to the enveloppe
 		modeling::SphereMeshConstructor<SURFACE, NONMANIFOLD> sphere_mesh_constructor(
@@ -2572,6 +2631,11 @@ private:
 			max_dist = std::max(max_dist, dist);
 		}
 		p.hausdorff_distance_enveloppe_to_shape_ = max_dist;
+
+		std::cout << "One sided hausdorff distance shape to enveloppe: "
+				  << p.hausdorff_distance_shape_to_enveloppe_ / dia_len * 100 << "%" << std::endl;
+		std::cout << "One sided hausdorff distance enveloppe to shape: "
+				  << p.hausdorff_distance_enveloppe_to_shape_ / dia_len * 100 << "%" << std::endl;
 	}
 
 	acc::BVHTree<uint32, Vec3>* build_bvh(SURFACE& surface)
@@ -2607,6 +2671,9 @@ private:
 		remove_attribute<SurfaceVertex>(surface, bvh_vertex_index);
 		return surface_bvh_;
 	}
+	
+	
+
 
 	void compute_hausdorff_distance(NONMANIFOLD& non_manifold, SURFACE& surface)
 	{
@@ -2861,15 +2928,22 @@ private:
 					initialise_cluster(p);
 				}
 				static bool sync_lambda = false;
-				ImGui::Checkbox("Sync lambda", &sync_lambda);
+				if (ImGui::Checkbox("Sync lambda", &sync_lambda))
+				{
+					if (sync_lambda)
+						p.partition_lambda = p.energy_lambda_fitting;
+				}
 				
 				if (ImGui::DragFloat("Fitting Energy Lambda", &p.energy_lambda_fitting, 0.001f, 0.f, 10.f, "%.3f"))
 				{
 					if (sync_lambda)
-						p.energy_lambda_fitting = p.partition_lambda;
+						p.partition_lambda = p.energy_lambda_fitting;
 				}
 				ImGui::DragFloat("Partition Lambda", &p.partition_lambda, 0.001f, 0.f, 10.f, "%.3f");
-
+				ImGui::RadioButton("No correction", (int*)&p.correction_mode_, NO_CORRECTION); 
+				ImGui::RadioButton("Correct at each step", (int*)&p.correction_mode_, SPHERE_CORRECTION_AT_EACH_STEP);
+				ImGui::RadioButton("Correct before split", (int*)&p.correction_mode_, SPHERE_CORRECTION_BEFORE_SPLIT);
+				ImGui::Separator();
 				ImGui::SliderInt("Update time", &(int)update_times, 1, 100);
 				if (ImGui::Button("Update clusters"))
 				{
@@ -2909,10 +2983,14 @@ private:
 						ImGui::InputScalar("Max nb spheres", ImGuiDataType_U32, &p.auto_split_max_nb_spheres_);
 				}
 				
-				ImGui::DragInt("Max split number", &(int)p.max_split_number, 1, 0, 100);
+				/*ImGui::DragInt("Max split number", &(int)p.max_split_number, 1, 0, 100);
 
 				if (ImGui::Button("Split clusters"))
-					split_cluster(p);
+					split_cluster(p);*/
+				/*if (ImGui::Button("Start experiment"))
+				{
+					script_experiments(p);
+				}*/
 				ImGui::Separator();
 			
 				if (ImGui::Button("Compute two-sided hausdorff distance"))
@@ -2929,7 +3007,7 @@ private:
 				{
 					update_render_data(p);
 				}
-				ImGui::Separator();
+			/*	ImGui::Separator();
 				ImGui::Checkbox("Logging", &p.logging);
 				ImGui::Text("Total error: %.9f", p.total_error_);
 				ImGui::Text("Min error: %.9f", p.min_error_);
@@ -2938,7 +3016,7 @@ private:
 				ImGui::Text("One sided hausdorff distance shape to enveloppe: %f \% ",
 							p.hausdorff_distance_shape_to_enveloppe_ / md.diangonal_length() * 100);
 				ImGui::Text("One sided hausdorff distance enveloppe to shape: %f \% ",
-							p.hausdorff_distance_enveloppe_to_shape_ / md.diangonal_length() * 100);
+							p.hausdorff_distance_enveloppe_to_shape_ / md.diangonal_length() * 100);*/
 				ImGui::Separator();
 
 				ImGui::Text("Pick the sphere under the mouse with I, split it with S and delete it with D");
