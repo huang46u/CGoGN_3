@@ -243,9 +243,10 @@ public:
 		std::shared_ptr<acc::KDTree<3, uint32>> surface_kdt_ = nullptr;
 
 		float dilation_factor = 0.02;
-		CandidateGenerationMethod candidate_generation_method = SHRINKING_BALL;
+		CandidateGenerationMethod candidate_generation_method = DELAUNAY;
 
-		uint32 surface_samples_number = 1500;
+		uint32 surface_cover_number = 1500;
+		
 		uint32 candidates_number = 20000;
 		uint32 max_selected_number = 200;
 		std::vector<PointVertex> selected_inner_points;
@@ -700,11 +701,11 @@ public:
 
 	void compute_coverage_matrix(CoverageAxisParameter& p)
 	{
-		p.coverage_matrix.resize(p.surface_samples_number, nb_cells<PointVertex>(*p.candidate_points_));
+		p.coverage_matrix.resize(p.surface_cover_number, nb_cells<PointVertex>(*p.candidate_points_));
 		p.sample_points.clear();
 		std::vector<Point> points;
 		CGAL::Random_points_in_triangle_mesh_3<Cgal_Surface_mesh> generator(p.csm_);
-		std::copy_n(generator, p.surface_samples_number, std::back_inserter(points));
+		std::copy_n(generator, p.surface_cover_number, std::back_inserter(points));
 		for (auto& pos : points)
 		{
 			p.sample_points.push_back(Vec3(pos.x(), pos.y(), pos.z()));
@@ -812,7 +813,7 @@ public:
 
 		std::vector<Point> points;
 		CGAL::Random_points_in_triangle_mesh_3<Cgal_Surface_mesh> generator(p.csm_);
-		std::copy_n(generator, p.surface_samples_number, std::back_inserter(points));
+		std::copy_n(generator, p.surface_cover_number, std::back_inserter(points));
 		for (auto& pos : points)
 		{
 			sample_points.push_back(Vec3(pos.x(), pos.y(), pos.z()));
@@ -1117,104 +1118,6 @@ public:
 		return surface_bvh_;
 	}
 
-	void compute_hausdorff_distance(NONMANIFOLD& non_manifold, SURFACE& surface)
-	{
-		auto& surface_vertex_position = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "position");
-
-		auto& non_manifold_vertex_position = get_or_add_attribute<Vec3, NonManifoldVertex>(non_manifold, "position");
-		auto& non_manifold_vertex_radius = get_or_add_attribute<Scalar, NonManifoldVertex>(non_manifold, "radius");
-		auto& non_manifold_sphere_info =
-			get_or_add_attribute<Vec4, NonManifoldVertex>(non_manifold, "non_manifold_sphere_info");
-		auto& nonmanifold_cluster_vertices = get_or_add_attribute<std::vector<SurfaceVertex>, NonManifoldVertex>(
-			non_manifold, "nonmanifold_cluster_vertices");
-		foreach_cell(surface, [&](SurfaceVertex sv) {
-			Scalar min_dist = std::numeric_limits<Scalar>::max();
-			Vec3& pos = value<Vec3>(surface, surface_vertex_position, sv);
-			NonManifoldVertex non_manifold_vertex;
-			foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
-				Vec3 center = value<Vec3>(non_manifold, non_manifold_vertex_position, nv);
-				Scalar radius = value<Scalar>(non_manifold, non_manifold_vertex_radius, nv);
-				Scalar dist = (center - pos).norm() - radius;
-				if (dist < min_dist)
-				{
-					min_dist = dist;
-					non_manifold_vertex = nv;
-				}
-				return true;
-			});
-			value<std::vector<SurfaceVertex>>(non_manifold, nonmanifold_cluster_vertices, non_manifold_vertex)
-				.push_back(sv);
-			return true;
-		});
-		foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
-			Vec3 center = value<Vec3>(non_manifold, non_manifold_vertex_position, nv);
-			Scalar radius = value<Scalar>(non_manifold, non_manifold_vertex_radius, nv);
-			value<Vec4>(non_manifold, non_manifold_sphere_info, nv) = Vec4(center.x(), center.y(), center.z(), radius);
-			return true;
-		});
-
-		// Compute the distance from the enveloppe to the shape
-		modeling::SphereMeshConstructor<SURFACE, NONMANIFOLD> sphere_mesh_constructor(
-			surface, non_manifold, surface_vertex_position, non_manifold_sphere_info, nonmanifold_cluster_vertices);
-		Scalar max_dist_shpae_to_enveloppe = 0.0;
-		foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
-			for (SurfaceVertex sv : value<std::vector<SurfaceVertex>>(non_manifold, nonmanifold_cluster_vertices, nv))
-			{
-				Scalar min_dist = sphere_mesh_constructor.min_distance_to_enveloppe(nv, sv);
-				max_dist_shpae_to_enveloppe = std::max(max_dist_shpae_to_enveloppe, min_dist);
-			}
-			return true;
-		});
-
-		Scalar max_dist_enveloppe_to_shape = 0.0;
-		cgogn::modeling::SkeletonSampler<Vec4, Vec3, Scalar> skeleton_sampler;
-
-		foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
-			skeleton_sampler.add_vertex(value<Vec3>(non_manifold, non_manifold_vertex_position, nv),
-										value<Scalar>(non_manifold, non_manifold_vertex_radius, nv));
-			return true;
-		});
-		foreach_cell(non_manifold, [&](NonManifoldEdge ne) {
-			auto& v_vec = incident_vertices(non_manifold, ne);
-			skeleton_sampler.add_edge(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
-									  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
-									  value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[1]),
-									  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[1]));
-			return true;
-		});
-		foreach_cell(non_manifold, [&](NonManifoldFace nf) {
-			auto& v_vec = incident_vertices(non_manifold, nf);
-			skeleton_sampler.add_triangle(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
-										  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
-										  value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[1]),
-										  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[1]),
-										  value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[2]),
-										  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[2]));
-			return true;
-		});
-
-		Vec3 bbw = skeleton_sampler.BBwidth();
-		Scalar dia_length = bbw.norm();
-		float step = std::min(std::min(bbw.x(), bbw.y()), bbw.z()) / 200;
-		skeleton_sampler.sample(step);
-		std::vector<Vec3> enveloppe_points = skeleton_sampler.samples();
-
-		// Build bvh
-		auto surface_bvh = build_bvh(surface);
-		std::pair<uint32, Vec3> bvh_res;
-		for (Vec3 v : enveloppe_points)
-		{
-			surface_bvh->closest_point(v, &bvh_res);
-			Vec3 closest_point_position = bvh_res.second;
-			Scalar dist = (closest_point_position - v).norm();
-			max_dist_enveloppe_to_shape = std::max(max_dist_enveloppe_to_shape, dist);
-		}
-		std::cout << "hausdorff distance shape to enveloppe:" << max_dist_shpae_to_enveloppe / dia_length * 100 << "%"
-				  << std::endl;
-		std::cout << "hausdorff distance enveloppe to shape:" << max_dist_enveloppe_to_shape / dia_length * 100 << "%"
-				  << std::endl;
-	}
-
 protected:
 	void init() override
 	{
@@ -1242,22 +1145,6 @@ protected:
 		ImGui::Separator();
 		if (selected_surface_mesh_)
 		{
-			imgui_mesh_selector(nonmanifold_provider_, selected_medial_axis_, "Skeleton", [&](NONMANIFOLD& m) {
-				selected_medial_axis_ = &m;
-				nonmanifold_provider_->mesh_data(m).outlined_until_ = App::frame_time_ + 1.0;
-			});
-			if (selected_medial_axis_)
-			{
-				if (ImGui::Button("Compute hausdorff distance"))
-				{
-					compute_hausdorff_distance(*selected_medial_axis_, *selected_surface_mesh_);
-				}
-				if (ImGui::Button("Draw skeleton"))
-				{
-					interpolate_skeleton(*selected_medial_axis_);
-				}
-				ImGui::Checkbox("Show skeleton", &draw_enveloppe);
-			}
 		
 			CoverageAxisParameter& c = coverage_axis_parameters_[selected_surface_mesh_];
 			imgui_combo_attribute<SurfaceVertex, Vec3>(*selected_surface_mesh_, c.surface_vertex_position_, "Position",
@@ -1270,11 +1157,15 @@ protected:
 			}
 			if (c.initialized_)
 			{
+				
 				ImGui::RadioButton("Generate Random candidates", (int*)&c.candidate_generation_method, RANDOM);
 				ImGui::RadioButton("Generate Shrinking ball candidates", (int*)&c.candidate_generation_method,
 								   SHRINKING_BALL);
 				ImGui::RadioButton("Generate Delaunay candidates", (int*)&c.candidate_generation_method, DELAUNAY);
-				ImGui::DragInt("Candidated Number", (int*)&c.candidates_number, 100, 0, 50000);
+				if (c.candidate_generation_method == RANDOM)
+				{
+					ImGui::DragInt("Candidated Number", (int*)&c.candidates_number, 100, 0, 50000);
+				}
 				if (ImGui::Button("Generate candidates"))
 				{
 					generate_candidates(c);
@@ -1282,7 +1173,7 @@ protected:
 				if (c.candidates_valid)
 				{
 					ImGui::DragFloat("Dilation factor", &c.dilation_factor, 0.001f, 0.0f, 1.0f, "%.3f");
-					ImGui::DragInt("Surface sample number", (int*)&c.surface_samples_number, 100, 0, 10000);
+					ImGui::DragInt("Surface sample number", (int*)&c.surface_cover_number, 100, 0, 10000);
 					if (ImGui::Button("Compute Coverage axis"))
 					{
 						coverage_axis(c);
