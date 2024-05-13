@@ -519,7 +519,7 @@ private:
 		std::shared_ptr<PointAttribute<std::vector<SurfaceVertex>>> clusters_surface_vertices_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_combined_error_ = nullptr;
 		std::shared_ptr<PointAttribute<std::set<PointVertex>>> clusters_neighbours_ = nullptr;
-		std::shared_ptr<PointAttribute<std::map<PointVertex, std::set<uint32>>>> clusters_adjacency_info_ = nullptr;
+		std::shared_ptr<PointAttribute<std::unordered_map<uint32, std::set<SurfaceVertex>>>> clusters_adjacency_info_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_max_distance_ = nullptr;
 		std::shared_ptr<PointAttribute<SurfaceVertex>> clusters_max_vertex_ = nullptr;
 		std::shared_ptr<PointAttribute<bool>> clusters_do_not_split_ = nullptr;
@@ -576,7 +576,7 @@ private:
 		uint32 max_split_number = 1;
 		uint32 iteration_count_ = 0;
 		
-
+		uint32 adjacent_number = 0;
 		cgogn::rendering::SkelShapeDrawer skeleton_drawer_;
 		cgogn::modeling::SkeletonSampler<Vec4, Vec3, Scalar> skeleton_sampler_;
 		bool draw_enveloppe = false;
@@ -1641,7 +1641,8 @@ private:
 			*p.clusters_, "clusters_max_distance");
 		p.clusters_max_vertex_ = get_or_add_attribute<SurfaceVertex, PointVertex>(*p.clusters_, "cluster_max_vertex");
 		
-		p.clusters_adjacency_info_ = get_or_add_attribute<std::map<PointVertex, std::set<uint32>>, PointVertex>(
+		p.clusters_adjacency_info_ = get_or_add_attribute<std::unordered_map<uint32, std::set<SurfaceVertex>>,
+		PointVertex > (
 			*p.clusters_, "clusters_adjacency_info");
 		p.clusters_without_correction_position_ =
 			get_or_add_attribute<Vec3, PointVertex>(*p.clusters_, "clusters_without_correction_position");
@@ -1754,7 +1755,7 @@ private:
 			p.nb_spheres_++;
 			value<Vec3>(*p.clusters_, p.clusters_position_, new_cluster) = sphere_center;
 			value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster) =
-				Vec4(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX,1.0);
+				Vec4(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX,0.5);
 			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, new_cluster).clear();
 			value<Scalar>(*p.clusters_, p.clusters_radius_, new_cluster) = radius;
 			value<Vec3>(*p.surface_, p.surface_vertex_color_, v1) = value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster).head<3>();
@@ -1978,8 +1979,11 @@ private:
 	// Update the neighborhood of the clusters
 	void update_clusters_neighbor(ClusterAxisParameter& p)
 	{
+		//index_of cluster, number of vertex adjacent
 		parallel_foreach_cell(*p.clusters_, [&](PointVertex pv) {
 			value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv).clear();
+			value<std::unordered_map<uint32, std::set<SurfaceVertex>>>(*p.clusters_, p.clusters_adjacency_info_, pv)
+				.clear();
 			return true;
 		});
 		
@@ -1988,15 +1992,33 @@ private:
 
 			PointVertex v1_cluster = value<PointVertex>(*p.surface_, p.surface_cluster_info_, vertices[0]);
 			PointVertex v2_cluster = value<PointVertex>(*p.surface_, p.surface_cluster_info_, vertices[1]);
-			
 			if (v1_cluster.is_valid() && v2_cluster.is_valid() && v1_cluster != v2_cluster)
 			{
-				value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, v1_cluster).insert(v2_cluster);
-				value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, v2_cluster).insert(v1_cluster);
+				auto& adjacency_info1 = value<std::unordered_map<uint32, std::set<SurfaceVertex>>>(
+					*p.clusters_, p.clusters_adjacency_info_, v1_cluster);
+				auto& adjacency_info2 = value<std::unordered_map<uint32, std::set<SurfaceVertex>>>(
+					*p.clusters_, p.clusters_adjacency_info_, v2_cluster);
+
+				adjacency_info1[index_of(*p.clusters_, v2_cluster)].insert(vertices[1]);
+				adjacency_info2[index_of(*p.clusters_, v1_cluster)].insert(vertices[0]);
 			}
 			return true;
 		});
-		
+
+		parallel_foreach_cell(*p.clusters_, [&](PointVertex pv) { 
+			auto adjacency_info = value<std::unordered_map<uint32, std::set<SurfaceVertex>>>(
+				*p.clusters_, p.clusters_adjacency_info_, pv);
+			for (auto& [k, v] : adjacency_info)
+			{
+				//if it has more than two vertices adjacent to this clusters, then build neighbour info
+				if (v.size() > p.adjacent_number)
+				{
+					value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, pv)
+						.insert(of_index<PointVertex>(*p.clusters_, k));
+				}
+			}
+			return true;
+		});
 		
 	}
 
@@ -2202,7 +2224,7 @@ private:
 		value<Scalar>(*p.clusters_, p.clusters_radius_, new_cluster) =
 			value<Scalar>(*p.surface_, p.medial_axis_radius_, max_dist_vertex);
 		value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster) =
-			Vec4(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, 1);
+			Vec4(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, 0.5);
 
 	}
 
@@ -2604,7 +2626,7 @@ private:
 		std::cout << "save .obj file successfully" << std::endl;
 	}
 
-	
+
 	void compute_hausdorff_distance(ClusterAxisParameter& p)
 	{
 		MeshData<SURFACE>& md = surface_provider_->mesh_data(*p.surface_);
@@ -2982,7 +3004,15 @@ private:
 					else
 						ImGui::InputScalar("Max nb spheres", ImGuiDataType_U32, &p.auto_split_max_nb_spheres_);
 				}
-				
+				if (ImGui::SliderInt("Adjacency standard", (int*)&p.adjacent_number, 0,10))
+				{
+					compute_skeleton(p);
+					if (!p.running_)
+					{
+						update_render_data(p);
+					}
+					
+				}
 				/*ImGui::DragInt("Max split number", &(int)p.max_split_number, 1, 0, 100);
 
 				if (ImGui::Button("Split clusters"))
@@ -3003,9 +3033,16 @@ private:
 					export_spheres_OBJ(p, destination);
 					
 				}
+				if (ImGui::Button("Export spheres radius"))
+				{
+					
+				}
 				if (ImGui::Checkbox("Draw reconstruction", &p.draw_enveloppe))
 				{
-					update_render_data(p);
+					if (!p.running_)
+					{
+						update_render_data(p);
+					}
 				}
 			/*	ImGui::Separator();
 				ImGui::Checkbox("Logging", &p.logging);
