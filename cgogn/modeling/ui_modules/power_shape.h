@@ -578,6 +578,7 @@ private:
 		
 		uint32 adjacent_number = 0;
 		cgogn::rendering::SkelShapeDrawer skeleton_drawer_;
+		float skeleton_color[3] = {0.2, 0.2, 0.2};
 		cgogn::modeling::SkeletonSampler<Vec4, Vec3, Scalar> skeleton_sampler_;
 		bool draw_enveloppe = false;
 	};
@@ -1661,7 +1662,7 @@ private:
 			get_or_add_attribute<std::vector<SurfaceVertex>, NonManifoldVertex>(*p.non_manifold_, "cluster_vertices");
 		p.non_manifold_cloest_surface_color = get_or_add_attribute<Vec3, NonManifoldFace>(*p.non_manifold_, "volumn_detected_color");
 
-		p.skeleton_drawer_.set_color({1.0, 1.0, 1.0, 0.5});
+		p.skeleton_drawer_.set_color({p.skeleton_color[0], p.skeleton_color[1], p.skeleton_color[2], 1});
 		p.skeleton_drawer_.set_subdiv(40);
 		
 
@@ -2491,8 +2492,8 @@ private:
 				const std::set<PointVertex>& ne_ne1 =
 					value<std::set<PointVertex>>(*p.clusters_, p.clusters_neighbours_, ne1);
 				for (const PointVertex& ne2 : ne_ne1)
-				{
-					if (n_pv.find(ne2) != n_pv.end())
+				{ 
+					if (n_pv.find(ne2) != n_pv.end()) 
 					{
 						NonManifoldVertex nmv3 =
 							value<NonManifoldVertex>(*p.clusters_, spheres_skeleton_vertex_map, ne2);
@@ -2538,7 +2539,7 @@ private:
 		auto& non_manifold_vertex_position = get_or_add_attribute<Vec3, NonManifoldVertex>(non_manifold, "position");
 		auto& non_manifold_vertex_radius = get_or_add_attribute<Scalar, NonManifoldVertex>(non_manifold, "radius");
 		skeleton_drawer.clear();
-		skeleton_drawer.set_color({1.0, 1.0, 1.0, 0.5});
+		/*skeleton_drawer.set_color({1.0, 1.0, 1.0, 0.5});*/
 		skeleton_drawer.set_subdiv(40);
 		foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
 			skeleton_drawer.add_vertex(value<Vec3>(non_manifold, non_manifold_vertex_position, nv),
@@ -3039,6 +3040,14 @@ private:
 				}
 				if (ImGui::Checkbox("Draw reconstruction", &p.draw_enveloppe))
 				{
+					if (!p.running_)
+					{
+						update_render_data(p);
+					}
+				}
+				if (ImGui::ColorEdit3("skeleton color", p.skeleton_color, ImGuiColorEditFlags_NoInputs))
+				{
+					p.skeleton_drawer_.set_color({p.skeleton_color[0], p.skeleton_color[1], p.skeleton_color[2], 1});
 					if (!p.running_)
 					{
 						update_render_data(p);
