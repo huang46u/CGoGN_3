@@ -51,6 +51,17 @@ if (CGOGN_USE_CGAL)
 	)
 endif()
 
+add_executable(parameterization parameterization.cpp)
+target_link_libraries(parameterization
+	cgogn::core
+	cgogn::ui
+	cgogn::io
+	cgogn::rendering
+	cgogn::modeling
+	Blossom5
+	${CMAKE_DL_LIBS}
+)
+
 add_executable(tubular_mesh tubular_mesh.cpp)
 target_link_libraries(tubular_mesh
 	cgogn::core

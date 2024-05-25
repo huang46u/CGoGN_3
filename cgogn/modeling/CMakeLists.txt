@@ -49,6 +49,7 @@ set(src_list
 		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/volume_mr_modeling.h"
 		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/power_shape.h"
 		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/coverage_axis.h"
+		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/parameterization.h"
 )
 target_sources(${PROJECT_NAME} PRIVATE ${src_list})
 source_group(TREE ${CMAKE_CURRENT_LIST_DIR} FILES ${src_list})
