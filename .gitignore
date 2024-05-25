@@ -39,3 +39,5 @@ build
 /imgui.ini
 /CMakeSettings.json
 /data/
+/Cluster_axis_result
+/Cluster_axis_rendering
