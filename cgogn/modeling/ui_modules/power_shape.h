@@ -64,7 +64,7 @@
 #include <CGAL/point_generators_3.h>
 
 #include <GLFW/glfw3.h>
-#include <Highs.h>11
+#include <Highs.h>
 
 #include <iomanip>
 #include <limits>
