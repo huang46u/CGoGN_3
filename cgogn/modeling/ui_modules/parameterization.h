@@ -12,7 +12,7 @@
 #include <libacc/bvh_trees_spheres.h>
 #include <libacc/bvh_tree.h>
 #include <libacc/kd_tree.h>
-// import CGAL
+#include <cgogn/rendering/frame_manipulator.h>
 
 #include <GLFW/glfw3.h>
 #include <GL/gl3w.h>
@@ -59,55 +59,115 @@ public:
 		bool activate_plane_selection_ = false;
 		bool point_selected_ = false;
 
-		Vec3 first_point_, second_point_, selected_point_;
-		Vec4 cut_plane_;
-		Vec3 plane_normal_;
+		rendering::GLVec3d first_point_, second_point_, selected_point_;
+		rendering::GLVec3d plane_normal_;
 		std::shared_ptr<SAttribute<Vec3>> surface_vertex_position_ = nullptr;
 		std::shared_ptr<SAttribute<Vec3>> surface_edge_color_ = nullptr;
+		std::shared_ptr<SAttribute<Vec3>> surface_edge_col2_ = nullptr;
+		std::shared_ptr<SAttribute<Vec3>> surface_vertex_color_ = nullptr;
 		std::vector<SEdge> boundary_edge;
+
+
+		rendering::FrameManipulator frame_manipulator_;
+		bool show_frame_manipulator_;
+		bool manipulating_frame_;
+		bool clipping_plane_;
 	};
 
 	void parameterization_init(SURFACE& surface)
 	{
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(surface);
 		SurfaceParameter& p = surface_parameters_[&surface];
 		p.surface_= &surface;
 		p.surface_vertex_position_ = get_or_add_attribute<Vec3, SVertex>(*p.surface_, "position");
 		p.surface_edge_color_ = get_or_add_attribute<Vec3, SEdge>(*p.surface_, "surface_edge_color");
-		parallel_foreach_cell(*p.surface_, [&](SEdge se) {
-			value<Vec3>(*p.surface_, p.surface_edge_color_, se) = Vec3(0.0, 0.0, 0.0);
+		p.surface_edge_col2_ = get_or_add_attribute<Vec3, SEdge>(*p.surface_, "surface_edge_col2");
+		p.surface_vertex_color_ = get_or_add_attribute<Vec3, SVertex>(*p.surface_, "surface_vert_color");
+		//foreach_cell(*p.surface_, [&](SEdge se) {
+		//	value<Vec3>(*p.surface_, p.surface_edge_color_, se) = Vec3(0.0, 1.0, 0.0);
+		//	return true;
+		//});
+		foreach_cell(*p.surface_, [&](SEdge se) {
+			auto& vs = incident_vertices(*p.surface_, se);
+			value<Vec3>(*p.surface_, p.surface_edge_color_, se) =
+				value<Vec3>(*p.surface_, p.surface_vertex_position_, vs[0]);
+			value<Vec3>(*p.surface_, p.surface_edge_col2_, se) = value<Vec3>(*p.surface_, p.surface_edge_color_, se);
 			return true;
-		});
+		}); 
+
+
+
 		p.initialized_ = true;
+
+		Scalar size = (md.bb_max_ - md.bb_min_).norm() / 25;
+		Vec3 position = 0.2 * md.bb_min_ + 0.8 * md.bb_max_;
 		
-
-
+		p.frame_manipulator_.set_size(size);
+		p.frame_manipulator_.set_position(position);
 		
 	}
 
 	void cut_mesh(SurfaceParameter& p)
 	{
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(*p.surface_);
+		Vec3 position;
+		p.frame_manipulator_.get_position(position);
+		Vec3 axis_z;
+		p.frame_manipulator_.get_axis(rendering::FrameManipulator::Zt, axis_z);
+		Scalar d = -(position.dot(axis_z));
+		Vec4 plane = Vec4(axis_z.x(), axis_z.y(), axis_z.z(), d);
 		//Find the edges that intersected with the plane
-		parallel_foreach_cell(*p.surface_, [&](SEdge se) {
+		foreach_cell(*p.surface_, [&](SEdge se) {
 			auto& vs = incident_vertices(*p.surface_, se);
 			Vec3 pos1 = value<Vec3>(*p.surface_, p.surface_vertex_position_, vs[0]);
 			Vec3 pos2 = value<Vec3>(*p.surface_, p.surface_vertex_position_, vs[1]);
-			Scalar d1 = Vec4(pos1.x(), pos1.y(), pos1.z(), 1).dot(p.cut_plane_);
-			Scalar d2 = Vec4(pos2.x(), pos2.y(), pos2.z(), 1).dot(p.cut_plane_);
-			if((d1 < 0 && d2 > 0) || (d1 > 0 && d2 < 0))
+			Scalar d1 = Vec4(pos1.x(), pos1.y(), pos1.z(), 1).dot(plane);
+			Scalar d2 = Vec4(pos2.x(), pos2.y(), pos2.z(), 1).dot(plane);
+
+			if (std::signbit(d1) != std::signbit(d2))
 			{
-				std::cout << "find intersection" << std::endl;
-				value<Vec3>(*p.surface_, p.surface_edge_color_, se) = Vec3(1.0, 0.0, 0.0);
-				p.boundary_edge.push_back(se);
+				value<Vec3>(*p.surface_, p.surface_vertex_color_, vs[0]) = Vec3(1.0, 0.0, 0.0);
+				value<Vec3>(*p.surface_, p.surface_vertex_color_, vs[1]) = Vec3(1.0, 0.0, 0.0);
+//				value<Vec3>(*p.surface_, p.surface_edge_color_, se) = Vec3(1.0, 0.0, 0.0);
 			}
+
 			return true;
-			});
+		}); 
+
+		foreach_cell(*p.surface_, [&](SEdge se) {
+			auto& vs = incident_vertices(*p.surface_, se);
+			value<Vec3>(*p.surface_, p.surface_edge_color_, se) =
+				value<Vec3>(*p.surface_, p.surface_vertex_position_, vs[0]);
+
+			return true;
+		}); 
+
+
+		foreach_cell(*p.surface_, [&](SVertex ve) {
+			value<Vec3>(*p.surface_, p.surface_vertex_color_, ve) =
+				value<Vec3>(*p.surface_, p.surface_vertex_position_, ve);
+
+				//Scalar(0.5) * (value<Vec3>(*p.surface_, p.surface_vertex_color_, vs[0]) +
+				//			   value<Vec3>(*p.surface_, p.surface_vertex_color_, vs[1]));
+
+			return true;
+		}); 
+
+		surface_provider_->emit_attribute_changed(*p.surface_, p.surface_vertex_color_.get());
+		surface_provider_->emit_attribute_changed(*p.surface_, p.surface_edge_color_.get());
+		
 	}
 
 	void compute_plane_from_points(SurfaceParameter& p)
 	{
-		Scalar d = -p.plane_normal_.dot(p.first_point_);
-		p.cut_plane_ = Vec4(p.plane_normal_.x(), p.plane_normal_.y(), p.plane_normal_.z(), d);
-		std::cout << "plane defined: " << p.cut_plane_ <<std::endl;
+		rendering::GLVec3d a = p.second_point_ - p.first_point_;
+		a.normalize();
+		rendering::GLVec3d b = p.plane_normal_.cross(a);
+		b.normalize();
+		rendering::GLVec3 X = a.cast<float>(); // rendering::GLVec3(a.x(), a.y(), a.z());
+		rendering::GLVec3 Y = b.cast<float>(); // rendering::GLVec3(b.x(), b.y(), b.z());
+		p.frame_manipulator_.set_orientation(X,Y);
+		p.frame_manipulator_.set_position(p.first_point_);
 	} 
 
 protected:
@@ -118,22 +178,25 @@ protected:
 	}
 	void draw(View* view) override
 	{
-		
+		SurfaceParameter& p = surface_parameters_[selected_surface_mesh_];
+		auto& proj_matrix = view->projection_matrix();
+		auto& view_matrix = view->modelview_matrix();
+		if (p.show_frame_manipulator_)
+			p.frame_manipulator_.draw(true, true, proj_matrix, view_matrix);
 	}
 
 	void mouse_press_event(View* view, int32 button, int32 x, int32 y) override
 	{
 		SurfaceParameter& p = surface_parameters_[selected_surface_mesh_];
-		Vec3 first_pos_screen, second_pos_screen;
+		rendering::GLVec3d first_pos_screen, second_pos_screen;
 		if (button == GLFW_MOUSE_BUTTON_LEFT && p.activate_plane_selection_ )
 		{
-			
-			rendering::GLVec3d near_point = view->unproject(x, y, 0.0);
+			rendering::GLVec3d near_point = view->unproject(x, y, 0.25);
 			rendering::GLVec3d far_point = view->unproject(x, y, 1.0);
 			
 			if (!p.first_point_saved_)
 			{
-				first_pos_screen = Vec3(x, y, 0);
+				first_pos_screen = rendering::GLVec3d(x, y, 0);
 				p.first_point_ = near_point;
 				p.first_point_saved_ = true;
 				p.selected_point_ = near_point;
@@ -144,31 +207,65 @@ protected:
 			}
 			else
 			{
-				second_pos_screen = Vec3(x, y, 0);
+				second_pos_screen = rendering::GLVec3d(x, y, 0);
 				p.second_point_ = near_point;
 				p.first_point_saved_ = false;
 				p.point_selected_ = false;
 				std::cout << "pick second point: " << p.second_point_.x() << ", " << p.second_point_.y() << ", "
 						  << p.second_point_.z() << std::endl;
-				/*Vec3 v = first_pos_screen - second_pos_screen;
+				rendering::GLVec3d v =  second_pos_screen-first_pos_screen;
+				p.plane_normal_ = view->unproject(-v.y(), v.x(), 0.0) - view->unproject(0.0,0.0,0.0);
+				p.plane_normal_.normalize();
 				
-				p.plane_normal_ = view->unproject(-v.y(), v.x(), 0);
-				p.plane_normal_.normalize();*/
-				p.plane_normal_= Vec3(0.5,0.5,1);
 				compute_plane_from_points(p);
 			}
 		}
-		
-
+		if (p.manipulating_frame_)
+		{
+			auto [P, Q] = view->pixel_ray(x, y);
+			p.frame_manipulator_.pick(x, y, P, Q);
+			view->request_update();
+		}
 	}
+	void mouse_release_event(View* view, int32, int32, int32) override
+	{
+		SurfaceParameter& p = surface_parameters_[selected_surface_mesh_];
+		p.frame_manipulator_.release();
+		view->request_update();
+		
+	}
+	void mouse_move_event(View* view, int32 x, int32 y) override
+	{
+		SurfaceParameter& p = surface_parameters_[selected_surface_mesh_];
+		bool leftpress = view->mouse_button_pressed(GLFW_MOUSE_BUTTON_LEFT);
+		bool rightpress = view->mouse_button_pressed(GLFW_MOUSE_BUTTON_RIGHT);
+		if (p.manipulating_frame_ && (rightpress || leftpress))
+		{
+			p.frame_manipulator_.drag(leftpress, x, y);
+			if (p.clipping_plane_)
+			{
+				cut_mesh(p);
+			}
+			view->stop_event();
+			view->request_update();
+		}
+	}
+
+
 	void key_press_event(View* view, int32 keycode) override
 	{
 		SurfaceParameter& p = surface_parameters_[selected_surface_mesh_];
 		if (keycode == GLFW_KEY_C)
 		{
 			p.activate_plane_selection_ = true;
+			
 		}
-		
+		if (keycode == GLFW_KEY_D)
+		{
+
+			if (p.show_frame_manipulator_)
+				p.manipulating_frame_ = true;
+		}
 	}
 	void key_release_event(View* view, int32 keycode) override
 	{
@@ -176,6 +273,11 @@ protected:
 		if (keycode == GLFW_KEY_C)
 		{
 			p.activate_plane_selection_ = false;
+			
+		}
+		if (keycode == GLFW_KEY_D)
+		{
+			p.manipulating_frame_ = false;
 		}
 	}
 
@@ -202,6 +304,13 @@ protected:
 				if (ImGui::Button("Cut mesh")){
 					cut_mesh(p);
 				}
+				if (ImGui::Checkbox("Show clipping plane", &p.show_frame_manipulator_))
+				{
+					for (View* v : linked_views_)
+						v->request_update();
+				}
+				if (p.show_frame_manipulator_)
+					ImGui::TextUnformatted("Press D to manipulate the plane");
 			}
 		}
 	}
