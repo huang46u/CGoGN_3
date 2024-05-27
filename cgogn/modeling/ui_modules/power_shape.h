@@ -539,7 +539,7 @@ private:
 	
 		InitMethod init_method_ = CONSTANT;
 		AutoSplitMode auto_split_mode_ = MAX_NB_SPHERES;
-		CorrectionMode correction_mode_ = SPHERE_CORRECTION_AT_EACH_STEP;
+		CorrectionMode correction_mode_ = SPHERE_CORRECTION_BEFORE_SPLIT;
 		float energy_lambda_fitting = 0.5;
 		float partition_lambda = 0.2;
 		float energy_lambda_sqem = 1; 
@@ -2050,6 +2050,27 @@ private:
 		return Vec4(1.0, 0.0, 0.0, 0.5);
 	}
 
+	Vec3 color_map_BCGYR(Scalar x, Scalar min, Scalar max)
+	{
+		x = (x - min) / (max - min);
+		x = std::clamp(x, 0.0, 1.0);
+		float x4 = 4.0 * x;
+		switch (int(std::floor(std::max(0.0, x4 + 1.0))))
+		{
+		case 0:
+			return Vec3(0, 0, 1);
+		case 1:
+			return Vec3(0.0, x4, 1.0);
+		case 2:
+			return Vec3(0.0, 1.0, 2.0 - x4);
+		case 3:
+			return Vec3(x4 - 2.0, 1.0, 0.0);
+		case 4:
+			return Vec3(1.0, 4.0 - x4, 0.0);
+		}
+		return Vec3(1, 0, 0);
+	}
+
 	void correct_clusters(ClusterAxisParameter& p)
 	{
 		parallel_foreach_cell(*p.clusters_, [&](PointVertex pv) {
@@ -2659,6 +2680,7 @@ private:
 				  << p.hausdorff_distance_shape_to_enveloppe_ / dia_len * 100 << "%" << std::endl;
 		std::cout << "One sided hausdorff distance enveloppe to shape: "
 				  << p.hausdorff_distance_enveloppe_to_shape_ / dia_len * 100 << "%" << std::endl;
+
 	}
 
 	acc::BVHTree<uint32, Vec3>* build_bvh(SURFACE& surface)
@@ -2706,20 +2728,25 @@ private:
 		auto& non_manifold_vertex_radius = get_or_add_attribute<Scalar, NonManifoldVertex>(non_manifold, "radius");
 		auto& non_manifold_sphere_info =
 			add_attribute<Vec4, NonManifoldVertex>(non_manifold, "non_manifold_sphere_info");
-		
+		auto surface_error_color = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "surface_error_color");
+
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(surface);
+		Scalar dia_length = md.diangonal_length();
 		foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
 			Vec3 center = value<Vec3>(non_manifold, non_manifold_vertex_position, nv);
 			Scalar radius = value<Scalar>(non_manifold, non_manifold_vertex_radius, nv);
 			value<Vec4>(non_manifold, non_manifold_sphere_info, nv) = Vec4(center.x(), center.y(), center.z(), radius);
 			return true;
 		});
-
 		// Compute the distance from the enveloppe to the shape
 		modeling::SphereMeshConstructor<SURFACE, NONMANIFOLD> sphere_mesh_constructor(
 			surface, non_manifold, surface_vertex_position, non_manifold_sphere_info);
+		Scalar min = 0, max = 0.03; 
 		Scalar max_dist_shpae_to_enveloppe = 0.0;
 		foreach_cell(surface, [&](SurfaceVertex sv) {
 			Scalar min_dist = sphere_mesh_constructor.min_distance_to_enveloppe(sv);
+			Scalar error = min_dist / dia_length;
+			value<Vec3>(surface, surface_error_color, sv) = color_map_BCGYR(error, min, max);
 			max_dist_shpae_to_enveloppe = std::max(max_dist_shpae_to_enveloppe, min_dist);
 			return true;
 		});
@@ -2772,14 +2799,14 @@ private:
 			max_dist_enveloppe_to_shape = std::max(max_dist_enveloppe_to_shape, dist);
 		}
 		
-		MeshData<SURFACE>& md = surface_provider_->mesh_data(surface);
-		Scalar dia_length = md.diangonal_length();
+		
 		std::cout << "hausdorff distance shape to enveloppe:" << max_dist_shpae_to_enveloppe / dia_length * 100 << "%"
 				  << std::endl;
 		std::cout << "hausdorff distance enveloppe to shape:" << max_dist_enveloppe_to_shape / dia_length * 100 << "%"
 				  << std::endl;
 		delete surface_bvh;
 		remove_attribute<NonManifoldVertex>(non_manifold, non_manifold_sphere_info);
+		surface_provider_->emit_attribute_changed(surface, surface_error_color.get());
 	}
 	void init_delaunay(SURFACE& surface)
 	{
