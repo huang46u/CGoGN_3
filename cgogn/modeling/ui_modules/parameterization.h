@@ -1,7 +1,28 @@
-#pragma once
+/*******************************************************************************
+ * CGoGN                                                                        *
+ * Copyright (C), IGG Group, ICube, University of Strasbourg, France            *
+ *                                                                              *
+ * This library is free software; you can redistribute it and/or modify it      *
+ * under the terms of the GNU Lesser General Public License as published by the *
+ * Free Software Foundation; either version 2.1 of the License, or (at your     *
+ * option) any later version.                                                   *
+ *                                                                              *
+ * This library is distributed in the hope that it will be useful, but WITHOUT  *
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or        *
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License  *
+ * for more details.                                                            *
+ *                                                                              *
+ * You should have received a copy of the GNU Lesser General Public License     *
+ * along with this library; if not, write to the Free Software Foundation,      *
+ * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA.           *
+ *                                                                              *
+ * Web site: http://cgogn.unistra.fr/                                           *
+ * Contact information: cgogn@unistra.fr                                        *
+ *                                                                              *
+ *******************************************************************************/
 
-#ifndef CGOGN_MODULE_COVERAGE_AXIS_H_
-#define CGOGN_MODULE_COVERAGE_AXIS_H_
+#ifndef CGOGN_MODULE_PARAMETERIZATION_H_
+#define CGOGN_MODULE_PARAMETERIZATION_H_
 #include <cgogn/core/types/maps/gmap/gmap_base.h>
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/ui/app.h>
@@ -29,7 +50,6 @@ template <typename SURFACE>
 class Parameterization : public ViewModule
 {
 	static_assert(mesh_traits<SURFACE>::dimension >= 2, "Coverage axis can only be used with meshes of dimension >= 2");
-	// Kernel for construct Delaunay
 	template <typename T>
 	using SAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
 
@@ -63,8 +83,9 @@ public:
 		rendering::GLVec3d plane_normal_;
 		std::shared_ptr<SAttribute<Vec3>> surface_vertex_position_ = nullptr;
 		std::shared_ptr<SAttribute<Vec3>> surface_edge_color_ = nullptr;
-		std::shared_ptr<SAttribute<Vec3>> surface_edge_col2_ = nullptr;
+		std::shared_ptr<SAttribute<Vec3>> surface_face_color_ = nullptr;
 		std::shared_ptr<SAttribute<Vec3>> surface_vertex_color_ = nullptr;
+		std::shared_ptr<SAttribute<Vec3>> surface_tc_position_ = nullptr;
 		std::vector<SEdge> boundary_edge;
 
 
@@ -81,22 +102,14 @@ public:
 		p.surface_= &surface;
 		p.surface_vertex_position_ = get_or_add_attribute<Vec3, SVertex>(*p.surface_, "position");
 		p.surface_edge_color_ = get_or_add_attribute<Vec3, SEdge>(*p.surface_, "surface_edge_color");
-		p.surface_edge_col2_ = get_or_add_attribute<Vec3, SEdge>(*p.surface_, "surface_edge_col2");
+		p.surface_face_color_ = get_or_add_attribute<Vec3, SFace>(*p.surface_, "surface_face_color");
 		p.surface_vertex_color_ = get_or_add_attribute<Vec3, SVertex>(*p.surface_, "surface_vert_color");
-		//foreach_cell(*p.surface_, [&](SEdge se) {
-		//	value<Vec3>(*p.surface_, p.surface_edge_color_, se) = Vec3(0.0, 1.0, 0.0);
-		//	return true;
-		//});
-		foreach_cell(*p.surface_, [&](SEdge se) {
-			auto& vs = incident_vertices(*p.surface_, se);
-			value<Vec3>(*p.surface_, p.surface_edge_color_, se) =
-				value<Vec3>(*p.surface_, p.surface_vertex_position_, vs[0]);
-			value<Vec3>(*p.surface_, p.surface_edge_col2_, se) = value<Vec3>(*p.surface_, p.surface_edge_color_, se);
+		p.surface_tc_position_ = get_or_add_attribute<Vec3, SVertex>(*p.surface_, "tc_position");
+		
+		foreach_cell(*p.surface_, [&](SEdge v) {
+			value<Vec3>(*p.surface_, p.surface_edge_color_, v) = Vec3(0.0, 0.0, 0.0);
 			return true;
-		}); 
-
-
-
+		});
 		p.initialized_ = true;
 
 		Scalar size = (md.bb_max_ - md.bb_min_).norm() / 25;
@@ -107,8 +120,53 @@ public:
 		
 	}
 
+
+	//Only applicable for disk-like surface
+	void tutte_embedding(SurfaceParameter& p)
+	{
+		//Identify bord vertices
+		std::vector<Edge> boundary_edges;
+		foreach_cell(*p.surface_, [&](SEdge e) {
+			if (incident_faces(*p.surface_, e).size()==1)
+			{
+				
+				boundary_edges.push_back(e);
+				
+			}
+		
+			return true;
+		});
+		for (auto e : boundary_edges)
+		{
+			auto& vs = incident_vertices(*p.surface_, e);
+			for (auto v : vs)
+			{
+				value<Vec3>(*p.surface_, p.surface_vertex_color_, v) = Vec3(1.0, 0.0, 0.0);
+			}
+			value<Vec3>(*p.surface_, p.surface_edge_color_, e) = Vec3(1.0, 0.0, 0.0);
+		}
+		surface_provider_->emit_attribute_changed(*p.surface_, p.surface_vertex_color_.get());
+		surface_provider_->emit_attribute_changed(*p.surface_, p.surface_edge_color_.get());
+		surface_provider_->emit_attribute_changed(*p.surface_, p.surface_face_color_.get());
+		//Fix the boundary vertices on a square of size 1
+
+	}
+
 	void cut_mesh(SurfaceParameter& p)
 	{
+		
+		foreach_cell(*p.surface_, [&](SEdge se) {
+			value<Vec3>(*p.surface_, p.surface_edge_color_, se) = Vec3(0.0, 0.0, 0.0);
+			return true;
+		});
+		foreach_cell(*p.surface_, [&](SVertex se) {
+			value<Vec3>(*p.surface_, p.surface_vertex_color_, se) = Vec3(0.0, 0.0, 0.0);
+			return true;
+		});
+		foreach_cell(*p.surface_, [&](SFace se) {
+			value<Vec3>(*p.surface_, p.surface_face_color_, se) = Vec3(0.0, 0.0, 0.0);
+			return true;
+		});
 		MeshData<SURFACE>& md = surface_provider_->mesh_data(*p.surface_);
 		Vec3 position;
 		p.frame_manipulator_.get_position(position);
@@ -119,6 +177,7 @@ public:
 		//Find the edges that intersected with the plane
 		foreach_cell(*p.surface_, [&](SEdge se) {
 			auto& vs = incident_vertices(*p.surface_, se);
+			auto& fs = incident_faces(*p.surface_, se);
 			Vec3 pos1 = value<Vec3>(*p.surface_, p.surface_vertex_position_, vs[0]);
 			Vec3 pos2 = value<Vec3>(*p.surface_, p.surface_vertex_position_, vs[1]);
 			Scalar d1 = Vec4(pos1.x(), pos1.y(), pos1.z(), 1).dot(plane);
@@ -126,36 +185,37 @@ public:
 
 			if (std::signbit(d1) != std::signbit(d2))
 			{
-				value<Vec3>(*p.surface_, p.surface_vertex_color_, vs[0]) = Vec3(1.0, 0.0, 0.0);
-				value<Vec3>(*p.surface_, p.surface_vertex_color_, vs[1]) = Vec3(1.0, 0.0, 0.0);
-//				value<Vec3>(*p.surface_, p.surface_edge_color_, se) = Vec3(1.0, 0.0, 0.0);
+				for (SVertex& v : vs)
+				{
+					value<Vec3>(*p.surface_, p.surface_vertex_color_, v) = Vec3(1.0, 0.0, 0.0);
+				}
+				for (SFace& f : fs)
+				{
+					value<Vec3>(*p.surface_, p.surface_face_color_, f) = Vec3(1.0, 0.0, 0.0);
+				}
+				value<Vec3>(*p.surface_, p.surface_edge_color_, se) = Vec3(1.0, 0.0, 0.0);
 			}
 
 			return true;
 		}); 
-
-		foreach_cell(*p.surface_, [&](SEdge se) {
-			auto& vs = incident_vertices(*p.surface_, se);
-			value<Vec3>(*p.surface_, p.surface_edge_color_, se) =
-				value<Vec3>(*p.surface_, p.surface_vertex_position_, vs[0]);
-
-			return true;
-		}); 
-
-
-		foreach_cell(*p.surface_, [&](SVertex ve) {
-			value<Vec3>(*p.surface_, p.surface_vertex_color_, ve) =
-				value<Vec3>(*p.surface_, p.surface_vertex_position_, ve);
-
-				//Scalar(0.5) * (value<Vec3>(*p.surface_, p.surface_vertex_color_, vs[0]) +
-				//			   value<Vec3>(*p.surface_, p.surface_vertex_color_, vs[1]));
+		/*foreach_cell(*p.surface_, [&](SVertex se) {
+			Vec3 pos = value<Vec3>(*p.surface_, p.surface_vertex_position_, se);
+			Scalar d1 = Vec4(pos.x(), pos.y(), pos.z(), 1).dot(plane);
+			if (std::signbit(d1))
+			{
+				auto& es = incident_edges(*p.surface_, se);
+				for (SEdge& e : es)
+				{
+					value<Vec3>(*p.surface_, p.surface_edge_color_, e) = Vec3(1.0, 0.0, 0.0);
+				}
+			
+			}
 
 			return true;
-		}); 
-
+		}); */
 		surface_provider_->emit_attribute_changed(*p.surface_, p.surface_vertex_color_.get());
 		surface_provider_->emit_attribute_changed(*p.surface_, p.surface_edge_color_.get());
-		
+		surface_provider_->emit_attribute_changed(*p.surface_, p.surface_face_color_.get());
 	}
 
 	void compute_plane_from_points(SurfaceParameter& p)
@@ -292,7 +352,10 @@ protected:
 		if (selected_surface_mesh_){
 		
 			SurfaceParameter& p = surface_parameters_[selected_surface_mesh_];
-			
+			imgui_combo_attribute<SVertex, Vec3>(*selected_surface_mesh_, p.surface_vertex_position_, "Position",
+													   [&](const std::shared_ptr<SAttribute<Vec3>>& attribute) {
+														   p.surface_vertex_position_ = attribute;
+													   });
 			
 			if (ImGui::Button("Parameterization init"))
 			{
@@ -303,6 +366,15 @@ protected:
 			{
 				if (ImGui::Button("Cut mesh")){
 					cut_mesh(p);
+				}
+				if (ImGui::Button("Tutte embedding"))
+				{
+					tutte_embedding(p);
+				}
+				if (ImGui::Checkbox("Clipping plane ", &p.clipping_plane_))
+				{
+					for (View* v : linked_views_)
+						v->request_update();
 				}
 				if (ImGui::Checkbox("Show clipping plane", &p.show_frame_manipulator_))
 				{

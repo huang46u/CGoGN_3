@@ -55,7 +55,7 @@ int main(int argc, char** argv)
 	cgogn::thread_start();
 
 	cgogn::ui::App app;
-	app.set_window_title("Coverage axis viewer");
+	app.set_window_title("Parameterization viewer");
 	app.set_window_size(1000, 800);
 
 	cgogn::ui::MeshProvider<Surface> ms(app);
@@ -84,6 +84,8 @@ int main(int argc, char** argv)
 
 		sr.set_vertex_position(*v1, *m, surface_vertex_position);
 		sr.set_vertex_normal(*v1, *m, surface_vertex_normal);
+		cgogn::index_cells<Edge>(*m);
+		cgogn::index_cells<Face>(*m);
 	}
 
 	return app.launch();
