@@ -68,7 +68,7 @@ enum parameterization_weight
 
 void fix_boundary_vertices(CMap2& m, boundary_form form,
 						   typename mesh_traits<CMap2>::template Attribute<bool>* boundary,
-						   typename mesh_traits<CMap2>::template Attribute<Vec3>* tc_position)
+						   typename mesh_traits<CMap2>::template Attribute<Vec2>* tc_position)
 {
 	CMap2::Edge start_edge;
 	foreach_cell(m, [&](CMap2::Edge e) {
@@ -93,9 +93,9 @@ void fix_boundary_vertices(CMap2& m, boundary_form form,
 		Scalar step = 2 * M_PI / boundary_vertices.size();
 		for (uint32 idx = 0; idx < boundary_vertices.size(); idx++)
 		{
-			Scalar x = std::cos(idx * step);
-			Scalar y = std::sin(idx * step);
-			value<Vec3>(m, tc_position, boundary_vertices[idx]) = Vec3(x, y, 0.0);
+			Scalar x = std::cos(idx * step)+1;
+			Scalar y = std::sin(idx * step)+1;
+			value<Vec2>(m, tc_position, boundary_vertices[idx]) = Vec2(x, y);
 		}
 	}
 		break;
@@ -130,7 +130,7 @@ void fix_boundary_vertices(CMap2& m, boundary_form form,
 				x = 0.0;
 				y = 1.0 - static_cast<Scalar>(i - 3 * sideLength) / (sideLength - 1);
 			}
-			value<Vec3>(m, tc_position, boundary_vertices[i]) = Vec3(x-0.5, y-0.5, 0.0);
+			value<Vec2>(m, tc_position, boundary_vertices[i]) = Vec2(x, y);
 		}	
 	}
 		break;
@@ -190,7 +190,8 @@ public:
 		std::shared_ptr<SAttribute<Vec3>> surface_edge_color_ = nullptr;
 		std::shared_ptr<SAttribute<Vec3>> surface_face_color_ = nullptr;
 		std::shared_ptr<SAttribute<Vec3>> surface_vertex_color_ = nullptr;
-		std::shared_ptr<SAttribute<Vec3>> surface_tc_position_ = nullptr;
+		std::shared_ptr<SAttribute<Vec3>> surface_tc3_position_ = nullptr;
+		std::shared_ptr<SAttribute<Vec2>> surface_tc2_position_ = nullptr;
 		std::shared_ptr<SAttribute<bool>> is_boundary_vertex_= nullptr;
 		std::vector<SEdge> boundary_edge;
 		boundary_form boundary_form_;
@@ -210,7 +211,8 @@ public:
 		p.surface_edge_color_ = get_or_add_attribute<Vec3, SEdge>(*p.surface_, "surface_edge_color");
 		p.surface_face_color_ = get_or_add_attribute<Vec3, SFace>(*p.surface_, "surface_face_color");
 		p.surface_vertex_color_ = get_or_add_attribute<Vec3, SVertex>(*p.surface_, "surface_vert_color");
-		p.surface_tc_position_ = get_or_add_attribute<Vec3, SVertex>(*p.surface_, "tc_position");
+		p.surface_tc2_position_ = get_or_add_attribute<Vec2, SVertex>(*p.surface_, "tc2_position");
+		p.surface_tc3_position_ = get_or_add_attribute<Vec3, SVertex>(*p.surface_, "tc3_position");
 		p.is_boundary_vertex_ = get_or_add_attribute<bool, SVertex>(*p.surface_, "is_boundary_vertex");
 
 		p.boundary_form_ = BOUNDARY_FORM_CIRCLE;
@@ -236,7 +238,7 @@ public:
 	//Only applicable for disk-like surface
 	void tutte_embedding(SurfaceParameter& p)
 	{
-		fix_boundary_vertices(*p.surface_, p.boundary_form_, p.is_boundary_vertex_.get(), p.surface_tc_position_.get());
+		fix_boundary_vertices(*p.surface_, p.boundary_form_, p.is_boundary_vertex_.get(), p.surface_tc2_position_.get());
 		typedef Eigen::SparseMatrix<Scalar> SparseMatrix;
 		typedef Eigen::Triplet<Scalar> Triplet;
 		std::vector<Triplet> triplets;
@@ -249,7 +251,7 @@ public:
 			uint32 v_index = index_of(*p.surface_, v);
 			if ((*p.is_boundary_vertex_)[v_index])
 			{
-				Vec3 pos = value<Vec3>(*p.surface_, p.surface_tc_position_, v);
+				Vec2 pos = value<Vec2>(*p.surface_, p.surface_tc2_position_, v);
 				B(v_index, 0) = pos.x();
 				B(v_index, 1) = pos.y();
 				triplets.push_back(Triplet(v_index, v_index, 1.0));
@@ -373,12 +375,13 @@ public:
 		Eigen::MatrixXd X = solver.solve(B);
 		foreach_cell(*p.surface_, [&](SVertex v) {
 			uint32 v_index = index_of(*p.surface_, v);
-			value<Vec3>(*p.surface_, p.surface_tc_position_, v) = Vec3(X(v_index, 0), X(v_index, 1), 0.0);
+			value<Vec2>(*p.surface_, p.surface_tc2_position_, v) = Vec2(X(v_index, 0), X(v_index, 1));
+			value<Vec3>(*p.surface_, p.surface_tc3_position_,v) = Vec3(X(v_index, 0), X(v_index, 1), 0);
 			return true;
 		});
 		remove_attribute<SVertex>(*p.surface_, geodesic_polar_map_coord.get());
-		surface_provider_->emit_attribute_changed(*p.surface_, p.surface_tc_position_.get());
-		
+		surface_provider_->emit_attribute_changed(*p.surface_, p.surface_tc2_position_.get());
+		surface_provider_->emit_attribute_changed(*p.surface_, p.surface_tc3_position_.get());
 
 	}
 

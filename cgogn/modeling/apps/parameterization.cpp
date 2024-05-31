@@ -27,12 +27,13 @@
 #include <cgogn/modeling/ui_modules/parameterization.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
+
 #include <cgogn/ui/app.h>
 #include <cgogn/ui/view.h>
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/rendering/ui_modules/surface_render.h>
-
+#include <cgogn/rendering/ui_modules/surface_tex_render.h>
 #define DEFAULT_MESH_PATH CGOGN_STR(CGOGN_DATA_PATH) "/meshes/"
 
 using Surface = cgogn::CMap2;
@@ -60,6 +61,7 @@ int main(int argc, char** argv)
 
 	cgogn::ui::MeshProvider<Surface> ms(app);
 	cgogn::ui::SurfaceRender<Surface> sr(app);
+	cgogn::ui::SurfaceTexRender<Surface> str(app);
 	cgogn::ui::Parameterization<Surface> para(app);
 
 	app.init_modules();
@@ -68,6 +70,7 @@ int main(int argc, char** argv)
 
 	v1->link_module(&ms);
 	v1->link_module(&sr);
+	v1->link_module(&str);
 	v1->link_module(&para);
 
 	if (filename.length() > 0)
@@ -84,6 +87,7 @@ int main(int argc, char** argv)
 
 		sr.set_vertex_position(*v1, *m, surface_vertex_position);
 		sr.set_vertex_normal(*v1, *m, surface_vertex_normal);
+		str.chekered_texture();
 		cgogn::index_cells<Edge>(*m);
 		cgogn::index_cells<Face>(*m);
 	}
