@@ -91,7 +91,11 @@ enum CorrectionMode : uint32
 	SPHERE_CORRECTION_AT_EACH_STEP,
 	SPHERE_CORRECTION_BEFORE_SPLIT
 };
-
+enum EulideanMode
+{
+	EUCLIDEAN,
+	POWER
+};
 
 template <typename POINT, typename SURFACE, typename NONMANIFOLD>
 class PowerShape : public ViewModule
@@ -540,6 +544,7 @@ private:
 		InitMethod init_method_ = CONSTANT;
 		AutoSplitMode auto_split_mode_ = MAX_NB_SPHERES;
 		CorrectionMode correction_mode_ = SPHERE_CORRECTION_BEFORE_SPLIT;
+		EulideanMode distance_mode_ = EUCLIDEAN;
 		float energy_lambda_fitting = 0.5;
 		float partition_lambda = 0.2;
 		float energy_lambda_sqem = 1; 
@@ -1886,8 +1891,17 @@ private:
 				Scalar sphere_radius = (*p.clusters_radius_)[cluster_index];
 
 				Vec4 sphere_homo = Vec4(sphere_center.x(), sphere_center.y(), sphere_center.z(), sphere_radius);
-				Scalar dis_eucl = fabs((pos - sphere_center).norm() - sphere_radius);
-				dis_eucl *= dis_eucl * value<Scalar>(*p.surface_, p.surface_vertex_area_, sv);
+				Scalar dis_eucl;
+				if (p.distance_mode_ == EUCLIDEAN)
+				{
+					dis_eucl = fabs((pos - sphere_center).norm() - sphere_radius);
+					dis_eucl *= dis_eucl * value<Scalar>(*p.surface_, p.surface_vertex_area_, sv);
+				}
+				else
+				{
+					dis_eucl = (pos - sphere_center).norm();
+					dis_eucl *= dis_eucl * dis_eucl - sphere_radius * sphere_radius;
+				}
 				Scalar dis_sqem = sq.eval(sphere_homo);
 				Scalar dist = dis_sqem + p.partition_lambda * dis_eucl;
 				if (min_distance > dist)
@@ -1943,8 +1957,17 @@ private:
 			{
 				uint32 sv_index = index_of(*p.surface_, sv);
 				Vec4 sphere_homo = Vec4(center.x(), center.y(), center.z(), radius);
-				Scalar dis_eucl = fabs(((*p.surface_vertex_position_)[sv_index] - center).norm() - radius);
-				dis_eucl *= dis_eucl * (*p.surface_vertex_area_)[sv_index];
+				Scalar dis_eucl; 
+				if (p.distance_mode_ == EUCLIDEAN)
+				{
+					dis_eucl = fabs(((*p.surface_vertex_position_)[sv_index] - center).norm() - radius);
+					dis_eucl *= dis_eucl * (*p.surface_vertex_area_)[sv_index];
+				}
+				else
+				{
+					dis_eucl = ((*p.surface_vertex_position_)[sv_index] - center).norm();
+					dis_eucl = (dis_eucl * dis_eucl - radius * radius) * (*p.surface_vertex_area_)[sv_index];
+				}
 				Scalar dis_sqem = (*p.surface_vertex_quadric_)[sv_index].eval(sphere_homo);
 				Scalar dist = dis_sqem + p.partition_lambda * dis_eucl;
 				combined_error += dist;
@@ -2423,27 +2446,6 @@ private:
 		}
 	}
 
-	/*void script_experiments(ClusterAxisParameter& p)
-	{
-		MeshData<SURFACE>& md = surface_provider_->mesh_data(*p.surface_);
-		Scalar dia_len = md.diangonal_length();
-		p.init_distance_ = 5.0f;
-		for (uint32 idx = 0; idx < 3; idx++)
-		{
-			p.auto_split_ = true;
-			p.auto_stop_ = true;
-			p.slow_down_ = false;
-			p.correction_mode_ = (CorrectionMode)idx;
-			initialise_cluster(p);
-			start_clusters_update(p);
-			
-			compute_hausdorff_distance(p);
-			std::cout << "One sided hausdorff distance shape to enveloppe: "
-					  << p.hausdorff_distance_shape_to_enveloppe_ / dia_len * 100 << "%" << std::endl;
-			std::cout << "One sided hausdorff distance enveloppe to shape: "
-					  << p.hausdorff_distance_enveloppe_to_shape_ / dia_len * 100 << "%" << std::endl;
-		}
-	}*/
 
 	void compute_skeleton(ClusterAxisParameter& p)
 	{
@@ -3005,7 +3007,26 @@ private:
 				}
 				ImGui::Checkbox("slow down update", &p.slow_down_);
 				ImGui::SliderInt("Update rate", (int*)&p.update_rate_, 1, 1000);
-				
+				if (ImGui::RadioButton("Euclidean", (int*)&p.distance_mode_, EUCLIDEAN))
+				{
+					assign_cluster(p);
+					compute_skeleton(p);
+					if (!p.running_)
+					{
+
+						update_render_data(p);
+					}
+				}
+				if (ImGui::RadioButton("Power", (int*)&p.distance_mode_, POWER))
+				{
+					assign_cluster(p);
+					compute_skeleton(p);
+					if (!p.running_)
+					{
+						update_render_data(p);
+					}
+				}
+
 				if (!p.running_)
 				{
 					if (ImGui::Button("Start clusters update"))
