@@ -81,6 +81,7 @@ bool InsideTriangle(const Vec3& p, const Vec3& v0, const Vec3& v1, const Vec3& v
 }
 const Scalar denoise_preserve = 20.0 * M_PI / 180.0;
 const Scalar denoise_planar = 32.0 * M_PI / 180.0;
+const Scalar denoise_edge_length = 1e-5;
 const Scalar delta_convergence = 1e-5;
 const uint32 iteration_limit = 30;
 
@@ -95,30 +96,27 @@ std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_cent
 	using Face = typename mesh_traits<MESH>::Face;
 
 	uint32 j = 0;
-	Scalar r = 0.;
+	Scalar r = 0.0;
 
-	acc::Ray<Vec3> ray{p, -n, 1e-10, acc::inf};
-	acc::BVHTree<uint32, Vec3>::Hit h1;
-	acc::BVHTree<uint32, Vec3>::Hit h2;
-	Vec3 ip;
-	if (surface_bvh->intersect(ray, &h1))
-	{
-		Face f = bvh_faces[h1.idx];
-		std::vector<Vertex> vertices = incident_vertices(m, f);
-		ip = h1.bcoords[0] * value<Vec3>(m, vertex_position, vertices[0]) +
-				  h1.bcoords[1] * value<Vec3>(m, vertex_position, vertices[1]) +
-				  h1.bcoords[2] * value<Vec3>(m, vertex_position, vertices[2]);
-		r = (p - ip).norm() * 0.75;
-	}
-	else
-	{
-		std::cout << "intersection point not found !!!";
-		r = 0;
-		return
-		{
-			Vec3(0, 0, 0), 0, Vertex()
-		};
-	}
+	// if (use_kdt_only)
+	r = 0.5;
+	// else
+	// {
+	// 	acc::Ray<Vec3> ray{p, -n, 1e-10, acc::inf};
+	// 	acc::BVHTree<uint32, Vec3>::Hit h;
+	// 	if (surface_bvh->intersect(ray, &h))
+	// 	{
+	// 		Face f = bvh_faces[h.idx];
+	// 		std::vector<Vertex> vertices = incident_vertices(m, f);
+	// 		Vec3 ip = h.bcoords[0] * value<Vec3>(m, vertex_position, vertices[0]) +
+	// 				  h.bcoords[1] * value<Vec3>(m, vertex_position, vertices[1]) +
+	// 				  h.bcoords[2] * value<Vec3>(m, vertex_position, vertices[2]);
+	// 		r = (p - ip).norm() * 0.75;
+	// 	}
+	// 	else
+	// 		std::cout << "intersection point not found !!!";
+	// }
+
 	Vec3 c = p - (r * n);
 	Vec3 q = p - (2 * r * n);
 	Vertex q_v;
@@ -126,97 +124,51 @@ std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_cent
 	while (true)
 	{
 		// Find closest point to c
-		/* Vertex q_next_v;
+
+		Scalar d;
 		Vec3 q_next;
-		Scalar d = std::numeric_limits<Scalar>::max();
+		Vertex q_next_v;
+
+		// if (use_kdt_only)
+		// {
 		std::pair<uint32, Scalar> k_res;
-		if (!surface_kdt->find_nn(c, &k_res))
-		{
-			std::cout << "closest point not found !!!";
-			return
-			{
-				Vec3(0, 0, 0), 0, Vertex()
-			};
-		}
-		else
-		{
-			q_next_v = kdt_vertices[k_res.first];
-			foreach_incident_face(m, q_next_v, [&](Face f) {
-				std::vector<Vertex> vertices = incident_vertices(m, f);
-				Vec3 p1 = value<Vec3>(m, vertex_position, vertices[0]);
-				Vec3 p2 = value<Vec3>(m, vertex_position, vertices[1]);
-				Vec3 p3 = value<Vec3>(m, vertex_position, vertices[2]);
-				Vec3 proj = projection_point_on_triangle(c, p1, p2, p3);
-				Scalar dis = (proj - c).norm();
-				if (dis < d)
-				{
-					d = dis;
-					q_next = proj;
-				}
-				
-				return true;
-			});
-		}
-		/*const Vec3& q_next = surface_kdt->vertex(k_res.first);
-		Scalar d = k_res.second;
-		Vertex q_next_v = kdt_vertices[k_res.first];*/
+		surface_kdt->find_nn(c, &k_res);
+		q_next = surface_kdt->vertex(k_res.first);
+		d = k_res.second;
+		q_next_v = kdt_vertices[k_res.first];
+		// }
+		// else
+		// {
+		// 	std::pair<uint32, Vec3> cp_res;
+		// 	surface_bvh->closest_point(c, &cp_res);
+		// 	q_next = cp_res.second;
+		// 	d = (q_next - c).norm();
+		// 	Face f = bvh_faces[cp_res.first];
+		// 	std::vector<Vertex> vertices = incident_vertices(m, f);
+		// 	Scalar d0 = (q_next - value<Vec3>(m, vertex_position, vertices[0])).squaredNorm();
+		// 	Scalar d1 = (q_next - value<Vec3>(m, vertex_position, vertices[1])).squaredNorm();
+		// 	Scalar d2 = (q_next - value<Vec3>(m, vertex_position, vertices[2])).squaredNorm();
+		// 	if (d0 < d1 && d0 < d2)
+		// 		q_next_v = vertices[0];
+		// 	else if (d1 < d0 && d1 < d2)
+		// 		q_next_v = vertices[1];
+		// 	else
+		// 		q_next_v = vertices[2];
+		// }
 
-		 /* std::pair<uint32, Vec3> cp_res;
-		 surface_bvh->closest_point(c, &cp_res);
-		 Vec3 q_next = cp_res.second;
-		 Scalar d = (q_next - c).norm();
-		 Vertex q_next_v;
-
-		ray = acc::Ray<Vec3>{c, q_next - c, 1e-10, acc::inf};
-		 if(surface_bvh->intersect(ray, &h2)){
-			Face f = bvh_faces[h2.idx];
-			std::vector<Vertex> vertices = incident_vertices(m, f);
-			int max_idx = 0;
-			if (h2.bcoords[1] > h2.bcoords[max_idx])
-				max_idx = 1;
-			if (h2.bcoords[2] > h2.bcoords[max_idx])
-				max_idx = 2;
-			q_next_v = vertices[max_idx];
-		 }
-		 else
-		 {
-			std::cout << "intersection point of the center not found !!!";
-			 return
-			 {
-				 Vec3(0, 0, 0), 0, Vertex()
-			 };
-		 }*/
-
-		std::pair<uint32, Scalar> k_res;
-		if (!surface_kdt->find_nn(c, &k_res))
-		{
-			std::cout << "closest point not found !!!";
-			return {Vec3(0, 0, 0), 0, Vertex()};
-		}
-		const Vec3& q_next = surface_kdt->vertex(k_res.first);
-		Scalar d = k_res.second;
-		Vertex q_next_v = kdt_vertices[k_res.first];
 		// If the closest point is (almost) the same as the previous one, or if the ball no longer shrinks, we stop
-		if ((d >= r - delta_convergence) || (q_next - q).norm() < delta_convergence)
-		{
-			if (j == 0)
-			{
-				//std::cout << "the closest point is (almost) the same as the previous one, or if the ball no longer shrinks, we stop!!!"<<std::endl;
-				q_v = q_next_v;
-			}
+		if (fabs(d - r) <= delta_convergence || (q_next - q).norm() < delta_convergence)
 			break;
-		}
+
 		// Compute next ball center
 		Scalar r_next = compute_radius(p, n, q_next);
 		Vec3 c_next = p - (r_next * n);
 
 		// Denoising
 		Scalar separation_angle = geometry::angle(p - c_next, q_next - c_next);
-		if (j > 0 && separation_angle < denoise_preserve)
-		{ // && r_next > // (q_next - p).norm())
-			// std::cout << "Denoising preserve" << std::endl;
+		Scalar edge_length = fabs((p - c_next).norm() - (q_next - c_next).norm());
+		if (j > 0 && separation_angle < denoise_preserve && edge_length < 1e-5) // && r_next > // (q_next - p).norm())
 			break;
-		}
 
 		c = c_next;
 		r = r_next;
@@ -224,7 +176,6 @@ std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_cent
 		q_v = q_next_v;
 
 		j++;
-		
 		if (j > iteration_limit)
 			break;
 	}

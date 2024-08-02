@@ -521,7 +521,10 @@ private:
 		std::shared_ptr<PointAttribute<Vec4>> clusters_color_ = nullptr;
 		std::shared_ptr<PointAttribute<Vec4>> clusters_surface_color_ = nullptr;
 		std::shared_ptr<PointAttribute<std::vector<SurfaceVertex>>> clusters_surface_vertices_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> clusters_area_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_combined_error_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> clusters_eucl_error_ = nullptr;
+		std::shared_ptr<PointAttribute<Scalar>> clusters_sqem_error_ = nullptr;
 		std::shared_ptr<PointAttribute<std::set<PointVertex>>> clusters_neighbours_ = nullptr;
 		std::shared_ptr<PointAttribute<std::unordered_map<uint32, std::set<SurfaceVertex>>>> clusters_adjacency_info_ = nullptr;
 		std::shared_ptr<PointAttribute<Scalar>> clusters_max_distance_ = nullptr;
@@ -580,7 +583,7 @@ private:
 		uint32 update_rate_ = 20;
 		uint32 max_split_number = 1;
 		uint32 iteration_count_ = 0;
-		
+		uint32 update_times = 10;
 		uint32 adjacent_number = 0;
 		cgogn::rendering::SkelShapeDrawer skeleton_drawer_;
 		float skeleton_color[3] = {0.2, 0.2, 0.2};
@@ -1639,8 +1642,10 @@ private:
 			*p.clusters_, "clusters_surface_vertices");
 		
 
-		
+		p.clusters_area_ = get_or_add_attribute<Scalar, PointVertex>(*p.clusters_, "cluster_area");
 		p.clusters_combined_error_ = get_or_add_attribute<Scalar, PointVertex>(*p.clusters_, "clusters_combined_error");
+		p.clusters_eucl_error_ = get_or_add_attribute<Scalar, PointVertex>(*p.clusters_, "clusters_eucl_error");
+		p.clusters_sqem_error_ = get_or_add_attribute<Scalar, PointVertex>(*p.clusters_, "clusters_sqem_error");
 		p.clusters_neighbours_ = get_or_add_attribute<std::set<PointVertex>, PointVertex>(
 			*p.clusters_, "clusters_neighbours");
 		p.clusters_max_distance_ = get_or_add_attribute<Scalar, PointVertex>(
@@ -1873,14 +1878,16 @@ private:
 	void assign_cluster(ClusterAxisParameter& p)
 	{
 		parallel_foreach_cell(*p.clusters_, [&](PointVertex pv) {
-			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, pv).clear();
-			
+			uint32 v_index = index_of(*p.clusters_, pv);
+			(*p.clusters_surface_vertices_)[v_index].clear();
+			(*p.clusters_area_)[v_index] = 0;
 			return true;
 		});
 		parallel_foreach_cell(*p.surface_, [&](SurfaceVertex sv) {
 			if (!value<bool>(*p.surface_, p.medial_axis_selected_, sv))
 				return true;
 			Vec3& pos = value<Vec3>(*p.surface_, p.surface_vertex_position_, sv);
+			Scalar area = value<Scalar>(*p.surface_, p.surface_vertex_area_, sv);
 			Scalar min_distance = std::numeric_limits<Scalar>::max();
 			const Spherical_Quadric& sq = value<Spherical_Quadric>(*p.surface_, p.surface_vertex_quadric_, sv);
 			PointVertex closest_sphere;
@@ -1895,12 +1902,13 @@ private:
 				if (p.distance_mode_ == EUCLIDEAN)
 				{
 					dis_eucl = fabs((pos - sphere_center).norm() - sphere_radius);
-					dis_eucl *= dis_eucl * value<Scalar>(*p.surface_, p.surface_vertex_area_, sv);
+					dis_eucl *= dis_eucl * area;
 				}
 				else
 				{
 					dis_eucl = (pos - sphere_center).norm();
-					dis_eucl *= dis_eucl * dis_eucl - sphere_radius * sphere_radius;
+					dis_eucl = dis_eucl * dis_eucl - sphere_radius * sphere_radius;
+					dis_eucl *= area;
 				}
 				Scalar dis_sqem = sq.eval(sphere_homo);
 				Scalar dist = dis_sqem + p.partition_lambda * dis_eucl;
@@ -1916,9 +1924,10 @@ private:
 			value<PointVertex>(*p.surface_, p.surface_cluster_info_, sv) = closest_sphere;
 			value<Vec3>(*p.surface_, p.surface_vertex_color_, sv) =
 				value<Vec4>(*p.clusters_, p.clusters_surface_color_, closest_sphere).head<3>();
-
+			
 			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
 			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, closest_sphere).push_back(sv);
+			value<Scalar>(*p.clusters_, p.clusters_area_, closest_sphere) += area;
 			return true;
 		});
 		//}
@@ -1952,7 +1961,8 @@ private:
 			
 
 			Scalar combined_error = 0.0;
-			Scalar cluster_area = 0.0;
+			Scalar eucl_error = 0.0;
+			Scalar sqem_error = 0.0;
 			for (SurfaceVertex sv : cluster)
 			{
 				uint32 sv_index = index_of(*p.surface_, sv);
@@ -1967,19 +1977,23 @@ private:
 				{
 					dis_eucl = ((*p.surface_vertex_position_)[sv_index] - center).norm();
 					dis_eucl = (dis_eucl * dis_eucl - radius * radius) * (*p.surface_vertex_area_)[sv_index];
+					dis_eucl *= (*p.surface_vertex_area_)[sv_index];
 				}
+				eucl_error += dis_eucl;
 				Scalar dis_sqem = (*p.surface_vertex_quadric_)[sv_index].eval(sphere_homo);
+				sqem_error += dis_sqem;
 				Scalar dist = dis_sqem + p.partition_lambda * dis_eucl;
 				combined_error += dist;
-				cluster_area += (*p.surface_vertex_area_)[sv_index];
 				if (dist > (*p.clusters_max_distance_)[v_index])
 				{
 					(*p.clusters_max_vertex_)[v_index] = sv;
 					(*p.clusters_max_distance_)[v_index] = dist;
 				}
 			}
+			Scalar cluster_area = (*p.clusters_area_)[v_index];
 			(*p.clusters_combined_error_)[v_index] = combined_error/ cluster_area;
-			
+			(*p.clusters_eucl_error_)[v_index] = eucl_error / cluster_area;
+			(*p.clusters_sqem_error_)[v_index] = sqem_error / cluster_area;
 			return true;
 		});
 
@@ -2166,7 +2180,7 @@ private:
 			return true;
 		});
 		update_clusters_error(p); // compute spheres error 
-		if (p.auto_split_ && (p.total_error_diff_ < 1e-5 || p.iteration_count_ % 5== 0))
+		if (p.auto_split_ && (p.total_error_diff_ < 1e-5 || p.iteration_count_ % p.update_times== 0))
 		{
 			switch (p.auto_split_mode_)
 			{
@@ -2670,7 +2684,8 @@ private:
 		max_dist = 0.0;
 		std::vector<Vec3> enveloppe_points = p.skeleton_sampler_.samples();
 		std::pair<uint32, Vec3> bvh_res;
-		for (Vec3 v : enveloppe_points) {
+		for (Vec3 v : enveloppe_points)
+		{
 			p.surface_bvh_->closest_point(v, &bvh_res);
 			Vec3 closest_point_position = bvh_res.second;
 			Scalar dist = (closest_point_position - v).norm();
@@ -2682,9 +2697,7 @@ private:
 				  << p.hausdorff_distance_shape_to_enveloppe_ / dia_len * 100 << "%" << std::endl;
 		std::cout << "One sided hausdorff distance enveloppe to shape: "
 				  << p.hausdorff_distance_enveloppe_to_shape_ / dia_len * 100 << "%" << std::endl;
-
 	}
-
 	acc::BVHTree<uint32, Vec3>* build_bvh(SURFACE& surface)
 	{
 		auto surface_vertex_position = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "position");
@@ -2720,7 +2733,32 @@ private:
 	}
 	
 	
+	void post_processing(NONMANIFOLD& non_manifold, SURFACE& surface, ClusterAxisParameter& p)
+	{
+		auto surface_vertex_position = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "position");
 
+		auto non_manifold_vertex_position = get_or_add_attribute<Vec3, NonManifoldVertex>(non_manifold, "position");
+		auto non_manifold_vertex_radius = get_or_add_attribute<Scalar, NonManifoldVertex>(non_manifold, "radius");
+		
+		parallel_foreach_cell(non_manifold, [&](NonManifoldVertex pv) {
+			uint32 p_index = index_of(non_manifold, pv);
+			Vec3 pos = (*non_manifold_vertex_position)[p_index];
+			Scalar radius = (*non_manifold_vertex_radius)[p_index];
+			std::pair<uint32, Vec3> bvh_res;
+			p.surface_bvh_->closest_point(pos, &bvh_res);
+			Vec3 closest_point_position = bvh_res.second;
+			Vec3 closest_point_dir = (closest_point_position - pos).normalized();
+
+			auto [c, r, v2] = geometry::shrinking_ball_center(
+				surface, closest_point_position, closest_point_dir, surface_vertex_position.get(),
+				p.surface_bvh_.get(), p.surface_bvh_faces_, p.surface_kdt_.get(), p.surface_kdt_vertices_);
+			(*non_manifold_vertex_position)[p_index] = c;
+			(*non_manifold_vertex_radius)[p_index] = r;
+			return true;
+		});
+		nonmanifold_provider_->emit_attribute_changed(non_manifold, non_manifold_vertex_position.get());
+		nonmanifold_provider_->emit_attribute_changed(non_manifold, non_manifold_vertex_radius.get());
+	}
 
 	void compute_hausdorff_distance(NONMANIFOLD& non_manifold, SURFACE& surface)
 	{
@@ -2936,15 +2974,31 @@ private:
 			surface_provider_->mesh_data(m).outlined_until_ = App::frame_time_ + 1.0;
 		}); 
 		
+
 		ImGui::Separator();
 		if (selected_surface_mesh_)
 		{
+			ClusterAxisParameter& p = cluster_axis_parameters_[selected_surface_mesh_];
+			imgui_combo_attribute<SurfaceVertex, Vec3>(*selected_surface_mesh_, p.surface_vertex_position_, "Position",
+													   [&](const std::shared_ptr<SurfaceAttribute<Vec3>>& attribute) {
+														   p.surface_vertex_position_ = attribute;
+													   });
+			if (ImGui::Button("Cluster Axis"))
+			{
+					cluster_axis_init(*selected_surface_mesh_);
+			}
+			
 			imgui_mesh_selector(nonmanifold_provider_, selected_medial_axis_, "Skeleton", [&](NONMANIFOLD& m) {
 				selected_medial_axis_ = &m;
 				nonmanifold_provider_->mesh_data(m).outlined_until_ = App::frame_time_ + 1.0;
 			});
 			if (selected_medial_axis_)
 			{
+					if (ImGui::Button("Back projection spheres"))
+					{
+						post_processing(*selected_medial_axis_, *selected_surface_mesh_, p);
+					}
+
 					if (ImGui::Button("Compute hausdorff distance")){
 						compute_hausdorff_distance(*selected_medial_axis_, *selected_surface_mesh_);
 					}
@@ -2954,18 +3008,9 @@ private:
 					}
 					ImGui::Checkbox("Show skeleton", &draw_enveloppe);
 			}
-			ClusterAxisParameter& p = cluster_axis_parameters_[selected_surface_mesh_];
-
-			imgui_combo_attribute<SurfaceVertex, Vec3>(*selected_surface_mesh_, p.surface_vertex_position_, "Position",
-													   [&](const std::shared_ptr<SurfaceAttribute<Vec3>>& attribute) {
-														   p.surface_vertex_position_ = attribute;
-														   
-													   });
 			
-			if (ImGui::Button("Cluster Axis"))
-			{
-				cluster_axis_init(*selected_surface_mesh_);
-			}
+			
+			
 			if (p.initialized_)
 			{
 				
@@ -2996,10 +3041,10 @@ private:
 				ImGui::RadioButton("Correct at each step", (int*)&p.correction_mode_, SPHERE_CORRECTION_AT_EACH_STEP);
 				ImGui::RadioButton("Correct before split", (int*)&p.correction_mode_, SPHERE_CORRECTION_BEFORE_SPLIT);
 				ImGui::Separator();
-				ImGui::SliderInt("Update time", &(int)update_times, 1, 100);
+				ImGui::SliderInt("Update time", &(int)p.update_times, 1, 100);
 				if (ImGui::Button("Update clusters"))
 				{
-					for (uint32 i = 0; i < update_times; i++)
+					for (uint32 i = 0; i < p.update_times; i++)
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
 						update_clusters(p);
@@ -3120,7 +3165,22 @@ private:
 					const Vec3& sp = value<Vec3>(*p.clusters_, p.clusters_position_, picked_sphere_);
 					ImGui::Text("Index: %d", index_of(*p.clusters_, picked_sphere_));
 					ImGui::Text("Radius: %f", value<Scalar>(*p.clusters_, p.clusters_radius_, picked_sphere_));
-					ImGui::Text("Error: %.9f", value<Scalar>(*p.clusters_, p.clusters_combined_error_, picked_sphere_));
+					ImGui::Text("Combined Error per area: %.9f", value<Scalar>(*p.clusters_, p.clusters_combined_error_, picked_sphere_));
+					ImGui::Text("Combined Error : %.9f",
+								value<Scalar>(*p.clusters_, p.clusters_combined_error_, picked_sphere_)*
+									value<Scalar>(*p.clusters_, p.clusters_area_, picked_sphere_));
+					ImGui::Text("Eucldiean Error per area: %.9f",
+								value<Scalar>(*p.clusters_, p.clusters_eucl_error_, picked_sphere_));
+					ImGui::Text("Eucldiean Error: %.9f",
+								value<Scalar>(*p.clusters_, p.clusters_eucl_error_, picked_sphere_) *
+									value<Scalar>(*p.clusters_, p.clusters_area_, picked_sphere_));
+					ImGui::Text("SQEM Error per area: %.9f",
+								value<Scalar>(*p.clusters_, p.clusters_sqem_error_, picked_sphere_));
+					ImGui::Text("SQEM Error: %.9f",
+								value<Scalar>(*p.clusters_, p.clusters_sqem_error_, picked_sphere_) *
+									value<Scalar>(*p.clusters_, p.clusters_area_, picked_sphere_));
+
+
 				}
 				else
 				{
@@ -3204,7 +3264,7 @@ private :
 	float angle_threshold_ = 1.9;
 	float radius_threshold_ = 0.030;
 	float dilation_factor = 0.1f;
-	uint32 update_times = 5;
+	
 	double min_radius_ = std::numeric_limits<double>::max();
 	double max_radius_ = std::numeric_limits<double>::min();
 	double min_angle_ = std::numeric_limits<double>::max();
