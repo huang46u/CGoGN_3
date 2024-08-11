@@ -1672,7 +1672,7 @@ private:
 		p.non_manifold_cluster_vertices_ =
 			get_or_add_attribute<std::vector<SurfaceVertex>, NonManifoldVertex>(*p.non_manifold_, "cluster_vertices");
 		p.non_manifold_cloest_surface_color = get_or_add_attribute<Vec3, NonManifoldFace>(*p.non_manifold_, "volumn_detected_color");
-		p.non_manifold_vertex_color = get_or_add_attribute<Vec3, NonManifoldFace>(*p.non_manifold_, "vertex_color");
+		p.non_manifold_vertex_color = get_or_add_attribute<Vec3, NonManifoldVertex>(*p.non_manifold_, "vertex_color");
 		p.skeleton_drawer_.set_color({p.skeleton_color[0], p.skeleton_color[1], p.skeleton_color[2], 1});
 		p.skeleton_drawer_.set_subdiv(40);
 		
@@ -2766,7 +2766,7 @@ private:
 			double radius= (*p.non_manifold_vertex_radius_)[i];
 			Vec3 color = (*p.non_manifold_vertex_color)[i];
 			position.push_back({pos.x(), pos.y(), pos.z()});
-			vertex_color.push_back({{color.x(), color.y(), color.z()}})
+			vertex_color.push_back({{color.x(), color.y(), color.z()}});
 			radii.push_back(radius);
 		}
 
@@ -2797,6 +2797,7 @@ private:
 		plyOut.addVertexPositions(position);
 		plyOut.addFaceIndices(face_indices);
 		plyOut.addEdgeIndices(edge_indices);
+		plyOut.addVertexColors(vertex_color);
 		plyOut.addVertexRadius(radii);
 		plyOut.write(file_name);
 	}
