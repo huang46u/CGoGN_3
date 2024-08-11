@@ -1610,7 +1610,30 @@ public:
     getElement(vertexName).addProperty<unsigned char>("blue", b);
   }
 
+  void addVertexRadius(std::vector<double>& radii)
+  {
 
+	std::string vertexName = "vertex";
+	size_t N = radii.size();
+
+	// Create the element if it doesn't exist
+	if (!hasElement(vertexName))
+	{
+	  addElement(vertexName, N);
+	}
+
+	// Clamp radius values if necessary and prepare the radius vector
+	std::vector<float> radiusValues(N);
+	for (size_t i = 0; i < N; i++)
+	{
+	  if (radii[i] < 0.0)
+		radii[i] = 0.0; // Ensure no negative radii
+	  radiusValues[i] = static_cast<float>(radii[i]);
+	}
+
+	// Store the radius data
+	getElement(vertexName).addProperty<float>("radius", radiusValues);
+  }
   /**
    * @brief Common-case helper to set face indices. Creates a face element if needed. The input type will be casted to a
    * 32 bit integer of the same signedness.

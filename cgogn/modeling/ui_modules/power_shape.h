@@ -541,15 +541,16 @@ private:
 		std::shared_ptr<NonManifoldAttribute<Vec4>> non_manifold_sphere_info_ = nullptr;
 		std::shared_ptr<NonManifoldAttribute<std::vector<SurfaceVertex>>> non_manifold_cluster_vertices_ = nullptr;
 		std::shared_ptr<NonManifoldAttribute<Vec3>> non_manifold_cloest_surface_color = nullptr;
+		std::shared_ptr<NonManifoldAttribute<Vec3>> non_manifold_vertex_color = nullptr;
 		float init_min_radius_ = 0.01;
 		float init_cover_dist_ = 0.06;
 	
 		InitMethod init_method_ = CONSTANT;
 		AutoSplitMode auto_split_mode_ = MAX_NB_SPHERES;
-		CorrectionMode correction_mode_ = SPHERE_CORRECTION_BEFORE_SPLIT;
+		CorrectionMode correction_mode_ = NO_CORRECTION;
 		EulideanMode distance_mode_ = EUCLIDEAN;
-		float energy_lambda_fitting = 0.5;
-		float partition_lambda = 0.2;
+		float energy_lambda_fitting = 0.1;
+		float partition_lambda = 0.1;
 		float energy_lambda_sqem = 1; 
 
 		float split_sqem_combined_threshold_ = 0.001f;
@@ -1671,7 +1672,7 @@ private:
 		p.non_manifold_cluster_vertices_ =
 			get_or_add_attribute<std::vector<SurfaceVertex>, NonManifoldVertex>(*p.non_manifold_, "cluster_vertices");
 		p.non_manifold_cloest_surface_color = get_or_add_attribute<Vec3, NonManifoldFace>(*p.non_manifold_, "volumn_detected_color");
-
+		p.non_manifold_vertex_color = get_or_add_attribute<Vec3, NonManifoldFace>(*p.non_manifold_, "vertex_color");
 		p.skeleton_drawer_.set_color({p.skeleton_color[0], p.skeleton_color[1], p.skeleton_color[2], 1});
 		p.skeleton_drawer_.set_subdiv(40);
 		
@@ -1766,7 +1767,8 @@ private:
 			p.nb_spheres_++;
 			value<Vec3>(*p.clusters_, p.clusters_position_, new_cluster) = sphere_center;
 			value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster) =
-				Vec4(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX,0.5);
+				Vec4(0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0,
+					 0.5 + 0.5 * (rand() % 256) / 256.0, 0.9);
 			value<std::vector<SurfaceVertex>>(*p.clusters_, p.clusters_surface_vertices_, new_cluster).clear();
 			value<Scalar>(*p.clusters_, p.clusters_radius_, new_cluster) = radius;
 			value<Vec3>(*p.surface_, p.surface_vertex_color_, v1) = value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster).head<3>();
@@ -1951,6 +1953,8 @@ private:
 	void update_clusters_error(ClusterAxisParameter& p)
 	{
 		p.huasdorff_distance_cluster_ = 0.0;
+		//These two parameters were only used for collecting data
+		
 		parallel_foreach_cell(*p.clusters_, [&](PointVertex pv) {
 			uint32 v_index = index_of(*p.clusters_, pv);
 			(*p.clusters_max_distance_)[v_index] = std::numeric_limits<Scalar>::min();
@@ -1979,7 +1983,7 @@ private:
 					dis_eucl = (dis_eucl * dis_eucl - radius * radius) * (*p.surface_vertex_area_)[sv_index];
 					dis_eucl *= (*p.surface_vertex_area_)[sv_index];
 				}
-				eucl_error += dis_eucl;
+				eucl_error += dis_eucl *p.partition_lambda;
 				Scalar dis_sqem = (*p.surface_vertex_quadric_)[sv_index].eval(sphere_homo);
 				sqem_error += dis_sqem;
 				Scalar dist = dis_sqem + p.partition_lambda * dis_eucl;
@@ -1994,24 +1998,36 @@ private:
 			(*p.clusters_combined_error_)[v_index] = combined_error/ cluster_area;
 			(*p.clusters_eucl_error_)[v_index] = eucl_error / cluster_area;
 			(*p.clusters_sqem_error_)[v_index] = sqem_error / cluster_area;
+		
 			return true;
 		});
 
 		p.min_error_ = std::numeric_limits<Scalar>::max();
 		p.max_error_ = std::numeric_limits<Scalar>::min();
 		p.total_error_ = 0.0;
-		for (Scalar e : *p.clusters_combined_error_)
-		{
-			p.min_error_ = std::min(p.min_error_, e);
-			p.max_error_ = std::max(p.max_error_, e);
-			p.total_error_ += e;
-		}
+		Scalar total_eucl_error = 0.0;
+		Scalar total_sqem_error = 0.0;
+		foreach_cell(*p.clusters_, [&](PointVertex v) -> bool 
+			{
+				uint32 v_index = index_of(*p.clusters_, v);
+				Scalar eucl_error = (*p.clusters_eucl_error_)[v_index];
+				Scalar sqem_error = (*p.clusters_sqem_error_)[v_index];
+				Scalar error = (*p.clusters_combined_error_)[v_index];
+				total_eucl_error += eucl_error;
+				total_sqem_error += sqem_error;
+				p.min_error_ = std::min(p.min_error_, error);
+				p.max_error_ = std::max(p.max_error_, error);
+				p.total_error_ += error;
+				return true;
+			});
 		p.total_error_diff_ = fabs(p.total_error_ - p.last_total_error_);
 		p.last_total_error_ = p.total_error_;
 		for (Scalar max_distance : *p.clusters_max_distance_)
 		{
 			p.huasdorff_distance_cluster_ = std::max(p.huasdorff_distance_cluster_, max_distance);
 		}
+	/*	std::cout << total_eucl_error << std::endl;
+		std::cout << total_sqem_error << std::endl;*/
 	} 
 
 	// Update the neighborhood of the clusters
@@ -2180,7 +2196,7 @@ private:
 			return true;
 		});
 		update_clusters_error(p); // compute spheres error 
-		if (p.auto_split_ && (p.total_error_diff_ < 1e-5 || p.iteration_count_ % p.update_times== 0))
+		if (p.auto_split_ && (p.total_error_diff_ / p.total_error_<1e-3 || p.iteration_count_ % p.update_times == 0))
 		{
 			switch (p.auto_split_mode_)
 			{
@@ -2205,7 +2221,7 @@ private:
 						return value<Scalar>(*p.clusters_, p.clusters_combined_error_, a) >
 							   value<Scalar>(*p.clusters_, p.clusters_combined_error_, b);
 					});
-					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * 0.2)), 10u);
+					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * 0.2)), 5u);
 					for (PointVertex sphere : sorted_spheres)
 					{
 						uint32 s_index = index_of(*p.clusters_, sphere);
@@ -2283,7 +2299,8 @@ private:
 		value<Scalar>(*p.clusters_, p.clusters_radius_, new_cluster) =
 			value<Scalar>(*p.surface_, p.medial_axis_radius_, max_dist_vertex);
 		value<Vec4>(*p.clusters_, p.clusters_surface_color_, new_cluster) =
-			Vec4(rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, rand() / (double)RAND_MAX, 0.5);
+			Vec4(0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0,
+				 0.5 + 0.5 * (rand() % 256) / 256.0,  0.9);
 
 	}
 
@@ -2374,7 +2391,7 @@ private:
 					std::this_thread::yield();
 				if (p.auto_stop_)
 				{
-					if (p.total_error_diff_ / p.total_error_ < 1e-3)
+					if (p.total_error_diff_ / p.total_error_ < 5e-4)
 					{
 						switch (p.auto_split_mode_)
 						{
@@ -2393,21 +2410,24 @@ private:
 
 				if (p.stopping_)
 				{
-					if (p.correction_mode_ != SPHERE_CORRECTION_AT_EACH_STEP)
+					/* if (p.correction_mode_ != SPHERE_CORRECTION_AT_EACH_STEP)
 					{
 						correct_clusters(p);
-					}
+					}*/
+					//update_render_data(p);
 					p.running_ = false;
 					p.stopping_ = false;
 					
 					break;
 				}
 			}
+			
 			auto end = std::chrono::high_resolution_clock::now();
 			std::cout << "Sphere optimizations time: " << std::chrono::duration<Scalar>(end - start).count() << "s"
 					  << std::endl;
 			std::cout << "Nb iterations: " << p.iteration_count_ << std::endl;
 		});
+		
 		app_.start_timer(100, [&]() -> bool { return !p.running_; });
 	}
 
@@ -2477,6 +2497,8 @@ private:
 			Scalar radius = value<Scalar>(*p.clusters_, p.clusters_radius_, pv);
 			value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, nmv) = center;
 			value<Scalar>(*p.non_manifold_, p.non_manifold_vertex_radius_, nmv) = radius;
+			value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_color, nmv) =
+				value<Vec4>(*p.clusters_, p.clusters_surface_color_, pv).head<3>();
 			value<Vec4>(*p.non_manifold_, p.non_manifold_sphere_info_, nmv) = Vec4(center.x(), center.y(), center.z(), radius);
 			
 			value<std::vector<SurfaceVertex>>(*p.non_manifold_, p.non_manifold_cluster_vertices_, nmv) =
@@ -2664,6 +2686,120 @@ private:
 		std::cout << "save .obj file successfully" << std::endl;
 	}
 
+	void export_surface_PLY(ClusterAxisParameter& p, const std::string& directory)
+	{
+		SURFACE& m = *p.surface_;
+		auto& mesh_name = surface_provider_->mesh_name(*p.surface_);
+		auto& file_name = directory + "/" + mesh_name +
+						  ".ply ";
+		// TODO
+		std::vector<std::array<double, 3>> position;
+		std::vector<std::vector<uint32>> face_indices;
+		std::vector<std::array<uint32, 2>> edge_indices;
+		std::vector<std::array<double, 3>> vertex_color;
+
+		uint32 nb_vertices = nb_cells<SurfaceVertex>(m);
+		uint32 nb_faces = nb_cells<SurfaceFace>(m);
+		uint32 nb_edges = nb_cells<SurfaceEdge>(m);
+
+		position.reserve(nb_vertices);
+		for (size_t i = 0; i < nb_vertices; i++)
+		{
+			Vec3 pos = (*p.surface_vertex_position_)[i];
+			Vec3 color = (*p.surface_vertex_color_)[i];
+			position.push_back({pos.x(), pos.y(), pos.z()});
+			vertex_color.push_back({color.x(), color.y(), color.z()});
+		}
+
+		face_indices.reserve(nb_faces);
+		foreach_cell(m, [&](SurfaceFace f) {
+			std::vector<uint32> face;
+			for (Vertex v : incident_vertices(m, f))
+			{
+				face.push_back(index_of(m, v));
+			}
+
+			face_indices.push_back(face);
+			return true;
+		});
+
+		edge_indices.reserve(nb_edges);
+		foreach_cell(m, [&](SurfaceEdge e) {
+			auto& faces = incident_faces(m, e);
+			if (faces.size() != 0)
+				return true;
+			auto& vertices = incident_vertices(m, e);
+
+			edge_indices.push_back({index_of(m, vertices[0]), index_of(m, vertices[1])});
+			return true;
+		});
+
+		happly::PLYData plyOut;
+		plyOut.addVertexPositions(position);
+		plyOut.addFaceIndices(face_indices);
+		plyOut.addEdgeIndices(edge_indices);
+		plyOut.addVertexColors(vertex_color);
+		plyOut.write(file_name);
+		
+	}
+
+	void export_skeleton_PLY(ClusterAxisParameter& p, const std::string& directory)
+	{
+		
+		auto& mesh_name= nonmanifold_provider_->mesh_name(*p.non_manifold_);
+		auto& file_name = directory + "/" + mesh_name + ".ply";
+		// TODO
+		std::vector<std::array<double, 3>> position;
+		std::vector<std::vector<uint32>> face_indices;
+		std::vector<std::array<uint32, 2>> edge_indices;
+		std::vector<double> radii;
+		std::vector<std::array<double, 3>> vertex_color;
+
+		uint32 nb_vertices = nb_cells<NonManifoldVertex>(*p.non_manifold_);
+		uint32 nb_faces = nb_cells<NonManifoldFace>(*p.non_manifold_);
+		uint32 nb_edges = nb_cells<NonManifoldEdge>(*p.non_manifold_);
+
+		position.reserve(nb_vertices);
+		for (size_t i = 0; i < nb_vertices; i++)
+		{
+			Vec3 pos = (*p.non_manifold_vertex_position_)[i];
+			double radius= (*p.non_manifold_vertex_radius_)[i];
+			Vec3 color = (*p.non_manifold_vertex_color)[i];
+			position.push_back({pos.x(), pos.y(), pos.z()});
+			vertex_color.push_back({{color.x(), color.y(), color.z()}})
+			radii.push_back(radius);
+		}
+
+		face_indices.reserve(nb_faces);
+		foreach_cell(*p.non_manifold_, [&](NonManifoldFace f) {
+			std::vector<uint32> face;
+			for (NonManifoldVertex v : incident_vertices(*p.non_manifold_, f))
+			{
+				face.push_back(index_of(*p.non_manifold_, v));
+			}
+
+			face_indices.push_back(face);
+			return true;
+		});
+
+		edge_indices.reserve(nb_edges);
+		foreach_cell(*p.non_manifold_, [&](NonManifoldEdge e) {
+			auto& faces = incident_faces(*p.non_manifold_, e);
+			if (faces.size() != 0)
+				return true;
+			auto& vertices = incident_vertices(*p.non_manifold_, e);
+
+			edge_indices.push_back({index_of(*p.non_manifold_, vertices[0]), index_of(*p.non_manifold_, vertices[1])});
+			return true;
+		});
+
+		happly::PLYData plyOut;
+		plyOut.addVertexPositions(position);
+		plyOut.addFaceIndices(face_indices);
+		plyOut.addEdgeIndices(edge_indices);
+		plyOut.addVertexRadius(radii);
+		plyOut.write(file_name);
+	}
 
 	void compute_hausdorff_distance(ClusterAxisParameter& p)
 	{
@@ -2983,10 +3119,7 @@ private:
 													   [&](const std::shared_ptr<SurfaceAttribute<Vec3>>& attribute) {
 														   p.surface_vertex_position_ = attribute;
 													   });
-			if (ImGui::Button("Cluster Axis"))
-			{
-					cluster_axis_init(*selected_surface_mesh_);
-			}
+			
 			
 			imgui_mesh_selector(nonmanifold_provider_, selected_medial_axis_, "Skeleton", [&](NONMANIFOLD& m) {
 				selected_medial_axis_ = &m;
@@ -3009,7 +3142,12 @@ private:
 					ImGui::Checkbox("Show skeleton", &draw_enveloppe);
 			}
 			
-			
+			if (ImGui::Button("Cluster Axis"))
+			{
+					cluster_axis_init(*selected_surface_mesh_);
+					std::lock_guard<std::mutex> lock(p.mutex_);
+					initialise_cluster(p);
+			}
 			
 			if (p.initialized_)
 			{
@@ -3024,7 +3162,7 @@ private:
 					std::lock_guard<std::mutex> lock(p.mutex_);
 					initialise_cluster(p);
 				}
-				static bool sync_lambda = false;
+				static bool sync_lambda = true;
 				if (ImGui::Checkbox("Sync lambda", &sync_lambda))
 				{
 					if (sync_lambda)
@@ -3125,11 +3263,17 @@ private:
 				{
 					auto destination = pfd::select_folder("Select a file").result();
 					export_spheres_OBJ(p, destination);
-					
 				}
-				if (ImGui::Button("Export spheres radius"))
+				if (ImGui::Button("Export mesh in PLY"))
 				{
-					
+					auto destination = pfd::select_folder("Select a file").result();
+					export_surface_PLY(p, destination);
+				}
+				
+				if (ImGui::Button("Export skeleton in PLY"))
+				{
+					auto destination = pfd::select_folder("Select a file").result();
+					export_skeleton_PLY(p, destination);
 				}
 				if (ImGui::Checkbox("Draw reconstruction", &p.draw_enveloppe))
 				{
