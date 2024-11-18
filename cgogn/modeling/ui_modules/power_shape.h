@@ -620,8 +620,8 @@ private:
 					Vec3& n = value<Vec3>(*p.surface_, p.surface_face_normal_, f);
 					Vec4 n4 = Vec4(n.x(), n.y(), n.z(), 1.0);
 					Scalar a = value<Scalar>(*p.surface_, p.surface_face_area_, f);
-					J.row(idx) += (-n4) * sqrt(a / 3.0);
-					b(idx) += -((pos - Vec3(s(0), s(1), s(2))).dot(n)-s(3)) * sqrt(a / 3.0);
+					J.row(idx) += (-n4) * sqrt(a / 3.0)*p.energy_lambda_sqem;
+					b(idx) += -((pos - Vec3(s(0), s(1), s(2))).dot(n)-s(3)) * sqrt(a / 3.0)*p.energy_lambda_sqem;
 					return true;
 				});
 				++idx;
@@ -2598,7 +2598,7 @@ private:
 		auto& non_manifold_vertex_position = get_or_add_attribute<Vec3, NonManifoldVertex>(non_manifold, "position");
 		auto& non_manifold_vertex_radius = get_or_add_attribute<Scalar, NonManifoldVertex>(non_manifold, "radius");
 		skeleton_drawer.clear();
-		/*skeleton_drawer.set_color({1.0, 1.0, 1.0, 0.5});*/
+		skeleton_drawer.set_color({1.0, 1.0, 1.0, 0.5});
 		skeleton_drawer.set_subdiv(40);
 		foreach_cell(non_manifold, [&](NonManifoldVertex nv) {
 			skeleton_drawer.add_vertex(value<Vec3>(non_manifold, non_manifold_vertex_position, nv),
@@ -2835,6 +2835,7 @@ private:
 		std::cout << "One sided hausdorff distance enveloppe to shape: "
 				  << p.hausdorff_distance_enveloppe_to_shape_ / dia_len * 100 << "%" << std::endl;
 	}
+
 	acc::BVHTree<uint32, Vec3>* build_bvh(SURFACE& surface)
 	{
 		auto surface_vertex_position = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "position");
@@ -3164,12 +3165,19 @@ private:
 					initialise_cluster(p);
 				}
 				static bool sync_lambda = true;
+				static bool only_euclidean = false;
 				if (ImGui::Checkbox("Sync lambda", &sync_lambda))
 				{
 					if (sync_lambda)
 						p.partition_lambda = p.energy_lambda_fitting;
 				}
-				
+				if (ImGui::Checkbox("Use only Eulidean", &only_euclidean))
+				{
+					if (only_euclidean)
+						p.energy_lambda_sqem = 0.0;
+					else
+						p.energy_lambda_sqem = 1.0;
+				}
 				if (ImGui::DragFloat("Fitting Energy Lambda", &p.energy_lambda_fitting, 0.001f, 0.f, 10.f, "%.3f"))
 				{
 					if (sync_lambda)
