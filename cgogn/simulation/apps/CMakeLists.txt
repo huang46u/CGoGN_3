@@ -20,6 +20,16 @@ target_link_libraries(shallow_water
 	${CMAKE_DL_LIBS}
 )
 
+add_executable(elastic elastic.cpp)
+target_link_libraries(elastic
+	cgogn::core
+	cgogn::ui
+	cgogn::io
+	cgogn::rendering
+	cgogn::simulation
+	${CMAKE_DL_LIBS}
+)
+
 if(APPLE)
 	find_library(CORE_FOUNDATION CoreFoundation)
 	find_library(CARBON Carbon)

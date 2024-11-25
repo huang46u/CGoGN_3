@@ -47,7 +47,7 @@ namespace ui
 
 using geometry::Scalar;
 using geometry::Vec3;
-
+using geometry::Vec4;
 template <typename MESH>
 class PointCloudRender : public ViewModule
 {
