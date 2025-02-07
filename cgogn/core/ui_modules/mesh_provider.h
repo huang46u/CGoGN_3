@@ -417,9 +417,6 @@ public:
 			return {nullptr, nullptr, nullptr};
 	}
 
-
-
-
 	template <typename FUNC>
 	void foreach_mesh(const FUNC& f)
 	{

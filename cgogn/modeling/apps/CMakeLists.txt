@@ -22,7 +22,8 @@ target_link_libraries(modeling
 if (CGOGN_USE_CGAL)
 	find_package(CGAL REQUIRED)
 	add_executable(power_shape power_shape.cpp)
-	target_link_libraries(power_shape highs::highs
+	target_link_libraries(power_shape 
+		highs::highs
 		CGAL::CGAL
 		cgogn::core
 		cgogn::ui
@@ -33,6 +34,16 @@ if (CGOGN_USE_CGAL)
 	)
 endif()
 
+add_executable(reach_for_the_sphere reach_for_the_sphere.cpp)
+target_link_libraries(reach_for_the_sphere
+	cgogn::core
+	cgogn::ui
+	cgogn::io
+	cgogn::rendering
+	cgogn::modeling
+	Blossom5
+	${CMAKE_DL_LIBS}
+)
 add_executable(tubular_mesh tubular_mesh.cpp)
 target_link_libraries(tubular_mesh
 	cgogn::core
