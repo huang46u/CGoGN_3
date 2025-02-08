@@ -40,11 +40,14 @@ using Point = cgogn::CMap0;
 using Surface = cgogn::CMap2;
 
 template <typename T>
-using Attribute = typename cgogn::mesh_traits<Surface>::Attribute<T>;
-using Vertex = typename cgogn::mesh_traits<Surface>::Vertex;
-using Face = typename cgogn::mesh_traits<Surface>::Face;
+using SurfaceAttribute = typename cgogn::mesh_traits<Surface>::Attribute<T>;
+using SurfaceVertex = typename cgogn::mesh_traits<Surface>::Vertex;
+using SurfaceFace = typename cgogn::mesh_traits<Surface>::Face;
 
 using PointVertex = typename cgogn::mesh_traits<Point>::Vertex;
+template <typename T>
+using PointAttribute = typename cgogn::mesh_traits<Point>::Attribute<T>;
+
 using Vec3 = cgogn::geometry::Vec3;
 using Scalar = cgogn::geometry::Scalar;
 
@@ -78,28 +81,17 @@ int main(int argc, char** argv)
 	v1->link_module(&sr);
 	v1->link_module(&srp);
 	
-
 	if (filename.length() > 0)
 	{
 		Surface* m = ms.load_surface_from_file(filename);
-		Surface* hull = ms.add_mesh("convex_hull");
-		std::shared_ptr<Attribute<Vec3>> vertex_position = cgogn::add_attribute<Vec3, Vertex>(*hull, "position");
-
-		if (m)
+		if (!m)
 		{
-			std::shared_ptr<Attribute<Vec3>> m_vertex_position = cgogn::get_attribute<Vec3, Vertex>(*m, "position");
-			std::vector<Vec3> points;
-			points.reserve(ms.mesh_data(*m).nb_cells<Vertex>());
-			for (const Vec3& p : *m_vertex_position)
-				points.push_back(p);
-			cgogn::modeling::convex_hull(points, *hull, vertex_position.get());
-
-			mp.set_mesh_bb_vertex_position(*m, m_vertex_position);
-			sr.set_vertex_position(*v1, *m, m_vertex_position);
+			std::cout << "File could not be loaded" << std::endl;
+			return 1;
 		}
 
-		
-		std::shared_ptr<Attribute<Vec3>> vertex_normal = cgogn::add_attribute<Vec3, Vertex>(*m, "normal");
+		std::shared_ptr<SurfaceAttribute<Vec3>> vertex_position = cgogn::get_attribute<Vec3, SurfaceVertex>(*m, "position");
+		std::shared_ptr<SurfaceAttribute<Vec3>> vertex_normal = cgogn::add_attribute<Vec3, SurfaceVertex>(*m, "normal");
 
 		sr.set_vertex_position(*v1, *m, vertex_position);
 		sr.set_vertex_normal(*v1, *m, vertex_normal);
