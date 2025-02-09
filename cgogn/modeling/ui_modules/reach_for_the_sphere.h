@@ -24,6 +24,8 @@
 #ifndef CGOGN_MODULE_REACH_FOR_THE_SPHERE_
 #define CGOGN_MODULE_REACH_FOR_THE_SPHERE_
 
+#include <random>
+
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/ui/app.h>
 #include <cgogn/ui/module.h>
@@ -70,6 +72,11 @@ class ReachForTheSphere : public Module
 	using SurfaceEdge = typename mesh_traits<SURFACE>::Edge;
 	using SurfaceFace = typename mesh_traits<SURFACE>::Face;
 
+	enum SamplingMode : uint32
+	{
+		GRILLE,
+		RANDOM
+	};
 
 	struct SurfaceParameters
 	{
@@ -97,11 +104,13 @@ class ReachForTheSphere : public Module
 		std::shared_ptr<PointAttribute<Scalar>> sdf_sample_radius_ = nullptr;
 		std::shared_ptr<PointAttribute<Vec4>> sdf_sample_color_ = nullptr;
 
-		double tau_min = 1e-6;
-		double tau_max = 50;
+		Scalar t_min = 1e-6;
+		Scalar t_max = 50;
 
+		SamplingMode sampling_mode_ = GRILLE;
 
-
+		uint32 grille_sample_resolution_ = 10;
+		uint32 random_sample_number_ = 10000; 
 	};
 
 public:
@@ -151,6 +160,8 @@ private:
 		// Create sdf mesh
 		if (!p.sdf_)
 			p.sdf_ = points_provider_->add_mesh(surface_provider_->mesh_name(s) + "_sdf");
+		
+		clear(*p.sdf_);
 
 		p.sdf_sample_position_ = get_or_add_attribute<Vec3, PointVertex>(*p.sdf_, "position");
 		p.sdf_sample_value_ = get_or_add_attribute<Scalar, PointVertex>(*p.sdf_, "sdf");
@@ -158,12 +169,13 @@ private:
 		p.sdf_sample_radius_ = get_or_add_attribute<Scalar, PointVertex>(*p.sdf_, "radius");
 
 		// Sample the surface to create the SDF mesh
-		sample_space_around_mesh(s);
+		if (p.sampling_mode_ == GRILLE)
+			grille_samping_mesh(s, p.grille_sample_resolution_);
+		if (p.sampling_mode_ == RANDOM)
+			random_sampling_mesh(s, p.random_sample_number_);
 
 		// Compute the convex hull of the sampled points
 		compute_convex_hull(s);
-
-		
 
 		// Ensure the flow mesh is created before building its BVH
 		if (!p.flow_mesh_)
@@ -229,59 +241,115 @@ public:
 			remove_attribute<SurfaceVertex>(s, bvh_vertex_index);
 		}
 
+	void random_sampling_mesh(SURFACE& surface, uint32 numbers)
+	{
+		
+		SurfaceParameters& p = surface_parameters_[&surface];
 
-	void sample_space_around_mesh(SURFACE& surface, int divisions = 50)
+		// Compute bounding box of the surface mesh
+		Vec3 bb_min, bb_max;
+		std::tie(bb_min, bb_max) = geometry::bounding_box(*p.surface_vertex_position_);
+
+		std::random_device rd;
+		std::mt19937 gen(rd());
+		std::uniform_real_distribution<> dis_x(bb_min[0], bb_max[0]);
+		std::uniform_real_distribution<> dis_y(bb_min[1], bb_max[1]);
+		std::uniform_real_distribution<> dis_z(bb_min[2], bb_max[2]);
+
+		for (uint32 i = 0; i < numbers; ++i)
+		{
+			Vec3 sample_point(dis_x(gen), dis_y(gen), dis_z(gen));
+
+			std::pair<uint32, Vec3> cp;
+			p.surface_bvh_->closest_point(sample_point, &cp);
+			float distance = (cp.second - sample_point).norm();
+			float signed_distance = distance;
+			if (is_inside(surface, sample_point, p.surface_bvh_faces_, p.surface_vertex_position_, cp))
+			{
+				signed_distance = -signed_distance;
+			}
+
+			// Add sample point to the point mesh
+			PointVertex pv = add_vertex(*p.sdf_);
+			value<Scalar>(*p.sdf_, p.sdf_sample_radius_, pv) = distance;
+			value<Scalar>(*p.sdf_, p.sdf_sample_value_, pv) = signed_distance;
+			value<Vec3>(*p.sdf_, p.sdf_sample_position_, pv) = sample_point;
+
+			// Assign color based on signed distance
+			Vec4 color;
+			if (signed_distance < 0)
+			{
+				color = Vec4(1.0, 0.0, 0.0, 0.1); // Red for inside
+			}
+			else
+			{
+				color = Vec4(0.0, 0.0, 1.0, 0.1); // Blue for outside
+			}
+			value<Vec4>(*p.sdf_, p.sdf_sample_color_, pv) = color;
+		}
+
+		std::cout << "Finished random sampling" << std::endl;
+		points_provider_->emit_connectivity_changed(*p.sdf_);
+		points_provider_->emit_attribute_changed(*p.sdf_, p.sdf_sample_position_.get());
+
+		points_provider_->set_mesh_bb_vertex_position(*p.sdf_, p.sdf_sample_position_);
+		
+
+	}
+
+	//marching cube like sampling
+	void grille_samping_mesh(SURFACE& surface, uint32 step = 50)
 	{
 		SurfaceParameters& p = surface_parameters_[&surface];
 		// Compute bounding box of the surface mesh
 		Vec3 bb_min, bb_max;
 		std::tie(bb_min, bb_max) = geometry::bounding_box(*p.surface_vertex_position_);
 
-			// Compute the size of each division
-			Vec3 size = (bb_max - bb_min) / float(divisions);
+		// Compute the size of each division
+		Vec3 size = (bb_max - bb_min) / float(step);
 
-			// Sample points within the bounding box using cubic grid approach
-			for (int i = 0; i < divisions; ++i)
+		// Sample points within the bounding box using cubic grid approach
+		for (int i = 0; i < step; ++i)
+		{
+			for (int j = 0; j < step; ++j)
 			{
-				for (int j = 0; j < divisions; ++j)
+				for (int k = 0; k < step; ++k)
 				{
-					for (int k = 0; k < divisions; ++k)
-					{
-						Vec3 sample_point = bb_min + Vec3((i + 0.5f) * size(0), (j + 0.5f) *size(1), (k + 0.5f)*size(2));
+					Vec3 sample_point = bb_min + Vec3((i + 0.5f) * size(0), (j + 0.5f) * size(1), (k + 0.5f) * size(2));
 
-						std::pair<uint32, Vec3> cp;
-						p.surface_bvh_->closest_point(sample_point, &cp);
-						float distance = (cp.second - sample_point).norm();
-						float signed_distance = distance;
-						if (is_inside(surface, sample_point, p.surface_bvh_faces_, p.surface_vertex_position_, cp))
-						{
-							signed_distance = -signed_distance;
-						}
-						// Add sample point to the point mesh
-						PointVertex pv = add_vertex(*p.sdf_);
-						value<Scalar>(*p.sdf_, p.sdf_sample_radius_, pv) = distance;
-						value<Scalar>(*p.sdf_, p.sdf_sample_value_, pv) = signed_distance;
-						value<Vec3>(*p.sdf_, p.sdf_sample_position_, pv) = sample_point;
-						// Assign color based on signed distance
-						Vec4 color;
-						if (signed_distance < 0)
-						{
-							color = Vec4(1.0, 0.0, 0.0, 0.5); // Red for inside
-						}
-						else
-						{
-							color = Vec4(0.0, 1.0, 0.0, 0.5); // Green for outside
-						}
-						value<Vec4>(*p.sdf_, p.sdf_sample_color_, pv) = color;
+					std::pair<uint32, Vec3> cp;
+					p.surface_bvh_->closest_point(sample_point, &cp);
+					float distance = (cp.second - sample_point).norm();
+					float signed_distance = distance;
+					if (is_inside(surface, sample_point, p.surface_bvh_faces_, p.surface_vertex_position_, cp))
+					{
+						signed_distance = -signed_distance;
 					}
+					// Add sample point to the point mesh
+					PointVertex pv = add_vertex(*p.sdf_);
+					value<Scalar>(*p.sdf_, p.sdf_sample_radius_, pv) = distance;
+					value<Scalar>(*p.sdf_, p.sdf_sample_value_, pv) = signed_distance;
+					value<Vec3>(*p.sdf_, p.sdf_sample_position_, pv) = sample_point;
+					// Assign color based on signed distance
+					Vec4 color;
+					if (signed_distance < 0)
+					{
+						color = Vec4(1.0, 0.0, 0.0, 0.1); // Red for inside
+					}
+					else
+					{
+						color = Vec4(0.0, 0.0, 1.0, 0.1); // Blue for outside
+					}
+					value<Vec4>(*p.sdf_, p.sdf_sample_color_, pv) = color;
 				}
 			}
-			std::cout << "Finished sampling" << std::endl;
-			points_provider_->emit_connectivity_changed(*p.sdf_);
-			points_provider_->emit_attribute_changed(*p.sdf_, p.sdf_sample_position_.get());
-			
-			points_provider_->set_mesh_bb_vertex_position(*p.sdf_, p.sdf_sample_position_);
 		}
+		std::cout << "Finished grille sampling" << std::endl;
+		points_provider_->emit_connectivity_changed(*p.sdf_);
+		points_provider_->emit_attribute_changed(*p.sdf_, p.sdf_sample_position_.get());
+
+		points_provider_->set_mesh_bb_vertex_position(*p.sdf_, p.sdf_sample_position_);
+	}
 	
 	void compute_convex_hull(SURFACE& surface)	
 	{
@@ -304,14 +372,14 @@ public:
 		{
 			p.flow_mesh_ = surface_provider_->add_mesh(surface_provider_->mesh_name(*selected_surface_) + "_convex_hull");
 		}
-
+		clear(*p.flow_mesh_);
 		p.flow_vertex_position_ = get_or_add_attribute<Vec3, SurfaceVertex>(*p.flow_mesh_, "position");
 		p.flow_vertex_id_ = get_or_add_attribute<uint32, SurfaceVertex>(*p.flow_mesh_, "id");
 
 		cgogn::modeling::convex_hull(points, *p.flow_mesh_, p.flow_vertex_position_.get());
 
 		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, 3, false, true);
-		
+		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, 3, false, true);
 		uint32 vertex_id = 0;
 		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
 			value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv) = vertex_id++;
@@ -347,15 +415,16 @@ public:
 		return bcoords;
 	}
 
-	void reach_for_the_sphere(SURFACE& s)
+	void reach_for_the_sphere_iteration(SURFACE& s)
 	{
 		SurfaceParameters& p = surface_parameters_[&s];
 
 		uint32 nb_vertices = nb_cells<SurfaceVertex>(*p.flow_mesh_);
 		uint32 nb_samples = nb_cells<PointVertex>(*p.sdf_);
 
-
 		Eigen::SparseMatrix<Scalar, Eigen::ColMajor> A(nb_samples, nb_vertices);
+		A.setZero();
+		std::cout << "(" << A.rows() << ", " << A.cols() << ") " << std::endl;
 		Eigen::SparseMatrix<Scalar, Eigen::ColMajor> M(nb_vertices, nb_vertices);
 		Eigen::MatrixXd V(nb_vertices, 3);
 		Eigen::MatrixXd S(nb_samples, 3);
@@ -365,14 +434,13 @@ public:
 		std::vector<Eigen::Triplet<Scalar>> Acoeffs;
 		Acoeffs.reserve(nb_samples * 3);
 
-		 
 		foreach_cell(*p.sdf_, [&](PointVertex pv) -> bool {
 			// get sdf sample info
 			uint32 pv_index = index_of(*p.sdf_, pv);
 			Vec3 pv_pos = value<Vec3>(*p.sdf_, p.sdf_sample_position_, pv);
 			Scalar sdf = value<Scalar>(*p.sdf_, p.sdf_sample_value_, pv);
 			Scalar radius = value<Scalar>(*p.sdf_, p.sdf_sample_radius_, pv);
-			
+
 			// find the closest triangle for each sphere
 			std::pair<uint32, Vec3> cp;
 			p.flow_mesh_bvh_->closest_point(pv_pos, &cp);
@@ -384,18 +452,17 @@ public:
 			Vec3 v2 = value<Vec3>(*p.flow_mesh_, p.flow_vertex_position_, vertices[2]);
 
 			Vec3 bary_coord = barycentric_coordinates(v0, v1, v2, cp.second);
-			
-			
+
 			for (uint32 i = 0; i < 3; i++)
 			{
-				uint32 sv_index = value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, vertices[i]); 
+				uint32 sv_index = value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, vertices[i]);
 				Acoeffs.push_back(Eigen::Triplet<Scalar>((int)pv_index, (int)sv_index, bary_coord[i]));
 			}
 
-			//compute the projection points on the spheres
-			
+			// compute the projection points on the spheres
+
 			Vec3 projection;
-			
+
 			if (distance < 1e-5)
 				projection = cp.second;
 			else
@@ -404,7 +471,7 @@ public:
 				int sigma = (inside == (sdf < 0)) ? 1 : -1;
 				projection = pv_pos + sigma * (cp.second - pv_pos).normalized() * radius;
 			}
-			//Build S matrix
+			// Build S matrix
 			S.row(pv_index) = projection.transpose();
 			return true;
 		});
@@ -414,15 +481,13 @@ public:
 
 		std::cout << "Finished build A and S" << std::endl;
 		// Build V matrix
-		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv)-> bool
-		{
+		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
 			uint32 sv_index = value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv);
 			Vec3 sv_pos = value<Vec3>(*p.flow_mesh_, p.flow_vertex_position_, sv);
 			V.row(sv_index) = sv_pos.transpose();
 			return true;
 		});
-		std::cout << "Non-zero elements in A: " << A.nonZeros() << std::endl;
-		
+
 		Scalar rho = 1.0 / nb_samples;
 
 		std::vector<Eigen::Triplet<Scalar>> triplets;
@@ -436,31 +501,30 @@ public:
 		Eigen::SparseMatrix<Scalar> R(nb_samples, nb_samples);
 		R.setFromTriplets(triplets.begin(), triplets.end());
 
-		
 		Scalar n_c = 0.01;
 
 		// Compute n_p = -A^T * R * (A * V - S)
-		Eigen::VectorXd n_p = -A.transpose() * R * (A * V - S);
+		Eigen::MatrixXd P = -A.transpose() * R * (A * V - S);
 
-		// Compute t using element-wise product sum instead of dot product
-		Scalar numerator = (A * V - S).cwiseProduct(R * (A * n_p)).sum() + n_c * n_p.squaredNorm();
-		Scalar denominator = (A * n_p).cwiseProduct(R * (A * n_p)).sum();
-
-		Scalar t = (denominator > 1e-10) ? -numerator / denominator : 0.0; // Avoid division by zero
+		Scalar numerator = (A * V - S).cwiseProduct(R * (A * P)).sum() + n_c * P.squaredNorm();
+		Scalar denominator = (A * P).cwiseProduct(R * (A * P)).sum();
+		std::cout << "numerator :" << numerator << ", denominator: " << denominator << std::endl;
+		Scalar t = -numerator / denominator; // Avoid division by zero
 
 		// Handle NaN and Inf values
 		if (std::isnan(t) || std::isinf(t))
 		{
+			std::cout << "t not correct" << std::endl;
 			t = 0.0;
 		}
-
+		std::cout << "computed time step: " << t << std::endl;
 		// Clamp t within [min_t, max_t]
-		t = std::min(p.tau_max, std::max(t, p.tau_min));
+		t = std::min(p.t_max, std::max(t, p.t_min));
+		std::cout << "selected time step: " << t << std::endl;
 
-		
-		Eigen::SparseMatrix<Scalar> system_matrix = M + t * A.transpose() * A;
-		Eigen::SimplicialCholesky<Eigen::SparseMatrix<Scalar>> chol(system_matrix);
-		
+		Eigen::SparseMatrix<Scalar> lhs = M + t * A.transpose() * A;
+		Eigen::SimplicialCholesky<Eigen::SparseMatrix<Scalar>> chol(lhs);
+
 		if (chol.info() != Eigen::Success)
 		{
 			std::cerr << "Cholesky decomposition failed!" << std::endl;
@@ -476,12 +540,32 @@ public:
 				return true;
 			});
 
-			
+			uint32 vertex_id = 0;
+			foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
+				value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv) = vertex_id++;
+				return true;
+			});
+			build_bvh(*p.flow_mesh_, p.flow_vertex_position_, p.flow_mesh_bvh_, p.flow_mesh_bvh_faces_);
 			surface_provider_->emit_attribute_changed(*p.flow_mesh_, p.flow_vertex_position_.get());
-
-			
 		}
-		
+	}
+	
+	void remeshing(SURFACE& s)
+	{
+		SurfaceParameters& p = surface_parameters_[&s];
+
+		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, 1, false, true, true);
+	
+		uint32 vertex_id = 0;
+		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
+			value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv) = vertex_id++;
+			return true;
+		});
+		build_bvh(*p.flow_mesh_, p.flow_vertex_position_, p.flow_mesh_bvh_, p.flow_mesh_bvh_faces_);
+		surface_provider_->emit_connectivity_changed(*p.flow_mesh_);
+		surface_provider_->emit_attribute_changed(*p.flow_mesh_, p.flow_vertex_position_.get());
+
+		surface_provider_->set_mesh_bb_vertex_position(*p.flow_mesh_, p.flow_vertex_position_);
 	}
 
 protected:
@@ -507,17 +591,33 @@ protected:
 				*selected_surface_, p.surface_vertex_position_, "Position",
 				[&](const std::shared_ptr<SurfaceAttribute<Vec3>>& attribute) { p.surface_vertex_position_ = attribute; });
 
-			if (p.surface_vertex_position_ && !p.initialized_)
+			if (p.surface_vertex_position_)
 			{
+				ImGui::RadioButton("Grille", (int*)&p.sampling_mode_, GRILLE);
+				ImGui::SameLine();
+				ImGui::RadioButton("Random", (int*)&p.sampling_mode_, RANDOM);
+				if (p.sampling_mode_ == GRILLE)
+				{
+					ImGui::InputScalar("Grille resolution", ImGuiDataType_U32, &p.grille_sample_resolution_);
+				}
+				if (p.sampling_mode_ == RANDOM)
+				{
+					ImGui::InputScalar("Samples number", ImGuiDataType_U32, &p.random_sample_number_);
+				}
 				if (ImGui::Button("Init surface data"))
 					init_surface_data(*selected_surface_);
+				if (p.initialized_)
+				{
 
+					if (ImGui::Button("Reach for the sphere"))
+						reach_for_the_sphere_iteration(*selected_surface_);
+					if (ImGui::Button("Remshing"))
+						remeshing(*selected_surface_);
+				}
 			}
-			if (p.initialized_)
-			{
-				if (ImGui::Button("Reach for the sphere"))
-					reach_for_the_sphere(*selected_surface_);
-			}
+			
+			
+			
 		}
 	}
 
