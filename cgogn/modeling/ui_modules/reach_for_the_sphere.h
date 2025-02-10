@@ -36,7 +36,7 @@
 #include <cgogn/core/functions/traversals/vertex.h>
 
 #include <cgogn/geometry/types/vector_traits.h>
-
+#include <cgogn/geometry/algos/area.h>
 #include <cgogn/geometry/algos/length.h>
 #include <cgogn/geometry/algos/medial_axis.h>
 
@@ -93,6 +93,7 @@ class ReachForTheSphere : public Module
 		std::shared_ptr<SurfaceAttribute<Vec3>> flow_vertex_position_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<Vec3>> flow_vertex_normal_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<uint32>> flow_vertex_id_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Scalar>> flow_vertex_area = nullptr;
 
 		acc::BVHTree<uint32, Vec3>* flow_mesh_bvh_ = nullptr;
 		std::vector<SurfaceFace> flow_mesh_bvh_faces_;
@@ -375,6 +376,7 @@ public:
 		clear(*p.flow_mesh_);
 		p.flow_vertex_position_ = get_or_add_attribute<Vec3, SurfaceVertex>(*p.flow_mesh_, "position");
 		p.flow_vertex_id_ = get_or_add_attribute<uint32, SurfaceVertex>(*p.flow_mesh_, "id");
+		p.flow_vertex_area = get_or_add_attribute<Scalar, SurfaceVertex>(*p.flow_mesh_, "area");
 
 		cgogn::modeling::convex_hull(points, *p.flow_mesh_, p.flow_vertex_position_.get());
 
@@ -423,14 +425,24 @@ public:
 		uint32 nb_samples = nb_cells<PointVertex>(*p.sdf_);
 
 		Eigen::SparseMatrix<Scalar, Eigen::ColMajor> A(nb_samples, nb_vertices);
-		A.setZero();
-		std::cout << "(" << A.rows() << ", " << A.cols() << ") " << std::endl;
 		Eigen::SparseMatrix<Scalar, Eigen::ColMajor> M(nb_vertices, nb_vertices);
 		Eigen::MatrixXd V(nb_vertices, 3);
 		Eigen::MatrixXd S(nb_samples, 3);
+		A.setZero();
+		M.setZero();
 
-		M.setIdentity();
+		//Build M matrix
+		geometry::compute_area<SurfaceVertex>(*p.flow_mesh_, p.flow_vertex_position_.get(), p.flow_vertex_area.get());
+		std::vector<Eigen::Triplet<Scalar>> Mcoeffs;
+		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
+			uint32 idx = value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv);
+			Mcoeffs.push_back(
+				Eigen::Triplet<Scalar>(idx, idx, value<Scalar>(*p.flow_mesh_, p.flow_vertex_area.get(), sv)));
+			return true;
+		});
+		M.setFromTriplets(Mcoeffs.begin(), Mcoeffs.end());
 
+		// Build A matrix	
 		std::vector<Eigen::Triplet<Scalar>> Acoeffs;
 		Acoeffs.reserve(nb_samples * 3);
 
