@@ -106,6 +106,7 @@ Scalar area(const MESH& m, typename mesh_traits<MESH>::Vertex v,
 			vertex_area += area(median, centroid, vertex);
 			vertex_area += area(next_median, centroid, vertex);
 		}
+		break;
 	}
 	case VertexAreaPolicy::VORONOI: {
 		const Vec3& vertex = value<Vec3>(m, vertex_position, v);
@@ -123,6 +124,7 @@ Scalar area(const MESH& m, typename mesh_traits<MESH>::Vertex v,
 			vertex_area += area(median, circumcenter, vertex);
 			vertex_area += area(next_median, circumcenter, vertex);
 		}
+		break;
 	}
 	case VertexAreaPolicy::MIXED: {
 		const Vec3& vertex = value<Vec3>(m, vertex_position, v);
@@ -130,7 +132,7 @@ Scalar area(const MESH& m, typename mesh_traits<MESH>::Vertex v,
 		uint32 size = uint32(vertices.size());
 		for (uint32 i = 0; i < size; ++i)
 		{
-			const Vec3& current_vertex = value<Vec3>(m, vertex_position, vertices[i]);
+			const Vec3& current_vertex = value<Vec3>(m, vertex_position, vertices[i]); 
 			const Vec3& next_vertex = value<Vec3>(m, vertex_position, vertices[(i + 1) % size]);
 
 			Vec3 median = (current_vertex + vertex) * 0.5;
@@ -143,15 +145,16 @@ Scalar area(const MESH& m, typename mesh_traits<MESH>::Vertex v,
 			vertex_area += area(median, centroid, vertex);
 			vertex_area += area(next_median, centroid, vertex);
 		}
+		break;
 	}
 	case VertexAreaPolicy::THIRD: {
 		foreach_incident_face(m, v, [&](Face iface) -> bool {
 			vertex_area += area(m, iface, vertex_position) / 3.0;
 			return true;
 		});
+		break;
 	}
 	}
-
 	return vertex_area;
 }
 
