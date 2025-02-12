@@ -31,6 +31,7 @@
 #include <cgogn/ui/module.h>
 
 #include <cgogn/core/functions/convert.h>
+#include <cgogn/core/types/cells_set.h>
 
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
@@ -106,12 +107,16 @@ class ReachForTheSphere : public Module
 		std::shared_ptr<PointAttribute<Vec4>> sdf_sample_color_ = nullptr;
 
 		Scalar t_min = 1e-6;
-		Scalar t_max = 50;
+		Scalar t_max = 1;
 
 		SamplingMode sampling_mode_ = GRILLE;
 
 		uint32 grille_sample_resolution_ = 10;
 		uint32 random_sample_number_ = 10000; 
+
+		Scalar tol_remesh_ = 1e-2; 
+		Scalar remesh_edge_length_target_ratio_ = 1.0;
+		CellsSet<SURFACE, SurfaceFace>* faces_to_remesh = nullptr;
 	};
 
 public:
@@ -136,7 +141,7 @@ private:
 			std::cout << "No surface vertex position attribute set" << std::endl;
 			return;
 		}
-
+		
 		// set signal connections to update the data when the surface connectivity or position changes
 
 		if (surface_connections_.find(&s) == surface_connections_.end())
@@ -184,7 +189,8 @@ private:
 			std::cout << "Flow mesh not created" << std::endl;
 			return;
 		}
-
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(*p.flow_mesh_);
+		p.faces_to_remesh = &md.template get_or_add_cells_set<SurfaceFace>("Cells_To_Remesh");
 		// Build the BVH for the flow mesh
 		build_bvh(*p.flow_mesh_, p.flow_vertex_position_, p.flow_mesh_bvh_, p.flow_mesh_bvh_faces_);
 
@@ -380,8 +386,8 @@ public:
 
 		cgogn::modeling::convex_hull(points, *p.flow_mesh_, p.flow_vertex_position_.get());
 
-		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, 3, false, true);
-		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, 3, false, true);
+		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, 2, false, false);
+		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, 3, false, false);
 		uint32 vertex_id = 0;
 		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
 			value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv) = vertex_id++;
@@ -420,7 +426,7 @@ public:
 	void reach_for_the_sphere_iteration(SURFACE& s)
 	{
 		SurfaceParameters& p = surface_parameters_[&s];
-
+		p.faces_to_remesh->clear();
 		uint32 nb_vertices = nb_cells<SurfaceVertex>(*p.flow_mesh_);
 		uint32 nb_samples = nb_cells<PointVertex>(*p.sdf_);
 
@@ -432,7 +438,8 @@ public:
 		M.setZero();
 
 		//Build M matrix
-		geometry::compute_area<SurfaceVertex>(*p.flow_mesh_, p.flow_vertex_position_.get(), p.flow_vertex_area.get());
+		geometry::compute_area<SurfaceVertex>(
+			*p.flow_mesh_, p.flow_vertex_position_.get(), p.flow_vertex_area.get());
 		std::vector<Eigen::Triplet<Scalar>> Mcoeffs;
 		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
 			uint32 idx = value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv);
@@ -457,6 +464,10 @@ public:
 			std::pair<uint32, Vec3> cp;
 			p.flow_mesh_bvh_->closest_point(pv_pos, &cp);
 			Scalar distance = std::abs((cp.second - pv_pos).norm() - radius);
+			if (distance < p.tol_remesh_)
+			{
+				p.faces_to_remesh->select(p.flow_mesh_bvh_faces_[cp.first]);
+			}
 			// compute the barycentric coordinate
 			auto vertices = incident_vertices(*p.flow_mesh_, p.flow_mesh_bvh_faces_[cp.first]);
 			Vec3 v0 = value<Vec3>(*p.flow_mesh_, p.flow_vertex_position_, vertices[0]);
@@ -473,18 +484,13 @@ public:
 
 			// compute the projection points on the spheres
 
-			Vec3 projection;
-
-			if (distance < 1e-5)
-				projection = cp.second;
-			else
-			{
-				bool inside = is_inside(*p.flow_mesh_, pv_pos, p.flow_mesh_bvh_faces_, p.flow_vertex_position_, cp);
-				int sigma = (inside == (sdf < 0)) ? 1 : -1;
-				projection = pv_pos + sigma * (cp.second - pv_pos).normalized() * radius;
-			}
+			
+			bool inside = is_inside(*p.flow_mesh_, pv_pos, p.flow_mesh_bvh_faces_, p.flow_vertex_position_, cp);
+			int sigma = (inside == (sdf < 0)) ? 1 : -1;
+			Vec3 projection = pv_pos + sigma * (cp.second - pv_pos).normalized() * radius;
+			
 			// Build S matrix
-			S.row(pv_index) = projection.transpose();
+			S.row(pv_index) = projection;
 			return true;
 		});
 
@@ -496,7 +502,7 @@ public:
 		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
 			uint32 sv_index = value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv);
 			Vec3 sv_pos = value<Vec3>(*p.flow_mesh_, p.flow_vertex_position_, sv);
-			V.row(sv_index) = sv_pos.transpose();
+			V.row(sv_index) = sv_pos;
 			return true;
 		});
 
@@ -534,7 +540,8 @@ public:
 		t = std::min(p.t_max, std::max(t, p.t_min));
 		std::cout << "selected time step: " << t << std::endl;
 
-		Eigen::SparseMatrix<Scalar> lhs = M + t * A.transpose() * A;
+
+		Eigen::SparseMatrix<Scalar> lhs = M + t * A.transpose() *R* A;
 		Eigen::SimplicialCholesky<Eigen::SparseMatrix<Scalar>> chol(lhs);
 
 		if (chol.info() != Eigen::Success)
@@ -543,7 +550,7 @@ public:
 		}
 		else
 		{
-			Eigen::MatrixXd V_t = chol.solve(M * V + t * A.transpose() * S);
+			Eigen::MatrixXd V_t = chol.solve(M * V + t * A.transpose() * R * S);
 			std::cout << "Solved the system" << std::endl;
 			// Assign the new postition of each vertex
 			foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
@@ -560,13 +567,15 @@ public:
 			build_bvh(*p.flow_mesh_, p.flow_vertex_position_, p.flow_mesh_bvh_, p.flow_mesh_bvh_faces_);
 			surface_provider_->emit_attribute_changed(*p.flow_mesh_, p.flow_vertex_position_.get());
 		}
+
+		
 	}
 	
-	void remeshing(SURFACE& s)
+	void remeshing(SURFACE& s, Scalar ratio)
 	{
 		SurfaceParameters& p = surface_parameters_[&s];
 
-		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, 1, false, true, true);
+		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, ratio, false, false, true);
 	
 		uint32 vertex_id = 0;
 		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
@@ -623,8 +632,9 @@ protected:
 
 					if (ImGui::Button("Reach for the sphere"))
 						reach_for_the_sphere_iteration(*selected_surface_);
+					ImGui::InputScalar("Remeshing ratio", ImGuiDataType_Double, &p.remesh_edge_length_target_ratio_);
 					if (ImGui::Button("Remshing"))
-						remeshing(*selected_surface_);
+						remeshing(*selected_surface_,p.remesh_edge_length_target_ratio_);
 				}
 			}
 			

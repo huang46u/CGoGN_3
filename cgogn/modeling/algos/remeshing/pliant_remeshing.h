@@ -28,11 +28,12 @@
 #include <cgogn/core/functions/traversals/vertex.h>
 #include <cgogn/core/types/maps/cmap/cmap2.h>
 #include <cgogn/core/types/mesh_views/cell_cache.h>
-
+#include <cgogn/core/types/cells_set.h>
 #include <cgogn/geometry/algos/angle.h>
 #include <cgogn/geometry/algos/length.h>
 #include <cgogn/geometry/algos/medial_axis.h>
 #include <cgogn/geometry/types/vector_traits.h>
+
 
 #include <vector>
 
@@ -483,6 +484,220 @@ void pliant_remeshing(MESH& m, std::shared_ptr<typename mesh_traits<MESH>::templ
 
 		remove_attribute<Vertex>(m, vertex_area);
 	}
+}
+
+template <typename MESH>
+void pliant_remeshing(MESH& m, std::shared_ptr<typename mesh_traits<MESH>::template Attribute<Vec3>>& vertex_position,
+					  CellsSet<MESH, typename mesh_traits<MESH>::Face>* target_faces,
+					  Scalar edge_length_target_ratio = 1.0, bool recompute_bvh = false)
+{
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+	using Edge = typename mesh_traits<MESH>::Edge;
+	using Face = typename mesh_traits<MESH>::Face;
+
+	// static map to store helpers associated to meshes
+	// allows to store context without polluting outer context and function api
+	static std::unordered_map<MESH*, PliantRemeshing_Helper<MESH>> helpers_;
+	auto [it, inserted] = helpers_.try_emplace(&m, m, vertex_position);
+	PliantRemeshing_Helper<MESH>& helper = it->second;
+
+	if (recompute_bvh || vertex_position != helper.vertex_position_)
+		helper.compute_bvh();
+
+	Scalar edge_length_target = geometry::mean_edge_length(m, vertex_position.get()) * edge_length_target_ratio;
+
+	const Scalar squared_min_edge_length = Scalar(0.5625) * edge_length_target * edge_length_target; // 0.5625 = 0.75^2
+	const Scalar squared_max_edge_length = Scalar(1.5625) * edge_length_target * edge_length_target; // 1.5625 = 1.25^2
+
+	CellCache<MESH> cache(m);
+
+	for (uint32 i = 0; i < 3; ++i)
+	{
+		// cut long edges (and adjacent faces)
+		bool has_long_edge = false;
+		do
+		{
+			target_faces->foreach_cell([&](Face f) -> bool{
+				std::vector<Vertex> ivf = incident_vertices(m, f);
+				for (Vertex& v : ivf)
+				{
+					foreach_adjacent_vertex_through_edge(m, v, [&](Vertex vr1) {
+						ivf.push_back(vr1);
+						foreach_adjacent_vertex_through_edge(m, v, [&](Vertex vr2) {
+							ivf.push_back(vr2);
+							return true;
+						});
+						return true;
+					});
+				}
+				for (Vertex& v : ivf)
+				{
+					foreach_incident_vertex(m, f, [&](Vertex v) -> bool {
+						foreach_incident_edge(m, v, [&](Edge e) -> bool {
+							Scalar coeff = 1.0;
+							Scalar threshold = squared_max_edge_length * coeff;
+							if (geometry::squared_length(m, e, vertex_position.get()) > threshold)
+							{
+								has_long_edge = true;
+								
+								value<Vec3>(m, vertex_position, v) =
+									(value<Vec3>(m, vertex_position, ivf[0]) + value<Vec3>(m, vertex_position, ivf[1])) *
+									0.5;
+								triangulate_incident_faces(m, v);
+							}
+							return true;
+						});
+						return true;
+					});
+					return true;
+				}
+			});
+		} while (has_long_edge);
+
+		// collapse short edges
+		bool has_short_edge = false;
+		do
+		{
+			target_faces->foreach_cell([&](Face f) ->bool {
+				std::vector<Vertex> ivf = incident_vertices(m, f);
+				for (Vertex& v : ivf)
+				{
+					foreach_adjacent_vertex_through_edge(m, v, [&](Vertex vr1) {
+						ivf.push_back(vr1);
+						foreach_adjacent_vertex_through_edge(m, v, [&](Vertex vr2) {
+							ivf.push_back(vr2);
+							return true;
+						});
+						return true;
+					});
+				}
+				for (Vertex& v : ivf)
+				{
+					foreach_incident_vertex(m, f, [&](Vertex v) -> bool {
+						foreach_incident_edge(m, v, [&](Edge e) -> bool {
+							std::vector<Vertex> iv = incident_vertices(m, e);
+							Scalar lfs;
+							Scalar coeff = 1.0;
+
+							Scalar threshold = squared_min_edge_length * coeff;
+							if (geometry::squared_length(m, e, vertex_position.get()) < threshold)
+							{
+								bool collapse = true;
+								const Vec3& p = value<Vec3>(m, vertex_position, iv[0]);
+								foreach_adjacent_vertex_through_edge(m, iv[1], [&](Vertex v) -> bool {
+									const Vec3& vec = p - value<Vec3>(m, vertex_position, v);
+									if (vec.squaredNorm() > threshold)
+										collapse = false;
+									return collapse;
+								});
+							
+								if (collapse && edge_can_collapse(m, e))
+								{
+									has_short_edge = true;
+									Vec3 mp = value<Vec3>(m, vertex_position, iv[1]);
+									// (value<Vec3>(m, vertex_position, iv[0]) + value<Vec3>(m, vertex_position, iv[1]))
+									// * 0.5;
+									Vertex cv = collapse_edge(m, e);
+									value<Vec3>(m, vertex_position, cv) = mp;
+								}
+							}
+							return true;
+						});
+
+						return true;
+					});
+				}
+				return true;
+			});
+		} while (has_short_edge);
+
+		// equalize valences with edge flips
+
+		target_faces->foreach_cell([&](Face f) -> bool{
+			std::vector<Vertex> ivf = incident_vertices(m, f);
+			for (Vertex& v : ivf)
+			{
+				foreach_adjacent_vertex_through_edge(m, v, [&](Vertex vr1) {
+					ivf.push_back(vr1);
+					foreach_adjacent_vertex_through_edge(m, v, [&](Vertex vr2) {
+						ivf.push_back(vr2);
+						return true;
+					});
+					return true;
+				});
+			}
+			for (Vertex v : ivf)
+			{
+				foreach_incident_vertex(m, f, [&](Vertex v) -> bool {
+					foreach_incident_edge(m, v, [&](Edge e) -> bool {
+						if (!edge_can_flip(m, e))
+							return true;
+
+						if (edge_should_flip(m, e))
+							flip_edge(m, e);
+						else
+						{
+							// Delaunay flips
+							std::vector<Vertex> iv = incident_vertices(m, e);
+							if (degree(m, iv[0]) > 4 && degree(m, iv[1]) > 4)
+							{
+								std::vector<Scalar> op_angles = geometry::opposite_angles(m, e, vertex_position.get());
+								if (op_angles[0] + op_angles[1] > M_PI)
+									flip_edge(m, e);
+							}
+						}
+						return true;
+					});
+					return true;
+				});
+			}
+			return true;
+		});
+
+		auto vertex_area = add_attribute<Scalar, Vertex>(m, "vertex_area__");
+		geometry::compute_area<Vertex>(m, vertex_position.get(), vertex_area.get());
+
+		// tangential relaxation
+		// + project back on surface
+		target_faces->foreach_cell([&](Face f) -> bool{
+			std::vector<Vertex> ivf = incident_vertices(m, f);
+			for (Vertex& v : ivf)
+			{
+				foreach_adjacent_vertex_through_edge(m, v, [&](Vertex vr1) {
+					ivf.push_back(vr1);
+					foreach_adjacent_vertex_through_edge(m, v, [&](Vertex vr2) {
+						ivf.push_back(vr2);
+						return true;
+					});
+					return true;
+				});
+			}
+			for (Vertex v : ivf)
+			{
+				if (is_incident_to_boundary(m, v))
+					return true;
+				Vec3 new_pos = value<Vec3>(m, vertex_position, v);
+			
+					Vec3 q(0, 0, 0);
+					Scalar total_area = 0.0;
+					foreach_adjacent_vertex_through_edge(m, v, [&](Vertex av) -> bool {
+						Scalar a = value<Scalar>(m, vertex_area, av);
+						q += a * value<Vec3>(m, vertex_position, av);
+						total_area += a;
+						return true;
+					});
+					q /= Scalar(total_area);
+					Vec3 n = geometry::normal(m, v, vertex_position.get());
+					new_pos = q + n.dot(value<Vec3>(m, vertex_position, v) - q) * n;
+					new_pos = helper.surface_bvh_->closest_point(new_pos);
+				
+				value<Vec3>(m, vertex_position, v) = new_pos;
+				return true;
+			}
+		});
+		remove_attribute<Vertex>(m, vertex_area);
+	}
+	
 }
 
 } // namespace modeling
