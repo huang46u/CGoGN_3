@@ -31,7 +31,7 @@
 #include <cgogn/ui/module.h>
 
 #include <cgogn/core/functions/convert.h>
-#include <cgogn/core/types/cells_set.h>
+//#include <cgogn/core/types/cells_set.h>
 
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
@@ -95,6 +95,7 @@ class ReachForTheSphere : public Module
 		std::shared_ptr<SurfaceAttribute<Vec3>> flow_vertex_normal_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<uint32>> flow_vertex_id_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<Scalar>> flow_vertex_area = nullptr;
+		std::shared_ptr<SurfaceAttribute<bool>> flow_edge_need_remeshing_ = nullptr;
 
 		acc::BVHTree<uint32, Vec3>* flow_mesh_bvh_ = nullptr;
 		std::vector<SurfaceFace> flow_mesh_bvh_faces_;
@@ -107,16 +108,17 @@ class ReachForTheSphere : public Module
 		std::shared_ptr<PointAttribute<Vec4>> sdf_sample_color_ = nullptr;
 
 		Scalar t_min = 1e-6;
-		Scalar t_max = 1;
+		Scalar t_max = 50;
 
 		SamplingMode sampling_mode_ = GRILLE;
 
 		uint32 grille_sample_resolution_ = 10;
-		uint32 random_sample_number_ = 10000; 
+		uint32 random_sample_number_ = 50000; 
 
 		Scalar tol_remesh_ = 1e-2; 
-		Scalar remesh_edge_length_target_ratio_ = 1.0;
-		CellsSet<SURFACE, SurfaceFace>* faces_to_remesh = nullptr;
+		Scalar remesh_target_edge_length = 1.0;
+		uint32 remesh_nb_iter = 1;
+		/* CellsSet<SURFACE, SurfaceFace>* faces_to_remesh = nullptr;*/
 	};
 
 public:
@@ -183,6 +185,7 @@ private:
 		// Compute the convex hull of the sampled points
 		compute_convex_hull(s);
 
+		p.remesh_target_edge_length = geometry::mean_edge_length(*p.flow_mesh_, p.flow_vertex_position_.get());
 		// Ensure the flow mesh is created before building its BVH
 		if (!p.flow_mesh_)
 		{
@@ -190,7 +193,7 @@ private:
 			return;
 		}
 		MeshData<SURFACE>& md = surface_provider_->mesh_data(*p.flow_mesh_);
-		p.faces_to_remesh = &md.template get_or_add_cells_set<SurfaceFace>("Cells_To_Remesh");
+		// p.faces_to_remesh = &md.template get_or_add_cells_set<SurfaceFace>("Cells_To_Remesh");
 		// Build the BVH for the flow mesh
 		build_bvh(*p.flow_mesh_, p.flow_vertex_position_, p.flow_mesh_bvh_, p.flow_mesh_bvh_faces_);
 
@@ -254,14 +257,14 @@ public:
 		SurfaceParameters& p = surface_parameters_[&surface];
 
 		// Compute bounding box of the surface mesh
-		Vec3 bb_min, bb_max;
-		std::tie(bb_min, bb_max) = geometry::bounding_box(*p.surface_vertex_position_);
+		/*Vec3 bb_min, bb_max;
+		std::tie(bb_min, bb_max) = geometry::bounding_box(*p.surface_vertex_position_);*/
 
 		std::random_device rd;
 		std::mt19937 gen(rd());
-		std::uniform_real_distribution<> dis_x(bb_min[0], bb_max[0]);
-		std::uniform_real_distribution<> dis_y(bb_min[1], bb_max[1]);
-		std::uniform_real_distribution<> dis_z(bb_min[2], bb_max[2]);
+		std::uniform_real_distribution<> dis_x(-0.1, 1.1);
+		std::uniform_real_distribution<> dis_y(-0.1, 1.1);
+		std::uniform_real_distribution<> dis_z(-0.1, 1.1);
 
 		for (uint32 i = 0; i < numbers; ++i)
 		{
@@ -308,21 +311,24 @@ public:
 	void grille_samping_mesh(SURFACE& surface, uint32 step = 50)
 	{
 		SurfaceParameters& p = surface_parameters_[&surface];
-		// Compute bounding box of the surface mesh
+	
+		/* //Compute bounding box of the surface mesh
 		Vec3 bb_min, bb_max;
 		std::tie(bb_min, bb_max) = geometry::bounding_box(*p.surface_vertex_position_);
-
+		std::cout << "bounding box min: " << bb_min << " max: " << bb_max << std::endl;*/
 		// Compute the size of each division
-		Vec3 size = (bb_max - bb_min) / float(step);
+		Vec3 size = Vec3(1.0,1.0,1.0) / float(step);
 
 		// Sample points within the bounding box using cubic grid approach
-		for (int i = 0; i < step; ++i)
+		for (int i = 0; i < step+2; ++i)
 		{
-			for (int j = 0; j < step; ++j)
+			for (int j = 0; j < step+2; ++j)
 			{
-				for (int k = 0; k < step; ++k)
+				for (int k = 0; k < step+2; ++k)
 				{
-					Vec3 sample_point = bb_min + Vec3((i + 0.5f) * size(0), (j + 0.5f) * size(1), (k + 0.5f) * size(2));
+					Vec3 sample_point =
+						/* bb_min+ */ -size +
+						Vec3((i + 0.5f) * size(0), (j + 0.5f) * size(1), (k + 0.5f) * size(2));
 
 					std::pair<uint32, Vec3> cp;
 					p.surface_bvh_->closest_point(sample_point, &cp);
@@ -362,12 +368,6 @@ public:
 	{
 		SurfaceParameters& p = surface_parameters_[&surface];
 
-		if (!p.sdf_)
-		{
-			std::cout << "No SDF mesh available" << std::endl;
-			return;
-		}
-
 		std::vector<Vec3> points;
 		points.reserve(nb_cells<SurfaceVertex>(*p.surface_));
 		foreach_cell(*p.surface_, [&](SurfaceVertex v) -> bool {
@@ -383,11 +383,12 @@ public:
 		p.flow_vertex_position_ = get_or_add_attribute<Vec3, SurfaceVertex>(*p.flow_mesh_, "position");
 		p.flow_vertex_id_ = get_or_add_attribute<uint32, SurfaceVertex>(*p.flow_mesh_, "id");
 		p.flow_vertex_area = get_or_add_attribute<Scalar, SurfaceVertex>(*p.flow_mesh_, "area");
+		p.flow_edge_need_remeshing_ = get_or_add_attribute<bool, SurfaceEdge>(*p.flow_mesh_, "need_remeshing");
 
 		cgogn::modeling::convex_hull(points, *p.flow_mesh_, p.flow_vertex_position_.get());
 
-		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, 2, false, false);
-		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, 3, false, false);
+		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, 3, false, false, true);
+		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, 3, false, false, false);
 		uint32 vertex_id = 0;
 		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
 			value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv) = vertex_id++;
@@ -426,7 +427,12 @@ public:
 	void reach_for_the_sphere_iteration(SURFACE& s)
 	{
 		SurfaceParameters& p = surface_parameters_[&s];
-		p.faces_to_remesh->clear();
+		//p.faces_to_remesh->clear();
+		
+		foreach_cell(*p.flow_mesh_, [&](SurfaceEdge se) -> bool {
+			value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, se) = false;
+			return true;
+		});
 		uint32 nb_vertices = nb_cells<SurfaceVertex>(*p.flow_mesh_);
 		uint32 nb_samples = nb_cells<PointVertex>(*p.sdf_);
 
@@ -464,9 +470,18 @@ public:
 			std::pair<uint32, Vec3> cp;
 			p.flow_mesh_bvh_->closest_point(pv_pos, &cp);
 			Scalar distance = std::abs((cp.second - pv_pos).norm() - radius);
-			if (distance < p.tol_remesh_)
+			// if the distance is less than the tolerance, mark the incident edges for remeshing
+			if (distance > p.tol_remesh_)
 			{
-				p.faces_to_remesh->select(p.flow_mesh_bvh_faces_[cp.first]);
+				//p.faces_to_remesh->select(p.flow_mesh_bvh_faces_[cp.first]);
+				std::vector<SurfaceVertex> iv = incident_vertices(*p.flow_mesh_, p.flow_mesh_bvh_faces_[cp.first]);
+				for (SurfaceVertex v : iv)
+				{
+					foreach_incident_edge(*p.flow_mesh_, v, [&](SurfaceEdge e) -> bool {
+						value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e) = true;
+						return true;
+					});
+				}
 			}
 			// compute the barycentric coordinate
 			auto vertices = incident_vertices(*p.flow_mesh_, p.flow_mesh_bvh_faces_[cp.first]);
@@ -559,12 +574,37 @@ public:
 				return true;
 			});
 
+			/*for (uint32 i = 0; i < p.remesh_nb_iter; i++)
+				cgogn::modeling::pliant_remeshing_local(*p.flow_mesh_, p.flow_vertex_position_,
+														p.flow_edge_need_remeshing_,
+														p.remesh_target_edge_length, false, false, true);*/
+
 			uint32 vertex_id = 0;
+			uint32 count = 0;
+			foreach_cell(*p.flow_mesh_, [&](SurfaceEdge se) -> bool {
+				if (value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, se))
+				{
+					count++;
+				}
+				return true;
+			});
 			foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
 				value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv) = vertex_id++;
 				return true;
 			});
+			/*foreach_cell(*p.flow_mesh_, [&](SurfaceEdge se) -> bool {
+				if (value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, se))
+				{
+					count++;
+					value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, se) = false;
+				}
+				
+				return true;
+			});*/
+			std::cout << "Number of edges to remesh: " << count << std::endl;
+
 			build_bvh(*p.flow_mesh_, p.flow_vertex_position_, p.flow_mesh_bvh_, p.flow_mesh_bvh_faces_);
+			surface_provider_->emit_connectivity_changed(*p.flow_mesh_);
 			surface_provider_->emit_attribute_changed(*p.flow_mesh_, p.flow_vertex_position_.get());
 		}
 
@@ -575,7 +615,8 @@ public:
 	{
 		SurfaceParameters& p = surface_parameters_[&s];
 
-		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, ratio, false, false, true);
+		cgogn::modeling::pliant_remeshing_local(*p.flow_mesh_, p.flow_vertex_position_, p.flow_edge_need_remeshing_,
+												p.remesh_target_edge_length, false, false, true);
 	
 		uint32 vertex_id = 0;
 		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
@@ -632,9 +673,9 @@ protected:
 
 					if (ImGui::Button("Reach for the sphere"))
 						reach_for_the_sphere_iteration(*selected_surface_);
-					ImGui::InputScalar("Remeshing ratio", ImGuiDataType_Double, &p.remesh_edge_length_target_ratio_);
+					ImGui::InputScalar("Remeshing ratio", ImGuiDataType_Double, &p.remesh_target_edge_length);
 					if (ImGui::Button("Remshing"))
-						remeshing(*selected_surface_,p.remesh_edge_length_target_ratio_);
+						remeshing(*selected_surface_, p.remesh_target_edge_length);
 				}
 			}
 			
