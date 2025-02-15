@@ -129,7 +129,7 @@ class SphereFitting : public ViewModule
 
 		bool point_cloud_mode_ = false;
 
-		float32 sqem_update_lambda_ = 0.5f;
+		float32 sqem_update_lambda_ = 0.2f;
 		float32 sqem_clustering_lambda_ = 0.2f; // initialized with mean edge length
 
 		POINTS* spheres_;
@@ -1660,7 +1660,7 @@ protected:
 
 				// if (p.update_method_ == SQEM)
 				// {
-				static bool sync_lambda = false;
+				static bool sync_lambda = true;
 				ImGui::Checkbox("Sync lambda", &sync_lambda);
 				if (ImGui::SliderFloat("update lambda", &p.sqem_update_lambda_, 0.0f, 2.0f, "%.6f"))
 				{
