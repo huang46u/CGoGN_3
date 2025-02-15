@@ -221,6 +221,13 @@ public:
 		v.request_update();
 	}
 
+	void set_render_vertices(View& v, const MESH& m, bool b)
+	{
+		Parameters& p = parameters_[&v][&m];
+		p.render_vertices_ = b;
+		v.request_update();
+	}
+
 protected:
 	void init() override
 	{
