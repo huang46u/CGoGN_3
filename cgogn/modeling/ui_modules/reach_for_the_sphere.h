@@ -79,6 +79,12 @@ class ReachForTheSphere : public Module
 		RANDOM
 	};
 
+	enum FlowMethMode : uint32
+	{
+		CONVEX_HULL,
+		ICOSPHERE
+	};
+
 	struct SurfaceParameters
 	{
 		bool initialized_;
@@ -182,8 +188,12 @@ private:
 		if (p.sampling_mode_ == RANDOM)
 			random_sampling_mesh(s, p.random_sample_number_);
 
+		if (p.flow_method_ == CONVEX_HULL)
 		// Compute the convex hull of the sampled points
 		compute_convex_hull(s);
+		if (p.flow_method_ == ICOSPHERE)
+			// generate the icosphere of the sampled points
+			generate_ico_sphere(s);
 
 		p.remesh_target_edge_length = geometry::mean_edge_length(*p.flow_mesh_, p.flow_vertex_position_.get());
 		// Ensure the flow mesh is created before building its BVH
@@ -262,9 +272,9 @@ public:
 
 		std::random_device rd;
 		std::mt19937 gen(rd());
-		std::uniform_real_distribution<> dis_x(-0.1, 1.1);
-		std::uniform_real_distribution<> dis_y(-0.1, 1.1);
-		std::uniform_real_distribution<> dis_z(-0.1, 1.1);
+		std::uniform_real_distribution<> dis_x(-1.0, 1.0);
+		std::uniform_real_distribution<> dis_y(-1.0, 1.0);
+		std::uniform_real_distribution<> dis_z(-1.0, 1.0);
 
 		for (uint32 i = 0; i < numbers; ++i)
 		{
@@ -317,18 +327,20 @@ public:
 		std::tie(bb_min, bb_max) = geometry::bounding_box(*p.surface_vertex_position_);
 		std::cout << "bounding box min: " << bb_min << " max: " << bb_max << std::endl;*/
 		// Compute the size of each division
-		Vec3 size = Vec3(1.0,1.0,1.0) / float(step);
+
+		Vec3 min_bb = Vec3(p.sample_min_, p.sample_min_, p.sample_min_);
+		Vec3 max_bb = Vec3(p.sample_max_, p.sample_max_, p.sample_max_);
+		Vec3 size = (max_bb - min_bb) / float(step);
 
 		// Sample points within the bounding box using cubic grid approach
-		for (int i = 0; i < step+2; ++i)
+		for (int i = 0; i < step; ++i)
 		{
-			for (int j = 0; j < step+2; ++j)
+			for (int j = 0; j < step; ++j)
 			{
-				for (int k = 0; k < step+2; ++k)
+				for (int k = 0; k < step; ++k)
 				{
 					Vec3 sample_point =
-						/* bb_min+ */ -size +
-						Vec3((i + 0.5f) * size(0), (j + 0.5f) * size(1), (k + 0.5f) * size(2));
+						/* bb_min+ */ min_bb + Vec3((i + 0.5f) * size(0), (j + 0.5f) * size(1), (k + 0.5f) * size(2));
 
 					std::pair<uint32, Vec3> cp;
 					p.surface_bvh_->closest_point(sample_point, &cp);
@@ -364,6 +376,36 @@ public:
 		points_provider_->set_mesh_bb_vertex_position(*p.sdf_, p.sdf_sample_position_);
 	}
 	
+	void generate_ico_sphere(SURFACE& surface)
+	{
+		SurfaceParameters& p = surface_parameters_[&surface];
+		if (p.flow_mesh_)
+			clear(*p.flow_mesh_);
+
+		p.flow_mesh_ = surface_provider_->load_surface_from_file("D://Code//CGoGN_3//data//meshes//wavefront_obj//icosphere.obj", false);
+		if (!p.flow_mesh_)
+		{
+			std::cout << "File could not be loaded" << std::endl;
+			exit(1);
+		}
+		p.flow_vertex_position_ = get_or_add_attribute<Vec3, SurfaceVertex>(*p.flow_mesh_, "position");
+		p.flow_vertex_id_ = get_or_add_attribute<uint32, SurfaceVertex>(*p.flow_mesh_, "id");
+		p.flow_vertex_area = get_or_add_attribute<Scalar, SurfaceVertex>(*p.flow_mesh_, "area");
+		p.flow_edge_need_remeshing_ = get_or_add_attribute<bool, SurfaceEdge>(*p.flow_mesh_, "need_remeshing");
+		p.flow_edge_color_ = get_or_add_attribute<Vec3, SurfaceEdge>(*p.flow_mesh_, "color");
+
+		uint32 vertex_id = 0;
+		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
+			value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv) = vertex_id++;
+			return true;
+		});
+
+		surface_provider_->emit_connectivity_changed(*p.flow_mesh_);
+		surface_provider_->emit_attribute_changed(*p.flow_mesh_, p.flow_vertex_position_.get());
+
+		surface_provider_->set_mesh_bb_vertex_position(*p.flow_mesh_, p.flow_vertex_position_);
+	}
+
 	void compute_convex_hull(SURFACE& surface)	
 	{
 		SurfaceParameters& p = surface_parameters_[&surface];
@@ -377,14 +419,15 @@ public:
 
 		if (!p.flow_mesh_)
 		{
-			p.flow_mesh_ = surface_provider_->add_mesh(surface_provider_->mesh_name(*selected_surface_) + "_convex_hull");
+			p.flow_mesh_ =
+				surface_provider_->add_mesh(surface_provider_->mesh_name(*selected_surface_) + "_convex_hull");
 		}
 		clear(*p.flow_mesh_);
 		p.flow_vertex_position_ = get_or_add_attribute<Vec3, SurfaceVertex>(*p.flow_mesh_, "position");
 		p.flow_vertex_id_ = get_or_add_attribute<uint32, SurfaceVertex>(*p.flow_mesh_, "id");
 		p.flow_vertex_area = get_or_add_attribute<Scalar, SurfaceVertex>(*p.flow_mesh_, "area");
 		p.flow_edge_need_remeshing_ = get_or_add_attribute<bool, SurfaceEdge>(*p.flow_mesh_, "need_remeshing");
-
+		p.flow_edge_color_ = get_or_add_attribute<Vec3, SurfaceEdge>(*p.flow_mesh_, "color");
 		cgogn::modeling::convex_hull(points, *p.flow_mesh_, p.flow_vertex_position_.get());
 
 		cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, 3, false, false, true);
