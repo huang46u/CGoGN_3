@@ -89,10 +89,13 @@ int main(int argc, char** argv)
 			std::cout << "File could not be loaded" << std::endl;
 			return 1;
 		}
-
+		
 		std::shared_ptr<SurfaceAttribute<Vec3>> vertex_position = cgogn::get_attribute<Vec3, SurfaceVertex>(*m, "position");
 		std::shared_ptr<SurfaceAttribute<Vec3>> vertex_normal = cgogn::add_attribute<Vec3, SurfaceVertex>(*m, "normal");
-
+		/* cgogn::geometry::rescale(*vertex_position, -0.5, 0.5);
+		
+		ms.emit_attribute_changed(*m, vertex_position.get());
+		ms.set_mesh_bb_vertex_position(*m, vertex_position);*/
 		sr.set_vertex_position(*v1, *m, vertex_position);
 		sr.set_vertex_normal(*v1, *m, vertex_normal);
 		sr.set_render_edges(*v1, *m, false);

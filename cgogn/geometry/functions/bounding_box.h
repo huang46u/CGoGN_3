@@ -79,6 +79,30 @@ void rescale(CONTAINER<VEC>& container, typename vector_traits<VEC>::Scalar s)
 	}
 }
 
+template <template <typename VEC> typename CONTAINER, typename VEC>
+void rescale(CONTAINER<VEC>& container, typename vector_traits<VEC>::Scalar a, typename vector_traits<VEC>::Scalar b)
+{
+	using Scalar = typename vector_traits<VEC>::Scalar;
+	const std::size_t dimension = vector_traits<VEC>::SIZE;
+
+	auto [bb_min, bb_max] = bounding_box(container);
+	VEC range = bb_max - bb_min;
+	Scalar max = 0;
+	for (std::size_t i = 0; i < dimension; ++i)
+	{
+		if (range[i] > max)
+			max = range[i];
+	}
+	VEC scale = (range / max) * (b - a);
+	for (VEC& v : container)
+	{
+		for (std::size_t i = 0; i < dimension; ++i)
+		{
+			v[i] = (v[i] - bb_min[i]) / range[i] * scale[i] + a;
+		}
+	}
+}
+
 } // namespace geometry
 
 } // namespace cgogn

@@ -272,7 +272,7 @@ public:
 				if (vertex_position)
 				{
 					if (normalized)
-						geometry::rescale(*vertex_position, 1);
+						geometry::rescale(*vertex_position,-0.5, 0.5);
 					set_mesh_bb_vertex_position(*m, vertex_position);
 				}
 				boost::synapse::emit<mesh_added>(this, m);
