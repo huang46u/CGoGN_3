@@ -79,9 +79,8 @@ bool import_OBJ(MESH& m, const std::string& filename)
 
 	// read faces (vertex indices)
 	// uint32 nb_faces = 0;
-	do
+	while (fp >> tag)
 	{
-		fp >> tag;
 		getline_safe(fp, line);
 		if (tag == std::string("f"))
 		{
