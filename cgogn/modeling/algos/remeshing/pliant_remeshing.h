@@ -663,8 +663,81 @@ void pliant_remeshing_local(MESH& m, std::shared_ptr<typename mesh_traits<MESH>:
 
 		// tangential relaxation
 		// + project back on surface
-		parallel_foreach_cell(m, [&](Edge e) -> bool {
+		/* CellMarker<MESH, Vertex> remesh_marker(m);
+		foreach_cell(m, [&](Edge e) -> bool {
 			if (value<bool>(m, edge_need_remeshing,e))
+			{
+				std::vector<Vertex> iv = incident_vertices(m, e);
+				remesh_marker.mark(iv[0]);
+				remesh_marker.mark(iv[1]);
+			}
+			return true;
+		});
+		
+		parallel_foreach_cell(m, [&](SurfaceVertex v) -> bool {
+			if (is_incident_to_boundary(m, v) || !remesh_marker.is_marked(v))
+				return true;
+			Vec3 new_pos = value<Vec3>(m, vertex_position, v);
+			if (preserve_features)
+			{
+				if (!value<bool>(m, helper.feature_corner_, v))
+				{
+					if (value<bool>(m, helper.feature_vertex_, v))
+					{
+						// Vec3 q(0, 0, 0);
+						// uint32 count = 0;
+						// foreach_adjacent_vertex_through_edge(m, v, [&](Vertex av) -> bool {
+						// 	if (value<bool>(m, helper.feature_vertex_, av))
+						// 	{
+						// 		q += value<Vec3>(m, vertex_position, av);
+						// 		++count;
+						// 	}
+						// 	return true;
+						// });
+						// if (count == 2)
+						// {
+						// 	q /= Scalar(count);
+						// 	Vec3 n = geometry::normal(m, v, vertex_position.get());
+						// 	new_pos = q + n.dot(value<Vec3>(m, vertex_position, v) - q) * n;
+						// }
+					}
+					else
+					{
+						Vec3 q(0, 0, 0);
+						Scalar total_area = 0.0;
+						foreach_adjacent_vertex_through_edge(m, v, [&](Vertex av) -> bool {
+							Scalar a = value<Scalar>(m, vertex_area, av);
+							q += a * value<Vec3>(m, vertex_position, av);
+							total_area += a;
+							return true;
+						});
+						q /= Scalar(total_area);
+						Vec3 n = geometry::normal(m, v, vertex_position.get());
+						new_pos = q + n.dot(value<Vec3>(m, vertex_position, v) - q) * n;
+						new_pos = helper.surface_bvh_->closest_point(new_pos);
+					}
+				}
+			}
+			else
+			{
+				Vec3 q(0, 0, 0);
+				Scalar total_area = 0.0;
+				foreach_adjacent_vertex_through_edge(m, v, [&](Vertex av) -> bool {
+					Scalar a = value<Scalar>(m, vertex_area, av);
+					q += a * value<Vec3>(m, vertex_position, av);
+					total_area += a;
+					return true;
+				});
+				q /= Scalar(total_area);
+				Vec3 n = geometry::normal(m, v, vertex_position.get());
+				new_pos = q + n.dot(value<Vec3>(m, vertex_position, v) - q) * n;
+				new_pos = helper.surface_bvh_->closest_point(new_pos);
+			}
+			value<Vec3>(m, vertex_position, v) = new_pos;
+			return true;
+		});*/
+		parallel_foreach_cell(m, [&](Edge e) -> bool {
+			if (value<bool>(m, edge_need_remeshing, e))
 			{
 				for (Vertex v : incident_vertices(m, e))
 				{
@@ -731,7 +804,6 @@ void pliant_remeshing_local(MESH& m, std::shared_ptr<typename mesh_traits<MESH>:
 			}
 			return true;
 		});
-		
 		remove_attribute<Vertex>(m, vertex_area);
 	}
 }
