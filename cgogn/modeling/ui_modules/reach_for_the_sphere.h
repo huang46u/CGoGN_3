@@ -102,6 +102,7 @@ class ReachForTheSphere : public Module
 		std::shared_ptr<SurfaceAttribute<uint32>> flow_vertex_id_ = nullptr;
 		std::shared_ptr<SurfaceAttribute<Scalar>> flow_vertex_area = nullptr;
 		std::shared_ptr<SurfaceAttribute<bool>> flow_edge_need_remeshing_ = nullptr;
+		std::shared_ptr<SurfaceAttribute<Vec3>> flow_edge_color_ = nullptr;
 
 		acc::BVHTree<uint32, Vec3>* flow_mesh_bvh_ = nullptr;
 		std::vector<SurfaceFace> flow_mesh_bvh_faces_;
@@ -113,17 +114,30 @@ class ReachForTheSphere : public Module
 		std::shared_ptr<PointAttribute<Scalar>> sdf_sample_radius_ = nullptr;
 		std::shared_ptr<PointAttribute<Vec4>> sdf_sample_color_ = nullptr;
 
-		Scalar t_min = 1e-6;
-		Scalar t_max = 50;
+		Scalar t_min_ = 1e-6;
+		Scalar t_max_ = 50;
+		Scalar t_ = 1.0;
 
 		SamplingMode sampling_mode_ = GRILLE;
-
+		FlowMethMode flow_method_ = ICOSPHERE;
+		bool line_search_ = true;
+		Scalar sample_min_ = -1.0;
+		Scalar sample_max_ = 1.0;
 		uint32 grille_sample_resolution_ = 10;
 		uint32 random_sample_number_ = 50000; 
 
 		Scalar tol_remesh_ = 1e-2; 
-		Scalar remesh_target_edge_length = 1.0;
-		uint32 remesh_nb_iter = 1;
+		Scalar target_edge_length_ = 0.2;
+		Scalar min_edge_length_ = 0.01;
+		uint32 remesh_edge_count_ = 0;
+
+		uint32 nb_iteration_ = 0; 
+		uint32 remesh_nb_iter_ = 1;
+		uint32 convergence_counter_ = 0;
+		Scalar convergence_threshold_ = 1e-3;
+		Scalar average_error_ = 0.0;
+		Scalar best_average_error_ = std::numeric_limits<Scalar>::max();
+		
 		/* CellsSet<SURFACE, SurfaceFace>* faces_to_remesh = nullptr;*/
 	};
 
@@ -185,16 +199,16 @@ private:
 		// Sample the surface to create the SDF mesh
 		if (p.sampling_mode_ == GRILLE)
 			grille_samping_mesh(s, p.grille_sample_resolution_);
-		if (p.sampling_mode_ == RANDOM)
+		 if (p.sampling_mode_ == RANDOM)
 			random_sampling_mesh(s, p.random_sample_number_);
 
 		if (p.flow_method_ == CONVEX_HULL)
-		// Compute the convex hull of the sampled points
-		compute_convex_hull(s);
+			// Compute the convex hull of the sampled points
+			compute_convex_hull(s);
 		if (p.flow_method_ == ICOSPHERE)
 			// generate the icosphere of the sampled points
 			generate_ico_sphere(s);
-
+		
 		p.remesh_target_edge_length = geometry::mean_edge_length(*p.flow_mesh_, p.flow_vertex_position_.get());
 		// Ensure the flow mesh is created before building its BVH
 		if (!p.flow_mesh_)
@@ -220,50 +234,47 @@ private:
 		// If point is inside of the mesh
 		return dir.dot(n) >= 0.0; // TODO: not reliable, better use general winding number.
 	}
-
-public:
-
 	void build_bvh(SURFACE& s, std::shared_ptr<SurfaceAttribute<Vec3>>& surface_vertex_position,
-					   acc::BVHTree<uint32, Vec3>*& surface_bvh, std::vector<SurfaceFace>& surface_bvh_faces)
-		{
-			MeshData<SURFACE>& md = surface_provider_->mesh_data(s);
-			uint32 nb_vertices = md.template nb_cells<SurfaceVertex>();
-			uint32 nb_faces = md.template nb_cells<SurfaceFace>();
+				   acc::BVHTree<uint32, Vec3>*& surface_bvh, std::vector<SurfaceFace>& surface_bvh_faces)
+	{
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(s);
+		uint32 nb_vertices = md.template nb_cells<SurfaceVertex>();
+		uint32 nb_faces = md.template nb_cells<SurfaceFace>();
 
-			auto bvh_vertex_index = get_or_add_attribute<uint32, SurfaceVertex>(s, "__bvh_vertex_index");
+		auto bvh_vertex_index = get_or_add_attribute<uint32, SurfaceVertex>(s, "__bvh_vertex_index");
 
-			std::vector<Vec3> vertex_position_vector;
-			vertex_position_vector.reserve(nb_vertices);
-			uint32 idx = 0;
-			foreach_cell(s, [&](SurfaceVertex v) -> bool {
-				value<uint32>(s, bvh_vertex_index, v) = idx++;
-				vertex_position_vector.push_back(value<Vec3>(s, surface_vertex_position, v));
+		std::vector<Vec3> vertex_position_vector;
+		vertex_position_vector.reserve(nb_vertices);
+		uint32 idx = 0;
+		foreach_cell(s, [&](SurfaceVertex v) -> bool {
+			value<uint32>(s, bvh_vertex_index, v) = idx++;
+			vertex_position_vector.push_back(value<Vec3>(s, surface_vertex_position, v));
+			return true;
+		});
+
+		surface_bvh_faces.clear();
+		surface_bvh_faces.reserve(nb_faces);
+		std::vector<uint32> face_vertex_indices;
+		face_vertex_indices.reserve(nb_faces * 3);
+		foreach_cell(s, [&](SurfaceFace f) -> bool {
+			surface_bvh_faces.push_back(f);
+			foreach_incident_vertex(s, f, [&](SurfaceVertex v) -> bool {
+				face_vertex_indices.push_back(value<uint32>(s, bvh_vertex_index, v));
 				return true;
 			});
+			return true;
+		});
 
-			surface_bvh_faces.clear();
-			surface_bvh_faces.reserve(nb_faces);
-			std::vector<uint32> face_vertex_indices;
-			face_vertex_indices.reserve(nb_faces * 3);
-			foreach_cell(s, [&](SurfaceFace f) -> bool {
-				surface_bvh_faces.push_back(f);
-				foreach_incident_vertex(s, f, [&](SurfaceVertex v) -> bool {
-					face_vertex_indices.push_back(value<uint32>(s, bvh_vertex_index, v));
-					return true;
-				});
-				return true;
-			});
+		if (surface_bvh)
+			delete surface_bvh;
+		surface_bvh = new acc::BVHTree<uint32, Vec3>(face_vertex_indices, vertex_position_vector);
 
-			if (surface_bvh)
-				delete surface_bvh;
-			surface_bvh = new acc::BVHTree<uint32, Vec3>(face_vertex_indices, vertex_position_vector);
-
-			remove_attribute<SurfaceVertex>(s, bvh_vertex_index);
-		}
+		remove_attribute<SurfaceVertex>(s, bvh_vertex_index);
+	}
 
 	void random_sampling_mesh(SURFACE& surface, uint32 numbers)
 	{
-		
+
 		SurfaceParameters& p = surface_parameters_[&surface];
 
 		// Compute bounding box of the surface mesh
@@ -313,15 +324,13 @@ public:
 		points_provider_->emit_attribute_changed(*p.sdf_, p.sdf_sample_position_.get());
 
 		points_provider_->set_mesh_bb_vertex_position(*p.sdf_, p.sdf_sample_position_);
-		
-
 	}
 
-	//marching cube like sampling
+	// marching cube like sampling
 	void grille_samping_mesh(SURFACE& surface, uint32 step = 50)
 	{
 		SurfaceParameters& p = surface_parameters_[&surface];
-	
+
 		/* //Compute bounding box of the surface mesh
 		Vec3 bb_min, bb_max;
 		std::tie(bb_min, bb_max) = geometry::bounding_box(*p.surface_vertex_position_);
@@ -375,7 +384,7 @@ public:
 
 		points_provider_->set_mesh_bb_vertex_position(*p.sdf_, p.sdf_sample_position_);
 	}
-	
+
 	void generate_ico_sphere(SURFACE& surface)
 	{
 		SurfaceParameters& p = surface_parameters_[&surface];
@@ -406,7 +415,7 @@ public:
 		surface_provider_->set_mesh_bb_vertex_position(*p.flow_mesh_, p.flow_vertex_position_);
 	}
 
-	void compute_convex_hull(SURFACE& surface)	
+	void compute_convex_hull(SURFACE& surface)
 	{
 		SurfaceParameters& p = surface_parameters_[&surface];
 
@@ -467,13 +476,16 @@ public:
 		return bcoords;
 	}
 
+public:
+
 	void reach_for_the_sphere_iteration(SURFACE& s)
 	{
 		SurfaceParameters& p = surface_parameters_[&s];
 		//p.faces_to_remesh->clear();
-		
+		p.nb_iteration_++;
 		foreach_cell(*p.flow_mesh_, [&](SurfaceEdge se) -> bool {
 			value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, se) = false;
+			value<Vec3>(*p.flow_mesh_, p.flow_edge_color_, se) = Vec3(0.0,0.0,0.0) ;
 			return true;
 		});
 		uint32 nb_vertices = nb_cells<SurfaceVertex>(*p.flow_mesh_);
@@ -513,15 +525,17 @@ public:
 			std::pair<uint32, Vec3> cp;
 			p.flow_mesh_bvh_->closest_point(pv_pos, &cp);
 			Scalar distance = std::abs((cp.second - pv_pos).norm() - radius);
-			// if the distance is less than the tolerance, mark the incident edges for remeshing
+
+			// if the distance is larger than the tolerance, mark the incident edges for remeshing
 			if (distance > p.tol_remesh_)
 			{
-				//p.faces_to_remesh->select(p.flow_mesh_bvh_faces_[cp.first]);
+				// p.faces_to_remesh->select(p.flow_mesh_bvh_faces_[cp.first]);
 				std::vector<SurfaceVertex> iv = incident_vertices(*p.flow_mesh_, p.flow_mesh_bvh_faces_[cp.first]);
 				for (SurfaceVertex v : iv)
 				{
 					foreach_incident_edge(*p.flow_mesh_, v, [&](SurfaceEdge e) -> bool {
 						value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e) = true;
+						value<Vec3>(*p.flow_mesh_, p.flow_edge_color_, e) = Vec3(1.0, 0.0, 0.0);
 						return true;
 					});
 				}
@@ -542,11 +556,19 @@ public:
 
 			// compute the projection points on the spheres
 
-			
 			bool inside = is_inside(*p.flow_mesh_, pv_pos, p.flow_mesh_bvh_faces_, p.flow_vertex_position_, cp);
 			int sigma = (inside == (sdf < 0)) ? 1 : -1;
-			Vec3 projection = pv_pos + sigma * (cp.second - pv_pos).normalized() * radius;
-			
+			Vec3 pe = cp.second - pv_pos;
+			Scalar norm_pe = pe.norm();
+			Vec3 projection;
+			if (norm_pe < p.tol_remesh_*0.5)
+			{
+				projection = cp.second;
+			}
+			else
+			{
+				projection = pv_pos + sigma * pe.normalized() * radius;
+			}
 			// Build S matrix
 			S.row(pv_index) = projection;
 			return true;
@@ -576,30 +598,35 @@ public:
 
 		Eigen::SparseMatrix<Scalar> R(nb_samples, nb_samples);
 		R.setFromTriplets(triplets.begin(), triplets.end());
-
-		Scalar n_c = 0.01;
-
-		// Compute n_p = -A^T * R * (A * V - S)
-		Eigen::MatrixXd P = -A.transpose() * R * (A * V - S);
-
-		Scalar numerator = (A * V - S).cwiseProduct(R * (A * P)).sum() + n_c * P.squaredNorm();
-		Scalar denominator = (A * P).cwiseProduct(R * (A * P)).sum();
-		std::cout << "numerator :" << numerator << ", denominator: " << denominator << std::endl;
-		Scalar t = -numerator / denominator; // Avoid division by zero
-
-		// Handle NaN and Inf values
-		if (std::isnan(t) || std::isinf(t))
+		if (p.line_search_)
 		{
-			std::cout << "t not correct" << std::endl;
-			t = 0.0;
+			Scalar n_c = 0.01;
+
+			// Compute n_p = -A^T * R * (A * V - S)
+			Eigen::MatrixXd P = -A.transpose() * R * (A * V - S);
+
+			Scalar numerator = (A * V - S).cwiseProduct(R * (A * P)).sum() + n_c * P.squaredNorm();
+			Scalar denominator = (A * P).cwiseProduct(R * (A * P)).sum();
+			std::cout << "numerator :" << numerator << ", denominator: " << denominator << std::endl;
+			p.t_ = -numerator / denominator; // Avoid division by zero
+
+			// Handle NaN and Inf values
+			if (std::isnan(p.t_) || std::isinf(p.t_))
+			{
+				std::cout << "p.t_ not correct" << std::endl;
+				p.t_ = 0.0;
+			}
+			std::cout << "computed time step: " << p.t_ << std::endl;
+			// Clamp p.t_ within [min_t, max_t]
+			p.t_ = std::min(p.t_max_, std::max(p.t_, p.t_min_));
+			std::cout << "selected time step: " << p.t_ << std::endl;
 		}
-		std::cout << "computed time step: " << t << std::endl;
-		// Clamp t within [min_t, max_t]
-		t = std::min(p.t_max, std::max(t, p.t_min));
-		std::cout << "selected time step: " << t << std::endl;
+		else
+		{
+			p.t_ = 1.0;
+		}
 
-
-		Eigen::SparseMatrix<Scalar> lhs = M + t * A.transpose() *R* A;
+		Eigen::SparseMatrix<Scalar> lhs = M + p.t_ * A.transpose() *R* A;
 		Eigen::SimplicialCholesky<Eigen::SparseMatrix<Scalar>> chol(lhs);
 
 		if (chol.info() != Eigen::Success)
@@ -608,50 +635,74 @@ public:
 		}
 		else
 		{
-			Eigen::MatrixXd V_t = chol.solve(M * V + t * A.transpose() * R * S);
+			
+			Eigen::MatrixXd V_t = chol.solve(M * V + p.t_ * A.transpose() * R * S);
 			std::cout << "Solved the system" << std::endl;
+			// Compute the average error
+			p.average_error_= (A * V_t -S).norm()/nb_samples;
+
+			std::cout<<"Iteration: "<< p.nb_iteration_ << ", Counter: "<< p.convergence_counter_ <<", h: " <<p.target_edge_length_<< ", Average error: " << p.average_error_
+					  << ", Best avg error: " << p.best_average_error_ << std::endl;
+
+			if (p.average_error_ + 1e-3 * p.tol_remesh_ >= p.best_average_error_)
+			{
+				p.convergence_counter_++;
+			}
+			else
+			{
+				p.convergence_counter_ = 0;
+				p.best_average_error_ = p.average_error_;
+			}
+
+			if (p.convergence_counter_ > 10)
+			{
+				if (p.target_edge_length_ > p.min_edge_length_)
+				{
+					p.best_average_error_ = std::numeric_limits<Scalar>::max();
+					p.convergence_counter_ = 0;
+				}
+				p.target_edge_length_ = std::max(p.target_edge_length_/2, p.min_edge_length_);
+			}
+
 			// Assign the new postition of each vertex
 			foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
 				uint32 sv_index = value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv);
 				value<Vec3>(*p.flow_mesh_, p.flow_vertex_position_, sv) = V_t.row(sv_index);
 				return true;
 			});
-
-			/*for (uint32 i = 0; i < p.remesh_nb_iter; i++)
-				cgogn::modeling::pliant_remeshing_local(*p.flow_mesh_, p.flow_vertex_position_,
-														p.flow_edge_need_remeshing_,
-														p.remesh_target_edge_length, false, false, true);*/
-
-			uint32 vertex_id = 0;
-			uint32 count = 0;
 			foreach_cell(*p.flow_mesh_, [&](SurfaceEdge se) -> bool {
 				if (value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, se))
 				{
-					count++;
+					p.remesh_edge_count_++;
 				}
 				return true;
 			});
+			if (p.convergence_counter_ > 100 || p.remesh_edge_count_ == 0)
+			{
+				surface_provider_->emit_attribute_changed(*p.flow_mesh_, p.flow_vertex_position_.get());
+				surface_provider_->emit_attribute_changed(*p.flow_mesh_, p.flow_edge_color_.get());
+				std::cout << "Converged" << std::endl;
+				return;
+			}
+			for (uint32 i = 0; i < p.remesh_nb_iter_; i++)
+				cgogn::modeling::pliant_remeshing_local(*p.flow_mesh_, p.flow_vertex_position_,
+														p.flow_edge_need_remeshing_,
+														p.target_edge_length_, false, false, true);
+			
+			uint32 vertex_id = 0;
+			
+			
 			foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
 				value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv) = vertex_id++;
 				return true;
 			});
-			/*foreach_cell(*p.flow_mesh_, [&](SurfaceEdge se) -> bool {
-				if (value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, se))
-				{
-					count++;
-					value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, se) = false;
-				}
-				
-				return true;
-			});*/
-			std::cout << "Number of edges to remesh: " << count << std::endl;
-
+			std::cout << "Number of edges to remesh: " << p.remesh_edge_count_ << std::endl;
+			std::cout << "-----------------------------" << std::endl;
 			build_bvh(*p.flow_mesh_, p.flow_vertex_position_, p.flow_mesh_bvh_, p.flow_mesh_bvh_faces_);
 			surface_provider_->emit_connectivity_changed(*p.flow_mesh_);
 			surface_provider_->emit_attribute_changed(*p.flow_mesh_, p.flow_vertex_position_.get());
+			surface_provider_->emit_attribute_changed(*p.flow_mesh_, p.flow_edge_color_.get());
 		}
-
-		
 	}
 	
 	void remeshing(SURFACE& s, Scalar ratio)
@@ -659,7 +710,7 @@ public:
 		SurfaceParameters& p = surface_parameters_[&s];
 
 		cgogn::modeling::pliant_remeshing_local(*p.flow_mesh_, p.flow_vertex_position_, p.flow_edge_need_remeshing_,
-												p.remesh_target_edge_length, false, false, true);
+												p.target_edge_length_, false, false, true);
 	
 		uint32 vertex_id = 0;
 		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
@@ -670,7 +721,7 @@ public:
 		surface_provider_->emit_connectivity_changed(*p.flow_mesh_);
 		surface_provider_->emit_attribute_changed(*p.flow_mesh_, p.flow_vertex_position_.get());
 
-		surface_provider_->set_mesh_bb_vertex_position(*p.flow_mesh_, p.flow_vertex_position_);
+		
 	}
 
 protected:
@@ -701,6 +752,9 @@ protected:
 				ImGui::RadioButton("Grille", (int*)&p.sampling_mode_, GRILLE);
 				ImGui::SameLine();
 				ImGui::RadioButton("Random", (int*)&p.sampling_mode_, RANDOM);
+				ImGui::RadioButton("Convex Hull", (int*)&p.flow_method_, CONVEX_HULL);
+				ImGui::SameLine();
+				ImGui::RadioButton("Icosphere", (int*)&p.flow_method_, ICOSPHERE);
 				if (p.sampling_mode_ == GRILLE)
 				{
 					ImGui::InputScalar("Grille resolution", ImGuiDataType_U32, &p.grille_sample_resolution_);
@@ -713,12 +767,17 @@ protected:
 					init_surface_data(*selected_surface_);
 				if (p.initialized_)
 				{
+					ImGui::Checkbox("Line Search ", &p.line_search_);
+					ImGui::InputScalar("Min time step", ImGuiDataType_Double, &p.t_min_);
+					ImGui::InputScalar("Max time step", ImGuiDataType_Double, &p.t_max_);
 
+					ImGui::InputScalar("Tolerance remeshing", ImGuiDataType_Double, &p.tol_remesh_);
+					ImGui::SliderInt("Number of remeshing iterations",  &(int)p.remesh_nb_iter_, 1, 10);
+				
 					if (ImGui::Button("Reach for the sphere"))
 						reach_for_the_sphere_iteration(*selected_surface_);
-					ImGui::InputScalar("Remeshing ratio", ImGuiDataType_Double, &p.remesh_target_edge_length);
-					if (ImGui::Button("Remshing"))
-						remeshing(*selected_surface_, p.remesh_target_edge_length);
+					ImGui::InputScalar("Current Remeshing edge length", ImGuiDataType_Double, &p.target_edge_length_);
+					
 				}
 			}
 			
