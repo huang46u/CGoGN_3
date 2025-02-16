@@ -108,7 +108,6 @@ class PowerShape : public Module
 	public:
 		uint32 id = -1;
 		bool inside = false;
-		Bare_point centroid;
 	};
 
 	using Vb = CGAL::Triangulation_vertex_base_with_info_3<VertexInfo, K>;
@@ -428,21 +427,18 @@ public:
 
 				Regular_Vertex_handle vh2 =
 					medial_axis.insert(Weight_Point(Point(other_pos.x(), other_pos.y(), other_pos.z()), radius));
-				if (vh1!=nullptr && vh2!=nullptr)
+				if (vh1!=nullptr)
 				{
 					vh1->info().id = id;
 					vh1->info().paired_id = other_id;
 					vertex_set.insert(id);
+					
+				}
+				if (vh2 != nullptr)
+				{
 					vh2->info().id = other_id;
 					vh2->info().paired_id = id;
 					vertex_set.insert(other_id);
-				}
-				else
-				{
-					if (vh1!=nullptr)
-						medial_axis.remove(vh1);
-					if (vh2!=nullptr)
-						medial_axis.remove(vh2);
 				}
 			}
 			return true;
@@ -477,17 +473,22 @@ public:
 						all_finite = false;
 						break;
 					}
-					auto center = medial_axis.dual(cc);
-					non_manifold_data.vertex_position_.emplace_back(
-						CGAL::to_double(center.x()), CGAL::to_double(center.y()), CGAL::to_double(center.z()));
-					cc->info().id = vertex_count;
-					vertex_count++;
 					incells.push_back(cc);
 					cc++;
 				} while (cc != medial_axis.incident_cells(*eit));
 				if (all_finite)
 				{
-
+					for (size_t i = 0; i < incells.size(); i++)
+					{
+						auto center = medial_axis.dual(incells[i]);
+						if (incells[i]->info().id == -1)
+						{
+							incells[i]->info().id = vertex_count;
+							non_manifold_data.vertex_position_.emplace_back(
+								CGAL::to_double(center.x()), CGAL::to_double(center.y()), CGAL::to_double(center.z()));
+							vertex_count++;
+						}
+					}
 					for (size_t i = 0; i < incells.size() - 1; i++)
 					{
 						uint32 ev1 = incells[i]->info().id;
