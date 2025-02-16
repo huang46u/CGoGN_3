@@ -82,7 +82,7 @@ int main(int argc, char** argv)
 
 	if (filename.length() > 0)
 	{
-		Surface* m = ms.load_surface_from_file(filename);
+		Surface* m = ms.load_surface_from_file(filename, false);
 		if (!m)
 		{
 			std::cout << "File could not be loaded" << std::endl;
@@ -91,7 +91,7 @@ int main(int argc, char** argv)
 
 		std::shared_ptr<Attribute<Vec3>> vertex_position = cgogn::get_attribute<Vec3, Vertex>(*m, "position");
 		std::shared_ptr<Attribute<Vec3>> vertex_normal = cgogn::add_attribute<Vec3, Vertex>(*m, "normal");
-
+		cgogn::geometry::compute_normal<Vertex>(*m, vertex_position.get(), vertex_normal.get());
 		sr.set_vertex_position(*v1, *m, vertex_position);
 		sr.set_vertex_normal(*v1, *m, vertex_normal);
 		sr.set_render_edges(*v1, *m, false);

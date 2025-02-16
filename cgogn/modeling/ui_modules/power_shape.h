@@ -27,7 +27,7 @@
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/ui/app.h>
 #include <cgogn/ui/module.h>
-
+#include <cgogn/geometry/algos/medial_axis.h>
 #include <cgogn/geometry/types/slab_quadric.h>
 
 #include <cgogn/io/point/point_import.h>
@@ -37,7 +37,7 @@
 // import CGAL
 #include <CGAL/Bbox_3.h>
 #include <CGAL/Delaunay_triangulation_3.h>
-#include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
+#include <CGAL/Exact_predicates_exact_constructions_kernel.h>
 #include <CGAL/IO/read_off_points.h>
 #include <CGAL/Object.h>
 #include <CGAL/Polygon_mesh_processing/distance.h>
@@ -67,7 +67,7 @@ class PowerShape : public Module
 {
 	static_assert(mesh_traits<SURFACE>::dimension >= 2, "PowerShape can only be used with meshes of dimension >= 2");
 	// Kernel for construct Delaunay
-	using K = CGAL::Exact_predicates_inexact_constructions_kernel;
+	using K = CGAL::Exact_predicates_exact_constructions_kernel;
 	using Point = K::Point_3;
 	using Weight_Point = K::Weighted_point_3;
 
@@ -101,6 +101,14 @@ class PowerShape : public Module
 	public:
 		bool inside = false;
 		uint32 id = -1;
+		uint32 paired_id = -1;
+	};
+	class RegularCellInfo
+	{
+	public:
+		uint32 id = -1;
+		bool inside = false;
+		Bare_point centroid;
 	};
 
 	using Vb = CGAL::Triangulation_vertex_base_with_info_3<VertexInfo, K>;
@@ -112,17 +120,21 @@ class PowerShape : public Module
 	using Delaunay_Cell_circulator = typename Delaunay::Cell_circulator;
 	using Delaunay_Vertex_handle = typename Delaunay::Vertex_handle;
 	// Regular
+
 	using Vb0 = CGAL::Regular_triangulation_vertex_base_3<K>;
 	using RVb = CGAL::Triangulation_vertex_base_with_info_3<RegularVertexInfo, K, Vb0>;
-	using RCb = CGAL::Regular_triangulation_cell_base_3<K>;
+	using RCb = CGAL::Regular_triangulation_cell_base_3<
+		K, CGAL::Triangulation_cell_base_with_info_3<RegularCellInfo, K, CGAL::Triangulation_cell_base_3<K>>>;
+	
 	using RTds = CGAL::Triangulation_data_structure_3<RVb, RCb>;
 	using Regular = CGAL::Regular_triangulation_3<K, RTds, CGAL::Fast_location>;
 	using Regular_Cell_handle = typename Regular::Cell_handle;
+	using Regular_Vertex_handle = typename Regular::Vertex_handle;
 
 	using Cgal_Surface_mesh = CGAL::Surface_mesh<Point>;
 	using Point_inside = CGAL::Side_of_triangle_mesh<Cgal_Surface_mesh, K>;
 	using Primitive = CGAL::AABB_face_graph_triangle_primitive<Cgal_Surface_mesh>;
-	using Traits = CGAL::AABB_traits<K, Primitive>;
+	using Traits = CGAL::AABB_traits_3<K, Primitive>;
 	using Tree = CGAL::AABB_tree<Traits>;
 
 	template <typename T>
@@ -153,6 +165,22 @@ public:
 	}
 
 private:
+	struct SurfaceParameters
+	{
+		SURFACE* surface;
+		std::shared_ptr<SurfaceAttribute<Vec3>> vertex_position_;
+		std::shared_ptr<SurfaceAttribute<Vec3>> vertex_normal_;
+		std::shared_ptr<SurfaceAttribute<uint32>> vertex_id;
+		std::shared_ptr<SurfaceAttribute<Vec3>> medial_axis_samples_position_;
+		std::shared_ptr<SurfaceAttribute<Scalar>> medial_axis_samples_radius_;
+		std::shared_ptr<SurfaceAttribute<SurfaceVertex>> medial_axis_samples_secondary_vertex_;
+		
+		NONMANIFOLD* nonmanifold;
+		std::shared_ptr<NonManifoldAttribute<Vec3>> nonmanifold_vertex_position;
+
+	};
+
+	
 	struct point_hash
 	{
 		std::size_t operator()(const Point& p) const
@@ -342,23 +370,185 @@ private:
 	}
 
 public:
-	/*
-		void detect_boundary_cells(NONMANIFOLD& nm)
-		{
-			parallel_foreach_cell(nm, [&](NonManifoldVertex v) {
-				auto ie = incident_edges(nm, v);
-				auto iface = incident_faces(nm, v);
-				set_boundary(nm, v, ie.size() == 1 && iface.size() == 0);
-				return true;
-				});
-			parallel_foreach_cell(nm, [&](NonManifoldEdge e) {
-				auto iface = incident_faces(nm, e);
-				set_boundary(nm, e, iface.size() == 1);
 
-				return true;
-				});
+	void init_surface_mesh(SURFACE* s)
+	{
+		SurfaceParameters& p = surface_parameters_[s];
+		p.surface = s;
+		p.vertex_position_ = get_or_add_attribute<Vec3, SurfaceVertex>(*s, "position");
+		p.vertex_normal_ = get_or_add_attribute<Vec3, SurfaceVertex>(*s, "normal");
+		p.vertex_id = get_or_add_attribute<uint32, SurfaceVertex>(*s, "id");
+
+		p.medial_axis_samples_position_ = get_or_add_attribute<Vec3, SurfaceVertex>(*s, "medial_axis_samples_position");
+		p.medial_axis_samples_secondary_vertex_ =
+			get_or_add_attribute<SurfaceVertex, SurfaceVertex>(*s, "medial_axis_samples_secondary_vertex");
+		p.medial_axis_samples_radius_ = get_or_add_attribute<Scalar, SurfaceVertex>(*s, "medial_axis_samples_radius");
+
+		uint32 vertex_count = 0;
+		foreach_cell(*s, [&](SurfaceVertex v) -> bool {
+			value<uint32>(*s, p.vertex_id, v) = vertex_count++;
+			return true;
+		});
+		sample_medial_axis(*s);
+	}
+
+	void sample_medial_axis(SURFACE& s)
+	{
+		SurfaceParameters& p = surface_parameters_[&s];
+
+		geometry::shrinking_ball_centers(s, p.vertex_position_.get(), p.vertex_normal_.get(),
+										 p.medial_axis_samples_position_.get(),
+										 p.medial_axis_samples_radius_.get(),
+										 p.medial_axis_samples_secondary_vertex_.get());
+
+
+		surface_provider_->emit_attribute_changed(s, p.medial_axis_samples_position_.get());
+		surface_provider_->emit_attribute_changed(s, p.medial_axis_samples_radius_.get());
+
+	}
+
+	void construct_medial_axis(SURFACE& s)
+	{
+		SurfaceParameters& p = surface_parameters_[&s];
+		Regular medial_axis;
+		std::unordered_set<uint32> vertex_set;
+		
+		foreach_cell(s, [&](SurfaceVertex sv) -> bool {
+			Vec3 pos = value<Vec3>(s, p.vertex_position_, sv);
+			SurfaceVertex other_sv = value<SurfaceVertex>(s, p.medial_axis_samples_secondary_vertex_, sv);
+			Vec3 other_pos = value<Vec3>(s, p.vertex_position_, other_sv);
+			Scalar radius = value<Scalar>(s, p.medial_axis_samples_radius_, sv);
+			uint32 id = value<uint32>(s, p.vertex_id, sv);
+			uint32 other_id =
+				value<uint32>(s, p.vertex_id, other_sv);
+			;
+			if (vertex_set.find(id) == vertex_set.end() && vertex_set.find(other_id) == vertex_set.end())
+			{
+				Regular_Vertex_handle vh1 = medial_axis.insert(Weight_Point(Point(pos.x(), pos.y(), pos.z()), radius));
+
+				Regular_Vertex_handle vh2 =
+					medial_axis.insert(Weight_Point(Point(other_pos.x(), other_pos.y(), other_pos.z()), radius));
+				if (vh1!=nullptr && vh2!=nullptr)
+				{
+					vh1->info().id = id;
+					vh1->info().paired_id = other_id;
+					vertex_set.insert(id);
+					vh2->info().id = other_id;
+					vh2->info().paired_id = id;
+					vertex_set.insert(other_id);
+				}
+				else
+				{
+					if (vh1!=nullptr)
+						medial_axis.remove(vh1);
+					if (vh2!=nullptr)
+						medial_axis.remove(vh2);
+				}
+			}
+			return true;
+		});
+
+		std::cout << "inserted " << medial_axis.number_of_vertices() << " vertices" << std::endl;
+		NONMANIFOLD* mv =
+			nonmanifold_provider_->add_mesh(std::to_string(nonmanifold_provider_->number_of_meshes()) + "_medial_axis");
+		cgogn::io::IncidenceGraphImportData non_manifold_data;
+		std::unordered_map<std::pair<uint32, uint32>, uint32, edge_hash, edge_equal> edge_indices;
+		uint32 edge_count = 0;
+		uint32 vertex_count = 0;
+		std::vector<Weight_Point> power_point;
+		std::vector<Regular_Cell_handle> incells;
+		std::cout << "start edge" << std::endl;
+		
+		for (auto eit = medial_axis.finite_edges_begin(); eit!=medial_axis.finite_edges_end(); eit++)
+		{
+		
+			Regular_Vertex_handle vh1 = eit->first->vertex(eit->second);
+			Regular_Vertex_handle vh2 = eit->first->vertex(eit->third);
+			if (vh1->info().paired_id == vh2->info().id || vh2->info().paired_id == vh1->info().id)
+			{
+				bool all_finite = true;
+				std::cout << "find paired" << std::endl;
+				incells.clear();
+				auto cc = medial_axis.incident_cells(*eit);
+				do
+				{
+					if (medial_axis.is_infinite(cc))
+					{
+						all_finite = false;
+						break;
+					}
+					auto center = medial_axis.dual(cc);
+					non_manifold_data.vertex_position_.emplace_back(
+						CGAL::to_double(center.x()), CGAL::to_double(center.y()), CGAL::to_double(center.z()));
+					cc->info().id = vertex_count;
+					vertex_count++;
+					incells.push_back(cc);
+					cc++;
+				} while (cc != medial_axis.incident_cells(*eit));
+				if (all_finite)
+				{
+
+					for (size_t i = 0; i < incells.size() - 1; i++)
+					{
+						uint32 ev1 = incells[i]->info().id;
+						uint32 ev2 = incells[i + 1]->info().id;
+						// Check if the edge is already added
+						if (edge_indices.find({ev1, ev2}) == edge_indices.end())
+						{
+							non_manifold_data.edges_vertex_indices_.push_back(ev1);
+							non_manifold_data.edges_vertex_indices_.push_back(ev2);
+
+							edge_indices.insert({{ev1, ev2}, edge_count});
+							edge_count++;
+						}
+					}
+					for (size_t k = 2; k < incells.size() - 1; k++)
+					{
+						uint32 ev1 = incells[0]->info().id;
+						uint32 ev2 = incells[k]->info().id;
+						// Check if the edge is already added
+						if (edge_indices.find({ev1, ev2}) == edge_indices.end())
+						{
+							non_manifold_data.edges_vertex_indices_.push_back(ev1);
+							non_manifold_data.edges_vertex_indices_.push_back(ev2);
+							edge_indices.insert({{ev1, ev2}, edge_count});
+							edge_count++;
+						}
+					}
+					for (size_t k = 1; k < incells.size() - 1; k++)
+					{
+						uint32 v1 = incells[0]->info().id;
+						uint32 v2 = incells[k]->info().id;
+						uint32 v3 = incells[k + 1]->info().id;
+						uint32 e1, e2, e3;
+						e1 = edge_indices[{v1, v2}];
+						e2 = edge_indices[{v2, v3}];
+						e3 = edge_indices[{v3, v1}];
+
+						non_manifold_data.faces_nb_edges_.push_back(3);
+						non_manifold_data.faces_edge_indices_.push_back(e1);
+						non_manifold_data.faces_edge_indices_.push_back(e2);
+						non_manifold_data.faces_edge_indices_.push_back(e3);
+					}
+				}
+
+			}
 		}
-	*/
+		uint32 inner_power_nb_vertices = non_manifold_data.vertex_position_.size();
+		uint32 inner_power_nb_edges = non_manifold_data.edges_vertex_indices_.size() / 2;
+		uint32 inner_power_nb_faces = non_manifold_data.faces_nb_edges_.size();
+
+		non_manifold_data.reserve(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
+		std::cout << "vertex count: " << vertex_count << std::endl;
+		std::cout << "edge count: " << edge_count << std::endl;
+		import_incidence_graph_data(*mv, non_manifold_data);
+		std::shared_ptr<NonManifoldAttribute<Vec3>> mv_vertex_position =
+			get_attribute<Vec3, NonManifoldVertex>(*mv, "position");
+		if (mv_vertex_position)
+			nonmanifold_provider_->set_mesh_bb_vertex_position(*mv, mv_vertex_position);
+
+		nonmanifold_provider_->emit_connectivity_changed(*mv);
+	}
 
 	std::array<std::array<double, 3>, 8> compute_big_box(SURFACE& surface, Cgal_Surface_mesh& csm)
 	{
@@ -1481,77 +1671,85 @@ protected:
 
 		if (selected_surface_mesh_)
 		{
-
-			if (ImGui::Button("Compute delaunay"))
+			if (ImGui::Button("Initial Surface Data"))
 			{
-				Cgal_Surface_mesh csm;
-				load_model_in_cgal(*selected_surface_mesh_, csm);
-				tree_ = Tree(faces(csm).first, faces(csm).second, csm);
-				tree_.accelerate_distance_queries();
-				tri_ = compute_delaunay_tredrahedron(*selected_surface_mesh_, csm, tree_);
+				init_surface_mesh(selected_surface_mesh_);
 			}
-			ImGui::Checkbox("Preseve only poles", &pole_filtering_);
-			ImGui::Checkbox("Filter by Angle", &angle_filtering_);
-			if (angle_filtering_)
+			if (ImGui::Button("Test"))
 			{
-				ImGui::DragFloat("angle", &angle_threshold_, 0.01, 0.0, M_PI, "%.2f");
+				construct_medial_axis(*selected_surface_mesh_);
 			}
-
-			ImGui::Checkbox("Filter by circumradius", &circumradius_filtering_);
-			if (circumradius_filtering_)
-			{
-				ImGui::DragFloat("circumradius", &radius_threshold_, (max_radius_ - min_radius_) / 100, min_radius_,
-								 max_radius_, "%.3f");
-			}
-			ImGui::Checkbox("Filter by distance", &distance_filtering_);
-			if (distance_filtering_)
-			{
-				ImGui::DragFloat("distance", &distance_threshold_, 1e-2, 0, 1, "%.4f");
-			}
-
-			if (ImGui::Button("Generate candidates"))
-			{
-				construct_candidates_points(*selected_surface_mesh_, tri_);
-			}
-			if (ImGui::Button("Power shape"))
-			{
-				compute_power_shape(*selected_surface_mesh_);
-			}
-			if (ImGui::Button("Original Medial Axis"))
-				compute_original_power_diagram(*selected_surface_mesh_);
-			if (selected_medial_axis_)
-			{
-				if (ImGui::Button("Compute stability ratio"))
-					compute_stability_ratio(*selected_medial_axis_);
-				static int32 number_vertex_remain = 1;
-				static float k = 1e-5;
-				ImGui::DragInt("Vertices to delete", &number_vertex_remain, 1, 0,
-							   nb_cells<NonManifoldVertex>(*selected_medial_axis_));
-				ImGui::DragFloat("K", &k, 1e-5, 0.0f, 1.0f, "%.5f");
-				if (ImGui::Button("QMAT"))
-				{
-					collapse_non_manifold_using_QMat(*selected_medial_axis_, number_vertex_remain, k);
-				}
-			}
-			if (selected_candidates_)
-			{
-				static float dilation_factor = 0.5f;
-				ImGui::DragFloat("Dilation factor", &dilation_factor, 0.001f, 0.0f, 1.0f, "%.4f");
-				if (ImGui::Button("Coverage Axis"))
-				{
-					solution = point_selection_by_coverage_axis(*selected_surface_mesh_, *selected_candidates_,
-																dilation_factor);
-				}
-				if (solution.col_value.size() > 0)
-				{
-					if (ImGui::Button("Collpase"))
-						coverage_axis_collapse(*selected_surface_mesh_, *selected_candidates_, solution); 
-					if (ImGui::Button("PD"))
-						coverage_axis_PD(*selected_surface_mesh_, *selected_candidates_, solution, dilation_factor);
-					if (ImGui::Button("CVD"))
-						coverage_axis_CVD(*selected_surface_mesh_, *selected_candidates_, solution);
-				}
-			}
+			// 			if (ImGui::Button("Compute delaunay"))
+			// 			{
+			// 				Cgal_Surface_mesh csm;
+			// 				load_model_in_cgal(*selected_surface_mesh_, csm);
+			// 				tree_ = Tree(faces(csm).first, faces(csm).second, csm);
+			// 				tree_.accelerate_distance_queries();
+			// 				tri_ = compute_delaunay_tredrahedron(*selected_surface_mesh_, csm, tree_);
+			// 			}
+			// 			ImGui::Checkbox("Preseve only poles", &pole_filtering_);
+			// 			ImGui::Checkbox("Filter by Angle", &angle_filtering_);
+			// 			if (angle_filtering_)
+			// 			{
+			// 				ImGui::DragFloat("angle", &angle_threshold_, 0.01, 0.0, M_PI, "%.2f");
+			// 			}
+			//
+			// 			ImGui::Checkbox("Filter by circumradius", &circumradius_filtering_);
+			// 			if (circumradius_filtering_)
+			// 			{
+			// 				ImGui::DragFloat("circumradius", &radius_threshold_, (max_radius_ - min_radius_) / 100,
+			// min_radius_, 								 max_radius_, "%.3f");
+			// 			}
+			// 			ImGui::Checkbox("Filter by distance", &distance_filtering_);
+			// 			if (distance_filtering_)
+			// 			{
+			// 				ImGui::DragFloat("distance", &distance_threshold_, 1e-2, 0, 1, "%.4f");
+			// 			}
+			//
+			// 			if (ImGui::Button("Generate candidates"))
+			// 			{
+			// 				construct_candidates_points(*selected_surface_mesh_, tri_);
+			// 			}
+			// 			if (ImGui::Button("Power shape"))
+			// 			{
+			// 				compute_power_shape(*selected_surface_mesh_);
+			// 			}
+			// 			if (ImGui::Button("Original Medial Axis"))
+			// 				compute_original_power_diagram(*selected_surface_mesh_);
+			// 			if (selected_medial_axis_)
+			// 			{
+			// 				if (ImGui::Button("Compute stability ratio"))
+			// 					compute_stability_ratio(*selected_medial_axis_);
+			// 				static int32 number_vertex_remain = 1;
+			// 				static float k = 1e-5;
+			// 				ImGui::DragInt("Vertices to delete", &number_vertex_remain, 1, 0,
+			// 							   nb_cells<NonManifoldVertex>(*selected_medial_axis_));
+			// 				ImGui::DragFloat("K", &k, 1e-5, 0.0f, 1.0f, "%.5f");
+			// 				if (ImGui::Button("QMAT"))
+			// 				{
+			// 					collapse_non_manifold_using_QMat(*selected_medial_axis_, number_vertex_remain, k);
+			// 				}
+			// 			}
+			// 			if (selected_candidates_)
+			// 			{
+			// 				static float dilation_factor = 0.5f;
+			// 				ImGui::DragFloat("Dilation factor", &dilation_factor, 0.001f, 0.0f, 1.0f, "%.4f");
+			// 				if (ImGui::Button("Coverage Axis"))
+			// 				{
+			// 					solution = point_selection_by_coverage_axis(*selected_surface_mesh_,
+			// *selected_candidates_, 																dilation_factor);
+			// 				}
+			// 				if (solution.col_value.size() > 0)
+			// 				{
+			// 					if (ImGui::Button("Collpase"))
+			// 						coverage_axis_collapse(*selected_surface_mesh_, *selected_candidates_, solution);
+			// 					if (ImGui::Button("PD"))
+			// 						coverage_axis_PD(*selected_surface_mesh_, *selected_candidates_, solution,
+			// dilation_factor); 					if (ImGui::Button("CVD")) 						coverage_axis_CVD(*selected_surface_mesh_,
+			// *selected_candidates_, solution);
+			// 				}
+			// 			}
+			// 		}
 		}
 	}
 
@@ -1575,6 +1773,7 @@ private:
 	float radius_threshold_ = 0.030;
 	double min_radius_ = std::numeric_limits<double>::max();
 	double max_radius_ = std::numeric_limits<double>::min();
+	std::unordered_map<const SURFACE*, SurfaceParameters> surface_parameters_;
 };
 
 } // namespace ui
