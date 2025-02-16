@@ -32,7 +32,7 @@
 
 #include <cgogn/core/functions/convert.h>
 //#include <cgogn/core/types/cells_set.h>
-
+#include <cgogn/core/types/mesh_views/cell_filter.h>
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
 
@@ -209,7 +209,7 @@ private:
 			// generate the icosphere of the sampled points
 			generate_ico_sphere(s);
 		
-		p.remesh_target_edge_length = geometry::mean_edge_length(*p.flow_mesh_, p.flow_vertex_position_.get());
+		p.target_edge_length_ = geometry::mean_edge_length(*p.flow_mesh_, p.flow_vertex_position_.get());
 		// Ensure the flow mesh is created before building its BVH
 		if (!p.flow_mesh_)
 		{
@@ -533,6 +533,7 @@ public:
 				std::vector<SurfaceVertex> iv = incident_vertices(*p.flow_mesh_, p.flow_mesh_bvh_faces_[cp.first]);
 				for (SurfaceVertex v : iv)
 				{
+
 					foreach_incident_edge(*p.flow_mesh_, v, [&](SurfaceEdge e) -> bool {
 						value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e) = true;
 						value<Vec3>(*p.flow_mesh_, p.flow_edge_color_, e) = Vec3(1.0, 0.0, 0.0);
@@ -591,7 +592,7 @@ public:
 		std::vector<Eigen::Triplet<Scalar>> triplets;
 		triplets.reserve(nb_samples);
 
-		for (int i = 0; i < nb_samples; ++i)
+		for (uint32 i = 0; i < nb_samples; ++i)
 		{
 			triplets.emplace_back(i, i, rho);
 		}
@@ -684,10 +685,23 @@ public:
 				std::cout << "Converged" << std::endl;
 				return;
 			}
+			CellFilter<SURFACE> cf_remesh(*p.flow_mesh_);
+			cf_remesh.set_filter<SurfaceEdge>([&](SurfaceEdge e) -> bool {
+				return value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e);
+				return true;
+			});
+			cf_remesh.set_filter<SurfaceVertex>([&](SurfaceVertex v) -> bool {
+				auto edges = incident_edges(*p.flow_mesh_, v);
+				for (SurfaceEdge e : edges)
+				{
+					if (value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e))
+						return true;
+				}
+				return false;
+			});
 			for (uint32 i = 0; i < p.remesh_nb_iter_; i++)
-				cgogn::modeling::pliant_remeshing_local(*p.flow_mesh_, p.flow_vertex_position_,
-														p.flow_edge_need_remeshing_,
-														p.target_edge_length_, false, false, true);
+				cgogn::modeling::pliant_remeshing(cf_remesh, p.flow_vertex_position_, p.target_edge_length_, false,
+												  false, false, true);
 			
 			uint32 vertex_id = 0;
 			
