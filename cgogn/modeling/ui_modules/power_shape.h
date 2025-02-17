@@ -67,9 +67,10 @@ class PowerShape : public Module
 {
 	static_assert(mesh_traits<SURFACE>::dimension >= 2, "PowerShape can only be used with meshes of dimension >= 2");
 	// Kernel for construct Delaunay
-	using K = CGAL::Exact_predicates_exact_constructions_kernel;
+	using K = CGAL::Exact_predicates_inexact_constructions_kernel;
 	using Point = K::Point_3;
 	using Weight_Point = K::Weighted_point_3;
+	using Bare_Point = K::Point_3;
 
 	class VertexInfo
 	{
@@ -107,6 +108,7 @@ class PowerShape : public Module
 	{
 	public:
 		uint32 id = -1;
+		Bare_Point centroid;
 		bool inside = false;
 	};
 
@@ -175,7 +177,11 @@ private:
 		std::shared_ptr<SurfaceAttribute<SurfaceVertex>> medial_axis_samples_secondary_vertex_;
 		
 		NONMANIFOLD* nonmanifold;
-		std::shared_ptr<NonManifoldAttribute<Vec3>> nonmanifold_vertex_position;
+		std::shared_ptr<NonManifoldAttribute<Vec3>> nonmanifold_vertex_position_;
+
+		std::unique_ptr<Tree> tree;
+		std::unique_ptr<Cgal_Surface_mesh> csm;
+		
 
 	};
 
@@ -389,6 +395,20 @@ public:
 			return true;
 		});
 		sample_medial_axis(*s);
+		p.csm = std::make_unique<Cgal_Surface_mesh>();
+		std::string filename = surface_provider_->mesh_filename(*p.surface);
+		if (!filename.empty())
+		{
+			std::ifstream input(filename);
+			if (!input || !(input >> *(p.csm.get())))
+			{
+				std::cerr << "Error: input file could not be read" << std::endl;
+				return;
+			}
+		}
+		p.tree = std::make_unique<Tree>(faces(*p.csm.get()).begin(), faces(*p.csm.get()).end(), *p.csm.get());
+		p.tree->accelerate_distance_queries();
+		std::cout << "BUILD AABB TREE" << std::endl;
 	}
 
 	void sample_medial_axis(SURFACE& s)
@@ -420,7 +440,6 @@ public:
 			uint32 id = value<uint32>(s, p.vertex_id, sv);
 			uint32 other_id =
 				value<uint32>(s, p.vertex_id, other_sv);
-			;
 			if (vertex_set.find(id) == vertex_set.end() && vertex_set.find(other_id) == vertex_set.end())
 			{
 				Regular_Vertex_handle vh1 = medial_axis.insert(Weight_Point(Point(pos.x(), pos.y(), pos.z()), radius));
@@ -443,7 +462,17 @@ public:
 			}
 			return true;
 		});
-
+		std::cout << "inserted " << medial_axis.number_of_vertices() << " vertices" << std::endl;
+		for (auto cit = medial_axis.finite_cells_begin(); cit != medial_axis.finite_cells_end(); cit++)
+		{
+			auto center = medial_axis.dual(cit);
+			if (pointInside((*p.tree.get()), center))
+			{
+				cit->info().inside = true;
+				cit->info().centroid = center;
+				
+			}
+		}
 		std::cout << "inserted " << medial_axis.number_of_vertices() << " vertices" << std::endl;
 		NONMANIFOLD* mv =
 			nonmanifold_provider_->add_mesh(std::to_string(nonmanifold_provider_->number_of_meshes()) + "_medial_axis");
@@ -454,92 +483,165 @@ public:
 		std::vector<Weight_Point> power_point;
 		std::vector<Regular_Cell_handle> incells;
 		std::cout << "start edge" << std::endl;
-		
-		for (auto eit = medial_axis.finite_edges_begin(); eit!=medial_axis.finite_edges_end(); eit++)
+		uint32 cell_count = 0;	
+		for (auto cit = medial_axis.finite_cells_begin(); cit != medial_axis.finite_cells_end(); cit++)
 		{
-		
-			Regular_Vertex_handle vh1 = eit->first->vertex(eit->second);
-			Regular_Vertex_handle vh2 = eit->first->vertex(eit->third);
-			if (vh1->info().paired_id == vh2->info().id || vh2->info().paired_id == vh1->info().id)
+			if (cit->info().inside)
 			{
-				bool all_finite = true;
-				std::cout << "find paired" << std::endl;
-				incells.clear();
-				auto cc = medial_axis.incident_cells(*eit);
-				do
-				{
-					if (medial_axis.is_infinite(cc))
-					{
-						all_finite = false;
-						break;
-					}
-					incells.push_back(cc);
-					cc++;
-				} while (cc != medial_axis.incident_cells(*eit));
-				if (all_finite)
-				{
-					for (size_t i = 0; i < incells.size(); i++)
-					{
-						auto center = medial_axis.dual(incells[i]);
-						if (incells[i]->info().id == -1)
-						{
-							incells[i]->info().id = vertex_count;
-							non_manifold_data.vertex_position_.emplace_back(
-								CGAL::to_double(center.x()), CGAL::to_double(center.y()), CGAL::to_double(center.z()));
-							vertex_count++;
-						}
-					}
-					for (size_t i = 0; i < incells.size() - 1; i++)
-					{
-						uint32 ev1 = incells[i]->info().id;
-						uint32 ev2 = incells[i + 1]->info().id;
-						// Check if the edge is already added
-						if (edge_indices.find({ev1, ev2}) == edge_indices.end())
-						{
-							non_manifold_data.edges_vertex_indices_.push_back(ev1);
-							non_manifold_data.edges_vertex_indices_.push_back(ev2);
-
-							edge_indices.insert({{ev1, ev2}, edge_count});
-							edge_count++;
-						}
-					}
-					for (size_t k = 2; k < incells.size() - 1; k++)
-					{
-						uint32 ev1 = incells[0]->info().id;
-						uint32 ev2 = incells[k]->info().id;
-						// Check if the edge is already added
-						if (edge_indices.find({ev1, ev2}) == edge_indices.end())
-						{
-							non_manifold_data.edges_vertex_indices_.push_back(ev1);
-							non_manifold_data.edges_vertex_indices_.push_back(ev2);
-							edge_indices.insert({{ev1, ev2}, edge_count});
-							edge_count++;
-						}
-					}
-					for (size_t k = 1; k < incells.size() - 1; k++)
-					{
-						uint32 v1 = incells[0]->info().id;
-						uint32 v2 = incells[k]->info().id;
-						uint32 v3 = incells[k + 1]->info().id;
-						uint32 e1, e2, e3;
-						e1 = edge_indices[{v1, v2}];
-						e2 = edge_indices[{v2, v3}];
-						e3 = edge_indices[{v3, v1}];
-
-						non_manifold_data.faces_nb_edges_.push_back(3);
-						non_manifold_data.faces_edge_indices_.push_back(e1);
-						non_manifold_data.faces_edge_indices_.push_back(e2);
-						non_manifold_data.faces_edge_indices_.push_back(e3);
-					}
-				}
-
+				auto center = cit->info().centroid;
+				non_manifold_data.vertex_position_.emplace_back(
+					center.x(),center.y(), center.z());
+				cit->info().id = cell_count++;
 			}
 		}
-		uint32 inner_power_nb_vertices = non_manifold_data.vertex_position_.size();
-		uint32 inner_power_nb_edges = non_manifold_data.edges_vertex_indices_.size() / 2;
-		uint32 inner_power_nb_faces = non_manifold_data.faces_nb_edges_.size();
+		edge_count = 0;
+		for (auto fit = medial_axis.finite_facets_begin(); fit != medial_axis.finite_facets_end(); ++fit)
+		{
+			if (fit->first->info().inside && medial_axis.mirror_facet(*fit).first->info().inside)
+			{
+				uint32 v1_ind = fit->first->info().id;
+				uint32 v2_ind = medial_axis.mirror_facet(*fit).first->info().id;
+				non_manifold_data.edges_vertex_indices_.push_back(v1_ind);
+				non_manifold_data.edges_vertex_indices_.push_back(v2_ind);
+				edge_indices.insert({{v1_ind, v2_ind}, edge_count++});
+			}
+		}
+		
+		
+		/*Regular_Vertex_handle vh1 = eit->first->vertex(eit->second);
+		Regular_Vertex_handle vh2 = eit->first->vertex(eit->third);
+			if (vh1->info().paired_id == vh2->info().id || vh2->info().paired_id == vh1->info().id)
+		{
+			bool all_finite = true;
+			std::cout << "find paired" << std::endl;
+			incells.clear();
+			auto cc = medial_axis.incident_cells(*eit);
+			do
+			{
+				if (medial_axis.is_infinite(cc))
+				{
+					all_finite = false;
+					break;
+				}
+				incells.push_back(cc);
+				cc++;
+			} while (cc != medial_axis.incident_cells(*eit));
+			if (all_finite)
+			{
+				for (size_t i = 0; i < incells.size(); i++)
+				{
+					auto center = medial_axis.dual(incells[i]);
+					if (incells[i]->info().id == -1)
+					{
+						incells[i]->info().id = vertex_count;
+						non_manifold_data.vertex_position_.emplace_back(
+							CGAL::to_double(center.x()), CGAL::to_double(center.y()), CGAL::to_double(center.z()));
+						vertex_count++;
+					}
+				}
+				for (size_t i = 0; i < incells.size() - 1; i++)
+				{
+					uint32 ev1 = incells[i]->info().id;
+					uint32 ev2 = incells[i + 1]->info().id;
+					// Check if the edge is already added
+					if (edge_indices.find({ev1, ev2}) == edge_indices.end())
+					{
+						non_manifold_data.edges_vertex_indices_.push_back(ev1);
+						non_manifold_data.edges_vertex_indices_.push_back(ev2);
 
-		non_manifold_data.reserve(inner_power_nb_vertices, inner_power_nb_edges, inner_power_nb_faces);
+						edge_indices.insert({{ev1, ev2}, edge_count});
+						edge_count++;
+					}
+				}
+				for (size_t k = 2; k < incells.size() - 1; k++)
+				{
+					uint32 ev1 = incells[0]->info().id;
+					uint32 ev2 = incells[k]->info().id;
+					// Check if the edge is already added
+					if (edge_indices.find({ev1, ev2}) == edge_indices.end())
+					{
+						non_manifold_data.edges_vertex_indices_.push_back(ev1);
+						non_manifold_data.edges_vertex_indices_.push_back(ev2);
+						edge_indices.insert({{ev1, ev2}, edge_count});
+						edge_count++;
+					}
+				}
+				for (size_t k = 1; k < incells.size() - 1; k++)
+				{
+					uint32 v1 = incells[0]->info().id;
+					uint32 v2 = incells[k]->info().id;
+					uint32 v3 = incells[k + 1]->info().id;
+					uint32 e1, e2, e3;
+					e1 = edge_indices[{v1, v2}];
+					e2 = edge_indices[{v2, v3}];
+					e3 = edge_indices[{v3, v1}];
+
+					non_manifold_data.faces_nb_edges_.push_back(3);
+					non_manifold_data.faces_edge_indices_.push_back(e1);
+					non_manifold_data.faces_edge_indices_.push_back(e2);
+					non_manifold_data.faces_edge_indices_.push_back(e3);
+				}
+			}
+				
+		}*/
+		bool all_finite_inside = true;
+		for (auto eit = medial_axis.finite_edges_begin(); eit != medial_axis.finite_edges_end(); ++eit)
+		{
+			all_finite_inside = true;
+			incells.clear();
+			auto cc = medial_axis.incident_cells(*eit);
+			do
+			{
+				if (medial_axis.is_infinite(cc))
+				{
+					all_finite_inside = false;
+					break;
+				}
+				else if (cc->info().inside == false)
+				{
+					all_finite_inside = false;
+					break;
+				}
+				incells.push_back(cc);
+				cc++;
+			} while (cc != medial_axis.incident_cells(*eit));
+			if (!all_finite_inside)
+				continue;
+			for (size_t k = 2; k < incells.size() - 1; k++)
+			{
+				uint32 ev1 = incells[0]->info().id;
+				uint32 ev2 = incells[k]->info().id;
+				// Check if the edge is already added
+				if (edge_indices.find({ev1, ev2}) == edge_indices.end())
+				{
+					non_manifold_data.edges_vertex_indices_.push_back(ev1);
+					non_manifold_data.edges_vertex_indices_.push_back(ev2);
+					edge_indices.insert({{ev1, ev2}, edge_count++});
+				}
+			}
+			for (size_t k = 1; k < incells.size() - 1; k++)
+			{
+				uint32 v1 = incells[0]->info().id;
+				uint32 v2 = incells[k]->info().id;
+				uint32 v3 = incells[k + 1]->info().id;
+				uint32 e1, e2, e3;
+				e1 = edge_indices[{v1, v2}];
+				e2 = edge_indices[{v2, v3}];
+				e3 = edge_indices[{v3, v1}];
+
+				non_manifold_data.faces_nb_edges_.push_back(3);
+				non_manifold_data.faces_edge_indices_.push_back(e1);
+				non_manifold_data.faces_edge_indices_.push_back(e2);
+				non_manifold_data.faces_edge_indices_.push_back(e3);
+			}
+			
+
+		}
+		uint32 nb_vertices = non_manifold_data.vertex_position_.size();
+		uint32 nb_edges = non_manifold_data.edges_vertex_indices_.size() / 2;
+		uint32 nb_faces = non_manifold_data.faces_nb_edges_.size();
+
+		non_manifold_data.reserve(nb_vertices, nb_edges, nb_faces);
 		std::cout << "vertex count: " << vertex_count << std::endl;
 		std::cout << "edge count: " << edge_count << std::endl;
 		import_incidence_graph_data(*mv, non_manifold_data);
