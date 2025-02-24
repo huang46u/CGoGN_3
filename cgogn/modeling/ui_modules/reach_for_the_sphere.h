@@ -210,7 +210,7 @@ private:
 			// generate the icosphere of the sampled points
 			generate_ico_sphere(s);
 		
-		p.target_edge_length_ = geometry::mean_edge_length(*p.flow_mesh_, p.flow_vertex_position_.get());
+		//p.target_edge_length_ = geometry::mean_edge_length(*p.flow_mesh_, p.flow_vertex_position_.get());
 		// Ensure the flow mesh is created before building its BVH
 		if (!p.flow_mesh_)
 		{
@@ -733,13 +733,13 @@ public:
 			});
 			for (uint32 i = 0; i < p.remesh_nb_iter_; i++)
 				cgogn::modeling::pliant_remeshing(cf_remesh, p.flow_vertex_position_, p.target_edge_length_, false,
-												  false, false, true);
+												  false, true, false);
 		}
 		else
 		{
 			for (uint32 i = 0; i < p.remesh_nb_iter_; i++)
 				cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, p.target_edge_length_, false,
-												  false, false, true);
+												  false, true, false);
 		}
 		uint32 vertex_id = 0;
 		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {

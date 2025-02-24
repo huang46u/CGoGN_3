@@ -258,9 +258,9 @@ struct PliantRemeshing_Helper
 
 template <typename MESH>
 void pliant_remeshing(MESH& m, std::shared_ptr<typename mesh_traits<MESH>::template Attribute<Vec3>>& vertex_position,
-					  Scalar edge_length_target_ratio = 1.0, bool use_as_ratio = true,
+					  Scalar edge_length_target_ratio = 1.0,
 					  bool preserve_features = false, bool lfs_adaptive = false,
-					  bool recompute_bvh = false)
+					  bool recompute_bvh = false, bool use_as_ratio = true)
 {
 	using Vertex = typename mesh_traits<MESH>::Vertex;
 	using Edge = typename mesh_traits<MESH>::Edge;
