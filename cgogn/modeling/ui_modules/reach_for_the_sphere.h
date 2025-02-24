@@ -115,12 +115,13 @@ class ReachForTheSphere : public Module
 		std::shared_ptr<PointAttribute<Vec4>> sdf_sample_color_ = nullptr;
 
 		Scalar t_min_ = 1e-6;
-		Scalar t_max_ = 50;
+		Scalar t_max_ = 20;
 		Scalar t_ = 1.0;
 
 		SamplingMode sampling_mode_ = GRILLE;
 		FlowMethMode flow_method_ = ICOSPHERE;
 		bool line_search_ = true;
+		bool remeshing_output_sensitive_ = true;
 		Scalar sample_min_ = -1.0;
 		Scalar sample_max_ = 1.0;
 		uint32 grille_sample_resolution_ = 10;
@@ -526,17 +527,24 @@ public:
 			p.flow_mesh_bvh_->closest_point(pv_pos, &cp);
 			Scalar distance = std::abs((cp.second - pv_pos).norm() - radius);
 
-			// if the distance is larger than the tolerance, mark the incident edges for remeshing
+			// if the distance is larger than the tolerance, mark 2-ring for remeshing
 			if (distance > p.tol_remesh_)
 			{
 				// p.faces_to_remesh->select(p.flow_mesh_bvh_faces_[cp.first]);
 				std::vector<SurfaceVertex> iv = incident_vertices(*p.flow_mesh_, p.flow_mesh_bvh_faces_[cp.first]);
 				for (SurfaceVertex v : iv)
 				{
-
 					foreach_incident_edge(*p.flow_mesh_, v, [&](SurfaceEdge e) -> bool {
 						value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e) = true;
 						value<Vec3>(*p.flow_mesh_, p.flow_edge_color_, e) = Vec3(1.0, 0.0, 0.0);
+						return true;
+					});
+					foreach_adjacent_vertex_through_edge(*p.flow_mesh_, v, [&](SurfaceVertex ve) -> bool {
+						foreach_incident_edge(*p.flow_mesh_, v, [&](SurfaceEdge e) -> bool {
+							value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e) = true;
+							value<Vec3>(*p.flow_mesh_, p.flow_edge_color_, e) = Vec3(1.0, 0.0, 0.0);
+							return true;
+						});
 						return true;
 					});
 				}
@@ -655,14 +663,14 @@ public:
 				p.best_average_error_ = p.average_error_;
 			}
 
-			if (p.convergence_counter_ > 10)
+			if (p.convergence_counter_ > 5)
 			{
 				if (p.target_edge_length_ > p.min_edge_length_)
 				{
 					p.best_average_error_ = std::numeric_limits<Scalar>::max();
 					p.convergence_counter_ = 0;
 				}
-				p.target_edge_length_ = std::max(p.target_edge_length_/2, p.min_edge_length_);
+				p.target_edge_length_ = std::max(p.target_edge_length_*0.8, p.min_edge_length_);
 			}
 
 			// Assign the new postition of each vertex
@@ -685,23 +693,6 @@ public:
 				std::cout << "Converged" << std::endl;
 				return;
 			}
-			CellFilter<SURFACE> cf_remesh(*p.flow_mesh_);
-			cf_remesh.set_filter<SurfaceEdge>([&](SurfaceEdge e) -> bool {
-				return value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e);
-				return true;
-			});
-			cf_remesh.set_filter<SurfaceVertex>([&](SurfaceVertex v) -> bool {
-				auto edges = incident_edges(*p.flow_mesh_, v);
-				for (SurfaceEdge e : edges)
-				{
-					if (value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e))
-						return true;
-				}
-				return false;
-			});
-			for (uint32 i = 0; i < p.remesh_nb_iter_; i++)
-				cgogn::modeling::pliant_remeshing(cf_remesh, p.flow_vertex_position_, p.target_edge_length_, false,
-												  false, false, true);
 			
 			uint32 vertex_id = 0;
 			
@@ -719,13 +710,37 @@ public:
 		}
 	}
 	
-	void remeshing(SURFACE& s, Scalar ratio)
+	void remeshing(SURFACE& s)
 	{
 		SurfaceParameters& p = surface_parameters_[&s];
 
-		cgogn::modeling::pliant_remeshing_local(*p.flow_mesh_, p.flow_vertex_position_, p.flow_edge_need_remeshing_,
-												p.target_edge_length_, false, false, true);
-	
+		if (p.remeshing_output_sensitive_)
+		{
+
+			CellFilter<SURFACE> cf_remesh(*p.flow_mesh_);
+			cf_remesh.set_filter<SurfaceEdge>(
+				[&](SurfaceEdge e) -> bool { return value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e); });
+			cf_remesh.set_filter<SurfaceVertex>([&](SurfaceVertex v) -> bool {
+				auto edges = incident_edges(*p.flow_mesh_, v);
+				for (SurfaceEdge e : edges)
+				{
+					if (value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e))
+						return true;
+				}
+				return false;
+			});
+			cf_remesh.set_filter<SurfaceFace>([&](SurfaceFace f) -> bool { return true;
+			});
+			for (uint32 i = 0; i < p.remesh_nb_iter_; i++)
+				cgogn::modeling::pliant_remeshing(cf_remesh, p.flow_vertex_position_, p.target_edge_length_, false,
+												  false, false, true);
+		}
+		else
+		{
+			for (uint32 i = 0; i < p.remesh_nb_iter_; i++)
+				cgogn::modeling::pliant_remeshing(*p.flow_mesh_, p.flow_vertex_position_, p.target_edge_length_, false,
+												  false, false, true);
+		}
 		uint32 vertex_id = 0;
 		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
 			value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv) = vertex_id++;
@@ -791,6 +806,9 @@ protected:
 					if (ImGui::Button("Reach for the sphere"))
 						reach_for_the_sphere_iteration(*selected_surface_);
 					ImGui::InputScalar("Current Remeshing edge length", ImGuiDataType_Double, &p.target_edge_length_);
+					ImGui::Checkbox("Remeshing loal", &p.remeshing_output_sensitive_);
+					if (ImGui::Button("Remeshing"))
+						remeshing(*selected_surface_);
 					
 				}
 			}
