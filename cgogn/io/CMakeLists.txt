@@ -40,6 +40,8 @@ set(src_list
 		"${CMAKE_CURRENT_LIST_DIR}/point/point_import.h"
 		"${CMAKE_CURRENT_LIST_DIR}/point/point_import.cpp"
 
+		"${CMAKE_CURRENT_LIST_DIR}/scene/scene_loader.h"
+
 		"${CMAKE_CURRENT_LIST_DIR}/utils.h"
 )
 target_sources(${PROJECT_NAME} PRIVATE ${src_list})
