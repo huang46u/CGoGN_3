@@ -26,7 +26,8 @@
 
 #include <cgogn/core/types/mesh_traits.h>
 #include <cgogn/geometry/types/vector_traits.h>
-#include <cgogn/geometry/types/eigen.h>
+#include <Eigen/Sparse>
+#include <vector>
 
 namespace cgogn
 {
@@ -37,6 +38,12 @@ namespace simulation
 using geometry::Vec3;
 using geometry::Scalar;
 
+enum ConstraintModel{
+    TRI_PD_ARAP,
+    TRI_SPRING,
+    TET_PD_ARAP,
+};
+
 /**
  * @brief Base class for all constraints in the projective dynamics framework
  * 
@@ -46,8 +53,6 @@ template <typename MESH>
 class Constraint
 {
 public:
-   
-    
     /**
      * @brief Constructor with weight parameter
      * 
@@ -82,17 +87,16 @@ public:
     virtual void init(MESH& m) = 0;
     
     /**
-     * @brief Compute RHS matrix elements to satisfy the constraint
+     * @brief Compute RHS contributions and add directly to the RHS vector
      * 
      * @param m The mesh reference
      * @param positions Current positions attribute
-     * @param rhs_triplets Output vector of triplets for the RHS matrix
+     * @param rhs The RHS vector to update directly
      */
     virtual void project(MESH& m, 
-                        const typename mesh_traits<MESH>::template Attribute<Vec3>* positions, 
-                        std::vector<geometry::Triplet>& rhs_triplets) = 0;
+                        const VertexAttribute* positions, 
+                        Eigen::VectorXd& rhs) = 0;
     
- 
     /**
      * @brief Add the constraint contribution to the global system matrix using triplets
      * 
@@ -100,8 +104,7 @@ public:
      * @param system_triplets The vector of triplets to accumulate the system matrix
      */
     virtual void accumulation_matrix(MESH& m, 
-                                std::vector<geometry::Triplet>& system_triplets) = 0;
-    
+                                std::vector<Eigen::Triplet<Scalar>>& system_triplets) = 0;
 
 protected:
     Scalar weight_;

@@ -32,7 +32,7 @@
 #include <cgogn/rendering/ui_modules/surface_render.h>
 #include <cgogn/rendering/ui_modules/volume_render.h>
 
-#include <cgogn/io/scene/scene_loader.h> // Include the scene loader
+#include <cgogn/io/scene/scene_loader.h> 
 
 using namespace cgogn::numerics;
 
@@ -59,53 +59,29 @@ int main(int argc, char** argv)
     app.set_window_title("Local-Global Solver");
     app.set_window_size(1200, 800);
 
-    // Create necessary rendering modules
-    cgogn::ui::SurfaceRender<Surface> surface_render(app);
-    cgogn::ui::VolumeRender<Volume> volume_render(app);
+    cgogn::ui::MeshProvider<Surface> sp(app);
+	cgogn::ui::MeshProvider<Volume> vp(app);
+    cgogn::ui::SurfaceRender<Surface> sr(app);
+    cgogn::ui::VolumeRender<Volume> vr(app);
+  
     
     // Create scene loader
-    cgogn::io::SceneLoader scene_loader(app);
+    cgogn::io::SceneLoader scene_loader(app, sp, vp);
 
     // Set up view
     cgogn::ui::View* view = app.current_view();
-    view->link_module(&surface_render);
-    view->link_module(&volume_render);
-	view->link_module(&scene_loader.surface_provider());
-	view->link_module(&scene_loader.volume_provider());
+	view->link_module(&sp);
+	view->link_module(&vp);
+    view->link_module(&sr);
+    view->link_module(&vr);
+	
     
     app.init_modules();
 
     // Load scene
     std::cout << "Starting to load scene: " << scene_file << std::endl;
     cgogn::io::SceneInfo scene = scene_loader.load_scene(scene_file);
-	for (const auto& model : scene.models)
-	{
-		if (model.type == "surface")
-		{
-			auto surface_mesh = scene_loader.get_surface_mesh(model.name, scene);
-			if (surface_mesh)
-			{
-				auto vertex_position = cgogn::get_attribute<Vec3, SurfaceVertex>(*surface_mesh, "position");
-				if (vertex_position)
-				{
-					surface_render.set_vertex_position(*view, *surface_mesh, vertex_position);
-				}
-			}
-		}
-		if (model.type == " volume")
-		{
-			auto volume_mesh = scene_loader.get_volume_mesh(model.name, scene);
-			if (volume_mesh)
-			{
-				auto vertex_position = cgogn::get_attribute<Vec3, VolumeVertex>(*volume_mesh, "position");
-				if (vertex_position)
-				{
-					volume_render.set_vertex_position(*view, *volume_mesh, vertex_position);
-				}
-			}
-        }
-		
-    }
+	
     // Output scene loading results
     if (scene.models.empty())
     {

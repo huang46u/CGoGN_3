@@ -40,7 +40,7 @@
 
 // Define DEFAULT_MESH_PATH if not already defined
 #ifndef DEFAULT_MESH_PATH
-#define DEFAULT_MESH_PATH CGOGN_STR(CGOGN_DATA_PATH)"meshes/"
+#define DEFAULT_MESH_PATH CGOGN_STR(CGOGN_DATA_PATH)"meshes"
 #endif
 
 namespace cgogn
@@ -87,10 +87,12 @@ struct SceneInfo
 class SceneLoader
 {
 public:
-	SceneLoader(cgogn::ui::App& app) : 
+    SceneLoader(cgogn::ui::App& app, 
+                cgogn::ui::MeshProvider<Surface>& surface_provider,
+                cgogn::ui::MeshProvider<Volume>& volume_provider) : 
         app_(app), 
-        surface_provider_(app), 
-        volume_provider_(app)
+        surface_provider_(surface_provider), 
+        volume_provider_(volume_provider)
     {
     }
 
@@ -241,14 +243,16 @@ public:
         return nullptr;
     }
 
-    cgogn::ui::MeshProvider<Surface>& surface_provider()
-	{
-		return surface_provider_;
-	}
-	cgogn::ui::MeshProvider<Volume>& volume_provider()
-	{
-		return volume_provider_;
+    cgogn::ui::MeshProvider<Surface>* surface_provider()
+    {
+        return &surface_provider_;
     }
+    
+    cgogn::ui::MeshProvider<Volume>* volume_provider()
+    {
+        return &volume_provider_;
+    }
+
 private:
     void apply_transformation(ModelInfo& model)
     {
@@ -258,7 +262,7 @@ private:
             auto position_attribute = get_attribute<Vec3, SurfaceVertex>(*model.surface_mesh, "position");
             if (position_attribute)
             {
-                // Use CGOGN's foreach_cell method to iterate through all vertices and apply transformation
+                
                 parallel_foreach_cell(*model.surface_mesh, [&](SurfaceVertex v) -> bool {
 					uint32 index_v = index_of(*model.surface_mesh, v);
 					Vec3& pos = (*position_attribute)[index_v];
@@ -310,7 +314,6 @@ private:
             auto position_attribute = get_attribute<Vec3, VolumeVertex>(*model.volume_mesh, "position");
             if (position_attribute)
             {
-                // Use CGOGN's foreach_cell method to iterate through all vertices and apply transformation
                 parallel_foreach_cell(*model.volume_mesh, [&](VolumeVertex v) -> bool {
 					uint32 index_v = index_of(*model.volume_mesh, v);
 					Vec3& pos = (*position_attribute)[index_v];
@@ -361,8 +364,8 @@ private:
 
 private:
     cgogn::ui::App& app_;
-    cgogn::ui::MeshProvider<Surface> surface_provider_;
-    cgogn::ui::MeshProvider<Volume> volume_provider_;
+    cgogn::ui::MeshProvider<Surface>& surface_provider_;
+    cgogn::ui::MeshProvider<Volume>& volume_provider_;
 };
 
 } // namespace io

@@ -16,7 +16,15 @@ set(src_list
         "${CMAKE_CURRENT_LIST_DIR}/algos/shallow_water/riemann_solver.h"
         "${CMAKE_CURRENT_LIST_DIR}/algos/shallow_water/riemann_solver.cpp"
 
+		"${CMAKE_CURRENT_LIST_DIR}/type/constraint/base_constraint.h"
+		"${CMAKE_CURRENT_LIST_DIR}/type/constraint/triangle_spring_constraint.h"
+		"${CMAKE_CURRENT_LIST_DIR}/type/constraint/pin_constraint.h"
+		
+		"${CMAKE_CURRENT_LIST_DIR}/solver/projective_dynamics_solver.h"
+
 		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/shallow_water.h"
+		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/local_global.h"
+
 )
 target_sources(${PROJECT_NAME} PRIVATE ${src_list})
 source_group(TREE ${CMAKE_CURRENT_LIST_DIR} FILES ${src_list})
