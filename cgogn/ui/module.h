@@ -108,6 +108,7 @@ public:
 	ProviderModule(const App& app, const std::string& name);
 	virtual ~ProviderModule();
 
+	virtual uint32 nb_meshes() const = 0;
 	virtual std::pair<geometry::Vec3, geometry::Vec3> meshes_bb() const = 0;
 
 protected:
