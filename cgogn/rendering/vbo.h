@@ -136,7 +136,7 @@ public:
 	 */
 	inline void allocate(std::size_t nb_vectors, int32 vector_dimension)
 	{
-		std::size_t total = nb_vectors * uint64(vector_dimension);
+		std::size_t total = std::max(1ull, nb_vectors * uint64(vector_dimension));
 		if (total != nb_vectors_ * uint64(vector_dimension_)) // only allocate when > ?
 		{
 			glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(total * 4), nullptr, GL_DYNAMIC_DRAW);

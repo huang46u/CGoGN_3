@@ -4,13 +4,28 @@ project(cgogn_geometry_examples
 	LANGUAGES CXX
 )
 
+set(CGOGN_TEST_PREFIX "test_")
+
 find_package(cgogn_core REQUIRED)
 find_package(cgogn_ui REQUIRED)
 find_package(cgogn_io REQUIRED)
 find_package(cgogn_rendering REQUIRED)
 
-set(CGOGN_TEST_PREFIX "test_")
-
+find_package(Torch REQUIRED)
+if (Torch_FOUND)
+	message(STATUS "Torch found")
+	add_executable(ndf_skeleton ndf_skeleton.cpp)
+	target_link_libraries(ndf_skeleton
+		cgogn::core
+		cgogn::ui
+		cgogn::io
+		cgogn::rendering
+		${CMAKE_DL_LIBS}
+		${TORCH_LIBRARIES}
+	)
+else()
+	message(FATAL_ERROR "Torch not found")
+endif()
 
 add_executable(filtering filtering.cpp)
 target_link_libraries(filtering
