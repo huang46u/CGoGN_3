@@ -112,7 +112,6 @@ public:
 		return camera_->modelview_matrix_d();
 	}
 
-	
 	void set_manipulated_frame(MovingFrame* frame);
 
 	inline void set_scene_radius(float64 radius)
@@ -134,6 +133,11 @@ public:
 	inline void show_entire_scene()
 	{
 		camera_->show_entire_scene();
+		request_update();
+	}
+	inline void pivot_around_scene_center()
+	{
+		camera_->set_pivot_point(scene_center_);
 		request_update();
 	}
 
