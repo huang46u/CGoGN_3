@@ -206,6 +206,8 @@ void View::update_scene_bb()
 	}
 	for (ProviderModule* m : linked_provider_modules_)
 	{
+		if (m->nb_meshes() == 0)
+			continue;
 		auto [pmin, pmax] = m->meshes_bb();
 		for (uint32 i = 0; i < 3; ++i)
 		{

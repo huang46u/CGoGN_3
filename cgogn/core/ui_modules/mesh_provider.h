@@ -100,6 +100,11 @@ public:
 			return nullptr;
 	}
 
+	uint32 nb_meshes() const override
+	{
+		return meshes_.size();
+	}
+
 	MESH* add_mesh(const std::string& name)
 	{
 		if constexpr (std::is_default_constructible_v<MESH>)
@@ -362,7 +367,6 @@ public:
 		}
 	}
 
-
 	std::array<MESH*, 3> load_surface_from_OBJ_file(const std::string& filename, bool normalized = true)
 	{
 		if constexpr (mesh_traits<MESH>::dimension == 2 && std::is_default_constructible_v<MESH>)
@@ -416,9 +420,6 @@ public:
 		else
 			return {nullptr, nullptr, nullptr};
 	}
-
-
-
 
 	template <typename FUNC>
 	void foreach_mesh(const FUNC& f)
