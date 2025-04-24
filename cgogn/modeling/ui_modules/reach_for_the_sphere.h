@@ -498,6 +498,8 @@ public:
 		A.setZero();
 		M.setZero();
 
+		std::cout << "Starting iteration " << p.nb_iteration_ << std::endl;
+
 		//Build M matrix
 		geometry::compute_area<SurfaceVertex>(
 			*p.flow_mesh_, p.flow_vertex_position_.get(), p.flow_vertex_area.get());
@@ -533,7 +535,6 @@ public:
 				std::vector<SurfaceVertex> iv = incident_vertices(*p.flow_mesh_, p.flow_mesh_bvh_faces_[cp.first]);
 				for (SurfaceVertex v : iv)
 				{
-
 					foreach_incident_edge(*p.flow_mesh_, v, [&](SurfaceEdge e) -> bool {
 						value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e) = true;
 						value<Vec3>(*p.flow_mesh_, p.flow_edge_color_, e) = Vec3(1.0, 0.0, 0.0);
@@ -668,7 +669,10 @@ public:
 			// Assign the new postition of each vertex
 			foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
 				uint32 sv_index = value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv);
-				value<Vec3>(*p.flow_mesh_, p.flow_vertex_position_, sv) = V_t.row(sv_index);
+				Vec3 old_pos = value<Vec3>(*p.flow_mesh_, p.flow_vertex_position_, sv);
+				Vec3 new_pos = V_t.row(sv_index);
+				value<Vec3>(*p.flow_mesh_, p.flow_vertex_position_, sv) = new_pos;
+				//std::cout << "Vertex " << sv_index << " moved from " << old_pos.transpose() << " to " << new_pos.transpose() << std::endl;
 				return true;
 			});
 			foreach_cell(*p.flow_mesh_, [&](SurfaceEdge se) -> bool {
@@ -685,46 +689,34 @@ public:
 				std::cout << "Converged" << std::endl;
 				return;
 			}
-			CellFilter<SURFACE> cf_remesh(*p.flow_mesh_);
-			cf_remesh.set_filter<SurfaceEdge>([&](SurfaceEdge e) -> bool {
-				return value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e);
-				return true;
-			});
-			cf_remesh.set_filter<SurfaceVertex>([&](SurfaceVertex v) -> bool {
-				auto edges = incident_edges(*p.flow_mesh_, v);
-				for (SurfaceEdge e : edges)
-				{
-					if (value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e))
-						return true;
-				}
-				return false;
-			});
-			for (uint32 i = 0; i < p.remesh_nb_iter_; i++)
-				cgogn::modeling::pliant_remeshing(cf_remesh, p.flow_vertex_position_, p.target_edge_length_, false,
-												  false, false, true);
 			
-			uint32 vertex_id = 0;
-			
-			
-			foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
-				value<uint32>(*p.flow_mesh_, p.flow_vertex_id_, sv) = vertex_id++;
-				return true;
-			});
-			std::cout << "Number of edges to remesh: " << p.remesh_edge_count_ << std::endl;
-			std::cout << "-----------------------------" << std::endl;
-			build_bvh(*p.flow_mesh_, p.flow_vertex_position_, p.flow_mesh_bvh_, p.flow_mesh_bvh_faces_);
-			surface_provider_->emit_connectivity_changed(*p.flow_mesh_);
 			surface_provider_->emit_attribute_changed(*p.flow_mesh_, p.flow_vertex_position_.get());
 			surface_provider_->emit_attribute_changed(*p.flow_mesh_, p.flow_edge_color_.get());
 		}
 	}
 	
-	void remeshing(SURFACE& s, Scalar ratio)
+	void remeshing(SURFACE& s)
 	{
 		SurfaceParameters& p = surface_parameters_[&s];
 
-		cgogn::modeling::pliant_remeshing_local(*p.flow_mesh_, p.flow_vertex_position_, p.flow_edge_need_remeshing_,
-												p.target_edge_length_, false, false, true);
+		CellFilter<SURFACE> cf_remesh(*p.flow_mesh_);
+		cf_remesh.set_filter<SurfaceEdge>([&](SurfaceEdge e) -> bool {
+			return value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e);
+			return true;
+		});
+		cf_remesh.set_filter<SurfaceVertex>([&](SurfaceVertex v) -> bool {
+			auto edges = incident_edges(*p.flow_mesh_, v);
+			for (SurfaceEdge e : edges)
+			{
+				if (value<bool>(*p.flow_mesh_, p.flow_edge_need_remeshing_, e))
+					return true;
+			}
+			return false;
+		});
+		cf_remesh.set_filter<SurfaceFace>([&](SurfaceFace f) -> bool { return true; });
+		for (uint32 i = 0; i < p.remesh_nb_iter_; i++)
+			cgogn::modeling::pliant_remeshing(cf_remesh, p.flow_vertex_position_, p.target_edge_length_, false, false,
+											  true, false);
 	
 		uint32 vertex_id = 0;
 		foreach_cell(*p.flow_mesh_, [&](SurfaceVertex sv) -> bool {
@@ -787,10 +779,11 @@ protected:
 
 					ImGui::InputScalar("Tolerance remeshing", ImGuiDataType_Double, &p.tol_remesh_);
 					ImGui::SliderInt("Number of remeshing iterations",  &(int)p.remesh_nb_iter_, 1, 10);
-				
+					ImGui::InputScalar("Current Remeshing edge length", ImGuiDataType_Double, &p.target_edge_length_);
 					if (ImGui::Button("Reach for the sphere"))
 						reach_for_the_sphere_iteration(*selected_surface_);
-					ImGui::InputScalar("Current Remeshing edge length", ImGuiDataType_Double, &p.target_edge_length_);
+					if (ImGui::Button("Remeshing"))
+						remeshing(*selected_surface_);
 					
 				}
 			}

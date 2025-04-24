@@ -398,7 +398,8 @@ template <typename T, typename CELL, typename MESH,
 std::shared_ptr<MapBase::Attribute<T>> get_attribute(const MESH& m, const std::string& name)
 {
 	static_assert(has_cell_type_v<MESH, CELL>, "CELL not supported in this MESH");
-	return m.attribute_containers_[CELL::ORBIT].template get_attribute<T>(name);
+	const MapBase& mb = static_cast<const MapBase&>(m);
+	return mb.attribute_containers_[CELL::ORBIT].template get_attribute<T>(name);
 }
 
 template <typename CELL>
