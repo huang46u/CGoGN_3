@@ -29,7 +29,7 @@
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/geometry/types/vector_traits.h>
-
+#include <filesystem>
 #include <torch/script.h>
 #include <torch/torch.h>
 
@@ -142,7 +142,7 @@ public:
 
 		at::Tensor point = torch::tensor({rp[0], rp[1], rp[2]}, torch::kFloat32);
 		at::Tensor output = p.model_.forward({point}).toTensor();
-		float radius = output.item<float>();
+		Scalar radius = output.item<Scalar>();
 
 		PointsVertex v = cgogn::add_vertex(*p.spheres_);
 		cgogn::value<Vec3>(*p.spheres_, p.spheres_position_, v) = rp;
@@ -161,20 +161,20 @@ public:
 
 		clear(*p.spheres_);
 
-		float step = 1.0f / (N - 1);
-		for (int i = 0; i < N; i++)
+		Scalar step = 1.0f / (N - 1);
+		for (size_t i = 0; i < N; i++)
 		{
-			for (int j = 0; j < N; j++)
+			for (size_t j = 0; j < N; j++)
 			{
-				for (int k = 0; k < N; k++)
+				for (size_t k = 0; k < N; k++)
 				{
-					float x = -0.5f + i * step;
-					float y = -0.5f + j * step;
-					float z = -0.5f + k * step;
+					Scalar x = -0.5f + i * step;
+					Scalar y = -0.5f + j * step;
+					Scalar z = -0.5f + k * step;
 
 					at::Tensor point = torch::tensor({x, y, z}, torch::kFloat32);
 					at::Tensor output = p.model_.forward({point}).toTensor();
-					float radius = output.item<float>();
+					Scalar radius = output.item<Scalar>();
 
 					PointsVertex v = cgogn::add_vertex(*p.spheres_);
 					cgogn::value<Vec3>(*p.spheres_, p.spheres_position_, v) = {x, y, z};
