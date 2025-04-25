@@ -122,7 +122,7 @@ class PowerShape : public Module
 	using Cgal_Surface_mesh = CGAL::Surface_mesh<Point>;
 	using Point_inside = CGAL::Side_of_triangle_mesh<Cgal_Surface_mesh, K>;
 	using Primitive = CGAL::AABB_face_graph_triangle_primitive<Cgal_Surface_mesh>;
-	using Traits = CGAL::AABB_traits<K, Primitive>;
+	using Traits = CGAL::AABB_traits_3<K, Primitive>;
 	using Tree = CGAL::AABB_tree<Traits>;
 
 	template <typename T>
