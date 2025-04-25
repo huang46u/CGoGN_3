@@ -140,7 +140,7 @@ public:
 		Vec3 rp = Vec3::Random(); // random point in [-1, 1]^3
 		rp /= Scalar(2);		  // contract to [-0.5, 0.5]^3
 
-		at::Tensor point = torch::tensor({rp[0], rp[1], rp[2]}, torch::kFloat32);
+		at::Tensor point = torch::tensor({rp[0], rp[1], rp[2]}, torch::kFloat32).to(device_);
 		at::Tensor output = p.model_.forward({point}).toTensor();
 		Scalar radius = output.item<Scalar>();
 
@@ -172,7 +172,7 @@ public:
 					Scalar y = -0.5f + j * step;
 					Scalar z = -0.5f + k * step;
 
-					at::Tensor point = torch::tensor({x, y, z}, torch::kFloat32);
+					at::Tensor point = torch::tensor({x, y, z}, torch::kFloat32).to(device_);
 					at::Tensor output = p.model_.forward({point}).toTensor();
 					Scalar radius = output.item<Scalar>();
 
@@ -230,8 +230,11 @@ protected:
 			std::cout << "CUDA is available! Using the GPU." << std::endl;
 			device_ = torch::kCUDA;
 		}
-		std::cout << "CUDA is not available! Using the CPU." << std::endl;
-		device_ = torch::kCPU;
+		else
+		{
+			std::cout << "CUDA is not available! Using the CPU." << std::endl;
+			device_ = torch::kCPU;
+		}
 	}
 
 	void left_panel() override
