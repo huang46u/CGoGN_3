@@ -140,8 +140,8 @@ public:
 		Vec3 rp = Vec3::Random(); // random point in [-1, 1]^3
 		rp /= Scalar(2);		  // contract to [-0.5, 0.5]^3
 
-		at::Tensor point = torch::tensor({rp[0], rp[1], rp[2]}, torch::kFloat32).to(device_);
-		at::Tensor output = p.model_.forward({point}).toTensor();
+		torch::Tensor point = torch::tensor({rp[0], rp[1], rp[2]}, torch::kFloat32).to(device_);
+		torch::Tensor output = p.model_.forward({point}).toTensor();
 		Scalar radius = output.item<Scalar>();
 
 		PointsVertex v = cgogn::add_vertex(*p.spheres_);
