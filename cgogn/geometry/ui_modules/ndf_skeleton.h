@@ -140,10 +140,13 @@ public:
 		Vec3 rp = Vec3::Random(); // random point in [-1, 1]^3
 		rp /= Scalar(2);		  // contract to [-0.5, 0.5]^3
 
-		torch::Tensor point = torch::tensor({rp[0], rp[1], rp[2]}, torch::kFloat32).to(device_);
-		torch::Tensor output = p.model_.forward({point}).toTensor();
-		Scalar radius = output.item<Scalar>();
-
+		torch::Tensor point = torch::tensor({{rp[0], rp[1], rp[2]}}, torch::kFloat32).to(device_);
+		//torch::Tensor output = p.model_.forward({point}).toTensor();
+		//Scalar radius = output.item<Scalar>();
+		torch::IValue output = p.model_.forward({point});
+		auto output_tuple = output.toTuple()->elements();
+		Scalar radius = output_tuple[0].toTensor().item<Scalar>();
+		
 		PointsVertex v = cgogn::add_vertex(*p.spheres_);
 		cgogn::value<Vec3>(*p.spheres_, p.spheres_position_, v) = rp;
 		cgogn::value<Scalar>(*p.spheres_, p.spheres_radius_, v) = radius;
@@ -173,8 +176,12 @@ public:
 					Scalar z = -0.5f + k * step;
 
 					at::Tensor point = torch::tensor({x, y, z}, torch::kFloat32).to(device_);
-					at::Tensor output = p.model_.forward({point}).toTensor();
-					Scalar radius = output.item<Scalar>();
+					//at::Tensor output = p.model_.forward({point}).toTensor();
+					//Scalar radius = output.item<Scalar>();
+
+					torch::IValue output = p.model_.forward({point});
+					auto output_tuple = output.toTuple()->elements();
+					Scalar radius = output_tuple[0].toTensor().item<Scalar>();
 
 					PointsVertex v = cgogn::add_vertex(*p.spheres_);
 					cgogn::value<Vec3>(*p.spheres_, p.spheres_position_, v) = {x, y, z};
