@@ -40,7 +40,20 @@ target_link_libraries(sphere_fitting
 	Blossom5
 	${CMAKE_DL_LIBS}
 )
-
+if (CGOGN_USE_CGAL)
+	find_package(CGAL REQUIRED)
+	add_executable(volumn_vmas volumn_vmas.cpp)
+	target_link_libraries(volumn_vmas
+		CGAL::CGAL
+		cgogn::core
+		cgogn::ui
+		cgogn::io
+		cgogn::rendering
+		cgogn::modeling
+		Blossom5
+		${CMAKE_DL_LIBS}
+)
+endif()
 add_executable(registration registration.cpp)
 target_link_libraries(registration
 	cgogn::core

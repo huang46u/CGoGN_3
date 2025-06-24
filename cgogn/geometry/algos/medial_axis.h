@@ -161,6 +161,104 @@ std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_cent
 
 	return {c, r, q_v};
 }
+template <typename MESH>
+std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_center(
+	const MESH& m, const Vec3& p, const Vec3& n,
+	const typename mesh_traits<MESH>::template Attribute<Vec3>* vertex_position,
+	const acc::KDTree<3, uint32>* surface_kdt, const std::vector<typename mesh_traits<MESH>::Vertex>& kdt_vertices,
+	bool use_kdt_only = false, double initial_radius = 0.5)
+{
+	// initial radius is only used when use_kdt_only is true
+
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+
+
+	uint32 j = 0;
+	Scalar r = 0.0;
+
+	// if (use_kdt_only)
+	r = initial_radius;
+	// else
+	// {
+	// 	acc::Ray<Vec3> ray{p, -n, 1e-10, acc::inf};
+	// 	acc::BVHTree<uint32, Vec3>::Hit h;
+	// 	if (surface_bvh->intersect(ray, &h))
+	// 	{
+	// 		Face f = bvh_faces[h.idx];
+	// 		std::vector<Vertex> vertices = incident_vertices(m, f);
+	// 		Vec3 ip = h.bcoords[0] * value<Vec3>(m, vertex_position, vertices[0]) +
+	// 				  h.bcoords[1] * value<Vec3>(m, vertex_position, vertices[1]) +
+	// 				  h.bcoords[2] * value<Vec3>(m, vertex_position, vertices[2]);
+	// 		r = (p - ip).norm() * 0.75;
+	// 	}
+	// 	else
+	// 		std::cout << "intersection point not found !!!";
+	// }
+
+	Vec3 c = p - (r * n);
+	Vec3 q = p - (2 * r * n);
+	Vertex q_v;
+
+	while (true)
+	{
+		// Find closest point to c
+
+		Scalar d;
+		Vec3 q_next;
+		Vertex q_next_v;
+
+		// if (use_kdt_only)
+		// {
+		std::pair<uint32, Scalar> k_res;
+		surface_kdt->find_nn(c, &k_res);
+		q_next = surface_kdt->vertex(k_res.first);
+		d = k_res.second;
+		q_next_v = kdt_vertices[k_res.first];
+		// }
+		// else
+		// {
+		// 	std::pair<uint32, Vec3> cp_res;
+		// 	surface_bvh->closest_point(c, &cp_res);
+		// 	q_next = cp_res.second;
+		// 	d = (q_next - c).norm();
+		// 	Face f = bvh_faces[cp_res.first];
+		// 	std::vector<Vertex> vertices = incident_vertices(m, f);
+		// 	Scalar d0 = (q_next - value<Vec3>(m, vertex_position, vertices[0])).squaredNorm();
+		// 	Scalar d1 = (q_next - value<Vec3>(m, vertex_position, vertices[1])).squaredNorm();
+		// 	Scalar d2 = (q_next - value<Vec3>(m, vertex_position, vertices[2])).squaredNorm();
+		// 	if (d0 < d1 && d0 < d2)
+		// 		q_next_v = vertices[0];
+		// 	else if (d1 < d0 && d1 < d2)
+		// 		q_next_v = vertices[1];
+		// 	else
+		// 		q_next_v = vertices[2];
+		// }
+
+		// If the closest point is (almost) the same as the previous one, or if the ball no longer shrinks, we stop
+		if (fabs(d - r) <= delta_convergence || (q_next - q).norm() < delta_convergence)
+			break;
+
+		// Compute next ball center
+		Scalar r_next = compute_radius(p, n, q_next);
+		Vec3 c_next = p - (r_next * n);
+
+		// Denoising
+		Scalar separation_angle = geometry::angle(p - c_next, q_next - c_next);
+		if (j > 0 && separation_angle < denoise_preserve) // && r_next > // (q_next - p).norm())
+			break;
+
+		c = c_next;
+		r = r_next;
+		q = q_next;
+		q_v = q_next_v;
+
+		j++;
+		if (j > iteration_limit)
+			break;
+	}
+
+	return {c, r, q_v};
+}
 
 // template <typename MESH>
 // std::tuple<Vec3, Scalar, Vec3> shrinking_ball_center(
