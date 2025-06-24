@@ -101,6 +101,24 @@ struct Spherical_Quadric
 		return _A * p - _b;
 	}
 
+	bool well_conditioned() const
+	{
+		Eigen::JacobiSVD<Mat4> svd(_A, Eigen::ComputeFullU | Eigen::ComputeFullV);
+		Mat4 U = svd.matrixU();
+		Vec4 S = svd.singularValues();
+		Mat4 V = svd.matrixV();
+		std::vector<double> sorted_sv(S.data(), S.data() + S.size());
+
+		std::sort(sorted_sv.begin(), sorted_sv.end(), std::greater<>());
+		if (sorted_sv[1] <= 1e-6 && sorted_sv[2] <= 1e-6 && sorted_sv[3]<=1e-6)
+		{
+			std::cout << "Spherical quadric is not well conditioned: " << sorted_sv[0] << ", " << sorted_sv[1] << ", "
+					  << sorted_sv[2] << ", " << sorted_sv[3] << std::endl;
+			return false; // not well-conditioned
+		}
+		return true; // threshold for well-conditioned quadric
+	}
+
 	bool optimized(Vec4& sphere)
 	{
 		Mat4 inverse;
