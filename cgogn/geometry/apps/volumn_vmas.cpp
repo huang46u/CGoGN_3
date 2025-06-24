@@ -74,7 +74,7 @@ int main(int argc, char** argv)
 	cgogn::thread_start();
 
 	cgogn::ui::App app;
-	app.set_window_title("Sphere fitting");
+	app.set_window_title("Volumn vmas");
 	app.set_window_size(1000, 800);
 
 	cgogn::ui::MeshProvider<Surface> mps(app);
@@ -150,7 +150,6 @@ int main(int argc, char** argv)
 	pcr.set_vertex_radius(*v1, *spheres, p_vertex_radius);
 	pcr.set_vertex_color(*v1, *spheres, p_vertex_color);
 	pcr.set_vertex_color_per_cell(*v1, *spheres, cgogn::ui::PointCloudRender<Points>::AttributePerCell::PER_VERTEX);
-
 	pcr.set_vertex_position(*v1, *spheres, nullptr);
 
 	NonManifold* skeleton = mpnm.mesh(mps.mesh_name(*s) + "_skeleton");

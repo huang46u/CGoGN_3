@@ -106,7 +106,7 @@ class Volumn_VMAS : public ViewModule
 		CORRECT_ON_SPLIT
 	};
 
-	const uint32 k = 6;
+	const uint32 k = 10;
 
 	struct SurfaceParameters
 	{
@@ -158,17 +158,17 @@ class Volumn_VMAS : public ViewModule
 		//Volumn Samples
 		POINTS* samples_;
 		std::shared_ptr<PAttribute<Vec3>> samples_position_ = nullptr;
-		std::shared_ptr<PAttribute<Vec3>> samples_vertex_color_ = nullptr;
+		std::shared_ptr<PAttribute<Vec4>> samples_vertex_color_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> projected_samples_position_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> projected_samples_normal_ = nullptr;
 		std::shared_ptr<PAttribute<Spherical_Quadric>> samples_quadric_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> medial_axis_position_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> medial_axis_radius_ = nullptr;
 		std::shared_ptr<PAttribute<PVertex>> medial_axis_secondary_vertex_ = nullptr;
-		std::shared_ptr<SAttribute<PVertex>> samples_vertex_sphere_ = nullptr;
-		std::shared_ptr<SAttribute<Scalar>> samples_vertex_error_ = nullptr;
-		std::shared_ptr<SAttribute<std::vector<PVertex>>> samples_vertex_knn_ = nullptr;
-		uint32 sampels_numbers_ = 30000;  
+		std::shared_ptr<PAttribute<PVertex>> samples_vertex_sphere_ = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> samples_vertex_error_ = nullptr;
+		std::shared_ptr<PAttribute<std::vector<PVertex>>> samples_vertex_knn_ = nullptr;
+		uint32 sampels_numbers_ = 100000;  
 		std::unique_ptr<Side_tester> inside_tester_;
 		CGAL_SurfaceMesh cgal_surface_mesh_;
 
@@ -189,7 +189,7 @@ class Volumn_VMAS : public ViewModule
 		CorrectionMode sphere_correction_mode_ = CORRECT_ALWAYS;
 
 		bool auto_stop_ = false;
-		bool auto_split_ = false;
+		bool auto_split_ = true;
 		AutoSplitMode auto_split_mode_ = ERROR_THRESHOLD;
 		// bool auto_simplify_ = false;
 		float32 auto_split_error_threshold_ = 0.00025f;
@@ -276,6 +276,7 @@ public:
 			value<Vec3>(*p.samples_, p.projected_samples_position_, new_sample) = closest_surface_position;
 			value<Vec3>(*p.samples_, p.projected_samples_normal_, new_sample) = closest_face_normal;
 		}
+		points_provider_->emit_connectivity_changed(*p.samples_);
 	}
 
 
@@ -450,8 +451,7 @@ public:
 		std::string filename = surface_provider_->mesh_filename(s);
 		if (!filename.empty())
 		{
-			std::ifstream input(filename);
-			if (!input || !(input >> p.cgal_surface_mesh_))
+			if (!CGAL::IO::read_polygon_mesh(filename, p.cgal_surface_mesh_) || p.cgal_surface_mesh_.is_empty())
 			{
 				std::cout << "Error loading CGAL surface mesh from file: " << filename << std::endl;
 				return;
@@ -465,7 +465,7 @@ public:
 			p.samples_ = points_provider_->add_mesh(surface_provider_->mesh_name(s) + "_samples");
 		// Volumn Samples
 		p.samples_position_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "position");
-		p.samples_vertex_color_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "color");
+		p.samples_vertex_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_, "color");
 		p.projected_samples_position_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "projected_position");
 		p.projected_samples_normal_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "projected_normal");
 
@@ -558,7 +558,7 @@ public:
 		p.spheres_do_not_split_ = get_or_add_attribute<bool, PVertex>(*p.spheres_, "do_not_split");
 
 		p.samples_vertex_error_ =
-			get_or_add_attribute<Scalar, PVertex>(s, "error"); // error of a vertex w.r.t. its sphere
+			get_or_add_attribute<Scalar, PVertex>(*p.samples_, "error"); // error of a vertex w.r.t. its sphere
 
 		p.samples_vertex_sphere_ = get_or_add_attribute<PVertex, PVertex>(*p.samples_, "sphere"); // cluster of the surface vertex
 		p.spheres_neighbor_clusters_ =
@@ -650,7 +650,7 @@ public:
 
 		
 		parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*p.surface_, v);
+			uint32 v_index = index_of(*p.samples_, v);
 			// if (!(*p.medial_axis_selected_)[v_index])
 			// 	return true;
 
@@ -806,50 +806,33 @@ public:
 		uint32 sphere_index = index_of(*p.spheres_, sphere);
 
 		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
-
 		Vec3 c = (*p.spheres_position_)[sphere_index];
 		Scalar r = (*p.spheres_radius_)[sphere_index];
-
-		Eigen::MatrixXd J(2 * cluster.size(), 4);
-		J.setZero();
-		Eigen::VectorXd b(2 * cluster.size());
-		b.setZero();
-		uint32 idx = 0;
-		Eigen::VectorXd s(4);
-		s << c[0], c[1], c[2], r;
-		for (uint32 i = 0; i < 10; ++i)
+		//Verify if the SQEM is well conditioned
+		Spherical_Quadric q;
+		for (PVertex v : cluster)
 		{
-			idx = 0;
-			for (PVertex v : cluster)
+			uint32 v_index = index_of(*p.samples_, v);
+			q += (*p.samples_quadric_)[v_index];
+		}
+		if (q.well_conditioned())
+		{
+			Eigen::MatrixXd J(2 * cluster.size(), 4);
+			J.setZero();
+			Eigen::VectorXd b(2 * cluster.size());
+			b.setZero();
+			uint32 idx = 0;
+			Eigen::VectorXd s(4);
+			s << c[0], c[1], c[2], r;
+			for (uint32 i = 0; i < 10; ++i)
 			{
-				uint32 v_index = index_of(*p.samples_, v);
-				const Vec3& pos = (*p.projected_samples_position_)[v_index];
-
-				// SQEM energy
-				/*if (p.point_cloud_mode_)
+				idx = 0;
+				for (PVertex v : cluster)
 				{
-					Eigen::Vector4d lhs = Eigen::Vector4d::Zero();
-					Scalar rhs = 0.0;
-					const Vec3& n = (*p.surface_vertex_normal_)[v_index];
-					Vec4 n4 = Vec4(n.x(), n.y(), n.z(), 1.0);
-					Scalar a = sqrt((*p.surface_vertex_area_pc_)[v_index] / (k + 1.0));
-					lhs += -n4 * a;
-					rhs += -1.0 * ((pos - Vec3(s(0), s(1), s(2))).dot(n) - s(3)) * a;
-					for (SVertex vn : (*p.surface_vertex_knn_)[v_index])
-					{
-						uint32 vn_index = index_of(*p.surface_, vn);
-						const Vec3& pn = (*p.surface_vertex_position_)[vn_index];
-						const Vec3& nn = (*p.surface_vertex_normal_)[vn_index];
-						Vec4 nn4 = Vec4(nn.x(), nn.y(), nn.z(), 1.0);
-						Scalar an = sqrt((*p.surface_vertex_area_pc_)[vn_index] / (k + 1.0));
-						lhs += -nn4 * an;
-						rhs += -1.0 * ((pn - Vec3(s(0), s(1), s(2))).dot(nn) - s(3)) * an;
-					}
-					J.row(idx) = lhs;
-					b(idx) = rhs;
-				}
-				else
-				{*/
+					uint32 v_index = index_of(*p.samples_, v);
+					const Vec3& pos = (*p.projected_samples_position_)[v_index];
+
+					// SQEM energy
 					Eigen::Vector4d lhs = Eigen::Vector4d::Zero();
 					Scalar rhs = 0.0;
 					const Vec3& n = (*p.projected_samples_normal_)[v_index];
@@ -859,39 +842,60 @@ public:
 					rhs += -1.0 * ((pos - Vec3(s(0), s(1), s(2))).dot(n) - s(3)) * a;
 					J.row(idx) = lhs;
 					b(idx) = rhs;
-				//}
-				++idx;
+					//}
+					++idx;
 
-				// distance energy
-				Vec3 d = pos - Vec3(s(0), s(1), s(2));
-				Scalar l = d.norm();
-				if (p.point_cloud_mode_)
-				{
-					Scalar a = sqrt((*p.surface_vertex_area_pc_)[v_index]);
-					J.row(idx) =
-						Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * a * p.sqem_update_lambda_;
-					b(idx) = -(l - s(3)) * a * p.sqem_update_lambda_; // scale the row by the update lambda
-				}
-				else
-				{
-					Scalar a = 1;
-					J.row(idx) =
-						Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * a * p.sqem_update_lambda_;
-					b(idx) = -(l - s(3)) * a * p.sqem_update_lambda_; // scale the row by the update lambda
-				}
-				++idx;
-			};
+					// distance energy
+					Vec3 d = pos - Vec3(s(0), s(1), s(2));
+					Scalar l = d.norm();
+					if (p.point_cloud_mode_)
+					{
+						Scalar a = sqrt((*p.surface_vertex_area_pc_)[v_index]);
+						J.row(idx) =
+							Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * a * p.sqem_update_lambda_;
+						b(idx) = -(l - s(3)) * a * p.sqem_update_lambda_; // scale the row by the update lambda
+					}
+					else
+					{
+						Scalar a = 1;
+						J.row(idx) =
+							Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * a * p.sqem_update_lambda_;
+						b(idx) = -(l - s(3)) * a * p.sqem_update_lambda_; // scale the row by the update lambda
+					}
+					++idx;
+				};
 
-			Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
-			Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
-			s += delta_s;
-			if (delta_s.norm() < 1e-6) // stop early if converged
-				break;
+				Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
+				Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
+				s += delta_s;
+				if (delta_s.norm() < 1e-6) // stop early if converged
+					break;
+			}
+
+			c = s.head<3>();
+			r = s[3];
 		}
+		else
+		{
+			std::cout << "Sphere " << sphere_index << " is not well conditioned, using shrinking ball" << std::endl;
+			//apply shrinking ball 
+			std::pair<uint32, Vec3> bvh_res;
+			p.surface_bvh_->closest_point(c, &bvh_res);
+			Vec3 closest_point_position = bvh_res.second;
+			Vec3 closest_point_dir = (closest_point_position - c).normalized();
 
-		c = s.head<3>();
-		r = s[3];
+			const Vec3& closest_face_normal =
+				value<Vec3>(*p.surface_, p.surface_face_normal_, p.surface_bvh_faces_[bvh_res.first]);
+			// TODO: exterior detection is not reliable
+			if ((*p.inside_tester_)(Point_3(c.x(), c.y(), c.z()))== CGAL::ON_UNBOUNDED_SIDE )
+				closest_point_dir = -closest_point_dir;
 
+			auto [center, radius, secondary] = geometry::shrinking_ball_center(
+				*p.samples_, closest_point_position, closest_point_dir, p.projected_samples_position_.get(),
+				p.projected_surface_kdt_, p.projected_kdt_vertices_, p.point_cloud_mode_, 0.25f);
+			c = center;
+			r = radius;
+		}
 		(*p.spheres_position_)[sphere_index] = c;
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
@@ -1258,7 +1262,7 @@ protected:
 				uint32 v_index = index_of(*p.samples_, v);
 				PVertex sphere = (*p.samples_vertex_sphere_)[v_index];
 				if (sphere.is_valid())
-					(*p.samples_vertex_color_)[v_index] = value<Vec3>(*p.spheres_, p.spheres_cluster_color_, sphere);
+					(*p.samples_vertex_color_)[v_index] = value<Vec4>(*p.spheres_, p.spheres_color_, sphere);
 				return true;
 			});
 			points_provider_->emit_attribute_changed(*p.samples_, p.samples_vertex_color_.get());
@@ -1278,7 +1282,7 @@ protected:
 				uint32 v_index = index_of(*p.samples_, v);
 				PVertex sphere = (*p.samples_vertex_sphere_)[v_index];
 				if (sphere.is_valid())
-					(*p.samples_vertex_color_)[v_index] = value<Vec3>(*p.spheres_, p.spheres_cluster_color_, sphere);
+					(*p.samples_vertex_color_)[v_index] = value<Vec4>(*p.spheres_, p.spheres_color_, sphere);
 				return true;
 			});
 			points_provider_->emit_attribute_changed(*p.samples_, p.samples_vertex_color_.get());
@@ -1328,7 +1332,7 @@ protected:
 						}
 					}
 				}
-
+				std::cout << "---------------------------------------------------------" << std::endl;
 				if (p.stopping_)
 				{
 					p.stopping_ = false;
@@ -1607,6 +1611,7 @@ protected:
 				{
 					ImGui::Text("Picked sphere:");
 					const Vec3& sp = value<Vec3>(*p.spheres_, p.spheres_position_, picked_sphere_);
+					ImGui::Text("Index: %u", index_of(*p.spheres_, picked_sphere_));
 					ImGui::Text("Center: (%f, %f, %f)", sp[0], sp[1], sp[2]);
 					ImGui::Text("Radius: %f", value<Scalar>(*p.spheres_, p.spheres_radius_, picked_sphere_));
 				}
