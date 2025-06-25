@@ -58,7 +58,7 @@ inline Scalar compute_radius(const Vec3& p, const Vec3& n, const Vec3& q)
 }
 
 // const Scalar denoise_planar = 32.0 * M_PI / 180.0;
-const Scalar denoise_preserve = 20.0 * M_PI / 180.0;
+const Scalar denoise_preserve = 30.0 * M_PI / 180.0;
 const Scalar delta_convergence = 1e-5;
 const uint32 iteration_limit = 30;
 
@@ -161,6 +161,85 @@ std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_cent
 
 	return {c, r, q_v};
 }
+
+template <typename MESH>
+std::pair<Vec3, Scalar> shrinking_ball_center(
+	const MESH& m, const Vec3& p, const Vec3& n,
+	const acc::BVHTree<uint32, Vec3>* surface_bvh, const std::vector<typename mesh_traits<MESH>::Face>& bvh_faces, double initial_radius = 0.5)
+{
+
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+	using Face = typename mesh_traits<MESH>::Face;
+
+	uint32 j = 0;
+	Scalar r = 0.0;
+
+	r = initial_radius;
+
+	Vec3 c = p - (r * n);
+	Vec3 q = p - (2 * r * n);
+	Face last_f;
+	while (true)
+	{
+		// Find closest point to c
+		Scalar squared_dist;
+		Vec3 q_next;
+
+		std::pair<uint32, Vec3> cp_res;
+		surface_bvh->closest_point(c, &cp_res);
+		q_next = cp_res.second;
+		squared_dist = (q_next - c).dot(q_next - c );
+		Face f = bvh_faces[cp_res.first];
+		Scalar squared_radius_eps = (r - 1e-6) * (r - 1e-6);
+	
+		if (squared_dist >= squared_radius_eps) 
+		{
+			std::cout << "Stopping shrinking ball: squared_dist = " << squared_dist
+					  << ", squared_radius_eps = " << squared_radius_eps << std::endl;
+			break;
+		}
+		if ((q_next - p).norm() <= 1e-3)
+		{
+			std::cout << "Stopping shrinking ball: distance between next point and previous one is too small: "
+					  << (q_next - p).norm() << std::endl;
+			break;
+		}
+		if (j > 0 && index_of(m, last_f) == index_of(m, f))
+		{
+			std::cout << "Stopping shrinking ball: next face is the same as the last one: " << index_of(m, last_f)
+					  << " == " << index_of(m, f) << std::endl;
+			break;
+		}
+
+		// Compute next ball center
+		Scalar r_next = compute_radius(p, n, q_next);
+		Vec3 c_next = p - (r_next * n);
+
+		squared_radius_eps = (r_next - 1e-6) * (r_next - 1e-6);
+		if (squared_radius_eps < 1e-4)
+		{
+			std::cout << "Warning: shrinking ball radius is too small, may lead to numerical issues" << std::endl;
+			break;
+		}
+		// Denoising
+		Scalar separation_angle = geometry::angle(p - c_next, q_next - c_next);
+		if (j > 0 && separation_angle < denoise_preserve) // && r_next > // (q_next - p).norm())
+			break;
+
+		c = c_next;
+		r = r_next;
+		q = q_next;
+	
+		last_f = f;
+		j++;
+		if (j > iteration_limit)
+			break;
+	}
+
+	return {c, r};
+}
+
+
 template <typename MESH>
 std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_center(
 	const MESH& m, const Vec3& p, const Vec3& n,

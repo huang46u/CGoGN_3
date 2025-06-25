@@ -524,7 +524,7 @@ public:
 		p.medial_axis_radius_ = get_or_add_attribute<Scalar, PVertex>(*p.samples_, "medial_axis_radius");
 		p.medial_axis_secondary_vertex_ = get_or_add_attribute<PVertex, PVertex>(*p.samples_, "medial_axis_secondary_vertex_");
 
-		parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+		 parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
 			auto [c, r, q] = geometry::shrinking_ball_center(
 				*p.samples_, (*p.projected_samples_position_)[v_index], (*p.projected_samples_normal_)[v_index],
@@ -535,6 +535,19 @@ public:
 			(*p.medial_axis_secondary_vertex_)[v_index] = q;
 			return true;
 		});
+
+		/* parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.samples_, v);
+			auto [c, r] = geometry::shrinking_ball_center(
+				*p.surface_, 
+				(*p.projected_samples_position_)[v_index], 
+				(*p.projected_samples_normal_)[v_index], 
+				p.surface_bvh_, 
+				p.surface_bvh_faces_);
+			(*p.medial_axis_position_)[v_index] = c;
+			(*p.medial_axis_radius_)[v_index] = r;
+			return true;
+		});*/
 
 		// create the spheres mesh
 
