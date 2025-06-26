@@ -97,7 +97,8 @@ auto import_surface_data_map_tmpl(MESH& m, SURFDATA& surface_data, bool reconstr
 	for (uint32 i = 0u; i < surface_data.nb_faces_; ++i)
 	{
 		uint32 nbv = surface_data.faces_nb_vertices_[i];
-
+		if (nbv == 0)
+			continue;
 		vertices_buffer.clear();
 		uint32 prev = std::numeric_limits<uint32>::max();
 
