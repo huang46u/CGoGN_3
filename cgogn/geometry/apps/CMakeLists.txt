@@ -26,6 +26,14 @@ if (Torch_FOUND)
 else()
 	message(FATAL_ERROR "Torch not found")
 endif()
+if (MSVC)
+  file(GLOB TORCH_DLLS "${TORCH_INSTALL_PREFIX}/lib/*.dll")
+  add_custom_command(TARGET ndf_skeleton
+                     POST_BUILD
+                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                     ${TORCH_DLLS}
+                     $<TARGET_FILE_DIR:ndf_skeleton>)
+endif (MSVC)
 
 add_executable(filtering filtering.cpp)
 target_link_libraries(filtering
