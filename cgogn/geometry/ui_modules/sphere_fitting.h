@@ -36,7 +36,6 @@
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
-
 #include <Eigen/Sparse>
 #include <libacc/bvh_tree.h>
 #include <libacc/bvh_tree_spheres.h>
@@ -107,6 +106,8 @@ class SphereFitting : public ViewModule
 		std::shared_ptr<SAttribute<Vec3>> surface_vertex_position_original_ = nullptr;
 		std::shared_ptr<SAttribute<Vec3>> surface_vertex_normal_ = nullptr;
 		std::shared_ptr<SAttribute<Vec3>> surface_vertex_color_ = nullptr;
+		std::shared_ptr<SAttribute<Vec3>> surface_shrinking_ball_vertex_color = nullptr;
+		std::shared_ptr<SAttribute<Vec3>> surface_shrinking_ball_face_color_ = nullptr;
 		std::shared_ptr<SAttribute<Vec3>> surface_face_normal_ = nullptr;
 		std::shared_ptr<SAttribute<Scalar>> surface_vertex_area_pc_ = nullptr;
 		std::shared_ptr<SAttribute<Scalar>> surface_vertex_area_surf_ = nullptr;
@@ -116,10 +117,14 @@ class SphereFitting : public ViewModule
 		std::shared_ptr<SAttribute<Vec3>> medial_axis_position_ = nullptr;
 		std::shared_ptr<SAttribute<Scalar>> medial_axis_radius_ = nullptr;
 		std::shared_ptr<SAttribute<SVertex>> medial_axis_secondary_vertex_ = nullptr;
+
+		std::shared_ptr<SAttribute<Vec3>> medial_axis_position_1 = nullptr;
+		std::shared_ptr<SAttribute<Scalar>> medial_axis_radius_1 = nullptr;
+		std::shared_ptr<SAttribute<SVertex>> medial_axis_secondary_vertex_1 = nullptr;
 		// std::shared_ptr<SAttribute<bool>> medial_axis_selected_ = nullptr;
 		std::shared_ptr<SAttribute<PVertex>> surface_vertex_sphere_ = nullptr;
 		std::shared_ptr<SAttribute<Scalar>> surface_vertex_error_ = nullptr;
-
+		std::shared_ptr<SAttribute<PVertex>> surface_shrinking_ball_ = nullptr;
 		acc::BVHTree<uint32, Vec3>* surface_bvh_ = nullptr;
 		std::vector<SFace> surface_bvh_faces_;
 		acc::KDTree<3, uint32>* surface_kdt_ = nullptr;
@@ -146,9 +151,14 @@ class SphereFitting : public ViewModule
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_not_normalized_ = nullptr;
 		// PAttribute<Scalar>* selected_spheres_error_ = nullptr;
 
+		POINTS* shrinking_spheres_;
+		
+		std::shared_ptr<PAttribute<Vec3>> shrinking_spheres_position_ = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> shrinking_spheres_radius_ = nullptr;
+		std::shared_ptr<PAttribute<Vec4>> shrinking_spheres_color_ = nullptr;
+
 		NONMANIFOLD* skeleton_;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_position_ = nullptr;
-
 		float32 filter_radius_threshold_ = 0.0f;
 		float32 filter_angle_threshold_ = 0.0f;
 
@@ -175,7 +185,7 @@ class SphereFitting : public ViewModule
 		Scalar min_error_ = 0.0;
 		Scalar max_error_ = 0.0;
 		PVertex max_error_sphere_ = PVertex();
-
+		SFace last_f_;
 		bool error_as_spheres_color_ = false;
 		float32 spheres_transparency_ = 0.5f;
 
@@ -422,12 +432,18 @@ public:
 
 		p.surface_vertex_quadric_ = get_or_add_attribute<Spherical_Quadric, SVertex>(s, "quadric");
 		compute_quadrics(p);
-
+		p.surface_shrinking_ball_ =
+			get_or_add_attribute<PVertex, SVertex>(s, "shrinking_ball"); // shrinking ball for the surface vertex
 		// compute shrinking balls for the surface vertices
 
 		p.medial_axis_position_ = get_or_add_attribute<Vec3, SVertex>(s, "medial_axis_position");
 		p.medial_axis_radius_ = get_or_add_attribute<Scalar, SVertex>(s, "medial_axis_radius");
 		p.medial_axis_secondary_vertex_ = get_or_add_attribute<SVertex, SVertex>(s, "medial_axis_secondary_vertex_");
+		p.medial_axis_position_1 = get_or_add_attribute<Vec3, SVertex>(s, "medial_axis_position_1");
+		p.medial_axis_radius_1 = get_or_add_attribute<Scalar, SVertex>(s, "medial_axis_radius_1");
+		p.medial_axis_secondary_vertex_1 = get_or_add_attribute<SVertex, SVertex>(s, "medial_axis_secondary_vertex_1");
+		p.surface_shrinking_ball_vertex_color = get_or_add_attribute<Vec3, SVertex>(s, "shrinking_ball_color");
+		p.surface_shrinking_ball_face_color_ = get_or_add_attribute<Vec3, SFace>(s, "shrinking_ball_face_color");
 
 		parallel_foreach_cell(s, [&](SVertex v) -> bool {
 			uint32 v_index = index_of(s, v);
@@ -438,9 +454,21 @@ public:
 			(*p.medial_axis_position_)[v_index] = c;
 			(*p.medial_axis_radius_)[v_index] = r;
 			(*p.medial_axis_secondary_vertex_)[v_index] = q;
+			(*p.surface_shrinking_ball_vertex_color)[v_index] = Vec3(0, 0, 0);
 			return true;
 		});
 
+		  parallel_foreach_cell(s, [&](SVertex v) -> bool {
+			uint32 v_index = index_of(s, v);
+			auto [c, r, q] = geometry::shrinking_ball_center(
+				s, v, (*p.surface_vertex_position_)[v_index], (*p.surface_vertex_normal_)[v_index], p.surface_bvh_,
+				p.surface_bvh_faces_, p.surface_kdt_, p.surface_kdt_vertices_);
+			(*p.medial_axis_position_1)[v_index] = c;
+			(*p.medial_axis_radius_1)[v_index] = r;
+			(*p.medial_axis_secondary_vertex_1)[v_index] = q;
+			return true;
+		});
+		
 		// // filter the medial samples
 
 		// p.medial_axis_selected_ = get_or_add_attribute<bool, SVertex>(s, "medial_axis_selected");
@@ -473,6 +501,14 @@ public:
 		p.surface_vertex_sphere_ = get_or_add_attribute<PVertex, SVertex>(s, "sphere"); // cluster of the surface vertex
 		p.spheres_neighbor_clusters_ =
 			get_or_add_attribute<std::set<PVertex>, PVertex>(*p.spheres_, "neighbor_clusters"); // neighbor clusters
+
+		if (!p.shrinking_spheres_)
+			p.shrinking_spheres_ = points_provider_->add_mesh(surface_provider_->mesh_name(s) + "_shrinking_spheres");
+
+		p.shrinking_spheres_position_ = get_or_add_attribute<Vec3, PVertex>(*p.shrinking_spheres_, "position");
+		p.shrinking_spheres_radius_ = get_or_add_attribute<Scalar, PVertex>(*p.shrinking_spheres_, "radius");
+		p.shrinking_spheres_color_ = get_or_add_attribute<Vec4, PVertex>(*p.shrinking_spheres_, "color");
+
 
 		// create the skeleton mesh
 
@@ -1403,6 +1439,135 @@ public:
 
 		remove_attribute<PVertex>(*p.spheres_, spheres_skeleton_vertex_map);
 	}
+	inline Scalar compute_radius(const Vec3& p, const Vec3& n, const Vec3& q)
+	{
+		Vec3 qp = p - q;
+		Scalar d = qp.norm();
+		// Scalar cos_theta = n.dot(p - q) / d;
+		Scalar cos_theta = geometry::cos_angle(n, qp);
+		return Scalar(d / (2 * cos_theta));
+	}
+
+	void single_step_shrinking_ball(SurfaceParameters& p, const CellsSet<SURFACE, SVertex>* source_vertices, uint32& i, bool& converge = false)
+	{
+		if (converge)
+		{
+			std::cout << "Converging shrinking ball step " << i << std::endl;
+			return;
+		}
+		Scalar delta_convergence = 1e-5;
+		Scalar denoise_preserve = 20.0 * M_PI / 180.0;
+		source_vertices->foreach_cell([&](SVertex v) {
+			auto incident_face = incident_faces(*p.surface_, v);
+			SVertex last_v;
+			Vec3 pos = value<Vec3>(*p.surface_, p.surface_vertex_position_, v);
+			Vec3 n = value<Vec3>(*p.surface_, p.surface_vertex_normal_, v);
+			if (i == 0)
+			{
+				Scalar r = 0.25f;
+				Vec3 c = pos - (r * n);
+				PVertex sphere = add_vertex(*p.shrinking_spheres_);
+				value<PVertex>(*p.surface_, p.surface_vertex_sphere_, v) = sphere;
+				uint32 sphere_index = index_of(*p.shrinking_spheres_, sphere);
+				(*p.shrinking_spheres_position_)[sphere_index] = c;
+				(*p.shrinking_spheres_radius_)[sphere_index] = r;
+				(*p.shrinking_spheres_color_)[sphere_index] =
+					Vec4(0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0,
+						 0.5 + 0.5 * (rand() % 256) / 256.0, 0.25f);
+				points_provider_->emit_connectivity_changed(*p.shrinking_spheres_);
+				points_provider_->emit_attribute_changed(*p.shrinking_spheres_, p.shrinking_spheres_position_.get());
+				points_provider_->emit_attribute_changed(*p.shrinking_spheres_, p.shrinking_spheres_radius_.get());
+				points_provider_->emit_attribute_changed(*p.shrinking_spheres_, p.shrinking_spheres_color_.get());
+				return;
+			}
+			else
+			{
+				Vec3 q_next;
+				
+				PVertex sphere = value<PVertex>(*p.surface_, p.surface_vertex_sphere_, v);
+				uint32 sphere_index = index_of(*p.shrinking_spheres_, sphere);
+				Vec3 c = (*p.shrinking_spheres_position_)[sphere_index];
+				Scalar r = (*p.shrinking_spheres_radius_)[sphere_index];
+				//closest point
+				std::pair<uint32, Vec3> cp_res;
+				p.surface_bvh_->closest_point(c, &cp_res);
+				q_next = cp_res.second;
+				SFace f = p.surface_bvh_faces_[cp_res.first];
+				//closest_vertex
+				std::pair<uint32, Scalar> k_res;
+				p.surface_kdt_->find_nn(q_next, &k_res);
+				SVertex q_next_v = p.surface_kdt_vertices_[k_res.first];
+
+				std::cout << "q_next: Vertex " << index_of(*p.surface_, q_next_v) << " "<< std::endl;
+
+				value<Vec3>(*p.surface_, p.surface_vertex_position_, q_next_v) = q_next;
+				value<Vec3>(*p.surface_, p.surface_shrinking_ball_vertex_color, q_next_v) = Vec3(1.0, 0.0, 0.0);
+				value<Vec3>(*p.surface_, p.surface_shrinking_ball_face_color_, f) = Vec3(1.0, 0.0, 0.0);
+
+				Scalar squared_dist;
+				squared_dist = (q_next - c).dot(q_next - c);
+				Scalar squared_radius_eps = (r - delta_convergence) * (r - delta_convergence);
+				if (squared_dist >= squared_radius_eps)
+				{
+					std::cout << "Stopping shrinking ball: squared_dist = " << squared_dist
+							  << ", squared_radius_eps = " << squared_radius_eps << std::endl;
+					converge = true;
+					return;
+				}
+				/* for (const SFace& i_f : incident_face)
+				{
+					if (index_of(*p.surface_, i_f) == index_of(*p.surface_, f))
+					{
+						std::cout << "Stopping shrinking ball: incident face is the same as the current one: "
+								  << index_of(*p.surface_, i_f) << " == " << index_of(*p.surface_, f) << std::endl;
+						converge = true;
+						return;
+					}
+				}*/
+				/* if (i > 1 && q_next_v == last_v)
+				{
+					std::cout << "Stopping shrinking ball: next vertex is the same as the last one: "
+							  << index_of(*p.surface_, last_v) << " == " << index_of(*p.surface_, q_next_v)
+							  << std::endl;
+					converge = true;
+					return;
+				}
+				if (i > 1 && q_next_v == v)
+				{
+					std::cout << "Stopping shrinking ball: next vertex is the same as the start one: "
+							  << index_of(*p.surface_, v) << " == " << index_of(*p.surface_, q_next_v) << std::endl;
+					converge = true;
+					return;
+				}*/
+				if (i>1 &&index_of(*p.surface_, p.last_f_) == index_of(*p.surface_, f) )
+				{
+					std::cout << "Stopping shrinking ball: next face is the same as the last one: "
+							  << index_of(*p.surface_, p.last_f_) << " == " << index_of(*p.surface_, f) << std::endl;
+					converge = true;
+					return;
+				}
+				Scalar r_next = compute_radius(pos, n, q_next);
+				Vec3 c_next = pos - (r_next * n);
+				Scalar seperation_angle = geometry::angle(pos - c_next, q_next - c_next);	
+				if (seperation_angle < denoise_preserve)
+				{
+					converge = true;
+					return;
+				}
+				p.last_f_ = f;
+				last_v = q_next_v;
+				(*p.shrinking_spheres_position_)[sphere_index] = c_next;
+				(*p.shrinking_spheres_radius_)[sphere_index] = r_next;
+				surface_provider_->emit_attribute_changed(*p.surface_, p.surface_shrinking_ball_vertex_color.get());
+				surface_provider_->emit_attribute_changed(*p.surface_, p.surface_shrinking_ball_face_color_.get());
+				points_provider_->emit_connectivity_changed(*p.shrinking_spheres_);
+				//surface_provider_->emit_attribute_changed(*p.surface_, p.surface_vertex_position_.get());
+				points_provider_->emit_attribute_changed(*p.shrinking_spheres_, p.shrinking_spheres_position_.get());
+				points_provider_->emit_attribute_changed(*p.shrinking_spheres_, p.shrinking_spheres_radius_.get());
+				return;
+			}
+		});
+	}
 
 protected:
 	void init() override
@@ -1542,7 +1707,7 @@ protected:
 				update_render_data(p);
 			}
 		}
-		else if (key_code == GLFW_KEY_I || key_code == GLFW_KEY_S || key_code == GLFW_KEY_D)
+		else if (key_code == GLFW_KEY_I || key_code == GLFW_KEY_K || key_code == GLFW_KEY_D)
 		{
 			int32 x = view->mouse_x();
 			int32 y = view->mouse_y();
@@ -1571,7 +1736,7 @@ protected:
 				return true;
 			});
 
-			if (key_code == GLFW_KEY_S && picked_sphere_.is_valid())
+			if (key_code == GLFW_KEY_K && picked_sphere_.is_valid())
 			{
 				std::lock_guard<std::mutex> lock(p.mutex_);
 				split_sphere(p, picked_sphere_);
@@ -1596,14 +1761,26 @@ protected:
 	{
 		imgui_mesh_selector(surface_provider_, selected_surface_, "Surface",
 							[&](SURFACE& s) { set_selected_surface(s); });
-
+		
 		if (selected_surface_)
 		{
 			SurfaceParameters& p = surface_parameters_[selected_surface_];
+			MeshData<SURFACE>& md = surface_provider_->mesh_data(*selected_surface_);
 
 			imgui_combo_attribute<SVertex, Vec3>(
 				*selected_surface_, p.surface_vertex_position_, "Position",
 				[&](const std::shared_ptr<SAttribute<Vec3>>& attribute) { p.surface_vertex_position_ = attribute; });
+			imgui_combo_cells_set(md, selected_vertices_set_, "Source vertices",
+								  [&](CellsSet<SURFACE, SVertex>* cs) { selected_vertices_set_ = cs; });
+			if (selected_vertices_set_)
+			{
+				
+				if (ImGui::Button("Step shrinking ball"))
+				{
+					single_step_shrinking_ball(p, selected_vertices_set_, i, converge);
+					i++;
+				}
+			}
 
 			if (p.surface_vertex_position_ && !p.initialized_)
 			{
@@ -1798,10 +1975,12 @@ private:
 	MeshProvider<SURFACE>* surface_provider_ = nullptr;
 	MeshProvider<POINTS>* points_provider_ = nullptr;
 	MeshProvider<NONMANIFOLD>* non_manifold_provider_ = nullptr;
-
+	CellsSet<SURFACE, SVertex>* selected_vertices_set_ = nullptr;
 	std::unordered_map<const SURFACE*, SurfaceParameters> surface_parameters_;
 
 	SURFACE* selected_surface_ = nullptr;
+	bool converge = false;
+	uint32 i = 0;
 	PVertex picked_sphere_;
 
 	std::array<std::mutex, 43> spheres_mutex_;
