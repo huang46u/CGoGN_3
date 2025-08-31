@@ -117,10 +117,10 @@ void export_PLY(MESH& m, const typename mesh_traits<MESH>::template Attribute<ge
 
 	edge_indices.reserve(nb_edges);
 	foreach_cell(m, [&](Edge e) {
-		auto& faces = incident_faces(m, e);
+		auto faces = incident_faces(m, e);
 		if (faces.size() != 0)
 			return true;
-		auto& vertices = incident_vertices(m, e);
+		auto vertices = incident_vertices(m, e);
 		
 		edge_indices.push_back({index_of(m, vertices[0]), index_of(m, vertices[1])});
 		return true;

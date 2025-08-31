@@ -292,6 +292,421 @@ public:
 	}
 };
 
+template <typename SURFACE, typename NONMANIFOLD>
+struct SphereMeshDistance
+{
+	template <typename T>
+	using NAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
+	template <typename T>
+	using SAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
+	using NVertex = typename NONMANIFOLD::Vertex;
+	using NEdge = typename NONMANIFOLD::Edge;
+	using NFace = typename NONMANIFOLD::Face;
+
+	using SVertex = typename SURFACE::Vertex;
+	using SEdge = typename SURFACE::Edge;
+	using SFace = typename SURFACE::Face;
+
+public:
+	SphereMeshDistance(SURFACE& surface, NONMANIFOLD& m, std::shared_ptr<SAttribute<Vec3>>& vertex_position,
+						  std::shared_ptr<NAttribute<Vec4>>& sphere_info)
+		: surface_(surface), m_(m), sphere_info_(sphere_info), vertex_position_(vertex_position)
+	{
+		const std::size_t n = nb_cells<NVertex>(m_);
+		radii_.reserve(n);
+		foreach_cell(m_, [&](NVertex v) -> bool {
+			const Vec4& s = value<Vec4>(m_, sphere_info_, v);
+			spheres_centers_.push_back(Vec3(s.x(), s.y(), s.z()));
+			radii_.push_back(s.w());
+			return true;
+		});
+
+		// Build adjacency for cones (edges) and incident face lists (slabs)
+		edge_adj_.resize(n);
+		face_incident_.resize(n);
+
+		foreach_cell(m_, [&](NEdge e) -> bool {
+			auto iv = incident_vertices(m_, e);
+			std::size_t i = index_of(m_, iv[0]);
+			std::size_t j = index_of(m_, iv[1]);
+			edge_adj_[i].push_back(j);
+			edge_adj_[j].push_back(i);
+			return true;
+		});
+		foreach_cell(m_, [&](NFace f) -> bool
+		{
+			auto iv = incident_vertices(m_, f);
+			std::size_t i = index_of(m_, iv[0]);
+			std::size_t j = index_of(m_, iv[1]);
+			std::size_t k = index_of(m_, iv[2]);
+			face_incident_[i].push_back(index_of(m_, f));
+			face_incident_[j].push_back(index_of(m_, f));
+			face_incident_[k].push_back(index_of(m_, f));
+			return true;
+		});	
+
+	}
+
+	Scalar min_distance_to_enveloppe(SVertex sv)
+	{
+		Scalar dmin = (std::numeric_limits<Scalar>::max)();
+		Vec3 p = value<Vec3>(surface_, vertex_position_, sv);
+		// Find closest sphere with AABB tree
+		std::size_t idx = 0;
+		foreach_cell(m_, [&](NVertex v) -> bool {
+			std::size_t i = index_of(m_, v);
+			Scalar d = sphere_distance(p, spheres_centers_[i], radii_[i]);
+			if (d < dmin)
+			{
+				dmin = d;
+				idx = i;
+			}
+			return true;
+		});
+
+		// Adjacent spheres to the closest sphere
+		for (std::size_t j : edge_adj_[idx])
+		{
+			eval_sphere(j, p, dmin);
+		}
+
+		// Cones (edges) incident to the closest sphere
+		for (std::size_t j : edge_adj_[idx])
+		{
+			eval_cone(idx, j, p, dmin);
+		}
+
+		// Slabs (faces) incident to the closest sphere
+		for (std::size_t fid : face_incident_[idx])
+		{
+			std::vector<NVertex> face_vertices;
+			foreach_cell(m_, [&](NFace f) -> bool {
+				if (index_of(m_, f) == fid)
+				{
+					auto vertices = incident_vertices(m_, f);
+					for (auto v : vertices)
+					{
+						face_vertices.push_back(v);
+					}
+					return false; 
+				}
+				return true;
+			});
+			
+			if (face_vertices.size() >= 3)
+			{
+				std::size_t ia = index_of(m_, face_vertices[0]);
+				std::size_t ib = index_of(m_, face_vertices[1]);
+				std::size_t ic = index_of(m_, face_vertices[2]);
+				eval_slab(ia, ib, ic, p, dmin);
+			}
+		}
+		return dmin;
+	}
+
+private:
+	int solve_quadric(const Scalar a, const Scalar b, const Scalar c, Scalar& t1, Scalar& t2) const
+	{
+		if (a == Scalar(0))
+		{
+			if (b == Scalar(0))
+				return 0;
+			t1 = -c / b;
+			return 1;
+		}
+		else
+		{
+			Scalar delta = b * b - 4 * a * c;
+			if (delta < Scalar(0))
+				return 0;
+			else if (delta == Scalar(0))
+			{
+				t1 = -b / (Scalar(2) * a);
+				return 1;
+			}
+			else
+			{
+				const Scalar sqrt_delta = std::sqrt(delta);
+				t1 = (-b - sqrt_delta) / (Scalar(2) * a);
+				t2 = (-b + sqrt_delta) / (Scalar(2) * a);
+				return 2;
+			}
+		}
+	}
+
+	Scalar sphere_distance(const Vec3& p, const Vec3& c, const Scalar r) const
+	{
+		return (p - c).norm() - r;
+	}
+
+	Scalar cone_distance(const Vec3& p, const Vec3& c1, const Vec3& c2, const Scalar r1, const Scalar r2, Scalar t) const
+	{
+		const Vec3 c = (1-t)* c1 + t *c2;
+		const Scalar r = (1-t) * r1 + t * r2;
+		return sphere_distance(p, c, r);
+	}
+
+	Scalar slab_distance(const Vec3& p, const Vec3& c1, const Vec3& c2, const Vec3& c3, const Scalar& r1,
+					 const Scalar& r2, const Scalar& r3, Scalar t1, Scalar t2) const
+	{
+		const Vec3 c = t1 * c1 + t2 * c2 + (1 - t1 - t2) * c3;
+		const Scalar r = t1 * r1 + t2 * r2 + (1 - t1 - t2) * r3;
+		return sphere_distance(p, c, r);
+	}
+
+	void eval_sphere(std::size_t idx, const Vec3& p, Scalar& dmin) const
+	{
+		const Vec3& c = spheres_centers_[idx];
+		const Scalar r = radii_[idx];
+		const Scalar d = (p - c).norm() - r;
+		if (d < dmin)
+			dmin = d;
+	}
+
+	void eval_cone(std::size_t i, std::size_t j, const Vec3& p, Scalar& dmin) const
+	{
+		const Vec3& c1 = spheres_centers_[i];
+		const Vec3& c2 = spheres_centers_[j];
+		const Scalar r1 = radii_[i];
+		const Scalar r2 = radii_[j];
+
+		const Vec3 c21 = c2 - c1;
+		const Vec3 c1p = p - c1;
+		const Scalar r21 = r2 - r1;
+		const Scalar a = c21.dot(c21);
+		const Scalar b = c21.dot(c1p);
+		const Scalar c = c1p.dot(c1p);
+		const Scalar A = a * (a - r21 * r21);
+		const Scalar B = 2 * b * (r21 * r21 - a);
+		const Scalar C = b * b - r21 * r21 * c;
+		Scalar t1, t2, dist1, dist2;
+		int root_nb = solve_quadric(A, B, C, t1, t2);
+		if (root_nb != 0)
+		{
+			t1 = std::clamp(t1, Scalar(0), Scalar(1));
+			dist1 = cone_distance(p, c1, c2, r1, r2, t1);
+			dmin = std::min(dmin, dist1);
+			if (root_nb != 1)
+			{
+				t2 = std::clamp(t2, Scalar(0), Scalar(1));
+				dist2 = cone_distance(p, c1, c2, r1, r2, t2);
+				dmin = std::min(dmin, dist2);
+			}
+		}
+		else
+		{
+			dmin = std::min(dmin, cone_distance(p, c1, c2, r1, r2, Scalar(0)));
+			dmin = std::min(dmin, cone_distance(p, c1, c2, r1, r2, Scalar(1)));
+		}
+	}
+
+	void eval_slab(std::size_t ia, std::size_t ib, std::size_t ic, const Vec3& p, Scalar& dmin) const
+	{
+		const Vec3& c1 = spheres_centers_[ia];
+		const Vec3& c2 = spheres_centers_[ib];
+		const Vec3& c3 = spheres_centers_[ic];
+		const Scalar r1 = radii_[ia];
+		const Scalar r2 = radii_[ib];
+		const Scalar r3 = radii_[ic];
+
+		// c(t1, t2) = t1 * c1 + t2 * c2+ (1-t1-t2) * c3 = (c1-c3) * t1 + (c2-c3) * t2 + c3
+		// r(t1, t2) = t1 * r1 + t2 * r2 + (1-t1-t2) * r3 = (r1-r3) * t1 + (r2-r3) * t2 + r3
+		// f(t1, t2) = ||c(t1, t2) - p || - r(t1, t2)
+		// obj: argmin_(t1,t2) f(t1, t2)
+		const Vec3 c13 = c1 - c3;
+		const Vec3 c23 = c2 - c3;
+		const Vec3 c3p = c3 - p;
+		const Scalar r13 = r1 - r3;
+		const Scalar r23 = r2 - r3;
+		// let x = c(t1, t2) - p = c13 * t1 + c23 * t2 + c3p
+		//  f(t1, t2) = ||x|| - (r1-r3) * t1 + (r2-r3) * t2 + r3
+		// df(t1,t2) / dt1 = (x*c13)/||x|| - r13 = 0 ===> x*c13 = ||x||* r13
+		// df(t1,t2) / dt2 = (x*c23)/||x|| - r23 = 0 ===> x*c23 = ||x||* r23
+		// x^2 = ||c13||^2 *t1^2 + ||c23||^2 *t2^2 + 2*(c13*c23)*t1*t2 + 2*(c13*c3p)*t1 + 2*(c23*c3p)*t2 + ||c3p||^2
+		const Scalar a = c13.dot(c13);
+		const Scalar b = c23.dot(c23);
+		const Scalar c = c13.dot(c23);
+		const Scalar d = c13.dot(c3p);
+		const Scalar e = c23.dot(c3p);
+		const Scalar f = c3p.dot(c3p);
+		// x^2 = a*t1^2 + b*t2^2 + 2*c*t1*t2 + 2*d*t1 + 2*e*t2 + f
+		Scalar t1 = 0, t2 = 0, dist1 = 0, dist2 = 0, dist3 = 0;
+
+		// three spheres have the same radius
+		if (r13 == Scalar(0) && r23 == Scalar(0))
+		{
+			//     x*c13                                         = 0
+			//===> ||c13||^2 * t1 + (c13 *c23)* t2 + (c13 * c3p) = 0
+			//===> a*t1 + c*t2 + d                               = 0
+
+			//     x*c23                                         = 0
+			//===> ||c23||^2 * t2 + (c23 *c13)* t1 + (c23 * c3p) = 0
+			//===> b*t2 + c*t1 + e                               = 0
+
+			const Scalar denom = a * b - c * c;
+			t1 = (c * e - b * d) / denom;
+			t2 = (c * d - a * e) / denom;
+		}
+		else if (r13 == Scalar(0) && r23 != Scalar(0))
+		{
+			// x * c13 = 0 ===> a*t1 + c*t2 + d = 0 ===> t1 = -(c/a)*t2 - d/a
+			const Scalar h = -c / a;
+			const Scalar k = -d / a;
+
+			//         df(t1,t2) / dt2 = 0
+			//===>               x*c23 = ||x||* r23
+			//===>         (x * c23)^2 = ||x||^2 * r23^2
+			//===> (b*t2 + c*t1 + e)^2 = ||x||^2 * r23^2
+			const Scalar A = (b + c * h) * (b + c * h) - r23 * r23 * (a * h * h + b + Scalar(2) * c * h);
+			const Scalar B = (Scalar(2) * (b + c * h) * (c * k + e) -
+						  r23 * r23 * (Scalar(2) * a * h * k + Scalar(2) * c * k + Scalar(2) * d * h + Scalar(2) * e));
+			const Scalar C = (c * k + e) * (c * k + e) - r23 * r23 * (a * k * k + Scalar(2) * d * k + f);
+			Scalar t1_1 = 0, t1_2 = 0, t2_1 = 0, t2_2 = 0;
+			solve_quadric(A, B, C, t2_1, t2_2);
+			t1_1 = h * t2_1 + k;
+			t1_2 = h * t2_2 + k;
+			dist1 = slab_distance(p, c1, c2, c3, r1, r2, r3, t1_1, t2_1);
+			dist2 = slab_distance(p, c1, c2, c3, r1, r2, r3, t1_2, t2_2);
+			if (dist2 < dist1)
+			{
+				t1 = t1_2;
+				t2 = t2_2;
+			}
+			else
+			{
+				t1 = t1_1;
+				t2 = t2_1;
+			}
+		}
+		else if (r13 != Scalar(0) && r23 == Scalar(0))
+		{
+			// x * c23 = 0 ===> b*t2 + c*t1 + e = 0 ===> t1 = -(b/c)*t2 - e/c
+			const Scalar h = -b / c;
+			const Scalar k = -e / c;
+
+			//         df(t1,t2) / dt1 = 0
+			//===>               x*c13 = ||x||* r13
+			//===>         (x * c13)^2 = ||x||^2 * r13^2
+			//===> (a*t1 + c*t2 + d)^2 = ||x||^2 * r13^2
+			const Scalar A = (c + a * h) * (c + a * h) - r13 * r13 * (a * h * h + b + Scalar(2) * c * h);
+			const Scalar B = (2 * (c + a * h) * (a * k + d) -
+						  r13 * r13 * (Scalar(2) * a * h * k + Scalar(2) * c * k + Scalar(2) * d * h + Scalar(2) * e));
+			const Scalar C = (a * k + d) * (a * k + d) - r13 * r13 * (a * k * k + Scalar(2) * d * k + f);
+			Scalar t1_1 = 0, t1_2 = 0, t2_1 = 0, t2_2 = 0;
+			solve_quadric(A, B, C, t2_1, t2_2);
+			t1_1 = h * t2_1 + k;
+			t1_2 = h * t2_2 + k;
+			dist1 = slab_distance(p, c1, c2, c3, r1, r2, r3, t1_1, t2_1);
+			dist2 = slab_distance(p, c1, c2, c3, r1, r2, r3, t1_2, t2_2);
+			if (dist2 < dist1)
+			{
+				t1 = t1_2;
+				t2 = t2_2;
+			}
+			else
+			{
+				t1 = t1_1;
+				t2 = t2_1;
+			}
+		}
+		else
+		{
+			// both spheres have different radii
+			// x * c13 = ||x|| * r13
+			// x * c23 = ||x|| * r23
+			// ===> (x* c13)/r13   = (x * c23)/r23
+			// ===> r23 * (x* c13) = r13 * (x * c23)
+			// ===> (r23 * a- r13* c)*t1 + (r23*c-r13*b) *t2- (r23 * d - r13 * e) = 0
+			const Scalar u = r23 * a - r13 * c;
+			const Scalar v = r23 * c - r13 * b;
+			const Scalar w = r23 * d - r13 * e;
+			// ===> u*t1 + v*t2 + w = 0
+			if (u == 0 && v != 0)
+			{
+				t2 = -w / v;
+				const Scalar A = a * a - r13 * r13 * a;
+				const Scalar B = Scalar(2) * a * (c * t2 + d) - r13 * r13 * (2 * c * t2 + 2 * d);
+				const Scalar C = (c * t2 + d) * (c * t2 + d) - r13 * r13 * (b * t2 * t2 + Scalar(2) * e * t2 + f);
+				Scalar t1_1 = 0, t1_2 = 0;
+				solve_quadric(A, B, C, t1_1, t1_2);
+				dist1 = slab_distance(p, c1, c2, c3, r1, r2, r3, t1_1, t2);
+				dist2 = slab_distance(p, c1, c2, c3, r1, r2, r3, t1_2, t2);
+				if (dist2 < dist1)
+				{
+					t1 = t1_2;
+				}
+				else
+				{
+					t1 = t1_1;
+				}
+			}
+			else if (u != 0 && v == 0)
+			{
+				t1 = -w / u;
+				const Scalar A = b * b - r23 * r23 * b;
+				const Scalar B = 2 * b * (c * t1 + e) - r23 * r23 * (2 * c * t1 + 2 * e);
+				const Scalar C = (c * t1 + e) * (c * t1 + e) - r23 * r23 * (a * t1 * t1 + Scalar(2) * d * t1 + f);
+				Scalar t2_1 = 0, t2_2 = 0;
+				solve_quadric(A, B, C, t2_1, t2_2);
+				dist1 = slab_distance(p, c1, c2, c3, r1, r2, r3, t1, t2_1);
+				dist2 = slab_distance(p, c1, c2, c3, r1, r2, r3, t1, t2_2);
+				if (dist2 < dist1)
+				{
+					t2 = t2_2;
+				}
+				else
+				{
+					t2 = t2_1;
+				}
+			}
+			else
+			{
+				const Scalar h = -u / v;
+				const Scalar k = -w / v;
+				const Scalar A = (b + c * h) * (b + c * h) - r23 * r23 * (a * h * h + b + Scalar(2) * c * h);
+				const Scalar B = (2 * (b + c * h) * (c * k + e) -
+							  r23 * r23 * (Scalar(2) * a * h * k + Scalar(2) * c * k + Scalar(2) * d * h + Scalar(2) * e));
+				const Scalar C = (c * k + e) * (c * k + e) - r23 * r23 * (a * k * k + Scalar(2) * d * k + f);
+				Scalar t1_1 = 0, t1_2 = 0, t2_1 = 0, t2_2 = 0;
+				solve_quadric(A, B, C, t2_1, t2_2);
+				t1_1 = h * t2_1 + k;
+				t1_2 = h * t2_2 + k;
+				dist1 = slab_distance(p, c1, c2, c3, r1, r2, r3, t1_1, t2_1);
+				dist2 = slab_distance(p, c1, c2, c3, r1, r2, r3, t1_2, t2_2);
+				if (dist2 < dist1)
+				{
+					t1 = t1_2;
+					t2 = t2_2;
+				}
+				else
+				{
+					t1 = t1_1;
+					t2 = t2_1;
+				}
+			}
+		}
+		if ((t1 + t2) < Scalar(1) && t1 > Scalar(0) && t2 > Scalar(0) && t1 < Scalar(1) && t2 < Scalar(1))
+		{
+			dmin = std::min(dmin, slab_distance(p, c1, c2, c3, r1, r2, r3, t1, t2));
+			return;
+		}
+		eval_cone(ia, ib, p, dmin);
+		eval_cone(ia, ic, p, dmin);
+		eval_cone(ib, ic, p, dmin);
+	}
+
+private:
+	NONMANIFOLD& m_;
+	SURFACE& surface_;
+	std::shared_ptr<NAttribute<Vec4>> sphere_info_;
+	std::shared_ptr<SAttribute<Vec3>> vertex_position_;
+	std::vector<Vec3> spheres_centers_;
+	std::vector<Scalar> radii_;
+
+	// adjacency
+	std::vector<std::vector<std::size_t>> edge_adj_;
+	std::vector<std::vector<std::size_t>> face_incident_;
+};
 
 
 template <typename SURFACE , typename NONMANIFOLD>
@@ -357,6 +772,7 @@ struct SphereMeshConstructor
 			return true;
 		});
 	}
+
 	
 	bool slab_mesh_triangle(Vec4& p1, Vec4& p2, Vec4& p3, Triangle& t1, Triangle& t2)
 	{

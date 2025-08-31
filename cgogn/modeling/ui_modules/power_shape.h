@@ -110,7 +110,7 @@ class PowerShape : public ViewModule
 	{
 	public:
 		bool inside = false;
-		uint32 id = -1;
+		int32 id = -1;
 		Point inside_pole;
 		Point outside_pole;
 		double inside_pole_distance = 0.0;
@@ -542,16 +542,16 @@ private:
 		std::shared_ptr<NonManifoldAttribute<std::vector<SurfaceVertex>>> non_manifold_cluster_vertices_ = nullptr;
 		std::shared_ptr<NonManifoldAttribute<Vec3>> non_manifold_cloest_surface_color = nullptr;
 		std::shared_ptr<NonManifoldAttribute<Vec3>> non_manifold_vertex_color = nullptr;
-		float init_min_radius_ = 0.01;
-		float init_cover_dist_ = 0.06;
+		float init_min_radius_ = 0.01f;
+		float init_cover_dist_ = 0.06f;
 	
 		InitMethod init_method_ = CONSTANT;
 		AutoSplitMode auto_split_mode_ = MAX_NB_SPHERES;
 		CorrectionMode correction_mode_ = NO_CORRECTION;
 		EulideanMode distance_mode_ = EUCLIDEAN;
-		float energy_lambda_fitting = 0.1;
-		float partition_lambda = 0.1;
-		float energy_lambda_sqem = 1; 
+		float energy_lambda_fitting = 0.1f;
+		float partition_lambda = 0.1f;
+		float energy_lambda_sqem = 1.f; 
 
 		float split_sqem_combined_threshold_ = 0.001f;
 		float fuzzy_distance_ = 0.001f;
@@ -587,7 +587,7 @@ private:
 		uint32 update_times = 10;
 		uint32 adjacent_number = 0;
 		cgogn::rendering::SkelShapeDrawer skeleton_drawer_;
-		float skeleton_color[3] = {0.2, 0.2, 0.2};
+		float skeleton_color[3] = {0.2f, 0.2f, 0.2f};
 		cgogn::modeling::SkeletonSampler<Vec4, Vec3, Scalar> skeleton_sampler_;
 		bool draw_enveloppe = false;
 	};
@@ -2595,8 +2595,8 @@ private:
 	}
 
 	void interpolate_skeleton(NONMANIFOLD& non_manifold) {
-		auto& non_manifold_vertex_position = get_or_add_attribute<Vec3, NonManifoldVertex>(non_manifold, "position");
-		auto& non_manifold_vertex_radius = get_or_add_attribute<Scalar, NonManifoldVertex>(non_manifold, "radius");
+		auto non_manifold_vertex_position = get_or_add_attribute<Vec3, NonManifoldVertex>(non_manifold, "position");
+		auto non_manifold_vertex_radius = get_or_add_attribute<Scalar, NonManifoldVertex>(non_manifold, "radius");
 		skeleton_drawer.clear();
 		skeleton_drawer.set_color({1.0, 1.0, 1.0, 0.5});
 		skeleton_drawer.set_subdiv(40);
@@ -2606,7 +2606,7 @@ private:
 			return true;
 		});
 		foreach_cell(non_manifold, [&](NonManifoldEdge ne) {
-			auto& v_vec = incident_vertices(non_manifold, ne);
+			auto v_vec = incident_vertices(non_manifold, ne);
 			skeleton_drawer.add_edge(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
 									  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
 									  value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[1]),
@@ -2614,7 +2614,7 @@ private:
 			return true;
 		});
 		foreach_cell(non_manifold, [&](NonManifoldFace nf) {
-			auto& v_vec = incident_vertices(non_manifold, nf);
+			auto v_vec = incident_vertices(non_manifold, nf);
 			skeleton_drawer.add_triangle(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
 										  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
 										  value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[1]),
@@ -2636,7 +2636,7 @@ private:
 			return true;
 		});
 		foreach_cell(*p.non_manifold_, [&](NonManifoldEdge ne) {
-			auto& v_vec = incident_vertices(*p.non_manifold_, ne);
+			auto v_vec = incident_vertices(*p.non_manifold_, ne);
 			p.skeleton_sampler_.add_edge(value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, v_vec[0]),
 										 value<Scalar>(*p.non_manifold_, p.non_manifold_vertex_radius_, v_vec[0]),
 										 value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, v_vec[1]),
@@ -2644,7 +2644,7 @@ private:
 			return true;
 		});
 		foreach_cell(*p.non_manifold_, [&](NonManifoldFace nf) {
-			auto& v_vec = incident_vertices(*p.non_manifold_, nf);
+			auto v_vec = incident_vertices(*p.non_manifold_, nf);
 			p.skeleton_sampler_.add_triangle(value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, v_vec[0]),
 											 value<Scalar>(*p.non_manifold_, p.non_manifold_vertex_radius_, v_vec[0]),
 											 value<Vec3>(*p.non_manifold_, p.non_manifold_vertex_position_, v_vec[1]),
@@ -2669,7 +2669,7 @@ private:
 
 	void export_spheres_OBJ(ClusterAxisParameter& p, const std::string& directory)
 	{
-		auto& mesh_name = surface_provider_->mesh_name(*p.surface_);
+		auto mesh_name = surface_provider_->mesh_name(*p.surface_);
 		 std::ofstream file(directory + "/"+ mesh_name + ".obj");
 		if (!file.is_open())
 		{
@@ -2689,8 +2689,8 @@ private:
 	void export_surface_PLY(ClusterAxisParameter& p, const std::string& directory)
 	{
 		SURFACE& m = *p.surface_;
-		auto& mesh_name = surface_provider_->mesh_name(*p.surface_);
-		auto& file_name = directory + "/" + mesh_name +
+		auto mesh_name = surface_provider_->mesh_name(*p.surface_);
+		auto file_name = directory + "/" + mesh_name +
 						  ".ply ";
 		// TODO
 		std::vector<std::array<double, 3>> position;
@@ -2725,10 +2725,10 @@ private:
 
 		edge_indices.reserve(nb_edges);
 		foreach_cell(m, [&](SurfaceEdge e) {
-			auto& faces = incident_faces(m, e);
+			auto faces = incident_faces(m, e);
 			if (faces.size() != 0)
 				return true;
-			auto& vertices = incident_vertices(m, e);
+			auto vertices = incident_vertices(m, e);
 
 			edge_indices.push_back({index_of(m, vertices[0]), index_of(m, vertices[1])});
 			return true;
@@ -2746,8 +2746,8 @@ private:
 	void export_skeleton_PLY(ClusterAxisParameter& p, const std::string& directory)
 	{
 		
-		auto& mesh_name= nonmanifold_provider_->mesh_name(*p.non_manifold_);
-		auto& file_name = directory + "/" + mesh_name + ".ply";
+		auto mesh_name= nonmanifold_provider_->mesh_name(*p.non_manifold_);
+		auto file_name = directory + "/" + mesh_name + ".ply";
 		// TODO
 		std::vector<std::array<double, 3>> position;
 		std::vector<std::vector<uint32>> face_indices;
@@ -2784,10 +2784,10 @@ private:
 
 		edge_indices.reserve(nb_edges);
 		foreach_cell(*p.non_manifold_, [&](NonManifoldEdge e) {
-			auto& faces = incident_faces(*p.non_manifold_, e);
+			auto faces = incident_faces(*p.non_manifold_, e);
 			if (faces.size() != 0)
 				return true;
-			auto& vertices = incident_vertices(*p.non_manifold_, e);
+			auto vertices = incident_vertices(*p.non_manifold_, e);
 
 			edge_indices.push_back({index_of(*p.non_manifold_, vertices[0]), index_of(*p.non_manifold_, vertices[1])});
 			return true;
@@ -2808,7 +2808,9 @@ private:
 		Scalar dia_len = md.diangonal_length();
 		samples_skeleton(p);
 		// Compute the distance from the shape to the enveloppe
-		modeling::SphereMeshConstructor<SURFACE, NONMANIFOLD> sphere_mesh_constructor(
+		//modeling::SphereMeshConstructor<SURFACE, NONMANIFOLD> sphere_mesh_constructor(
+		//	*p.surface_, *p.non_manifold_, p.surface_vertex_position_, p.non_manifold_sphere_info_);
+		modeling::SphereMeshDistance<SURFACE, NONMANIFOLD> sphere_mesh_constructor(
 			*p.surface_, *p.non_manifold_, p.surface_vertex_position_, p.non_manifold_sphere_info_);
 		Scalar max_dist = 0.0;
 		foreach_cell(*p.surface_, [&](SurfaceVertex sv) {
@@ -2900,11 +2902,11 @@ private:
 
 	void compute_hausdorff_distance(NONMANIFOLD& non_manifold, SURFACE& surface)
 	{
-		auto& surface_vertex_position = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "position");
+		auto surface_vertex_position = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "position");
 
-		auto& non_manifold_vertex_position = get_or_add_attribute<Vec3, NonManifoldVertex>(non_manifold, "position");
-		auto& non_manifold_vertex_radius = get_or_add_attribute<Scalar, NonManifoldVertex>(non_manifold, "radius");
-		auto& non_manifold_sphere_info =
+		auto non_manifold_vertex_position = get_or_add_attribute<Vec3, NonManifoldVertex>(non_manifold, "position");
+		auto non_manifold_vertex_radius = get_or_add_attribute<Scalar, NonManifoldVertex>(non_manifold, "radius");
+		auto non_manifold_sphere_info =
 			add_attribute<Vec4, NonManifoldVertex>(non_manifold, "non_manifold_sphere_info");
 		auto surface_error_color = get_or_add_attribute<Vec3, SurfaceVertex>(surface, "surface_error_color");
 
@@ -2939,7 +2941,7 @@ private:
 			return true;
 		});
 		foreach_cell(non_manifold, [&](NonManifoldEdge ne) {
-			auto& v_vec = incident_vertices(non_manifold, ne);
+			auto v_vec = incident_vertices(non_manifold, ne);
 			skeleton_sampler.add_edge(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
 									  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
 									  value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[1]),
@@ -2947,7 +2949,7 @@ private:
 			return true;
 		});
 		foreach_cell(non_manifold, [&](NonManifoldFace nf) {
-			auto& v_vec = incident_vertices(non_manifold, nf);
+			auto v_vec = incident_vertices(non_manifold, nf);
 			skeleton_sampler.add_triangle(value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[0]),
 										  value<Scalar>(non_manifold, non_manifold_vertex_radius, v_vec[0]),
 										  value<Vec3>(non_manifold, non_manifold_vertex_position, v_vec[1]),
@@ -2962,7 +2964,7 @@ private:
 		float step = std::min(std::min(bbw.x(), bbw.y()), bbw.z()) / 150;
 		skeleton_sampler.sample(step);
 		POINT* sample_points = point_provider_->add_mesh("Skeleton_samples");
-		auto& position = add_attribute<Vec3, PointVertex>(*sample_points, "position");
+		auto position = add_attribute<Vec3, PointVertex>(*sample_points, "position");
 		std::cout << "add samples MESH"<< std::endl;
 		std::vector<Vec3> enveloppe_points = skeleton_sampler.samples();
 		// Build bvh
@@ -3371,10 +3373,10 @@ private:
 					if (ImGui::Button("Compute stability ratio"))
 						compute_stability_ratio(*selected_medial_axis_);
 					static int32 number_vertex_remain = 1;
-					static float k = 1e-5;
+					static float k = 1e-5f;
 					ImGui::DragInt("Vertices to delete", &number_vertex_remain, 1, 0,
 								   nb_cells<NonManifoldVertex>(*selected_medial_axis_));
-					ImGui::DragFloat("K", &k, 1e-5, 0.0f, 1.0f, "%.5f");
+					ImGui::DragFloat("K", &k, 1e-5f, 0.0f, 1.0f, "%.5f");
 					if (ImGui::Button("QMAT"))
 					{
 						collapse_non_manifold_using_QMat(*selected_medial_axis_, number_vertex_remain, k);
@@ -3413,9 +3415,9 @@ private :
 	bool circumradius_filtering_ = true;
 	bool distance_filtering_ = true;
 	bool pole_filtering_ = true;
-	float distance_threshold_ = 0.001;
-	float angle_threshold_ = 1.9;
-	float radius_threshold_ = 0.030;
+	float distance_threshold_ = 0.001f;
+	float angle_threshold_ = 1.9f;
+	float radius_threshold_ = 0.030f;
 	float dilation_factor = 0.1f;
 	
 	double min_radius_ = std::numeric_limits<double>::max();
