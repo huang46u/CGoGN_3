@@ -51,6 +51,7 @@
 
 #include <boost/synapse/connect.hpp>
 #include <set>
+#include <random>
 
 namespace cgogn
 {
@@ -212,6 +213,9 @@ class Volumn_VMAS : public ViewModule
 		bool stopping_ = false;
 		bool slow_down_ = true;
 		uint32 update_rate_ = 20;
+		// poisson disk sampling
+		Scalar r_ = 0.01;
+		uint32 K_ = 30;
 	};
 
 public:
@@ -247,24 +251,129 @@ public:
 			mesh.point(v) = Point_3(nx, ny, nz);
 		}
 	}
-	void random_sampling(SurfaceParameters& p)
+
+	bool is_inside(const SurfaceParameters& p, const Vec3& pos)
 	{
-		Vec3 bias = Vec3(0.5, 0.5, 0.5);
+		Point_3 query(pos.x(), pos.y(), pos.z());
+		CGAL::Bounded_side res = (*p.inside_tester_)(query);
+		return res == CGAL::ON_BOUNDED_SIDE;
+	}
+	Vec3 random_sample_around(const Vec3& p, Scalar R)
+	{
+		static thread_local std::mt19937 rng{std::random_device{}()};
+		static thread_local std::uniform_real_distribution<Scalar> U(0.0, 1.0);
+
+		Scalar u = U(rng);
+		Scalar v = U(rng);
+		Scalar w = U(rng);
+
+		Scalar R3 = R * R * R;
+		Scalar r = std::cbrt(R3 + u * (8 * R3 - R3)); // r = pow((R^3 + u(8R^3 - R^3)), 1/3)
+
+		Scalar phi = v * 2.0 * M_PI;
+		Scalar theta = std::acos(1.0 - 2.0 * w);
+
+		Scalar x = r * std::sin(theta) * std::cos(phi);
+		Scalar y = r * std::sin(theta) * std::sin(phi);
+		Scalar z = r * std::cos(theta);
+
+		return p + Vec3(x, y, z);
+	}
+
+	std::tuple<uint32, uint32, uint32> pos_to_grid_cell(const Vec3& pos, Scalar cell_size, uint32 grid_size)
+	{
+		uint32 x = std::min(uint32(pos.x() / cell_size), grid_size - 1);
+		uint32 y = std::min(uint32(pos.y() / cell_size), grid_size - 1);
+		uint32 z = std::min(uint32(pos.z() / cell_size), grid_size - 1);
+		return {x, y, z};
+	}
+	void poisson_disk_sampling(SurfaceParameters& p)
+	{
+		Scalar cell_size = p.r_ / std::sqrt(3.0);
+		uint32 grid_size = uint32(std::ceil(1.0 / cell_size));
+		std::vector<std::vector<std::vector<Vec3*>>> grid(
+			grid_size, std::vector<std::vector<Vec3*>>(grid_size, std::vector<Vec3*>(grid_size, nullptr)));
+		std::vector<Vec3*> active_list;
 		std::vector<Vec3> samples;
-		CGAL::Random_points_in_cube_3<Point_3> generator(0.5);
-		while (samples.size() < p.sampels_numbers_)
+		std::mt19937 rng{std::random_device{}()};
+		auto pick_active_index = [&](void) -> size_t {
+			std::uniform_int_distribution<size_t> dist(0, active_list.size() - 1);
+			return dist(rng);
+		};
+		Vec3 bias = Vec3(0.5, 0.5, 0.5);
+		CGAL::Random_points_in_cube_3<Point_3> generator(0.5); // sample first point
+		while (active_list.empty())
 		{
 			Point_3 s = *generator++;
 			Vec3 pos = Vec3(s.x(), s.y(), s.z()) + bias;
-			Point_3 cgal_pos(pos.x(), pos.y(), pos.z());
-
-			
-			if ((*p.inside_tester_)(cgal_pos) == CGAL::ON_BOUNDED_SIDE)
+			if (!is_inside(p, pos))
+				continue;
+			auto [x, y, z] = pos_to_grid_cell(pos, cell_size, grid_size);
+			samples.push_back(pos);
+			Vec3* ptr = &samples.back();
+			grid[x][y][z] = ptr;
+			active_list.push_back(ptr);
+		}
+		while (active_list.size() != 0)
+		{ // Randomly pick a point from the active list 
+			size_t idx = pick_active_index(); 
+			Vec3* current_ptr = active_list[idx];
+			Vec3 current_sample = *current_ptr;
+			bool permenantly_remove = true;
+			for (uint32 i = 0; i < p.K_; i++)
 			{
-				samples.push_back(pos);
+				Vec3 next_pos;
+				next_pos = random_sample_around(current_sample, p.r_);
+				if (!is_inside(p, next_pos))
+					continue;
+				auto [x, y, z] =
+					pos_to_grid_cell(next_pos, cell_size, grid_size); // Test if next_pos is at least R far from other samples 
+				bool valid = true;
+				if (grid[x][y][z] != nullptr)
+				{
+					valid = false;
+				}
+				for (int32 dx = -2; dx <= 2 && valid; dx++)
+				{
+					for (int32 dy = -2; dy <= 2 && valid; dy++)
+					{
+						for (int32 dz = -2; dz <= 2 && valid; dz++)
+						{
+							int32 nx = int32(x) + dx;
+							int32 ny = int32(y) + dy;
+							int32 nz = int32(z) + dz;
+							if (nx >= 0 && nx < int32(grid_size) && ny >= 0 && ny < int32(grid_size) && nz >= 0 &&
+								nz < int32(grid_size))
+							{
+								if (grid[nx][ny][nz] != nullptr)
+								{
+									Vec3 neighbor_pos = *grid[nx][ny][nz];
+									Vec3 cp = next_pos - neighbor_pos;
+									if (cp.dot(cp) < p.r_ * p.r_)
+									{
+										valid = false;
+									}
+								}
+							}
+						}
+					}
+				}
+				if (valid)
+				{
+					samples.push_back(next_pos);
+					active_list.push_back(&samples.back());
+					grid[x][y][z] = &samples.back();
+					permenantly_remove = false;
+					break;
+				}
+			}
+			if (permenantly_remove)
+			{
+				active_list[idx] = active_list.back();
+				active_list.pop_back();
 			}
 		}
-		for (auto& pos : samples)
+		for (const Vec3& pos : samples)
 		{
 			PVertex new_sample = add_vertex(*p.samples_);
 			std::pair<uint32, Vec3> bvh_res;
@@ -470,7 +579,7 @@ public:
 		p.projected_samples_normal_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "projected_normal");
 
 		// initialize volumn samples
-		random_sampling(p);
+		poisson_disk_sampling(p);
 		
 		
 
