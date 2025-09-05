@@ -493,11 +493,10 @@ private:
 				dmin = std::min(dmin, dist2);
 			}
 		}
-		else
-		{
-			dmin = std::min(dmin, cone_distance(p, c1, c2, r1, r2, Scalar(0)));
-			dmin = std::min(dmin, cone_distance(p, c1, c2, r1, r2, Scalar(1)));
-		}
+		
+		dmin = std::min(dmin, cone_distance(p, c1, c2, r1, r2, Scalar(0)));
+		dmin = std::min(dmin, cone_distance(p, c1, c2, r1, r2, Scalar(1)));
+		
 	}
 
 	void eval_slab(std::size_t ia, std::size_t ib, std::size_t ic, const Vec3& p, Scalar& dmin) const
@@ -661,8 +660,8 @@ private:
 			}
 			else
 			{
-				const Scalar h = -u / v;
-				const Scalar k = -w / v;
+				const Scalar h = -v / u;
+				const Scalar k = -w / u;
 				const Scalar A = (b + c * h) * (b + c * h) - r23 * r23 * (a * h * h + b + Scalar(2) * c * h);
 				const Scalar B = (2 * (b + c * h) * (c * k + e) -
 							  r23 * r23 * (Scalar(2) * a * h * k + Scalar(2) * c * k + Scalar(2) * d * h + Scalar(2) * e));
