@@ -100,6 +100,13 @@ class Volumn_VMAS : public ViewModule
 		MAX_NB_SPHERES,
 		ERROR_THRESHOLD
 	};
+	enum DistanceMode : uint32
+	{
+		SPHERE_EUCLIDEAN_DISTANCE,
+		SPHERE_CENTER_DISTANCE,
+		SPHERE_POWER_DISTANCE
+		
+	};
 
 	enum CorrectionMode : uint32
 	{
