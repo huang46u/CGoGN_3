@@ -199,6 +199,8 @@ class Volumn_VMAS : public ViewModule
 		bool auto_stop_ = false;
 		bool auto_split_ = true;
 		AutoSplitMode auto_split_mode_ = ERROR_THRESHOLD;
+		DistanceMode distance_mode_ = SPHERE_EUCLIDEAN_DISTANCE;
+
 		// bool auto_simplify_ = false;
 		float32 auto_split_error_threshold_ = 0.00025f;
 		uint32 auto_split_max_nb_spheres_ = 50;
@@ -296,11 +298,13 @@ public:
 	}
 	void poisson_disk_sampling(SurfaceParameters& p)
 	{
+		using SampleIndex = std::size_t;
+		const SampleIndex INVALID = -1;
 		Scalar cell_size = p.r_ / std::sqrt(3.0);
 		uint32 grid_size = uint32(std::ceil(1.0 / cell_size));
-		std::vector<std::vector<std::vector<Vec3*>>> grid(
-			grid_size, std::vector<std::vector<Vec3*>>(grid_size, std::vector<Vec3*>(grid_size, nullptr)));
-		std::vector<Vec3*> active_list;
+		std::vector<std::vector<std::vector<SampleIndex>>> grid(
+			grid_size, std::vector<std::vector<SampleIndex>>(grid_size, std::vector<SampleIndex>(grid_size, INVALID)));
+		std::vector<SampleIndex> active_list;
 		std::vector<Vec3> samples;
 		std::mt19937 rng{std::random_device{}()};
 		auto pick_active_index = [&](void) -> size_t {
@@ -316,16 +320,16 @@ public:
 			if (!is_inside(p, pos))
 				continue;
 			auto [x, y, z] = pos_to_grid_cell(pos, cell_size, grid_size);
+			SampleIndex new_index = (SampleIndex)samples.size();
 			samples.push_back(pos);
-			Vec3* ptr = &samples.back();
-			grid[x][y][z] = ptr;
-			active_list.push_back(ptr);
+			grid[x][y][z] = new_index;
+			active_list.push_back(new_index);
 		}
 		while (active_list.size() != 0)
 		{ // Randomly pick a point from the active list 
 			size_t idx = pick_active_index(); 
-			Vec3* current_ptr = active_list[idx];
-			Vec3 current_sample = *current_ptr;
+			SampleIndex current_index = active_list[idx];
+			Vec3 current_sample = samples[current_index];
 			bool permenantly_remove = true;
 			for (uint32 i = 0; i < p.K_; i++)
 			{
@@ -336,7 +340,7 @@ public:
 				auto [x, y, z] =
 					pos_to_grid_cell(next_pos, cell_size, grid_size); // Test if next_pos is at least R far from other samples 
 				bool valid = true;
-				if (grid[x][y][z] != nullptr)
+				if (grid[x][y][z] != INVALID)
 				{
 					valid = false;
 				}
@@ -352,9 +356,10 @@ public:
 							if (nx >= 0 && nx < int32(grid_size) && ny >= 0 && ny < int32(grid_size) && nz >= 0 &&
 								nz < int32(grid_size))
 							{
-								if (grid[nx][ny][nz] != nullptr)
+								SampleIndex si = grid[nx][ny][nz];
+								if (si != INVALID)
 								{
-									Vec3 neighbor_pos = *grid[nx][ny][nz];
+									const Vec3& neighbor_pos = samples[si];
 									Vec3 cp = next_pos - neighbor_pos;
 									if (cp.dot(cp) < p.r_ * p.r_)
 									{
@@ -367,9 +372,10 @@ public:
 				}
 				if (valid)
 				{
+					SampleIndex new_index = (SampleIndex)samples.size();
 					samples.push_back(next_pos);
-					active_list.push_back(&samples.back());
-					grid[x][y][z] = &samples.back();
+					active_list.push_back(new_index);
+					grid[x][y][z] = new_index;
 					permenantly_remove = false;
 					break;
 				}
@@ -793,12 +799,34 @@ public:
 
 			foreach_cell(*p.spheres_, [&](PVertex pv) {
 				uint32 pv_index = index_of(*p.spheres_, pv);
-
 				const Vec3& center = (*p.spheres_position_)[pv_index];
 				Scalar radius = (*p.spheres_radius_)[pv_index];
-				Vec3 vp_center = vp - center;
-				Scalar dist = (vp_center.dot(vp_center) - radius*radius);
-				dist *= a;
+				Scalar dist_sqem =
+					(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
+				Scalar dist_other = 0.0;
+				switch (p.distance_mode_)
+				{
+				case SPHERE_EUCLIDEAN_DISTANCE: {
+					dist_other = ((*p.projected_samples_position_)[v_index] - center).norm() - radius;
+					dist_other *= dist_other;
+				}
+				break;
+				case SPHERE_CENTER_DISTANCE: {
+					dist_other = ((*p.projected_samples_position_)[v_index] - center).norm();
+					dist_other *= dist_other;
+				}
+				break;
+				case SPHERE_POWER_DISTANCE: {
+					dist_other = ((*p.projected_samples_position_)[v_index] - center)
+									 .dot((*p.projected_samples_position_)[v_index] - center) -
+								 radius * radius;
+				}
+				break;
+				default:
+					break;
+				}
+				dist_other *= a;
+				Scalar dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
 				if (dist < min_distance)
 				{
 					min_distance = dist;
@@ -854,18 +882,35 @@ public:
 				uint32 sv_index = index_of(*p.samples_, sv);
 
 				Scalar a = 1.0;
-
-				Scalar dist_eucl = ((*p.projected_samples_position_)[sv_index] - center).norm() - radius;
-				dist_eucl *= dist_eucl;
-				dist_eucl *= a;
 				Scalar dist_sqem =
 					(*p.samples_quadric_)[sv_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
-				Scalar dist = dist_sqem + p.sqem_clustering_lambda_ * dist_eucl;
-				// Scalar dist = dist_sqem + p.sqem_update_lambda_ * dist_eucl;
+				Scalar dist_other = 0.0;
+				switch (p.distance_mode_)
+				{
+				case SPHERE_EUCLIDEAN_DISTANCE: {
+					dist_other = ((*p.projected_samples_position_)[sv_index] - center).norm() - radius;
+					dist_other *= dist_other;
+				}
+				break;
+				case SPHERE_CENTER_DISTANCE: {
+					dist_other = ((*p.projected_samples_position_)[sv_index] - center).norm();
+					dist_other *= dist_other;
+				}
+				break;
+				case SPHERE_POWER_DISTANCE: {
+					dist_other = ((*p.projected_samples_position_)[sv_index] - center)
+									 .dot((*p.projected_samples_position_)[sv_index] - center) -
+								 radius * radius;
+				}
+				break;
+				default:
+					break;
+				}
+				dist_other *= a;
+				Scalar dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
 				(*p.samples_vertex_error_)[sv_index] = dist;
 				cluster_error += dist;
 			}
-
 			(*p.spheres_error_)[v_index] = cluster_error / (*p.spheres_cluster_area_)[v_index];
 			(*p.spheres_error_not_normalized_)[v_index] = cluster_error;
 
@@ -930,14 +975,16 @@ public:
 		return Vec4(1.0, 0.0, 0.0, transparency);
 	}
 
-	void update_sphere_sqem(SurfaceParameters& p, PVertex sphere)
+	
+
+	void update_sphere_euclidean_distance(SurfaceParameters& p, PVertex sphere)
 	{
 		uint32 sphere_index = index_of(*p.spheres_, sphere);
 
 		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
 		Vec3 c = (*p.spheres_position_)[sphere_index];
 		Scalar r = (*p.spheres_radius_)[sphere_index];
-		//Verify if the SQEM is well conditioned
+		// Verify if the SQEM is well conditioned
 		Spherical_Quadric q;
 		for (PVertex v : cluster)
 		{
@@ -1007,7 +1054,7 @@ public:
 		else
 		{
 			std::cout << "Sphere " << sphere_index << " is not well conditioned, using shrinking ball" << std::endl;
-			//apply shrinking ball 
+			// apply shrinking ball
 			std::pair<uint32, Vec3> bvh_res;
 			p.surface_bvh_->closest_point(c, &bvh_res);
 			Vec3 closest_point_position = bvh_res.second;
@@ -1016,7 +1063,65 @@ public:
 			const Vec3& closest_face_normal =
 				value<Vec3>(*p.surface_, p.surface_face_normal_, p.surface_bvh_faces_[bvh_res.first]);
 			// TODO: exterior detection is not reliable
-			if ((*p.inside_tester_)(Point_3(c.x(), c.y(), c.z()))== CGAL::ON_UNBOUNDED_SIDE )
+			if ((*p.inside_tester_)(Point_3(c.x(), c.y(), c.z())) == CGAL::ON_UNBOUNDED_SIDE)
+				closest_point_dir = -closest_point_dir;
+
+			auto [center, radius, secondary] = geometry::shrinking_ball_center(
+				*p.samples_, closest_point_position, closest_point_dir, p.projected_samples_position_.get(),
+				p.projected_surface_kdt_, p.projected_kdt_vertices_, p.point_cloud_mode_, 0.25f);
+			c = center;
+			r = radius;
+		}
+		(*p.spheres_position_)[sphere_index] = c;
+		(*p.spheres_radius_)[sphere_index] = r;
+	}
+
+	void update_power_distance(SurfaceParameters& p, PVertex sphere)
+	{
+		uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+		Vec3 c = (*p.spheres_position_)[sphere_index];
+		Scalar r = (*p.spheres_radius_)[sphere_index];
+		// Verify if the SQEM is well conditioned
+		Spherical_Quadric q;
+		Scalar area = 0.0;
+		Vec3 h;
+		h.setZero();
+		for (PVertex v : cluster)
+		{
+			uint32 v_index = index_of(*p.samples_, v);
+			q += (*p.samples_quadric_)[v_index];
+			h += 1.0 * (*p.samples_position_)[v_index];
+			area += 1.0;
+		}
+		if (q.well_conditioned())
+		{
+			Mat4 As = Mat4::Identity();
+			As.block<3, 3>(0, 0) = Mat3::Identity() * area;
+			As(3, 3) = -area;
+			Vec4 bs;
+			bs.head<3>() = 2 *h;
+			bs(3) = 0;
+			Mat4 A = q._A + p.sqem_clustering_lambda_ * As;
+			Vec4 b = q._b + p.sqem_clustering_lambda_ * bs;
+			Vec4 s = A.ldlt().solve(b);
+			c = s.head<3>();
+			r = s(3);
+		}
+		else
+		{
+			std::cout << "Sphere " << sphere_index << " is not well conditioned, using shrinking ball" << std::endl;
+			// apply shrinking ball
+			std::pair<uint32, Vec3> bvh_res;
+			p.surface_bvh_->closest_point(c, &bvh_res);
+			Vec3 closest_point_position = bvh_res.second;
+			Vec3 closest_point_dir = (closest_point_position - c).normalized();
+
+			const Vec3& closest_face_normal =
+				value<Vec3>(*p.surface_, p.surface_face_normal_, p.surface_bvh_faces_[bvh_res.first]);
+			// TODO: exterior detection is not reliable
+			if ((*p.inside_tester_)(Point_3(c.x(), c.y(), c.z())) == CGAL::ON_UNBOUNDED_SIDE)
 				closest_point_dir = -closest_point_dir;
 
 			auto [center, radius, secondary] = geometry::shrinking_ball_center(
@@ -1091,7 +1196,18 @@ public:
 		// }
 		// case SQEM: {
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			update_sphere_sqem(p, v);
+			switch (p.distance_mode_)
+			{
+			case SPHERE_EUCLIDEAN_DISTANCE:
+				update_sphere_euclidean_distance(p, v);
+				break;
+			case SPHERE_CENTER_DISTANCE:
+				break;
+			case SPHERE_POWER_DISTANCE:
+				update_power_distance(p, v);
+				break;
+			}
+			
 			if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
 				correct_sphere(p, v);
 			value<bool>(*p.spheres_, p.spheres_do_not_split_, v) = false;
@@ -1625,7 +1741,8 @@ protected:
 					if (sync_lambda)
 						p.sqem_update_lambda_ = p.sqem_clustering_lambda_;
 				}
-				// }
+
+				
 
 				// ImGui::Checkbox("Auto split outside spheres", &p.auto_split_outside_spheres_);
 
@@ -1676,6 +1793,12 @@ protected:
 				ImGui::Checkbox("Slow down", &p.slow_down_);
 				if (p.slow_down_)
 					ImGui::SliderInt("Update rate", (int*)&p.update_rate_, 1, 100);
+				ImGui::Separator();
+				ImGui::RadioButton("Sphere Eculidean", (int*)&p.distance_mode_, SPHERE_EUCLIDEAN_DISTANCE);
+				ImGui::SameLine();
+				ImGui::RadioButton("Sphere Center", (int*)&p.distance_mode_, SPHERE_CENTER_DISTANCE);
+				ImGui::SameLine();
+				ImGui::RadioButton("Sphere Power", (int*)&p.distance_mode_, SPHERE_POWER_DISTANCE);
 				if (!p.running_)
 				{
 					if (ImGui::Button("Start spheres update"))
