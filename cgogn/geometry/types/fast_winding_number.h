@@ -170,14 +170,14 @@ struct Fast_Winding_Number_Coeff<3, Scalar, VEC3>
 	Tensor3 T;
 };
 
-template <typename MESH, int ORDER = 3>
+template <typename MESH, typename IndexType, int ORDER = 3>
 class Fast_Winding_Number
 {
 	template <typename T>
 	using Attribute = typename mesh_traits<MESH>::template Attribute<T>;
 	using Vertex = typename mesh_traits<MESH>::Vertex;
 	using Face = typename mesh_traits<MESH>::Face;
-	using BVH = acc::BVHTree<std::size_t, Vec3>;
+	using BVH = acc::BVHTree<IndexType, Vec3>;
 	using Coeff = Fast_Winding_Number_Coeff<ORDER, Scalar, Vec3>;
 	using Mat3 = Eigen::Matrix<Scalar, 3, 3>;
 
@@ -189,7 +189,7 @@ public:
 	{
 		face_area_ = get_or_add_attribute<Scalar, Face>(m_, "f_area");
 		face_centroid_ = get_or_add_attribute<Vec3, Face>(m_, "f_centroid");
-		uint32 nb_node = bvh_tree_->node_count();
+		std::size_t nb_node = bvh_tree_->node_count();
 		coeffs_.resize(nb_node);
 		p_tilde_.resize(nb_node, Vec3(0, 0, 0));
 		node_radius_.resize(nb_node, 0);
@@ -250,21 +250,21 @@ public:
 private:
 	void precompute_coeffs()
 	{
-		std::stack<std::size_t> st;
-		st.push(0);
+		std::stack<IndexType> st;
+		st.push(IndexType(0));
 		while (!st.empty())
 		{
-			std::size_t node_id = st.top();
+			IndexType node_id = st.top();
 			Coeff& coeff = coeffs_[node_id];
 			st.pop();
-			std::vector<std::size_t> primitives;
+			std::vector<IndexType> primitives;
 			primitives.reserve(nb_cells<Face>(m_));
 			bvh_tree_->collect_primitives_id(node_id, primitives);
 			Scalar sum_area = 0;
 			Vec3 sum_ac(0, 0, 0); // sum of weighted centroid
 			Vec3 sum_an(0, 0, 0); // sum of weighted normal
 			// compute p_tilde
-			for (std::size_t& fid : primitives)
+			for (IndexType fid : primitives)
 			{
 				Face f = bvh_faces_[fid];
 				Scalar a = value<Scalar>(m_, face_area_, f);
@@ -279,7 +279,7 @@ private:
 				p_tilde_[node_id] = sum_ac / sum_area;
 			}
 			Scalar max_norm = 0;
-			for (std::size_t& fid : primitives)
+			for (IndexType fid : primitives)
 			{
 				Face f = bvh_faces_[fid];
 				Scalar a = value<Scalar>(m_, face_area_, f);
@@ -346,13 +346,13 @@ private:
 		return K;
 	}
 	
-	Scalar solid_angle_leaf(const Vec3& q, const std::size_t node_id) const
+	Scalar solid_angle_leaf(const Vec3& q, const IndexType node_id) const
 	{
 		Scalar w = 0.0;
 		auto [first, last] = bvh_tree_->range(node_id);
 		for (auto i = first; i < last; i++)
 		{
-			std::size_t fid = bvh_tree_->get_primitive_index(i);
+			IndexType fid = bvh_tree_->get_primitive_index(i);
 			Face f = bvh_faces_[fid];
 
 			w += solid_angle(q, f) / (4 * M_PI);
@@ -360,7 +360,7 @@ private:
 		return w;
 	}
 
-	Scalar direct_eval(const Vec3& q, const std::size_t node_id) const
+	Scalar direct_eval(const Vec3& q, const IndexType node_id) const
 	{
 		Scalar w = 0.0;
 		const Vec3 R = p_tilde_[node_id] - q;
@@ -408,7 +408,7 @@ private:
 		const Scalar denominator = 1 + v1.dot(v2) + v2.dot(v3) + v3.dot(v1);
 		return 2 * std::atan2(numerator, denominator);
 	}
-	Scalar aabb_radius(const std::size_t node_id) const
+	Scalar aabb_radius(const IndexType node_id) const
 	{
 		Scalar r = 0.0;
 		const auto box = bvh_tree_->node_aabb(node_id);

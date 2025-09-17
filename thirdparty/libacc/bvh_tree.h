@@ -131,38 +131,38 @@ public:
 	{
 		return tris.size();
 	}
-	bool is_leaf(size_t nid) const
+	bool is_leaf(typename Node::ID nid) const
 	{
 		return nodes[nid].left == NAI && nodes[nid].right == NAI;
 	}
-	std::pair<size_t, size_t> children(size_t nid) const
+	std::pair<typename Node::ID, typename Node::ID> children(typename Node::ID nid) const
 	{
 		const Node& n = nodes[nid];
-		return {(size_t)n.left, (size_t)n.right};
+		return {n.left, n.right};
 	}
-	const acc::AABB<Vec3fType>& node_aabb(size_t nid) const
+	const acc::AABB<Vec3fType>& node_aabb(typename Node::ID nid) const
 	{
 		return nodes[nid].aabb;
 	}
-	std::pair<size_t, size_t> range(size_t nid) const
+	std::pair<typename Node::ID, typename Node::ID> range(typename Node::ID nid) const
 	{
 		const Node& n = nodes[nid];
-		return {(size_t)n.first, (size_t)n.last};
+		return {n.first, n.last};
 	}
-	std::size_t get_primitive_index(std::size_t internal_idx) const
+	typename Node::ID get_primitive_index(typename Node::ID internal_idx) const
 	{
 		return indices[internal_idx];
 	}
 
-	template <typename Fucn>
-	void for_each_primitive_in_node(std::size_t node_id, Fucn&& f) const
+	template <typename Func>
+	void for_each_primitive_in_node(typename Node::ID node_id, Func&& f) const
 	{
 		if (is_leaf(node_id))
 		{
 			auto [first, last] = range(node_id);
-			for (std::size_t i = first; i < last; ++i)
+			for (typename Node::ID i = first; i < last; ++i)
 			{
-				std::size_t prim =get_primitive_index(i);
+				typename Node::ID prim = get_primitive_index(i);
 				f(prim);
 			}
 			return;
@@ -172,10 +172,10 @@ public:
 		for_each_primitive_in_node(R, f);
 	}
 
-	void collect_primitives_id(std::size_t node_id, std::vector<std::size_t>& out) const
+	void collect_primitives_id(typename Node::ID node_id, std::vector<typename Node::ID>& out) const
 	{
 		out.clear();
-		for_each_primitive_in_node(node_id, [&](std::size_t pid) { out.push_back(pid); });
+		for_each_primitive_in_node(node_id, [&](typename Node::ID pid) { out.push_back(pid); });
 	}
 };
 
