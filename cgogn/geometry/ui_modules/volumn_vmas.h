@@ -223,7 +223,7 @@ class Volumn_VMAS : public ViewModule
 		bool slow_down_ = true;
 		uint32 update_rate_ = 20;
 		// poisson disk sampling
-		Scalar r_ = 0.01;
+		Scalar r_ = 0.005;
 		uint32 K_ = 30;
 	};
 
@@ -812,13 +812,13 @@ public:
 				}
 				break;
 				case SPHERE_CENTER_DISTANCE: {
-					dist_other = ((*p.projected_samples_position_)[v_index] - center).norm();
+					dist_other = ((*p.samples_position_)[v_index] - center).norm();
 					dist_other *= dist_other;
 				}
 				break;
 				case SPHERE_POWER_DISTANCE: {
-					dist_other = ((*p.projected_samples_position_)[v_index] - center)
-									 .dot((*p.projected_samples_position_)[v_index] - center) -
+					dist_other = ((*p.samples_position_)[v_index] - center)
+									 .dot((*p.samples_position_)[v_index] - center) -
 								 radius * radius;
 				}
 				break;
@@ -893,14 +893,14 @@ public:
 				}
 				break;
 				case SPHERE_CENTER_DISTANCE: {
-					dist_other = ((*p.projected_samples_position_)[sv_index] - center).norm();
+					dist_other = ((*p.samples_position_)[sv_index] - center).norm();
 					dist_other *= dist_other;
 				}
 				break;
 				case SPHERE_POWER_DISTANCE: {
-					dist_other = ((*p.projected_samples_position_)[sv_index] - center)
-									 .dot((*p.projected_samples_position_)[sv_index] - center) -
-								 radius * radius;
+					dist_other =
+						((*p.samples_position_)[sv_index] - center).dot((*p.samples_position_)[sv_index] - center) -
+						radius * radius;
 				}
 				break;
 				default:
@@ -1076,7 +1076,7 @@ public:
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
 
-	void update_power_distance(SurfaceParameters& p, PVertex sphere)
+	void update_sphere_center_distance(SurfaceParameters& p, PVertex sphere)
 	{
 		uint32 sphere_index = index_of(*p.spheres_, sphere);
 
@@ -1098,8 +1098,66 @@ public:
 		if (q.well_conditioned())
 		{
 			Mat4 As = Mat4::Identity();
-			As.block<3, 3>(0, 0) = Mat3::Identity() * area;
-			As(3, 3) = -area;
+			As.block<3, 3>(0, 0) = 2 * Mat3::Identity() * area;
+			As(3, 3) = 0;
+			Vec4 bs;
+			bs.head<3>() = 2 * h;
+			bs(3) = 0;
+			Mat4 A = q._A + p.sqem_clustering_lambda_ * As;
+			Vec4 b = q._b + p.sqem_clustering_lambda_ * bs;
+			Vec4 s = A.ldlt().solve(b);
+			c = s.head<3>();
+			r = s(3);
+		}
+		else
+		{
+			std::cout << "Sphere " << sphere_index << " is not well conditioned, using shrinking ball" << std::endl;
+			// apply shrinking ball
+			std::pair<uint32, Vec3> bvh_res;
+			p.surface_bvh_->closest_point(c, &bvh_res);
+			Vec3 closest_point_position = bvh_res.second;
+			Vec3 closest_point_dir = (closest_point_position - c).normalized();
+
+			const Vec3& closest_face_normal =
+				value<Vec3>(*p.surface_, p.surface_face_normal_, p.surface_bvh_faces_[bvh_res.first]);
+			// TODO: exterior detection is not reliable
+			if ((*p.inside_tester_)(Point_3(c.x(), c.y(), c.z())) == CGAL::ON_UNBOUNDED_SIDE)
+				closest_point_dir = -closest_point_dir;
+
+			auto [center, radius, secondary] = geometry::shrinking_ball_center(
+				*p.samples_, closest_point_position, closest_point_dir, p.projected_samples_position_.get(),
+				p.projected_surface_kdt_, p.projected_kdt_vertices_, p.point_cloud_mode_, 0.25f);
+			c = center;
+			r = radius;
+		}
+		(*p.spheres_position_)[sphere_index] = c;
+		(*p.spheres_radius_)[sphere_index] = r;
+	}
+
+	void update_power_distance(SurfaceParameters& p, PVertex sphere)
+	{
+		uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+		Vec3 c = (*p.spheres_position_)[sphere_index];
+		Scalar r = (*p.spheres_radius_)[sphere_index];
+		// Verify if the SQEM is well conditioned
+		Spherical_Quadric q;
+		Scalar area = 0.0;
+		Vec3 h;
+		h.setZero();
+		for (PVertex v : cluster)
+		{
+			uint32 v_index = index_of(*p.samples_, v);
+			q += (*p.samples_quadric_)[v_index];
+			h += 1.0 * (*p.samples_position_)[v_index];
+			area += 1.0;
+		}
+		if (q.well_conditioned())
+		{
+			Mat4 As = Mat4::Zero();
+			As.block<3, 3>(0, 0) = 2*Mat3::Identity() * area;
+			As(3, 3) = -2*area;
 			Vec4 bs;
 			bs.head<3>() = 2 *h;
 			bs(3) = 0;
@@ -1202,6 +1260,7 @@ public:
 				update_sphere_euclidean_distance(p, v);
 				break;
 			case SPHERE_CENTER_DISTANCE:
+				update_sphere_center_distance(p, v);
 				break;
 			case SPHERE_POWER_DISTANCE:
 				update_power_distance(p, v);
