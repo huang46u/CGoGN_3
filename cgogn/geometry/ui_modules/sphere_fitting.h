@@ -29,6 +29,7 @@
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
 
+
 #include <cgogn/geometry/algos/area.h>
 #include <cgogn/geometry/algos/fitting.h>
 #include <cgogn/geometry/algos/length.h>
@@ -36,7 +37,7 @@
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
-
+#include <cgogn/geometry/types/fast_winding_number.h>
 #include <Eigen/Sparse>
 #include <libacc/bvh_tree.h>
 #include <libacc/bvh_tree_spheres.h>
@@ -187,6 +188,7 @@ class SphereFitting : public ViewModule
 		bool stopping_ = false;
 		bool slow_down_ = true;
 		uint32 update_rate_ = 20;
+		cgogn::geometry::Fast_Winding_Number<SURFACE>* fwn_;
 	};
 
 public:
@@ -415,6 +417,9 @@ public:
 		geometry::compute_area<SVertex>(s, p.surface_vertex_position_.get(), p.surface_vertex_area_surf_.get(),
 										geometry::VertexAreaPolicy::THIRD);
 
+		// fast winding number
+		p.fwn_ = new cgogn::geometry::Fast_Winding_Number<SURFACE>(
+			s, *p.surface_bvh_, p.surface_vertex_position_.get(), p.surface_face_normal_.get(), p.surface_bvh_faces_, 2.0);
 		// estimate lambda for SQEM
 
 		// Scalar mean_edge_length = geometry::mean_edge_length(s, p.surface_vertex_position_.get());
@@ -1146,8 +1151,8 @@ public:
 			closest_point_dir = (closest_point_position - c).normalized();
 
 			const Vec3& closest_vertex_normal = value<Vec3>(*p.surface_, p.surface_vertex_normal_, closest_vertex);
-			// TODO: exterior detection is not reliable
-			if (closest_point_dir.dot(closest_vertex_normal) <= 0.0)
+			
+			if (p.fwn_->evaluate_fast_winding_number(c) < 0.3)
 				closest_point_dir = -closest_point_dir;
 		}
 		else
