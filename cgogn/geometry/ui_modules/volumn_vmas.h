@@ -43,15 +43,15 @@
 #include <libacc/kd_tree.h>
 
 #include <GLFW/glfw3.h>
-//import CGAL
+// import CGAL
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
-#include <CGAL/point_generators_3.h>
 #include <CGAL/Side_of_triangle_mesh.h>
 #include <CGAL/Surface_mesh.h>
+#include <CGAL/point_generators_3.h>
 
 #include <boost/synapse/connect.hpp>
-#include <set>
 #include <random>
+#include <set>
 
 namespace cgogn
 {
@@ -104,8 +104,8 @@ class Volumn_VMAS : public ViewModule
 	{
 		SPHERE_EUCLIDEAN_DISTANCE,
 		SPHERE_CENTER_DISTANCE,
-		SPHERE_POWER_DISTANCE
-		
+		SPHERE_POWER_DISTANCE,
+		SPHERE_POWER_DISTANCE_SQUARED
 	};
 
 	enum CorrectionMode : uint32
@@ -129,11 +129,8 @@ class Volumn_VMAS : public ViewModule
 		std::shared_ptr<SAttribute<Scalar>> surface_vertex_area_pc_ = nullptr;
 		std::shared_ptr<SAttribute<Scalar>> surface_vertex_area_surf_ = nullptr;
 		std::shared_ptr<SAttribute<Scalar>> surface_face_area_ = nullptr;
-		
 
 		// std::shared_ptr<SAttribute<bool>> medial_axis_selected_ = nullptr;
-		
-		
 
 		acc::BVHTree<uint32, Vec3>* surface_bvh_ = nullptr;
 		std::vector<SFace> surface_bvh_faces_;
@@ -176,10 +173,9 @@ class Volumn_VMAS : public ViewModule
 		std::shared_ptr<PAttribute<PVertex>> samples_vertex_sphere_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> samples_vertex_error_ = nullptr;
 		std::shared_ptr<PAttribute<std::vector<PVertex>>> samples_vertex_knn_ = nullptr;
-		uint32 sampels_numbers_ = 100000;  
+		uint32 sampels_numbers_ = 100000;
 		std::unique_ptr<Side_tester> inside_tester_;
 		CGAL_SurfaceMesh cgal_surface_mesh_;
-
 
 		NONMANIFOLD* skeleton_;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_position_ = nullptr;
@@ -212,7 +208,7 @@ class Volumn_VMAS : public ViewModule
 		Scalar min_error_ = 0.0;
 		Scalar max_error_ = 0.0;
 		PVertex max_error_sphere_ = PVertex();
-		
+
 		bool error_as_spheres_color_ = false;
 		float32 spheres_transparency_ = 0.5f;
 
@@ -223,7 +219,7 @@ class Volumn_VMAS : public ViewModule
 		bool slow_down_ = true;
 		uint32 update_rate_ = 20;
 		// poisson disk sampling
-		Scalar r_ = 0.005;
+		Scalar r_ = 0.01;
 		uint32 K_ = 30;
 	};
 
@@ -326,8 +322,8 @@ public:
 			active_list.push_back(new_index);
 		}
 		while (active_list.size() != 0)
-		{ // Randomly pick a point from the active list 
-			size_t idx = pick_active_index(); 
+		{ // Randomly pick a point from the active list
+			size_t idx = pick_active_index();
 			SampleIndex current_index = active_list[idx];
 			Vec3 current_sample = samples[current_index];
 			bool permenantly_remove = true;
@@ -337,8 +333,8 @@ public:
 				next_pos = random_sample_around(current_sample, p.r_);
 				if (!is_inside(p, next_pos))
 					continue;
-				auto [x, y, z] =
-					pos_to_grid_cell(next_pos, cell_size, grid_size); // Test if next_pos is at least R far from other samples 
+				auto [x, y, z] = pos_to_grid_cell(next_pos, cell_size,
+												  grid_size); // Test if next_pos is at least R far from other samples
 				bool valid = true;
 				if (grid[x][y][z] != INVALID)
 				{
@@ -401,7 +397,6 @@ public:
 		points_provider_->emit_connectivity_changed(*p.samples_);
 	}
 
-
 	void set_selected_surface(SURFACE& s)
 	{
 		selected_surface_ = &s;
@@ -459,7 +454,7 @@ public:
 			Spherical_Quadric& q = (*p.samples_quadric_)[v_index];
 			q.clear();
 			const Vec3& pos = (*p.projected_samples_position_)[v_index];
-			const Vec3& n = (*p.projected_samples_normal_)[v_index];	
+			const Vec3& n = (*p.projected_samples_normal_)[v_index];
 			q = Spherical_Quadric(Vec4(pos.x(), pos.y(), pos.z(), 0), Vec4(n.x(), n.y(), n.z(), 1));
 			return true;
 		});
@@ -476,7 +471,6 @@ public:
 			return;
 		}
 
-		
 		// set signal connections to update the data when the surface connectivity or position changes
 
 		if (surface_connections_.find(&s) == surface_connections_.end())
@@ -535,7 +529,6 @@ public:
 		geometry::compute_area<SVertex>(s, p.surface_vertex_position_.get(), p.surface_vertex_area_surf_.get(),
 										geometry::VertexAreaPolicy::THIRD);
 
-		
 		MeshData<SURFACE>& md = surface_provider_->mesh_data(s);
 		uint32 nb_vertices = md.template nb_cells<SVertex>();
 		uint32 nb_faces = md.template nb_cells<SFace>();
@@ -593,8 +586,6 @@ public:
 
 		// initialize volumn samples
 		poisson_disk_sampling(p);
-		
-		
 
 		// create KDTree for the projected surface vertices
 		p.projected_kdt_vertices_.clear();
@@ -616,7 +607,6 @@ public:
 			delete p.samples_kdt_;
 		p.samples_kdt_ = new acc::KDTree<3, uint32>(samples_position_vector);
 		p.projected_surface_kdt_ = new acc::KDTree<3, uint32>(projected_surface_position_vector);
-
 
 		// compute knn graph
 		p.samples_vertex_knn_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.samples_, "knn");
@@ -644,14 +634,14 @@ public:
 
 		p.medial_axis_position_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "medial_axis_position");
 		p.medial_axis_radius_ = get_or_add_attribute<Scalar, PVertex>(*p.samples_, "medial_axis_radius");
-		p.medial_axis_secondary_vertex_ = get_or_add_attribute<PVertex, PVertex>(*p.samples_, "medial_axis_secondary_vertex_");
+		p.medial_axis_secondary_vertex_ =
+			get_or_add_attribute<PVertex, PVertex>(*p.samples_, "medial_axis_secondary_vertex_");
 
-		 parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+		parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
 			auto [c, r, q] = geometry::shrinking_ball_center(
 				*p.samples_, (*p.projected_samples_position_)[v_index], (*p.projected_samples_normal_)[v_index],
-				p.projected_samples_position_.get(), p.projected_surface_kdt_,
-				p.projected_kdt_vertices_);
+				p.projected_samples_position_.get(), p.projected_surface_kdt_, p.projected_kdt_vertices_);
 			(*p.medial_axis_position_)[v_index] = c;
 			(*p.medial_axis_radius_)[v_index] = r;
 			(*p.medial_axis_secondary_vertex_)[v_index] = q;
@@ -661,10 +651,10 @@ public:
 		/* parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
 			auto [c, r] = geometry::shrinking_ball_center(
-				*p.surface_, 
-				(*p.projected_samples_position_)[v_index], 
-				(*p.projected_samples_normal_)[v_index], 
-				p.surface_bvh_, 
+				*p.surface_,
+				(*p.projected_samples_position_)[v_index],
+				(*p.projected_samples_normal_)[v_index],
+				p.surface_bvh_,
 				p.surface_bvh_faces_);
 			(*p.medial_axis_position_)[v_index] = c;
 			(*p.medial_axis_radius_)[v_index] = r;
@@ -695,7 +685,8 @@ public:
 		p.samples_vertex_error_ =
 			get_or_add_attribute<Scalar, PVertex>(*p.samples_, "error"); // error of a vertex w.r.t. its sphere
 
-		p.samples_vertex_sphere_ = get_or_add_attribute<PVertex, PVertex>(*p.samples_, "sphere"); // cluster of the surface vertex
+		p.samples_vertex_sphere_ =
+			get_or_add_attribute<PVertex, PVertex>(*p.samples_, "sphere"); // cluster of the surface vertex
 		p.spheres_neighbor_clusters_ =
 			get_or_add_attribute<std::set<PVertex>, PVertex>(*p.spheres_, "neighbor_clusters"); // neighbor clusters
 
@@ -719,7 +710,6 @@ public:
 		p.initialized_ = true;
 	}
 
-
 	void init_spheres(SURFACE& s, uint32 max_nb_spheres)
 	{
 		SurfaceParameters& p = surface_parameters_[&s];
@@ -739,11 +729,10 @@ public:
 			// return value<uint32>(*p.surface_, nb_covered, a) > value<uint32>(*p.surface_, nb_covered, b);
 		});
 
-
 		p.nb_spheres_ = 0;
 
 		PVertex v = sorted_vertices[0];
-		
+
 		uint32 v_index = index_of(*p.samples_, v);
 
 		const Vec3& vp = (*p.medial_axis_position_)[v_index];
@@ -755,9 +744,8 @@ public:
 
 		(*p.spheres_position_)[sphere_index] = vp;
 		(*p.spheres_radius_)[sphere_index] = vr;
-		(*p.spheres_cluster_color_)[sphere_index] =
-			Vec3(0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0,
-					0.5 + 0.5 * (rand() % 256) / 256.0);
+		(*p.spheres_cluster_color_)[sphere_index] = Vec3(
+			0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0);
 		// Vec3(rand() % 256 / 255.0f, rand() % 256 / 255.0f, rand() % 256 / 255.0f);
 
 		compute_clusters(p);
@@ -783,13 +771,12 @@ public:
 
 		// auto start = std::chrono::high_resolution_clock::now();
 
-		
 		parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
 			// if (!(*p.medial_axis_selected_)[v_index])
 			// 	return true;
 
-			//Each volumn sample has weight 1
+			// Each volumn sample has weight 1
 			Scalar a = 1.0;
 
 			const Vec3& vp = (*p.projected_samples_position_)[v_index];
@@ -817,9 +804,16 @@ public:
 				}
 				break;
 				case SPHERE_POWER_DISTANCE: {
-					dist_other = ((*p.samples_position_)[v_index] - center)
-									 .dot((*p.samples_position_)[v_index] - center) -
-								 radius * radius;
+					dist_other =
+						((*p.samples_position_)[v_index] - center).dot((*p.samples_position_)[v_index] - center) -
+						radius * radius;
+				}
+				break;
+				case SPHERE_POWER_DISTANCE_SQUARED: {
+					dist_other =
+						((*p.samples_position_)[v_index] - center).dot((*p.samples_position_)[v_index] - center) -
+						radius * radius;
+					dist_other *= dist_other;
 				}
 				break;
 				default:
@@ -903,6 +897,13 @@ public:
 						radius * radius;
 				}
 				break;
+				case SPHERE_POWER_DISTANCE_SQUARED: {
+					dist_other =
+						((*p.samples_position_)[sv_index] - center).dot((*p.samples_position_)[sv_index] - center) -
+						radius * radius;
+					dist_other *= dist_other;
+				}
+				break;
 				default:
 					break;
 				}
@@ -974,8 +975,6 @@ public:
 		}
 		return Vec4(1.0, 0.0, 0.0, transparency);
 	}
-
-	
 
 	void update_sphere_euclidean_distance(SurfaceParameters& p, PVertex sphere)
 	{
@@ -1156,10 +1155,10 @@ public:
 		if (q.well_conditioned())
 		{
 			Mat4 As = Mat4::Zero();
-			As.block<3, 3>(0, 0) = 2*Mat3::Identity() * area;
-			As(3, 3) = -2*area;
+			As.block<3, 3>(0, 0) = 2 * Mat3::Identity() * area;
+			As(3, 3) = -2 * area;
 			Vec4 bs;
-			bs.head<3>() = 2 *h;
+			bs.head<3>() = 2 * h;
 			bs(3) = 0;
 			Mat4 A = q._A + p.sqem_clustering_lambda_ * As;
 			Vec4 b = q._b + p.sqem_clustering_lambda_ * bs;
@@ -1192,6 +1191,95 @@ public:
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
 
+	void update_power_distance_squared(SurfaceParameters& p, PVertex sphere)
+	{
+		uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+		Vec3 c = (*p.spheres_position_)[sphere_index];
+		Scalar r = (*p.spheres_radius_)[sphere_index];
+		// Verify if the SQEM is well conditioned
+		Spherical_Quadric q;
+		for (PVertex v : cluster)
+		{
+			uint32 v_index = index_of(*p.samples_, v);
+			q += (*p.samples_quadric_)[v_index];
+		}
+		if (q.well_conditioned())
+		{
+			Eigen::MatrixXd J(2 * cluster.size(), 4);
+			J.setZero();
+			Eigen::VectorXd b(2 * cluster.size());
+			b.setZero();
+			uint32 idx = 0;
+			Eigen::VectorXd s(4);
+			s << c[0], c[1], c[2], r;
+			for (uint32 i = 0; i < 10; ++i)
+			{
+				idx = 0;
+				for (PVertex v : cluster)
+				{
+					uint32 v_index = index_of(*p.samples_, v);
+					const Vec3& pos = (*p.projected_samples_position_)[v_index];
+
+					// SQEM energy
+					Eigen::Vector4d lhs = Eigen::Vector4d::Zero();
+					Scalar rhs = 0.0;
+					const Vec3& n = (*p.projected_samples_normal_)[v_index];
+					Vec4 n4 = Vec4(n.x(), n.y(), n.z(), 1.0);
+					Scalar a = 1;
+					lhs += -n4 * a;
+					rhs += -1.0 * ((pos - Vec3(s(0), s(1), s(2))).dot(n) - s(3)) * a;
+					J.row(idx) = lhs;
+					b(idx) = rhs;
+					//}
+					++idx;
+
+					// distance energy
+					const Vec3 vol_pos = (*p.samples_position_)[v_index];
+					Vec3 d = Vec3(s(0), s(1), s(2)) - vol_pos;
+					Scalar l = d.norm();
+					J.row(idx) =
+						Eigen::Vector4d(-2.0 * d(0), -2.0 * d(1), -2.0 * d(2), -2.0 * s(3)) * a * p.sqem_update_lambda_;
+					b(idx) = -(l * l - s(3) * s(3)) * a * p.sqem_update_lambda_; // scale the row by the update lambda
+
+					++idx;
+				}
+
+				Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
+				Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
+				s += delta_s;
+				if (delta_s.norm() < 1e-6) // stop early if converged
+					break;
+			}
+
+			c = s.head<3>();
+			r = s[3];
+		}
+		else
+		{
+			std::cout << "Sphere " << sphere_index << " is not well conditioned, using shrinking ball" << std::endl;
+			// apply shrinking ball
+			std::pair<uint32, Vec3> bvh_res;
+			p.surface_bvh_->closest_point(c, &bvh_res);
+			Vec3 closest_point_position = bvh_res.second;
+			Vec3 closest_point_dir = (closest_point_position - c).normalized();
+
+			const Vec3& closest_face_normal =
+				value<Vec3>(*p.surface_, p.surface_face_normal_, p.surface_bvh_faces_[bvh_res.first]);
+			// TODO: exterior detection is not reliable
+			if ((*p.inside_tester_)(Point_3(c.x(), c.y(), c.z())) == CGAL::ON_UNBOUNDED_SIDE)
+				closest_point_dir = -closest_point_dir;
+
+			auto [center, radius, secondary] = geometry::shrinking_ball_center(
+				*p.samples_, closest_point_position, closest_point_dir, p.projected_samples_position_.get(),
+				p.projected_surface_kdt_, p.projected_kdt_vertices_, p.point_cloud_mode_, 0.25f);
+			c = center;
+			r = radius;
+		}
+		(*p.spheres_position_)[sphere_index] = c;
+		(*p.spheres_radius_)[sphere_index] = r;
+	}
 	void correct_sphere(SurfaceParameters& p, PVertex v)
 	{
 		uint32 v_index = index_of(*p.spheres_, v);
@@ -1231,7 +1319,7 @@ public:
 
 		auto [center, radius, secondary] = geometry::shrinking_ball_center(
 			*p.samples_, closest_point_position, closest_point_dir, p.projected_samples_position_.get(),
-			 p.projected_surface_kdt_, p.projected_kdt_vertices_, p.point_cloud_mode_, 0.25f);
+			p.projected_surface_kdt_, p.projected_kdt_vertices_, p.point_cloud_mode_, 0.25f);
 
 		c = center;
 		r = radius;
@@ -1265,8 +1353,11 @@ public:
 			case SPHERE_POWER_DISTANCE:
 				update_power_distance(p, v);
 				break;
+			case SPHERE_POWER_DISTANCE_SQUARED:
+				update_power_distance_squared(p, v);
+				break;
 			}
-			
+
 			if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
 				correct_sphere(p, v);
 			value<bool>(*p.spheres_, p.spheres_do_not_split_, v) = false;
@@ -1287,7 +1378,7 @@ public:
 			case ERROR_THRESHOLD: {
 				if (p.max_error_ > p.auto_split_error_threshold_)
 				{
-					compute_skeleton(p, true); // only neighbor clusters computation
+					compute_cluster_neighbour(p);
 
 					if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
 					{
@@ -1331,7 +1422,7 @@ public:
 			case MAX_NB_SPHERES: {
 				if (p.nb_spheres_ < p.auto_split_max_nb_spheres_)
 				{
-					compute_skeleton(p, true); // only neighbor clusters computation
+					compute_cluster_neighbour(p);
 
 					if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
 					{
@@ -1440,7 +1531,8 @@ public:
 		}
 	};
 
-	void compute_skeleton(SurfaceParameters& p, bool compute_neighbor_clusters_only = false)
+	
+	void compute_cluster_neighbour(SurfaceParameters& p)
 	{
 		// clean neighbor clusters sets
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
@@ -1465,8 +1557,81 @@ public:
 			return true;
 		});
 
-		if (compute_neighbor_clusters_only)
+	}
+
+	void compute_skeleton(SurfaceParameters& p, bool compute_neighbor_clusters_only = false)
+	{
+		// clean neighbor clusters sets
+		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.spheres_, v);
+			(*p.spheres_neighbor_clusters_)[v_index].clear();
+			(*p.spheres_cluster_)[v_index].clear();
+			(*p.spheres_cluster_area_)[v_index] = 0.0;
+			return true;
+		});
+
+		p.samples_vertex_sphere_->fill(PVertex());
+
+		MeshData<POINTS>& md = points_provider_->mesh_data(*p.spheres_);
+		if (p.nb_spheres_ == 0)
 			return;
+
+		// auto start = std::chrono::high_resolution_clock::now();
+
+		parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.samples_, v);
+
+			// Each volumn sample has weight 1
+			Scalar a = 1.0;
+
+			Scalar min_distance = std::numeric_limits<Scalar>::max();
+			PVertex closest_sphere;
+			uint32 closest_sphere_index;
+
+			foreach_cell(*p.spheres_, [&](PVertex pv) {
+				uint32 pv_index = index_of(*p.spheres_, pv);
+				const Vec3& center = (*p.spheres_position_)[pv_index];
+				Scalar radius = (*p.spheres_radius_)[pv_index];
+
+				Scalar power_distance =
+					((*p.samples_position_)[v_index] - center).dot((*p.samples_position_)[v_index] - center)-radius * radius;
+				
+				power_distance *= a;
+				
+				if (power_distance < min_distance)
+				{
+					min_distance = power_distance;
+					closest_sphere = pv;
+					closest_sphere_index = pv_index;
+				}
+				return true;
+			});
+
+			value<PVertex>(*p.samples_, p.samples_vertex_sphere_, v) = closest_sphere;
+
+			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
+			value<std::vector<PVertex>>(*p.spheres_, p.spheres_cluster_, closest_sphere).push_back(v);
+			value<Scalar>(*p.spheres_, p.spheres_cluster_area_, closest_sphere) += a;
+
+			return true;
+		});
+	
+		// compute neighbor clusters
+		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.samples_, v);
+			PVertex v_sphere = (*p.samples_vertex_sphere_)[v_index];
+			for (PVertex w : (*p.samples_vertex_knn_)[v_index])
+			{
+				PVertex w_sphere = value<PVertex>(*p.samples_, p.samples_vertex_sphere_, w);
+				if (v_sphere.is_valid() && w_sphere.is_valid() && v_sphere != w_sphere)
+				{
+					value<std::set<PVertex>>(*p.spheres_, p.spheres_neighbor_clusters_, v_sphere).insert(w_sphere);
+					value<std::set<PVertex>>(*p.spheres_, p.spheres_neighbor_clusters_, w_sphere).insert(v_sphere);
+				}
+			}
+			return true;
+		});
+
 
 		clear(*p.skeleton_);
 
@@ -1636,7 +1801,6 @@ protected:
 						}
 					}
 				}
-				std::cout << "---------------------------------------------------------" << std::endl;
 				if (p.stopping_)
 				{
 					p.stopping_ = false;
@@ -1801,8 +1965,6 @@ protected:
 						p.sqem_update_lambda_ = p.sqem_clustering_lambda_;
 				}
 
-				
-
 				// ImGui::Checkbox("Auto split outside spheres", &p.auto_split_outside_spheres_);
 
 				if (ImGui::Button("Update spheres"))
@@ -1856,8 +2018,10 @@ protected:
 				ImGui::RadioButton("Sphere Eculidean", (int*)&p.distance_mode_, SPHERE_EUCLIDEAN_DISTANCE);
 				ImGui::SameLine();
 				ImGui::RadioButton("Sphere Center", (int*)&p.distance_mode_, SPHERE_CENTER_DISTANCE);
-				ImGui::SameLine();
+
 				ImGui::RadioButton("Sphere Power", (int*)&p.distance_mode_, SPHERE_POWER_DISTANCE);
+				ImGui::SameLine();
+				ImGui::RadioButton("Sphere Power Squared", (int*)&p.distance_mode_, SPHERE_POWER_DISTANCE_SQUARED);
 				if (!p.running_)
 				{
 					if (ImGui::Button("Start spheres update"))
