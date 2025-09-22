@@ -1239,8 +1239,8 @@ public:
 					const Vec3 vol_pos = (*p.samples_position_)[v_index];
 					Vec3 d = Vec3(s(0), s(1), s(2)) - vol_pos;
 					Scalar l = d.norm();
-					J.row(idx) =
-						Eigen::Vector4d(-2.0 * d(0), -2.0 * d(1), -2.0 * d(2), -2.0 * s(3)) * a * p.sqem_update_lambda_;
+					J.row(idx) = Eigen::Vector4d(2 * d(0) / l, 2 * d(1) / l, 2 * d(2) / l, -2.0 * s(3)) * a *
+								 p.sqem_update_lambda_;
 					b(idx) = -(l * l - s(3) * s(3)) * a * p.sqem_update_lambda_; // scale the row by the update lambda
 
 					++idx;
