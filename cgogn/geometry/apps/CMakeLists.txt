@@ -40,16 +40,26 @@ target_link_libraries(sphere_fitting
 	Blossom5
 	${CMAKE_DL_LIBS}
 )
+
+if (NOT CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+endif()
+
+
 if (CGOGN_USE_CGAL)
 	find_package(CGAL REQUIRED)
 	add_executable(volumn_vmas volumn_vmas.cpp)
+    target_sources(volumn_vmas PRIVATE ../algos/vmas_cuda.cu)
+    set_property(TARGET volumn_vmas PROPERTY CUDA_ARCHITECTURES 89)
+    set_target_properties(volumn_vmas PROPERTIES CUDA_PROPAGATE_HOST_FLAGS OFF)
+
 	target_link_libraries(volumn_vmas
 		CGAL::CGAL
 		cgogn::core
 		cgogn::ui
 		cgogn::io
 		cgogn::rendering
-		cgogn::modeling
+		cgogn::modeling 
 		Blossom5
 		${CMAKE_DL_LIBS}
 )

@@ -63,8 +63,12 @@ using cgogn::geometry::Scalar;
 using cgogn::geometry::Vec3;
 using cgogn::geometry::Vec4;
 
+extern "C" void cgogn_cuda_sanity_call();
+
 int main(int argc, char** argv)
 {
+	cgogn_cuda_sanity_call();
+
 	std::string filename;
 	if (argc < 2)
 		filename = std::string(DEFAULT_MESH_PATH) + std::string("off/elephant.off");
