@@ -215,7 +215,9 @@ class Volumn_VMAS : public ViewModule
 		//fuzzy membership
 		std::shared_ptr<PAttribute<std::unordered_map<uint32, Scalar>>> samples_membership_ = nullptr;
 		float tau_ = 0.01f;
-		uint32 top_k_spheres_ = 6;
+		uint32 top_k_spheres_ = 8;
+		Scalar eps_ = 1e-12;
+		float threshold_membership_ = 0.1f;
 
 		uint32 iteration_count_ = 0;
 		std::mutex mutex_;
@@ -224,7 +226,7 @@ class Volumn_VMAS : public ViewModule
 		bool slow_down_ = true;
 		uint32 update_rate_ = 20;
 		// poisson disk sampling
-		Scalar r_ = 0.02;
+		Scalar r_ = 0.01;
 		uint32 K_ = 30;
 	};
 
@@ -875,7 +877,6 @@ public:
 	{
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.spheres_, v);
-			(*p.samples_membership_)[v_index].clear();
 			(*p.spheres_cluster_)[v_index].clear();
 			(*p.spheres_cluster_area_)[v_index] = 0.0;
 			return true;
@@ -941,20 +942,35 @@ public:
 				candidates.push_back({ pv_index, dist });
 				return true;
 			});
-			const uint32 K = std::min(p.top_k_spheres_, uint32(candidates.size()));
+			/*const uint32 K = std::min(p.top_k_spheres_, uint32(candidates.size()));
 			std::nth_element(candidates.begin(), candidates.begin() + K, candidates.end(), [](const Cand& a, const Cand& b) {
 				return a.E < b.E;
 			});
 			candidates.resize(K);
 
+			Scalar tau = p.tau_;*/
+			if (candidates.size() == 0)
+				return true;
+			auto it = std::min_element(candidates.begin(), candidates.end(),
+									   [](const Cand& a, const Cand& b) { return a.E < b.E; });
+			std::vector<Cand> keep;
+			keep.reserve(candidates.size());
+			Scalar Emin = it->E;
+			const Scalar eps = std::max<Scalar>(p.eps_, 1e-16);
+			for (auto& cd : candidates)
+			{
+				if (cd.E <= (1.0 + p.threshold_membership_) * (Emin + eps))
+					keep.push_back(cd);
+			}
+			if (keep.size() == 0)
+				keep.push_back(*it);
+			
 			Scalar tau = p.tau_;
-			Scalar Emin = candidates[0].E;
-			for(auto& cd : candidates) Emin = std::min(Emin, cd.E);
-
 			Scalar denom = 0.0;
+			const auto K = keep.size();
 			std::vector<Scalar> ww(K);
 			for(uint32 t=0; t<K; ++t) {
-				Scalar w = std::exp(-(candidates[t].E - Emin) / tau);
+				Scalar w = std::exp(-(keep[t].E - Emin) / tau);
 				denom += w;
 				ww[t] = w;
 			}
@@ -963,7 +979,7 @@ public:
 			const Scalar inv = (denom > 0) ? (1.0/denom) : 1.0;
 			for (uint32 t=0; t<K; ++t) {
 				Scalar w = ww[t] * inv;
-				if (w > 0) mmap[candidates[t].sidx] = w;
+				if (w > 0) mmap[keep[t].sidx] = w;
 			}
 			for (const auto& [sidx, w] : mmap)
 			{
@@ -1911,7 +1927,7 @@ public:
 				auto c = (*p.spheres_color_)[it->first];
 				color += it->second * c;
 			}
-			color(3) = 0.5;
+			color(3) = 0.8;
 			(*p.samples_vertex_color_)[v_index] = color;
 			return true;
 		});
@@ -2176,17 +2192,21 @@ protected:
 						p.sqem_update_lambda_ = p.sqem_clustering_lambda_;
 				}
 				ImGui::SliderFloat("Tau", &p.tau_, 0.00001f, 0.01f, "%.6f");
+				ImGui::SliderFloat("Threshold", &p.threshold_membership_, 1.0,100.0f, "%.1f");
 				if (ImGui::Button("Print weight"))
 				{
+					uint32 count = 0;
+					std::unordered_map<uint32, Scalar> weight_sum;
 					foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 						uint32 v_index = index_of(*p.samples_, v);
 						auto& mmap = (*p.samples_membership_)[v_index];
 						Scalar sum = 0.0;
 						for (auto it = mmap.begin(); it != mmap.end(); ++it)
-							std::cout << "Sample " << v_index << " Sphere " << it->first
-									  << " Weight: " << it->second << std::endl;
+							weight_sum[it->first] += it->second;
 						return true;
 					});
+					for (auto it : weight_sum)
+						std::cout << "Sphere " << it.first << " weight sum: " << it.second << std::endl;
 				}
 				// ImGui::Checkbox("Auto split outside spheres", &p.auto_split_outside_spheres_);
 
