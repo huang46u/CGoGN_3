@@ -302,7 +302,7 @@ public:
 	void poisson_disk_sampling(SurfaceParameters& p)
 	{
 		using SampleIndex = std::size_t;
-		const SampleIndex INVALID = -1;
+		const SampleIndex INVALID = (std::numeric_limits<SampleIndex>::max)();
 		Scalar cell_size = p.r_ / std::sqrt(3.0);
 		uint32 grid_size = uint32(std::ceil(1.0 / cell_size));
 		std::vector<std::vector<std::vector<SampleIndex>>> grid(
@@ -998,7 +998,9 @@ public:
 		foreach_cell(*p.samples_, [&](PVertex vi)->bool {
 			const uint32 vi_idx = index_of(*p.samples_, vi);
 			const auto& mmap = (*p.samples_membership_)[vi_idx];
-			uint32 best_idx; Scalar bw = -1.0;
+			assert(!mmap.empty());
+			uint32 best_idx = 0; 
+			Scalar bw = -1.0;
 			for (const auto& kv : mmap) {
 				if (kv.second > bw)
 				{
@@ -1066,6 +1068,7 @@ public:
 				Scalar dist = membership * (dist_sqem + p.sqem_clustering_lambda_ * dist_other);
 				(*p.samples_vertex_error_)[sv_index] = dist;
 				cluster_error += dist;
+				return true;
 			});
 			(*p.spheres_error_)[v_index] = cluster_error / (*p.spheres_cluster_area_)[v_index];
 			(*p.spheres_error_not_normalized_)[v_index] = cluster_error;
