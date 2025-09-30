@@ -217,7 +217,8 @@ class Volumn_VMAS : public ViewModule
 		float tau_ = 0.01f;
 		uint32 top_k_spheres_ = 8;
 		Scalar eps_ = 1e-12;
-		float threshold_membership_ = 0.1f;
+
+		float theta_gap_log_ = 0.1f;
 
 		uint32 iteration_count_ = 0;
 		std::mutex mutex_;
@@ -226,7 +227,7 @@ class Volumn_VMAS : public ViewModule
 		bool slow_down_ = true;
 		uint32 update_rate_ = 20;
 		// poisson disk sampling
-		Scalar r_ = 0.01;
+		Scalar r_ = 0.015;
 		uint32 K_ = 30;
 	};
 
@@ -891,7 +892,7 @@ public:
 			uint32 sidx;
 			Scalar E;
 		};
-		parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
 			
 			std::vector<Cand> candidates;
@@ -942,42 +943,84 @@ public:
 				candidates.push_back({ pv_index, dist });
 				return true;
 			});
-			/*const uint32 K = std::min(p.top_k_spheres_, uint32(candidates.size()));
+			const uint32 K = std::min(p.top_k_spheres_, uint32(candidates.size()));
 			std::nth_element(candidates.begin(), candidates.begin() + K, candidates.end(), [](const Cand& a, const Cand& b) {
 				return a.E < b.E;
 			});
 			candidates.resize(K);
-
-			Scalar tau = p.tau_;*/
+			std::sort(candidates.begin(), candidates.end(), [](const Cand& a, const Cand& b) { return a.E < b.E; });
+			
+			
+			
+			Scalar Emin = candidates[0].E;
+			Scalar tau = p.tau_;
 			if (candidates.size() == 0)
 				return true;
-			auto it = std::min_element(candidates.begin(), candidates.end(),
-									   [](const Cand& a, const Cand& b) { return a.E < b.E; });
-			std::vector<Cand> keep;
-			keep.reserve(candidates.size());
-			Scalar Emin = it->E;
-			const Scalar eps = std::max<Scalar>(p.eps_, 1e-16);
-			for (auto& cd : candidates)
-			{
-				if (cd.E <= (1.0 + p.threshold_membership_) * (Emin + eps))
-					keep.push_back(cd);
-			}
-			if (keep.size() == 0)
-				keep.push_back(*it);
+			std::vector<Scalar> log_e;
+			log_e.reserve(candidates.size());
+			for (const auto& c : candidates)
+				log_e.push_back(std::log(c.E + 1e-16));
 			
-			Scalar tau = p.tau_;
+		
+			
+			const Scalar eps = std::max<Scalar>(p.eps_, 1e-16);
+			std::vector<Scalar> gap;
+			gap.reserve((K > 1) ? (K - 1): 0);
+
+			for (uint32 t = 0; t+1<K; ++t)
+			{ 
+				Scalar x_t = std::log(candidates[t].E + eps);
+				Scalar x_t1 = std::log(candidates[t + 1].E + eps);
+				gap.push_back(x_t1 - x_t);
+			
+			}
+			const Scalar theta_gap = p.theta_gap_log_;
+			uint32 pike =K - 1;
+			for (uint32 t = 0; t < gap.size(); ++t)
+			{
+				if (gap[t] >= p.theta_gap_log_)
+				{
+					pike = t;
+					break;
+				}
+			}
 			Scalar denom = 0.0;
-			const auto K = keep.size();
-			std::vector<Scalar> ww(K);
-			for(uint32 t=0; t<K; ++t) {
-				Scalar w = std::exp(-(keep[t].E - Emin) / tau);
+			std::vector<Cand> keep;
+			keep.reserve(pike+1);
+			for (uint32 t = 0; t <= pike; ++t)
+				keep.push_back(candidates[t]);
+			if (keep.empty())
+				keep.push_back(candidates.front());
+			/*if (keep.size() > 1)
+			{
+				std::cout << "candidates: ";
+				for (const auto& c : candidates)
+					std::cout << c.E << " ";
+				std::cout << std::endl;
+				std::cout << "log_e: ";
+				for (const auto& le : log_e)
+					std::cout << le << " ";
+				std::cout << std::endl;
+				std::cout << " keep: ";
+				for (auto& c : keep)
+					std::cout << c.E << " ";
+				std::cout << std::endl;
+				std::cout << " ----------------------------------------" << std::endl;
+			}*/
+			const auto nK = keep.size();
+			std::vector<Scalar> ww(nK);
+			for (uint32 t = 0; t < nK; ++t)
+			{
+				Scalar w = std::exp(-keep[t].E/ tau);
 				denom += w;
 				ww[t] = w;
 			}
 			auto& mmap = (*p.samples_membership_)[v_index];
-			mmap.clear(); mmap.reserve(K);
+			mmap.clear();
+			mmap.reserve(nK);
 			const Scalar inv = (denom > 0) ? (1.0/denom) : 1.0;
-			for (uint32 t=0; t<K; ++t) {
+			for (uint32 t = 0; t < nK; ++t)
+			{
 				Scalar w = ww[t] * inv;
 				if (w > 0) mmap[keep[t].sidx] = w;
 			}
@@ -2194,8 +2237,8 @@ protected:
 					if (sync_lambda)
 						p.sqem_update_lambda_ = p.sqem_clustering_lambda_;
 				}
-				ImGui::SliderFloat("Tau", &p.tau_, 0.00001f, 0.01f, "%.6f");
-				ImGui::SliderFloat("Threshold", &p.threshold_membership_, 1.0,100.0f, "%.1f");
+				ImGui::SliderFloat("Tau", &p.tau_, 0.0001f, 1.0f, "%.6f");
+				ImGui::SliderFloat("Threshold", &p.theta_gap_log_, 0.01f,5.0f, "%.2f");
 				if (ImGui::Button("Print weight"))
 				{
 					uint32 count = 0;
