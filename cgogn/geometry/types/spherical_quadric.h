@@ -137,6 +137,20 @@ struct Spherical_Quadric
 		return os;
 	}
 
+	Mat4 A() const
+	{
+		return _A;
+	}
+	Vec4 b() const
+	{
+		return _b;
+	}
+	Scalar c() const
+	{
+		return _c;
+	}
+
+
 	Mat4 _A;
 	Vec4 _b;
 	Scalar _c = 0;

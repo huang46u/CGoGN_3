@@ -53,6 +53,9 @@
 #include <random>
 #include <set>
 
+// Import CUDA
+#include <cgogn/geometry/algos/vmas_cuda_shared.h>
+#include <cuda_runtime.h>
 namespace cgogn
 {
 
@@ -160,7 +163,7 @@ class Volumn_VMAS : public ViewModule
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_not_normalized_ = nullptr;
 		// PAttribute<Scalar>* selected_spheres_error_ = nullptr;
 
-		//Volumn Samples
+		// Volumn Samples
 		POINTS* samples_;
 		std::shared_ptr<PAttribute<Vec3>> samples_position_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> samples_vertex_color_ = nullptr;
@@ -212,7 +215,7 @@ class Volumn_VMAS : public ViewModule
 		bool error_as_spheres_color_ = false;
 		float32 spheres_transparency_ = 0.5f;
 
-		//fuzzy membership
+		// fuzzy membership
 		std::shared_ptr<PAttribute<std::unordered_map<uint32, Scalar>>> samples_membership_ = nullptr;
 		float tau_ = 0.01f;
 		uint32 top_k_spheres_ = 8;
@@ -229,6 +232,7 @@ class Volumn_VMAS : public ViewModule
 		// poisson disk sampling
 		Scalar r_ = 0.015;
 		uint32 K_ = 30;
+		bool use_cuda_for_membership_ = false;
 	};
 
 public:
@@ -708,8 +712,11 @@ public:
 		// if we already have spheres, we need to recompute the clusters and errors
 		// (cleans out surface vertex sphere data)
 
-		//compute_clusters(p);
-		compute_membership_soft(p);
+		// compute_clusters(p);
+		if (p.use_cuda_for_membership_)
+			compute_membership_soft_cuda(p);
+		else
+			compute_membership_soft_cpu(p);
 		materialize_top1_labels(p);
 
 		// update the render data (spheres and skeleton)
@@ -759,8 +766,11 @@ public:
 			0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0);
 		// Vec3(rand() % 256 / 255.0f, rand() % 256 / 255.0f, rand() % 256 / 255.0f);
 
-		//compute_clusters(p);
-		compute_membership_soft(p);
+		// compute_clusters(p);
+		if (p.use_cuda_for_membership_)
+			compute_membership_soft_cuda(p);
+		else
+			compute_membership_soft_cpu(p);
 		materialize_top1_labels(p);
 
 		if (!p.running_)
@@ -873,9 +883,244 @@ public:
 	// 		return true;
 	// 	});
 	// }
-
-	void compute_membership_soft(SurfaceParameters& p)
+	struct MembershipInputs
 	{
+		std::vector<Vec3> samples_position;
+		std::vector<Vec3> samples_projected_position;
+		std::vector<Vec3> samples_projected_normal;
+
+		std::vector<Mat4> quadric_A;
+		std::vector<Vec4> quadric_b;
+		std::vector<Scalar> quadric_c;
+
+		std::vector<Vec3> spheres_position;
+		std::vector<Scalar> spheres_radius;
+	};
+	void fill_membership_inputs(const SurfaceParameters& p, MembershipInputs& out)
+	{
+		const uint32 n_v = nb_cells<PVertex>(*p.samples_);
+		out.samples_position.resize(n_v);
+		out.samples_projected_position.resize(n_v);
+		out.samples_projected_normal.resize(n_v);
+		out.quadric_A.resize(n_v);
+		out.quadric_b.resize(n_v);
+		out.quadric_c.resize(n_v);
+		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.samples_, v);
+			out.samples_position[v_index] = (*p.samples_position_)[v_index];
+			out.samples_projected_position[v_index] = (*p.projected_samples_position_)[v_index];
+			out.samples_projected_normal[v_index] = (*p.projected_samples_normal_)[v_index];
+			const Spherical_Quadric& q = (*p.samples_quadric_)[v_index];
+			out.quadric_A[v_index] = q.A();
+			out.quadric_b[v_index] = q.b();
+			out.quadric_c[v_index] = q.c();
+			return true;
+		});
+		const uint32 n_s = nb_cells<PVertex>(*p.spheres_);
+		out.spheres_position.resize(n_s);
+		out.spheres_radius.resize(n_s);
+		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.spheres_, v);
+			out.spheres_position[v_index] = (*p.spheres_position_)[v_index];
+			out.spheres_radius[v_index] = (*p.spheres_radius_)[v_index];
+			return true;
+		});
+	}
+	struct PackedMembershipInputs
+	{
+		std::vector<float> samples_pos_xyz; // size = nb_samples * 3
+		std::vector<float> samples_proj_xyz;
+		std::vector<float> samples_norm_xyz;
+		std::vector<float> quadric_A; // size = nb_samples * 16 (row-major)
+		std::vector<float> quadric_b; // size = nb_samples * 4
+		std::vector<float> quadric_c; // size = nb_samples
+
+		std::vector<float> spheres_pos_xyz; // size = nb_spheres * 3
+		std::vector<float> spheres_radius;	// size = nb_spheres
+	};
+
+	void pack_membership_inputs(const MembershipInputs& in, PackedMembershipInputs& out) const
+	{
+		const uint32 nb_samples = static_cast<uint32>(in.samples_position.size());
+		const uint32 nb_spheres = static_cast<uint32>(in.spheres_position.size());
+
+		out.samples_pos_xyz.resize(nb_samples * 3);
+		out.samples_proj_xyz.resize(nb_samples * 3);
+		out.samples_norm_xyz.resize(nb_samples * 3);
+		out.quadric_A.resize(nb_samples * 16);
+		out.quadric_b.resize(nb_samples * 4);
+		out.quadric_c.resize(nb_samples);
+
+		auto copy_vec3 = [](const Vec3& v, float* dst) {
+			dst[0] = static_cast<float>(v[0]);
+			dst[1] = static_cast<float>(v[1]);
+			dst[2] = static_cast<float>(v[2]);
+		};
+		auto copy_mat4 = [](const Mat4& m, float* dst) {
+			for (int r = 0; r < 4; ++r)
+				for (int c = 0; c < 4; ++c)
+					dst[r * 4 + c] = static_cast<float>(m(r, c));
+		};
+		auto copy_vec4 = [](const Vec4& v, float* dst) {
+			for (int i = 0; i < 4; ++i)
+				dst[i] = static_cast<float>(v[i]);
+		};
+
+		for (uint32 i = 0; i < nb_samples; ++i)
+		{
+			copy_vec3(in.samples_position[i], &out.samples_pos_xyz[i * 3]);
+			copy_vec3(in.samples_projected_position[i], &out.samples_proj_xyz[i * 3]);
+			copy_vec3(in.samples_projected_normal[i], &out.samples_norm_xyz[i * 3]);
+
+			copy_mat4(in.quadric_A[i], &out.quadric_A[i * 16]);
+			copy_vec4(in.quadric_b[i], &out.quadric_b[i * 4]);
+			out.quadric_c[i] = static_cast<float>(in.quadric_c[i]);
+		}
+
+		out.spheres_pos_xyz.resize(nb_spheres * 3);
+		out.spheres_radius.resize(nb_spheres);
+
+		for (uint32 i = 0; i < nb_spheres; ++i)
+		{
+			copy_vec3(in.spheres_position[i], &out.spheres_pos_xyz[i * 3]);
+			out.spheres_radius[i] = static_cast<float>(in.spheres_radius[i]);
+		}
+	}
+
+	void compute_membership_soft_cuda(SurfaceParameters& p)
+	{
+		MembershipInputs inputs;
+		fill_membership_inputs(p, inputs);
+		PackedMembershipInputs packed_inputs;
+		pack_membership_inputs(inputs, packed_inputs);
+		const int nbSamples = static_cast<int>(packed_inputs.samples_pos_xyz.size() / 3);
+		const int nbSpheres = static_cast<int>(packed_inputs.spheres_pos_xyz.size() / 3);
+		if (nbSamples == 0 || nbSpheres == 0)
+			return;
+
+		std::vector<PVertex> sample_vertices(nbSamples);
+		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.samples_, v);
+			sample_vertices[v_index] = v;
+			return true;
+		});
+		std::vector<MembershipEntry> h_entries(nbSamples * p.top_k_spheres_);
+		std::vector<int> h_counts(nbSamples);
+
+		float *d_samplesPos = nullptr, *d_samplesProj = nullptr, *d_samplesNorm = nullptr;
+		float *d_quadricA = nullptr, *d_quadricB = nullptr, *d_quadricC = nullptr;
+		float *d_spheresPos = nullptr, *d_spheresRadius = nullptr;
+		MembershipEntry* d_entries = nullptr;
+		int* d_counts = nullptr;
+
+		CUDA_OK(cudaMalloc((void**)&d_samplesPos, packed_inputs.samples_pos_xyz.size() * sizeof(float)),
+				"malloc samplesPos");
+		CUDA_OK(cudaMalloc((void**)&d_samplesProj, packed_inputs.samples_proj_xyz.size() * sizeof(float)),
+				"malloc samplesProj");
+		CUDA_OK(cudaMalloc((void**)&d_samplesNorm, packed_inputs.samples_norm_xyz.size() * sizeof(float)),
+				"malloc samplesNorm");
+		CUDA_OK(cudaMalloc((void**)&d_quadricA, packed_inputs.quadric_A.size() * sizeof(float)), "malloc quadricA");
+		CUDA_OK(cudaMalloc((void**)&d_quadricB, packed_inputs.quadric_b.size() * sizeof(float)), "malloc quadricB");
+		CUDA_OK(cudaMalloc((void**)&d_quadricC, packed_inputs.quadric_c.size() * sizeof(float)), "malloc quadricC");
+		CUDA_OK(cudaMalloc((void**)&d_spheresPos, packed_inputs.spheres_pos_xyz.size() * sizeof(float)),
+				"malloc spheresPos");
+		CUDA_OK(cudaMalloc((void**)&d_spheresRadius, packed_inputs.spheres_radius.size() * sizeof(float)),
+				"malloc spheresRadius");
+		CUDA_OK(cudaMalloc((void**)&d_entries, h_entries.size() * sizeof(MembershipEntry)), "malloc entries");
+		CUDA_OK(cudaMalloc((void**)&d_counts, h_counts.size() * sizeof(int)), "malloc counts");
+
+		CUDA_OK(cudaMemcpy(d_samplesPos, packed_inputs.samples_pos_xyz.data(),
+						   packed_inputs.samples_pos_xyz.size() * sizeof(float), cudaMemcpyHostToDevice),
+				"memcpy samplesPos");
+		CUDA_OK(cudaMemcpy(d_samplesProj, packed_inputs.samples_proj_xyz.data(),
+						   packed_inputs.samples_proj_xyz.size() * sizeof(float), cudaMemcpyHostToDevice),
+				"memcpy samplesProj");
+		CUDA_OK(cudaMemcpy(d_samplesNorm, packed_inputs.samples_norm_xyz.data(),
+						   packed_inputs.samples_norm_xyz.size() * sizeof(float), cudaMemcpyHostToDevice),
+				"memcpy samplesNorm");
+		CUDA_OK(cudaMemcpy(d_quadricA, packed_inputs.quadric_A.data(), packed_inputs.quadric_A.size() * sizeof(float),
+						   cudaMemcpyHostToDevice),
+				"memcpy quadricA");
+		CUDA_OK(cudaMemcpy(d_quadricB, packed_inputs.quadric_b.data(), packed_inputs.quadric_b.size() * sizeof(float),
+						   cudaMemcpyHostToDevice),
+				"memcpy quadricB");
+		CUDA_OK(cudaMemcpy(d_quadricC, packed_inputs.quadric_c.data(), packed_inputs.quadric_c.size() * sizeof(float),
+						   cudaMemcpyHostToDevice),
+				"memcpy quadricC");
+		CUDA_OK(cudaMemcpy(d_spheresPos, packed_inputs.spheres_pos_xyz.data(),
+						   packed_inputs.spheres_pos_xyz.size() * sizeof(float), cudaMemcpyHostToDevice),
+				"memcpy spheresPos");
+		CUDA_OK(cudaMemcpy(d_spheresRadius, packed_inputs.spheres_radius.data(),
+						   packed_inputs.spheres_radius.size() * sizeof(float), cudaMemcpyHostToDevice),
+				"memcpy spheresRadius");
+
+		CUDA_OK(cgogn_compute_membership(nbSamples, d_samplesPos, d_samplesProj, d_samplesNorm, d_quadricA, d_quadricB,
+										 d_quadricC, nbSpheres, d_spheresPos, d_spheresRadius,
+										 static_cast<float>(p.sqem_clustering_lambda_), static_cast<float>(p.tau_),
+										 static_cast<float>(p.eps_), static_cast<float>(p.theta_gap_log_),
+										 static_cast<int>(p.distance_mode_), d_entries, d_counts),
+				"cgogn_compute_membership");
+
+		CUDA_OK(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+
+		CUDA_OK(
+			cudaMemcpy(h_entries.data(), d_entries, h_entries.size() * sizeof(MembershipEntry), cudaMemcpyDeviceToHost),
+			"memcpy entries");
+		CUDA_OK(cudaMemcpy(h_counts.data(), d_counts, h_counts.size() * sizeof(int), cudaMemcpyDeviceToHost),
+				"memcpy counts");
+
+		CUDA_OK(cudaFree(d_samplesPos));
+		CUDA_OK(cudaFree(d_samplesProj));
+		CUDA_OK(cudaFree(d_samplesNorm));
+		CUDA_OK(cudaFree(d_quadricA));
+		CUDA_OK(cudaFree(d_quadricB));
+		CUDA_OK(cudaFree(d_quadricC));
+		CUDA_OK(cudaFree(d_spheresPos));
+		CUDA_OK(cudaFree(d_spheresRadius));
+		CUDA_OK(cudaFree(d_entries));
+		CUDA_OK(cudaFree(d_counts));
+		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 idx = index_of(*p.spheres_, v);
+			(*p.spheres_cluster_)[idx].clear();
+			(*p.spheres_cluster_area_)[idx] = 0.0;
+			return true;
+		});
+		p.samples_vertex_sphere_->fill(PVertex());
+		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+			uint32 idx = index_of(*p.samples_, v);
+			(*p.samples_membership_)[idx].clear();
+			return true;
+		});
+
+		for (int sampleIdx = 0; sampleIdx < nbSamples; ++sampleIdx)
+		{
+			const int count = h_counts[sampleIdx];
+			if (count <= 0)
+				continue;
+
+			PVertex vi = sample_vertices[sampleIdx];
+			auto& mmap = (*p.samples_membership_)[sampleIdx];
+
+			for (int k = 0; k < count; ++k)
+			{
+				const MembershipEntry& entry = h_entries[sampleIdx * p.top_k_spheres_ + k];
+				if (entry.weight <= 0.f)
+					continue;
+
+				mmap[static_cast<uint32>(entry.sphere_idx)] = static_cast<Scalar>(entry.weight);
+
+				{
+					std::lock_guard<std::mutex> lock(spheres_mutex_[entry.sphere_idx % spheres_mutex_.size()]);
+					(*p.spheres_cluster_)[entry.sphere_idx].push_back(vi);
+					(*p.spheres_cluster_area_)[entry.sphere_idx] += static_cast<Scalar>(entry.weight);
+				}
+			}
+		}
+	}
+
+	void compute_membership_soft_cpu(SurfaceParameters& p)
+	{
+
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.spheres_, v);
 			(*p.spheres_cluster_)[v_index].clear();
@@ -894,7 +1139,7 @@ public:
 		};
 		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
-			
+
 			std::vector<Cand> candidates;
 			candidates.reserve(p.nb_spheres_);
 			// Each volumn sample has weight 1
@@ -940,18 +1185,15 @@ public:
 				}
 				dist_other *= a;
 				Scalar dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
-				candidates.push_back({ pv_index, dist });
+				candidates.push_back({pv_index, dist});
 				return true;
 			});
 			const uint32 K = std::min(p.top_k_spheres_, uint32(candidates.size()));
-			std::nth_element(candidates.begin(), candidates.begin() + K, candidates.end(), [](const Cand& a, const Cand& b) {
-				return a.E < b.E;
-			});
+			std::nth_element(candidates.begin(), candidates.begin() + K, candidates.end(),
+							 [](const Cand& a, const Cand& b) { return a.E < b.E; });
 			candidates.resize(K);
 			std::sort(candidates.begin(), candidates.end(), [](const Cand& a, const Cand& b) { return a.E < b.E; });
-			
-			
-			
+
 			Scalar Emin = candidates[0].E;
 			Scalar tau = p.tau_;
 			if (candidates.size() == 0)
@@ -960,22 +1202,19 @@ public:
 			log_e.reserve(candidates.size());
 			for (const auto& c : candidates)
 				log_e.push_back(std::log(c.E + 1e-16));
-			
-		
-			
+
 			const Scalar eps = std::max<Scalar>(p.eps_, 1e-16);
 			std::vector<Scalar> gap;
-			gap.reserve((K > 1) ? (K - 1): 0);
+			gap.reserve((K > 1) ? (K - 1) : 0);
 
-			for (uint32 t = 0; t+1<K; ++t)
-			{ 
+			for (uint32 t = 0; t + 1 < K; ++t)
+			{
 				Scalar x_t = std::log(candidates[t].E + eps);
 				Scalar x_t1 = std::log(candidates[t + 1].E + eps);
 				gap.push_back(x_t1 - x_t);
-			
 			}
 			const Scalar theta_gap = p.theta_gap_log_;
-			uint32 pike =K - 1;
+			uint32 pike = K - 1;
 			for (uint32 t = 0; t < gap.size(); ++t)
 			{
 				if (gap[t] >= p.theta_gap_log_)
@@ -986,7 +1225,7 @@ public:
 			}
 			Scalar denom = 0.0;
 			std::vector<Cand> keep;
-			keep.reserve(pike+1);
+			keep.reserve(pike + 1);
 			for (uint32 t = 0; t <= pike; ++t)
 				keep.push_back(candidates[t]);
 			if (keep.empty())
@@ -1011,18 +1250,19 @@ public:
 			std::vector<Scalar> ww(nK);
 			for (uint32 t = 0; t < nK; ++t)
 			{
-				Scalar w = std::exp(-keep[t].E/ tau);
+				Scalar w = std::exp(-keep[t].E / tau);
 				denom += w;
 				ww[t] = w;
 			}
 			auto& mmap = (*p.samples_membership_)[v_index];
 			mmap.clear();
 			mmap.reserve(nK);
-			const Scalar inv = (denom > 0) ? (1.0/denom) : 1.0;
+			const Scalar inv = (denom > 0) ? (1.0 / denom) : 1.0;
 			for (uint32 t = 0; t < nK; ++t)
 			{
 				Scalar w = ww[t] * inv;
-				if (w > 0) mmap[keep[t].sidx] = w;
+				if (w > 0)
+					mmap[keep[t].sidx] = w;
 			}
 			for (const auto& [sidx, w] : mmap)
 			{
@@ -1038,13 +1278,14 @@ public:
 	{
 		if (p.nb_spheres_ == 0)
 			return;
-		foreach_cell(*p.samples_, [&](PVertex vi)->bool {
+		foreach_cell(*p.samples_, [&](PVertex vi) -> bool {
 			const uint32 vi_idx = index_of(*p.samples_, vi);
 			const auto& mmap = (*p.samples_membership_)[vi_idx];
 			assert(!mmap.empty());
-			uint32 best_idx = 0; 
+			uint32 best_idx = 0;
 			Scalar bw = -1.0;
-			for (const auto& kv : mmap) {
+			for (const auto& kv : mmap)
+			{
 				if (kv.second > bw)
 				{
 					bw = kv.second;
@@ -1276,7 +1517,6 @@ public:
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
 
-	
 	void update_fuzzy_sphere_euclidean_distance(SurfaceParameters& p, PVertex sphere)
 	{
 		uint32 sphere_index = index_of(*p.spheres_, sphere);
@@ -1307,9 +1547,9 @@ public:
 				const Vec3& n = (*p.projected_samples_normal_)[v_index];
 				Vec4 n4 = Vec4(n.x(), n.y(), n.z(), 1.0);
 				Scalar a = 1;
-				Vec4 lhs=  -n4* a;
-				Scalar r1 = - 1.0 * ((pos - Vec3(s(0), s(1), s(2))).dot(n) - s(3)) * a;
-				rows.push_back(sw* lhs);
+				Vec4 lhs = -n4 * a;
+				Scalar r1 = -1.0 * ((pos - Vec3(s(0), s(1), s(2))).dot(n) - s(3)) * a;
+				rows.push_back(sw * lhs);
 				rhs.push_back(sw * r1);
 
 				// distance energy
@@ -1317,7 +1557,7 @@ public:
 				Scalar l = d.norm();
 
 				lhs = Vec4(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * a * p.sqem_update_lambda_;
-				Scalar r2 =  -(l - s(3)) * a * p.sqem_update_lambda_; // scale the row by the update lambda
+				Scalar r2 = -(l - s(3)) * a * p.sqem_update_lambda_; // scale the row by the update lambda
 				rows.push_back(lhs * sw);
 				rhs.push_back(sw * r2);
 				return true;
@@ -1594,8 +1834,11 @@ public:
 	{
 		// auto start = std::chrono::high_resolution_clock::now();
 
-		//compute_clusters(p);
-		compute_membership_soft(p);
+		// compute_clusters(p);
+		if(p.use_cuda_for_membership_)
+			compute_membership_soft_cuda(p);
+		else
+			compute_membership_soft_cpu(p);
 		materialize_top1_labels(p);
 		// switch (p.update_method_)
 		// {
@@ -1797,7 +2040,6 @@ public:
 		}
 	};
 
-	
 	void compute_cluster_neighbour(SurfaceParameters& p)
 	{
 		// clean neighbor clusters sets
@@ -1822,7 +2064,6 @@ public:
 			}
 			return true;
 		});
-
 	}
 
 	void compute_skeleton(SurfaceParameters& p, bool compute_neighbor_clusters_only = false)
@@ -1860,10 +2101,11 @@ public:
 				Scalar radius = (*p.spheres_radius_)[pv_index];
 
 				Scalar power_distance =
-					((*p.samples_position_)[v_index] - center).dot((*p.samples_position_)[v_index] - center)-radius * radius;
-				
+					((*p.samples_position_)[v_index] - center).dot((*p.samples_position_)[v_index] - center) -
+					radius * radius;
+
 				power_distance *= a;
-				
+
 				if (power_distance < min_distance)
 				{
 					min_distance = power_distance;
@@ -1881,7 +2123,7 @@ public:
 
 			return true;
 		});
-	
+
 		// compute neighbor clusters
 		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
@@ -1897,7 +2139,6 @@ public:
 			}
 			return true;
 		});
-
 
 		clear(*p.skeleton_);
 
@@ -1977,7 +2218,6 @@ public:
 			(*p.samples_vertex_color_)[v_index] = color;
 			return true;
 		});
-		
 	}
 
 protected:
@@ -2136,8 +2376,11 @@ protected:
 			{
 				std::lock_guard<std::mutex> lock(p.mutex_);
 				split_sphere(p, picked_sphere_);
-				//compute_clusters(p);
-				compute_membership_soft(p);
+				// compute_clusters(p);
+				if (p.use_cuda_for_membership_)
+					compute_membership_soft_cuda(p);
+				else
+					compute_membership_soft_cpu(p);
 				materialize_top1_labels(p);
 				compute_spheres_error(p);
 				if (!p.running_)
@@ -2147,8 +2390,11 @@ protected:
 			{
 				std::lock_guard<std::mutex> lock(p.mutex_);
 				remove_sphere(p, picked_sphere_);
-				//compute_clusters(p);
-				compute_membership_soft(p);
+				// compute_clusters(p);
+				if (p.use_cuda_for_membership_)
+					compute_membership_soft_cuda(p);
+				else
+					compute_membership_soft_cpu(p);
 				materialize_top1_labels(p);
 				compute_spheres_error(p);
 				if (!p.running_)
@@ -2237,8 +2483,8 @@ protected:
 					if (sync_lambda)
 						p.sqem_update_lambda_ = p.sqem_clustering_lambda_;
 				}
-				ImGui::SliderFloat("Tau", &p.tau_, 0.0001f, 1.0f, "%.6f");
-				ImGui::SliderFloat("Threshold", &p.theta_gap_log_, 0.01f,5.0f, "%.2f");
+				ImGui::SliderFloat("Tau", &p.tau_, 0.00001f, 0.01f, "%.6f");
+				ImGui::SliderFloat("Threshold", &p.theta_gap_log_, 0.1f, 10.0f, "%.1f");
 				if (ImGui::Button("Print weight"))
 				{
 					uint32 count = 0;
@@ -2255,7 +2501,7 @@ protected:
 						std::cout << "Sphere " << it.first << " weight sum: " << it.second << std::endl;
 				}
 				// ImGui::Checkbox("Auto split outside spheres", &p.auto_split_outside_spheres_);
-
+				ImGui::Checkbox("Use CUDA for membership", &p.use_cuda_for_membership_);
 				if (ImGui::Button("Update spheres"))
 				{
 					if (!p.running_)
@@ -2272,8 +2518,11 @@ protected:
 					if (!p.running_)
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
-						//compute_clusters(p);
-						compute_membership_soft(p);
+						// compute_clusters(p);
+						if (p.use_cuda_for_membership_)
+							compute_membership_soft_cuda(p);
+						else
+							compute_membership_soft_cpu(p);
 						materialize_top1_labels(p);
 						compute_spheres_error(p);
 						update_render_data(p);
@@ -2358,8 +2607,11 @@ protected:
 				{
 					std::lock_guard<std::mutex> lock(p.mutex_);
 					split_sphere(p, p.max_error_sphere_);
-					//compute_clusters(p);
-					compute_membership_soft(p);
+					// compute_clusters(p);
+					if (p.use_cuda_for_membership_)
+						compute_membership_soft_cuda(p);
+					else
+						compute_membership_soft_cpu(p);
 					materialize_top1_labels(p);
 					compute_spheres_error(p);
 					if (!p.running_)
