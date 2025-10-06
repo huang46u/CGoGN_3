@@ -44,7 +44,9 @@ namespace cgogn
 template <typename T>
 class CGOGN_CORE_EXPORT ChunkArray : public AttributeGenT
 {
+	
 public:
+	using value_type = T;
 	static const uint32 CHUNK_SIZE = 1024u;
 
 private:

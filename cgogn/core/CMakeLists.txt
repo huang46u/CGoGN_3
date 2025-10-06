@@ -19,6 +19,7 @@ set(src_list
 		"${CMAKE_CURRENT_LIST_DIR}/types/cell_marker.h"
 		"${CMAKE_CURRENT_LIST_DIR}/types/cells_set.h"
 		"${CMAKE_CURRENT_LIST_DIR}/types/mesh_traits.h"
+		"${CMAKE_CURRENT_LIST_DIR}/types/cuda_plain_traits.h"
 		
 		"${CMAKE_CURRENT_LIST_DIR}/types/mesh_views/cell_cache.h"
 		"${CMAKE_CURRENT_LIST_DIR}/types/mesh_views/cell_filter.h"
@@ -78,6 +79,9 @@ set(src_list
 		"${CMAKE_CURRENT_LIST_DIR}/types/container/attribute_container.cpp"
 		"${CMAKE_CURRENT_LIST_DIR}/types/container/chunk_array.h"
 		"${CMAKE_CURRENT_LIST_DIR}/types/container/vector.h"
+		"${CMAKE_CURRENT_LIST_DIR}/types/container/cuda_plain_buffer.h"
+
+
 
 		"${CMAKE_CURRENT_LIST_DIR}/functions/attributes.h"
 		"${CMAKE_CURRENT_LIST_DIR}/functions/convert.h"

@@ -25,6 +25,7 @@
 #define CGOGN_GEOMETRY_TYPES_SPHEREICAL_QUADRIC_H_
 
 #include <cgogn/geometry/types/vector_traits.h>
+#include <iostream>
 
 namespace cgogn
 {
