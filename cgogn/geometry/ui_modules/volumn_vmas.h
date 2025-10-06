@@ -1398,6 +1398,47 @@ public:
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
 
+	void update_fuzzy_sphere_center_distance(SurfaceParameters& p, PVertex sphere)
+	{
+		uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+		Vec3 c = (*p.spheres_position_)[sphere_index];
+		Scalar r = (*p.spheres_radius_)[sphere_index];
+		Spherical_Quadric q;
+		Scalar area = 0.0;
+		Vec3 h;
+		h.setZero();
+		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.samples_, v);
+			auto& mmap = (*p.samples_membership_)[v_index];
+			auto it = mmap.find(sphere_index);
+			if (it == mmap.end())
+				return true;
+			const Scalar weight = std::max(0.0, it->second);
+			Spherical_Quadric quadric = (*p.samples_quadric_)[v];
+			quadric *= weight;
+			q += quadric;
+			h += 1.0 * weight * (*p.samples_position_)[v];
+			area += 1.0;
+			return true;
+		});
+		Mat4 As = Mat4::Identity();
+		As.block<3, 3>(0, 0) = 2 * Mat3::Identity() * area;
+		As(3, 3) = 0;
+		Vec4 bs;
+		bs.head<3>() = 2 * h;
+		bs(3) = 0;
+		Mat4 A = q._A + p.sqem_clustering_lambda_ * As;
+		Vec4 b = q._b + p.sqem_clustering_lambda_ * bs;
+		Vec4 s = A.ldlt().solve(b);
+		c = s.head<3>();
+		r = s(3);
+
+		(*p.spheres_position_)[sphere_index] = c;
+		(*p.spheres_radius_)[sphere_index] = r;
+	}
+
 	void update_power_distance(SurfaceParameters& p, PVertex sphere)
 	{
 		uint32 sphere_index = index_of(*p.spheres_, sphere);
@@ -1452,6 +1493,48 @@ public:
 			c = center;
 			r = radius;
 		}
+		(*p.spheres_position_)[sphere_index] = c;
+		(*p.spheres_radius_)[sphere_index] = r;
+	}
+
+	void update_fuzzy_power_distance(SurfaceParameters& p, PVertex sphere)
+	{
+		uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+		Vec3 c = (*p.spheres_position_)[sphere_index];
+		Scalar r = (*p.spheres_radius_)[sphere_index];
+		// Verify if the SQEM is well conditioned
+		Spherical_Quadric q;
+		Scalar area = 0.0;
+		Vec3 h;
+		h.setZero();
+		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.samples_, v);
+			auto& mmap = (*p.samples_membership_)[v_index];
+			auto it = mmap.find(sphere_index);
+			if (it == mmap.end())
+				return true;
+			const Scalar weight = std::max(0.0, it->second);
+			Spherical_Quadric quadric = (*p.samples_quadric_)[v];
+			quadric *= weight;
+			q += quadric;
+			h += 1.0 * weight * (*p.samples_position_)[v];
+			area += 1.0;
+			return true;
+		});
+
+		Mat4 As = Mat4::Zero();
+		As.block<3, 3>(0, 0) = 2 * Mat3::Identity() * area;
+		As(3, 3) = -2 * area;
+		Vec4 bs;
+		bs.head<3>() = 2 * h;
+		bs(3) = 0;
+		Mat4 A = q._A + p.sqem_clustering_lambda_ * As;
+		Vec4 b = q._b + p.sqem_clustering_lambda_ * bs;
+		Vec4 s = A.ldlt().solve(b);
+		c = s.head<3>();
+		r = s(3);
+
 		(*p.spheres_position_)[sphere_index] = c;
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
@@ -1545,6 +1628,69 @@ public:
 		(*p.spheres_position_)[sphere_index] = c;
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
+
+	void update_fuzzy_power_distance_squared(SurfaceParameters& p, PVertex sphere)
+	{
+		uint32 sphere_index = index_of(*p.spheres_, sphere);
+		Vec3 c = (*p.spheres_position_)[sphere_index];
+		Scalar r = (*p.spheres_radius_)[sphere_index];
+		Vec4 s;
+		s << c(0), c(1), c(2), r;
+
+		for (uint32 i = 0; i < 10; ++i)
+		{
+			std::vector<Eigen::Vector4d> rows;
+			std::vector<Scalar> rhs;
+			rows.reserve(2048);
+			rhs.reserve(2048);
+			foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+				uint32 v_index = index_of(*p.samples_, v);
+				auto& mmap = (*p.samples_membership_)[v_index];
+				auto it = mmap.find(sphere_index);
+				if (it == mmap.end())
+					return true;
+				const Scalar weight = std::max(0.0, it->second);
+				const Scalar sw = std::sqrt(weight);
+				const Vec3& pos = (*p.projected_samples_position_)[v_index];
+
+				// SQEM energy
+				const Vec3& n = (*p.projected_samples_normal_)[v_index];
+				Vec4 n4 = Vec4(n.x(), n.y(), n.z(), 1.0);
+				Scalar a = 1;
+				Vec4 lhs = -n4 * a;
+				Scalar r1 = -1.0 * ((pos - Vec3(s(0), s(1), s(2))).dot(n) - s(3)) * a;
+				rows.push_back(sw * lhs);
+				rhs.push_back(sw * r1);
+
+				// distance energy
+				const Vec3 vol_pos = (*p.samples_position_)[v_index];
+				Vec3 d = vol_pos - Vec3(s(0), s(1), s(2));
+				Scalar l = d.norm();
+
+				lhs = Vec4(-(2 * d[0] / l), -(2 * d[1] / l), -(2 * d[2] / l), -2.0 * s(3)) * a * p.sqem_update_lambda_;
+				Scalar r2 = -(l * l - s(3) * s(3)) * a * p.sqem_update_lambda_; // scale the row by the update lambda
+				rows.push_back(lhs * sw);
+				rhs.push_back(sw * r2);
+				return true;
+			});
+			Eigen::MatrixXd J(rows.size(), 4);
+			Eigen::VectorXd b(rhs.size());
+			for (uint32 j = 0; j < rows.size(); ++j)
+			{
+				J.row(j) = rows[j];
+				b(j) = rhs[j];
+			}
+			Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
+			Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
+			s += delta_s;
+			if (delta_s.norm() < 1e-6) // stop early if converged
+				break;
+		}
+
+		(*p.spheres_position_)[sphere_index] = s.head<3>();
+		(*p.spheres_radius_)[sphere_index] = s[3];
+	}
+
 	void correct_sphere(SurfaceParameters& p, PVertex v)
 	{
 		uint32 v_index = index_of(*p.spheres_, v);
@@ -1614,13 +1760,13 @@ public:
 				update_fuzzy_sphere_euclidean_distance(p, v);
 				break;
 			case SPHERE_CENTER_DISTANCE:
-				update_sphere_center_distance(p, v);
+				update_fuzzy_sphere_center_distance(p, v);
 				break;
 			case SPHERE_POWER_DISTANCE:
-				update_power_distance(p, v);
+				update_fuzzy_power_distance(p, v);
 				break;
 			case SPHERE_POWER_DISTANCE_SQUARED:
-				update_power_distance_squared(p, v);
+				update_fuzzy_power_distance_squared(p, v);
 				break;
 			}
 
