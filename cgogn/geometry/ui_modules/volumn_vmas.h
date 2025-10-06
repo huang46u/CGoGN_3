@@ -949,7 +949,7 @@ public:
 		CUDA_OK(cudaMalloc(&d_entries, h_entries.size() * sizeof(MembershipEntry)), "malloc entries");
 		CUDA_OK(cudaMalloc(&d_counts, h_counts.size() * sizeof(int)), "malloc counts");
 
-		CUDA_OK(cgogn_compute_membership(nbSamples, d_samplesPos, d_samplesProj, d_samplesNorm, d_quadrics, nbSpheres, d_spheresPos, d_spheresRadius,
+		CUDA_OK(cgogn_compute_membership(nbSamples, d_samplesPos, d_samplesProj, d_quadrics, nbSpheres, d_spheresPos, d_spheresRadius,
 										 static_cast<float>(p.sqem_clustering_lambda_), static_cast<float>(p.tau_),
 										 static_cast<float>(p.eps_), static_cast<float>(p.theta_gap_log_),
 										 static_cast<int>(p.distance_mode_), d_entries, d_counts),

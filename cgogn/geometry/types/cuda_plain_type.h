@@ -27,6 +27,7 @@
 #include <cgogn/core/types/cuda_plain_traits.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/vector_traits.h>
+#include <cuda_runtime.h>
 #include <vector_types.h>
 namespace cgogn
 {
@@ -73,43 +74,58 @@ struct CudaPlainValueTraits<cgogn::geometry::Vec3>
 };
 struct PlainSphericalQuadric
 {
-	float A[16];
-	float b[4];
-	float c;
+    float4 A[4];   
+    float4 b;      
+    float c;      
 };
 
 template <>
 struct CudaPlainValueTraits<Spherical_Quadric>
 {
-	using PlainType = PlainSphericalQuadric;
-	static PlainType to_plain(const Spherical_Quadric& value)
-	{
-		PlainType plain;
-		auto A = value.A();
-		auto b = value.b();
-		for (int r = 0; r < 4; ++r)
-			for (int c = 0; c < 4; ++c)
-				plain.A[r * 4 + c] = static_cast<float>(A(r, c));
-		for (int i = 0; i < 4; ++i)
-			plain.b[i] = static_cast<float>(b(i));
-		plain.c = static_cast<float>(value.c());
-		return plain;
-	}
+    using PlainType = PlainSphericalQuadric;
 
-	static Spherical_Quadric from_plain(const PlainType& plain)
-	{
-		Spherical_Quadric q;
-		int idx = 0;
-		for (int r = 0; r < 4; ++r)
-			for (int c = 0; c < 4; ++c)
-				q._A(r, c) = plain.A[idx++];
-		for (int i = 0; i < 4; ++i)
-			q._b(i) = plain.b[i];
-		q._c = plain.c;
-		return q;
-	}
+    static PlainType to_plain(const Spherical_Quadric& value)
+    {
+        PlainType plain;
+        const auto A = value.A();
+        const auto b = value.b();
 
-	static constexpr bool can_write_back = true;
+        for (int r = 0; r < 4; ++r)
+        {
+            plain.A[r] = make_float4(
+                static_cast<float>(A(r, 0)),
+                static_cast<float>(A(r, 1)),
+                static_cast<float>(A(r, 2)),
+                static_cast<float>(A(r, 3)));
+        }
+        plain.b = make_float4(
+            static_cast<float>(b(0)),
+            static_cast<float>(b(1)),
+            static_cast<float>(b(2)),
+            static_cast<float>(b(3)));
+        plain.c = static_cast<float>(value.c());
+        return plain;
+    }
+
+    static Spherical_Quadric from_plain(const PlainType& plain)
+    {
+        Spherical_Quadric q;
+        for (int r = 0; r < 4; ++r)
+        {
+            q._A(r,0) = plain.A[r].x;
+            q._A(r,1) = plain.A[r].y;
+            q._A(r,2) = plain.A[r].z;
+            q._A(r,3) = plain.A[r].w;
+        }
+        q._b(0) = plain.b.x;
+        q._b(1) = plain.b.y;
+        q._b(2) = plain.b.z;
+        q._b(3) = plain.b.w;
+        q._c    = plain.c;
+        return q;
+    }
+
+    static constexpr bool can_write_back = true;
 };
 } // namespace cuda
 } // namespace cgogn

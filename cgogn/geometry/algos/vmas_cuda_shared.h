@@ -22,7 +22,7 @@ struct MembershipEntry
 };
 
 extern "C" cudaError_t cgogn_compute_membership(int nbSamples, const float4* d_samplesPos, const float4* d_samplesProj,
-												const float4* d_samplesNorm, const cgogn::cuda::PlainSphericalQuadric* d_quadric, int nbSpheres,
+											    const cgogn::cuda::PlainSphericalQuadric* d_quadric, int nbSpheres,
 												const float4* d_spheresPos, const float* d_spheresRadius, float lambda,
 												float tau, float eps, float thetaGap, int distanceMode,
 												MembershipEntry* d_outEntries, int* d_outCounts);
