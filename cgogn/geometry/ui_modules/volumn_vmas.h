@@ -271,6 +271,37 @@ public:
 		std::shared_ptr<PAttribute<bool>> samples_highlight_flag_ = nullptr;
 		bool debug_highlight_active_ = false;
 		bool debug_highlight_dirty_ = false;
+
+		// Manual stepping and state rollback
+		bool manual_mode_ = false;
+		bool has_saved_state_ = false;
+		struct SavedIterationState
+		{
+			// Sphere data
+			std::vector<Vec3> spheres_positions_;
+			std::vector<Scalar> spheres_radii_;
+			std::vector<Vec4> spheres_colors_;
+			std::vector<Vec3> spheres_cluster_colors_;
+			std::vector<std::vector<PVertex>> spheres_clusters_;
+			std::vector<Scalar> spheres_cluster_areas_;
+			std::vector<Scalar> spheres_errors_;
+			std::vector<Scalar> spheres_errors_not_normalized_;
+			std::vector<std::set<PVertex>> spheres_neighbor_clusters_;
+			std::vector<bool> spheres_do_not_split_;
+			// Sample membership data
+			std::vector<std::unordered_map<uint32, Scalar>> samples_membership_;
+			std::vector<PVertex> samples_vertex_sphere_;
+			std::vector<Scalar> samples_vertex_error_;
+			// Global stats
+			uint32 nb_spheres_;
+			uint32 iteration_count_;
+			Scalar total_error_;
+			Scalar total_error_not_normalized_;
+			Scalar last_total_error_;
+			Scalar min_error_;
+			Scalar max_error_;
+		};
+		SavedIterationState saved_state_;
 	};
 
 public:
@@ -941,6 +972,116 @@ public:
 	// 		return true;
 	// 	});
 	// }
+
+	void save_iteration_state(SurfaceParameters& p)
+	{
+		if (!p.spheres_ || !p.samples_)
+			return;
+
+		p.saved_state_.spheres_positions_.clear();
+		p.saved_state_.spheres_radii_.clear();
+		p.saved_state_.spheres_colors_.clear();
+		p.saved_state_.spheres_cluster_colors_.clear();
+		p.saved_state_.spheres_clusters_.clear();
+		p.saved_state_.spheres_cluster_areas_.clear();
+		p.saved_state_.spheres_errors_.clear();
+		p.saved_state_.spheres_errors_not_normalized_.clear();
+		p.saved_state_.spheres_neighbor_clusters_.clear();
+		p.saved_state_.spheres_do_not_split_.clear();
+
+		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 idx = index_of(*p.spheres_, v);
+			p.saved_state_.spheres_positions_.push_back((*p.spheres_position_)[idx]);
+			p.saved_state_.spheres_radii_.push_back((*p.spheres_radius_)[idx]);
+			p.saved_state_.spheres_colors_.push_back((*p.spheres_color_)[idx]);
+			p.saved_state_.spheres_cluster_colors_.push_back((*p.spheres_cluster_color_)[idx]);
+			p.saved_state_.spheres_clusters_.push_back((*p.spheres_cluster_)[idx]);
+			p.saved_state_.spheres_cluster_areas_.push_back((*p.spheres_cluster_area_)[idx]);
+			p.saved_state_.spheres_errors_.push_back((*p.spheres_error_)[idx]);
+			p.saved_state_.spheres_errors_not_normalized_.push_back((*p.spheres_error_not_normalized_)[idx]);
+			p.saved_state_.spheres_neighbor_clusters_.push_back((*p.spheres_neighbor_clusters_)[idx]);
+			p.saved_state_.spheres_do_not_split_.push_back((*p.spheres_do_not_split_)[idx]);
+			return true;
+		});
+
+		p.saved_state_.samples_membership_.clear();
+		p.saved_state_.samples_vertex_sphere_.clear();
+		p.saved_state_.samples_vertex_error_.clear();
+
+		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+			uint32 idx = index_of(*p.samples_, v);
+			p.saved_state_.samples_membership_.push_back((*p.samples_membership_)[idx]);
+			p.saved_state_.samples_vertex_sphere_.push_back((*p.samples_vertex_sphere_)[idx]);
+			p.saved_state_.samples_vertex_error_.push_back((*p.samples_vertex_error_)[idx]);
+			return true;
+		});
+
+		p.saved_state_.nb_spheres_ = p.nb_spheres_;
+		p.saved_state_.iteration_count_ = p.iteration_count_;
+		p.saved_state_.total_error_ = p.total_error_;
+		p.saved_state_.total_error_not_normalized_ = p.total_error_not_normalized_;
+		p.saved_state_.last_total_error_ = p.last_total_error_;
+		p.saved_state_.min_error_ = p.min_error_;
+		p.saved_state_.max_error_ = p.max_error_;
+
+		p.has_saved_state_ = true;
+		std::cout << "[State] Saved iteration state at iteration " << p.iteration_count_ << std::endl;
+	}
+
+	void restore_iteration_state(SurfaceParameters& p)
+	{
+		if (!p.has_saved_state_ || !p.spheres_ || !p.samples_)
+		{
+			std::cout << "[State] No saved state to restore" << std::endl;
+			return;
+		}
+
+		// Restore sphere data
+		uint32 sphere_idx = 0;
+		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 idx = index_of(*p.spheres_, v);
+			if (sphere_idx < p.saved_state_.spheres_positions_.size())
+			{
+				(*p.spheres_position_)[idx] = p.saved_state_.spheres_positions_[sphere_idx];
+				(*p.spheres_radius_)[idx] = p.saved_state_.spheres_radii_[sphere_idx];
+				(*p.spheres_color_)[idx] = p.saved_state_.spheres_colors_[sphere_idx];
+				(*p.spheres_cluster_color_)[idx] = p.saved_state_.spheres_cluster_colors_[sphere_idx];
+				(*p.spheres_cluster_)[idx] = p.saved_state_.spheres_clusters_[sphere_idx];
+				(*p.spheres_cluster_area_)[idx] = p.saved_state_.spheres_cluster_areas_[sphere_idx];
+				(*p.spheres_error_)[idx] = p.saved_state_.spheres_errors_[sphere_idx];
+				(*p.spheres_error_not_normalized_)[idx] = p.saved_state_.spheres_errors_not_normalized_[sphere_idx];
+				(*p.spheres_neighbor_clusters_)[idx] = p.saved_state_.spheres_neighbor_clusters_[sphere_idx];
+				(*p.spheres_do_not_split_)[idx] = p.saved_state_.spheres_do_not_split_[sphere_idx];
+			}
+			sphere_idx++;
+			return true;
+		});
+
+		// Restore sample data
+		uint32 sample_idx = 0;
+		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+			uint32 idx = index_of(*p.samples_, v);
+			if (sample_idx < p.saved_state_.samples_membership_.size())
+			{
+				(*p.samples_membership_)[idx] = p.saved_state_.samples_membership_[sample_idx];
+				(*p.samples_vertex_sphere_)[idx] = p.saved_state_.samples_vertex_sphere_[sample_idx];
+				(*p.samples_vertex_error_)[idx] = p.saved_state_.samples_vertex_error_[sample_idx];
+			}
+			sample_idx++;
+			return true;
+		});
+
+		// Restore global stats
+		p.nb_spheres_ = p.saved_state_.nb_spheres_;
+		p.iteration_count_ = p.saved_state_.iteration_count_;
+		p.total_error_ = p.saved_state_.total_error_;
+		p.total_error_not_normalized_ = p.saved_state_.total_error_not_normalized_;
+		p.last_total_error_ = p.saved_state_.last_total_error_;
+		p.min_error_ = p.saved_state_.min_error_;
+		p.max_error_ = p.saved_state_.max_error_;
+
+		std::cout << "[State] Restored iteration state from iteration " << p.iteration_count_ << std::endl;
+	}
 
 	void compute_membership_soft_cuda(SurfaceParameters& p)
 	{
@@ -1897,6 +2038,10 @@ public:
 
 	void update_spheres(SurfaceParameters& p)
 	{
+		// Save state before updating if not in manual mode
+		if (!p.manual_mode_)
+			save_iteration_state(p);
+
 		// auto start = std::chrono::high_resolution_clock::now();
 
 		// compute_clusters(p);
@@ -1973,14 +2118,24 @@ public:
 					highlighted_indices.push_back(sphere_index);
 					log_sphere_state(p, sphere_index, "top error sphere");
 				}
+			if (!highlighted_indices.empty())
+				apply_debug_highlight(p, highlighted_indices);
+			
+			// Rollback to previous state but keep highlights
+			if (p.has_saved_state_)
+			{
+				std::cout << "[State] Rolling back to previous iteration due to error spike" << std::endl;
+				restore_iteration_state(p);
+				// Re-apply highlights after restore
 				if (!highlighted_indices.empty())
 					apply_debug_highlight(p, highlighted_indices);
-				p.stopping_ = true;
+				p.manual_mode_ = true; // Enter manual mode for inspection
+				std::cout << "[State] Entered manual mode for step-by-step debugging" << std::endl;
 			}
-			
+			p.stopping_ = true;
 		}
-
-		// std::cout << p.total_error_not_normalized_ << std::endl;
+			
+		}		// std::cout << p.total_error_not_normalized_ << std::endl;
 
 		if (p.auto_split_ &&
 			(p.total_error_diff_ < 1e-5 || p.iteration_count_ % 10 == 0)) // wait for convergence or max 10 iterations
@@ -2675,6 +2830,110 @@ protected:
 						});
 						compute_spheres_error(p);
 						update_render_data(p);
+					}
+				}
+
+				ImGui::Separator();
+				ImGui::Text("Manual Step Control");
+				ImGui::Checkbox("Manual Mode", &p.manual_mode_);
+				
+				if (p.manual_mode_)
+				{
+					ImGui::Text("Step-by-step sphere optimization");
+					
+					if (ImGui::Button("1. Compute Membership"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							std::cout << "[Manual] Computing membership..." << std::endl;
+							if (p.use_cuda_for_membership_)
+								compute_membership_soft_cuda(p);
+							else
+								compute_membership_soft_cpu(p);
+							materialize_top1_labels(p);
+							update_render_data(p);
+							std::cout << "[Manual] Membership computed" << std::endl;
+						}
+					}
+					
+					if (ImGui::Button("2. Update Fuzzy Distance"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							std::cout << "[Manual] Updating sphere positions/radii..." << std::endl;
+							parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+								switch (p.distance_mode_)
+								{
+								case SPHERE_EUCLIDEAN_DISTANCE:
+									update_fuzzy_sphere_euclidean_distance(p, v);
+									break;
+								case SPHERE_CENTER_DISTANCE:
+									update_sphere_center_distance(p, v);
+									break;
+								case SPHERE_POWER_DISTANCE:
+									update_power_distance(p, v);
+									break;
+								case SPHERE_POWER_DISTANCE_SQUARED:
+									update_power_distance_squared(p, v);
+									break;
+								}
+								return true;
+							});
+							update_render_data(p);
+							std::cout << "[Manual] Spheres updated" << std::endl;
+						}
+					}
+					
+					if (ImGui::Button("3. Compute Sphere Error"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							std::cout << "[Manual] Computing sphere errors..." << std::endl;
+							compute_spheres_error(p);
+							update_render_data(p);
+							std::cout << "[Manual] Errors: total=" << p.total_error_ 
+								<< " min=" << p.min_error_ << " max=" << p.max_error_ << std::endl;
+						}
+					}
+					
+					ImGui::Separator();
+					
+					if (p.has_saved_state_)
+					{
+						ImGui::Text("Saved state at iteration: %u", p.saved_state_.iteration_count_);
+						if (ImGui::Button("Restore Saved State"))
+						{
+							if (!p.running_)
+							{
+								std::lock_guard<std::mutex> lock(p.mutex_);
+								restore_iteration_state(p);
+								update_render_data(p);
+							}
+						}
+					}
+					else
+					{
+						ImGui::Text("No saved state available");
+					}
+					
+					if (ImGui::Button("Save Current State"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							save_iteration_state(p);
+						}
+					}
+					
+					if (ImGui::Button("Exit Manual Mode"))
+					{
+						p.manual_mode_ = false;
+						clear_debug_highlight(p);
+						update_render_data(p);
+						std::cout << "[Manual] Exited manual mode" << std::endl;
 					}
 				}
 
