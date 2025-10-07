@@ -50,9 +50,11 @@
 #include <CGAL/Side_of_triangle_mesh.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/point_generators_3.h>
+#include <CGAL/Random.h>
 
 #include <boost/synapse/connect.hpp>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <random>
 #include <set>
@@ -253,12 +255,16 @@ public:
 		Scalar r_ = 0.015;
 		uint32 K_ = 30;
 		bool use_cuda_for_membership_ = false;
+		bool use_sampling_seed_ = true;
+		uint32 sampling_seed_value_ = 1;
+		uint32 sampling_seed_last_used_ = 1;
+		bool sampling_seed_used_ = true;
 		// debug instrumentation
 		bool debug_enable_logging_ = false;
 		float32 debug_sphere_error_threshold_ = 0.05f;
 		float32 debug_sample_error_threshold_ = 0.05f;
 		float32 debug_total_error_abs_threshold_ = 0.05f;
-		float32 debug_total_error_ratio_threshold_ = 10.0f;
+		float32 debug_total_error_ratio_threshold_ = 1.0f;
 		float32 debug_membership_sum_tolerance_ = 1e-3f;
 		uint32 debug_top_spheres_to_log_ = 5;
 		std::shared_ptr<PAttribute<bool>> spheres_highlight_flag_ = nullptr;
@@ -307,9 +313,8 @@ public:
 		CGAL::Bounded_side res = (*p.inside_tester_)(query);
 		return res == CGAL::ON_BOUNDED_SIDE;
 	}
-	Vec3 random_sample_around(const Vec3& p, Scalar R)
+	Vec3 random_sample_around(std::mt19937& rng, const Vec3& p, Scalar R)
 	{
-		static thread_local std::mt19937 rng{std::random_device{}()};
 		static thread_local std::uniform_real_distribution<Scalar> U(0.0, 1.0);
 
 		Scalar u = U(rng);
@@ -346,13 +351,17 @@ public:
 			grid_size, std::vector<std::vector<SampleIndex>>(grid_size, std::vector<SampleIndex>(grid_size, INVALID)));
 		std::vector<SampleIndex> active_list;
 		std::vector<Vec3> samples;
-		std::mt19937 rng{std::random_device{}()};
+		uint32 seed_to_use = p.use_sampling_seed_ ? p.sampling_seed_value_
+												 : static_cast<uint32>(std::random_device{}());
+		std::mt19937 rng(seed_to_use);
+		CGAL::Random cgal_rng(static_cast<unsigned int>(seed_to_use));
+		p.sampling_seed_last_used_ = seed_to_use;
 		auto pick_active_index = [&](void) -> size_t {
 			std::uniform_int_distribution<size_t> dist(0, active_list.size() - 1);
 			return dist(rng);
 		};
 		Vec3 bias = Vec3(0.5, 0.5, 0.5);
-		CGAL::Random_points_in_cube_3<Point_3> generator(0.5); // sample first point
+		CGAL::Random_points_in_cube_3<Point_3> generator(0.5, cgal_rng); // sample first point
 		while (active_list.empty())
 		{
 			Point_3 s = *generator++;
@@ -374,7 +383,7 @@ public:
 			for (uint32 i = 0; i < p.K_; i++)
 			{
 				Vec3 next_pos;
-				next_pos = random_sample_around(current_sample, p.r_);
+				next_pos = random_sample_around(rng, current_sample, p.r_);
 				if (!is_inside(p, next_pos))
 					continue;
 				auto [x, y, z] = pos_to_grid_cell(next_pos, cell_size,
@@ -1576,6 +1585,8 @@ public:
 		uint32 sphere_index = index_of(*p.spheres_, sphere);
 
 		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+		if (cluster.size() <= 4)
+			return;
 		Vec3 c = (*p.spheres_position_)[sphere_index];
 		Scalar r = (*p.spheres_radius_)[sphere_index];
 		Vec4 s;
@@ -2536,6 +2547,11 @@ protected:
 			if (p.initialized_)
 			{
 				ImGui::SliderFloat("Noise factor", &p.noise_factor_, 0.0f, 0.1f, "%.6f");
+				
+				if (p.use_sampling_seed_)
+				{
+					ImGui::InputScalar("Sampling seed", ImGuiDataType_U32, &p.sampling_seed_value_);
+				}
 				if (ImGui::Button("Add noise"))
 				{
 					std::lock_guard<std::mutex> lock(p.mutex_);
