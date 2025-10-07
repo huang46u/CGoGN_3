@@ -52,9 +52,13 @@
 #include <CGAL/point_generators_3.h>
 
 #include <boost/synapse/connect.hpp>
+#include <iomanip>
+#include <sstream>
 #include <random>
 #include <set>
-
+#include <cmath>
+#include <algorithm>
+#include <mutex>
 // Import CUDA
 #include <cgogn/geometry/algos/vmas_cuda_shared.h>
 #include <cuda_runtime.h>
@@ -249,6 +253,18 @@ public:
 		Scalar r_ = 0.015;
 		uint32 K_ = 30;
 		bool use_cuda_for_membership_ = false;
+		// debug instrumentation
+		bool debug_enable_logging_ = false;
+		float32 debug_sphere_error_threshold_ = 0.05f;
+		float32 debug_sample_error_threshold_ = 0.05f;
+		float32 debug_total_error_abs_threshold_ = 0.05f;
+		float32 debug_total_error_ratio_threshold_ = 10.0f;
+		float32 debug_membership_sum_tolerance_ = 1e-3f;
+		uint32 debug_top_spheres_to_log_ = 5;
+		std::shared_ptr<PAttribute<bool>> spheres_highlight_flag_ = nullptr;
+		std::shared_ptr<PAttribute<bool>> samples_highlight_flag_ = nullptr;
+		bool debug_highlight_active_ = false;
+		bool debug_highlight_dirty_ = false;
 	};
 
 public:
@@ -413,6 +429,8 @@ public:
 		for (const Vec3& pos : samples)
 		{
 			PVertex new_sample = add_vertex(*p.samples_);
+			if (p.samples_highlight_flag_)
+				value<bool>(*p.samples_, p.samples_highlight_flag_, new_sample) = false;
 			std::pair<uint32, Vec3> bvh_res;
 			p.surface_bvh_->closest_point(pos, &bvh_res);
 			Vec3 closest_surface_position = bvh_res.second;
@@ -613,6 +631,8 @@ public:
 		p.projected_samples_normal_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "projected_normal");
 		p.samples_membership_ =
 			get_or_add_attribute<std::unordered_map<uint32, Scalar>, PVertex>(*p.samples_, "membership");
+		p.samples_highlight_flag_ = get_or_add_attribute<bool, PVertex>(*p.samples_, "debug_highlight");
+		p.samples_highlight_flag_->fill(false);
 		// initialize volumn samples
 		poisson_disk_sampling(p);
 
@@ -703,6 +723,9 @@ public:
 		p.spheres_position_ = get_or_add_attribute<Vec3, PVertex>(*p.spheres_, "position");
 		p.spheres_radius_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "radius");
 		p.spheres_color_ = get_or_add_attribute<Vec4, PVertex>(*p.spheres_, "color");
+		p.spheres_highlight_flag_ = get_or_add_attribute<bool, PVertex>(*p.spheres_, "debug_highlight");
+		p.spheres_highlight_flag_->fill(false);
+		p.debug_highlight_active_ = false;
 
 		p.spheres_cluster_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(
 			*p.spheres_, "cluster"); // surface vertices in the cluster
@@ -780,6 +803,8 @@ public:
 		PVertex sphere = add_vertex(*p.spheres_);
 		p.nb_spheres_++;
 		uint32 sphere_index = index_of(*p.spheres_, sphere);
+		if (p.spheres_highlight_flag_)
+			(*p.spheres_highlight_flag_)[sphere_index] = false;
 
 		(*p.spheres_position_)[sphere_index] = vp;
 		(*p.spheres_radius_)[sphere_index] = vr;
@@ -950,9 +975,9 @@ public:
 		CUDA_OK(cudaMalloc(&d_counts, h_counts.size() * sizeof(int)), "malloc counts");
 
 		CUDA_OK(cgogn_compute_membership(nbSamples, d_samplesPos, d_samplesProj, d_quadrics, nbSpheres, d_spheresPos, d_spheresRadius,
-										 static_cast<float>(p.sqem_clustering_lambda_), static_cast<float>(p.tau_),
-										 static_cast<float>(p.eps_), static_cast<float>(p.theta_gap_log_),
-										 static_cast<int>(p.distance_mode_), d_entries, d_counts),
+								 static_cast<float>(p.sqem_clustering_lambda_), static_cast<float>(p.tau_),
+								 static_cast<float>(p.eps_), static_cast<float>(p.theta_gap_log_),
+								 static_cast<int>(p.distance_mode_), d_entries, d_counts),
 				"cgogn_compute_membership");
 
 		CUDA_OK(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
@@ -983,26 +1008,45 @@ public:
 		{
 			const int count = h_counts[sampleIdx];
 			if (count <= 0)
+			{
+				if (p.debug_enable_logging_)
+					log_membership_anomaly(p, static_cast<uint32>(sampleIdx), Scalar(0.0));
 				continue;
+			}
 
 			PVertex vi = sample_vertices[sampleIdx];
 			auto& mmap = (*p.samples_membership_)[sampleIdx];
 
+			Scalar sum_weights = 0.0;
 			for (int i = 0; i < count; ++i)
 			{
 				const MembershipEntry& entry = h_entries[sampleIdx * p.top_k_spheres_ + i];
 				if (entry.weight <= 0.f)
 					continue;
 
-				mmap[entry.sphere_idx] = static_cast<Scalar>(entry.weight);
+				const Scalar weight = static_cast<Scalar>(entry.weight);
+				mmap[entry.sphere_idx] = weight;
 				(*p.spheres_cluster_)[entry.sphere_idx].push_back(vi);
-				(*p.spheres_cluster_area_)[entry.sphere_idx] += static_cast<Scalar>(entry.weight);
-				
+				(*p.spheres_cluster_area_)[entry.sphere_idx] += weight;
+				sum_weights += weight;
+			}
+
+			if (p.debug_enable_logging_)
+			{
+				if (mmap.empty())
+				{
+					log_membership_anomaly(p, static_cast<uint32>(sampleIdx), sum_weights);
+				}
+				else if (!std::isfinite(sum_weights) || std::fabs(sum_weights - Scalar(1.0)) > p.debug_membership_sum_tolerance_)
+				{
+					log_membership_anomaly(p, static_cast<uint32>(sampleIdx), sum_weights);
+				}
 			}
 		}
 	}
 
-	void compute_membership_soft_cpu(SurfaceParameters& p)
+
+		void compute_membership_soft_cpu(SurfaceParameters& p)
 	{
 
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
@@ -1030,8 +1074,6 @@ public:
 			Scalar a = 1.0;
 
 			const Vec3& vp = (*p.projected_samples_position_)[v_index];
-			Scalar total_weight = 0.0;
-			std::vector<std::pair<uint32, Scalar>> weights;
 			foreach_cell(*p.spheres_, [&](PVertex pv) {
 				uint32 pv_index = index_of(*p.spheres_, pv);
 				const Vec3& center = (*p.spheres_position_)[pv_index];
@@ -1073,15 +1115,20 @@ public:
 				return true;
 			});
 			const uint32 K = std::min(p.top_k_spheres_, uint32(candidates.size()));
-			std::nth_element(candidates.begin(), candidates.begin() + K, candidates.end(),
-							 [](const Cand& a, const Cand& b) { return a.E < b.E; });
-			candidates.resize(K);
-			std::sort(candidates.begin(), candidates.end(), [](const Cand& a, const Cand& b) { return a.E < b.E; });
-
-			Scalar Emin = candidates[0].E;
-			Scalar tau = p.tau_;
-			if (candidates.size() == 0)
+			if (K == 0)
+			{
+				if (p.debug_enable_logging_)
+					log_membership_anomaly(p, v_index, Scalar(0.0));
 				return true;
+			}
+			if (K < candidates.size())
+				std::nth_element(candidates.begin(), candidates.begin() + K, candidates.end(),
+							 [](const Cand& a, const Cand& b) { return a.E < b.E; });
+			std::sort(candidates.begin(), candidates.begin() + K, [](const Cand& a, const Cand& b) { return a.E < b.E; });
+			if (K < candidates.size())
+				candidates.resize(K);
+
+			Scalar tau = p.tau_;
 			std::vector<Scalar> log_e;
 			log_e.reserve(candidates.size());
 			for (const auto& c : candidates)
@@ -1097,7 +1144,6 @@ public:
 				Scalar x_t1 = std::log(candidates[t + 1].E + eps);
 				gap.push_back(x_t1 - x_t);
 			}
-			const Scalar theta_gap = p.theta_gap_log_;
 			uint32 pike = K - 1;
 			for (uint32 t = 0; t < gap.size(); ++t)
 			{
@@ -1114,22 +1160,6 @@ public:
 				keep.push_back(candidates[t]);
 			if (keep.empty())
 				keep.push_back(candidates.front());
-			/*if (keep.size() > 1)
-			{
-				std::cout << "candidates: ";
-				for (const auto& c : candidates)
-					std::cout << c.E << " ";
-				std::cout << std::endl;
-				std::cout << "log_e: ";
-				for (const auto& le : log_e)
-					std::cout << le << " ";
-				std::cout << std::endl;
-				std::cout << " keep: ";
-				for (auto& c : keep)
-					std::cout << c.E << " ";
-				std::cout << std::endl;
-				std::cout << " ----------------------------------------" << std::endl;
-			}*/
 			const auto nK = keep.size();
 			std::vector<Scalar> ww(nK);
 			for (uint32 t = 0; t < nK; ++t)
@@ -1138,16 +1168,28 @@ public:
 				denom += w;
 				ww[t] = w;
 			}
+			if (p.debug_enable_logging_ && denom <= std::numeric_limits<Scalar>::epsilon())
+				log_membership_anomaly(p, v_index, denom);
 			auto& mmap = (*p.samples_membership_)[v_index];
 			mmap.clear();
 			mmap.reserve(nK);
-			const Scalar inv = (denom > 0) ? (1.0 / denom) : 1.0;
+			const Scalar inv = (denom > 0) ? (Scalar(1.0) / denom) : Scalar(0.0);
 			for (uint32 t = 0; t < nK; ++t)
 			{
 				Scalar w = ww[t] * inv;
 				if (w > 0)
 					mmap[keep[t].sidx] = w;
 			}
+
+			if (p.debug_enable_logging_)
+			{
+				Scalar sum = 0.0;
+				for (const auto& kv : mmap)
+					sum += kv.second;
+				if (mmap.empty() || !std::isfinite(sum) || std::fabs(sum - Scalar(1.0)) > p.debug_membership_sum_tolerance_)
+					log_membership_anomaly(p, v_index, sum);
+			}
+
 			for (const auto& [sidx, w] : mmap)
 			{
 				std::lock_guard<std::mutex> lock(spheres_mutex_[sidx % spheres_mutex_.size()]);
@@ -1157,6 +1199,7 @@ public:
 			return true;
 		});
 	}
+
 
 	void materialize_top1_labels(SurfaceParameters& p)
 	{
@@ -1175,34 +1218,125 @@ public:
 					bw = kv.second;
 					best_idx = kv.first;
 				}
+
 			}
 			value<PVertex>(*p.samples_, p.samples_vertex_sphere_, vi) = of_index<PVertex>(*p.spheres_, best_idx);
 			(*p.spheres_cluster_)[best_idx].push_back(vi);
 			return true;
 		});
 	}
+	void log_debug(const SurfaceParameters& p, const std::string& message) const
+	{
+		if (!p.debug_enable_logging_)
+			return;
+		std::lock_guard<std::mutex> lock(debug_output_mutex_);
+		std::cout << "[Volumn_VMAS][debug] " << message << std::endl;
+	}
 
+	void log_sphere_state(const SurfaceParameters& p, uint32 sphere_index, const std::string& reason) const
+	{
+		if (!p.debug_enable_logging_)
+			return;
+		if (!p.spheres_ || sphere_index >= nb_cells<PVertex>(*p.spheres_))
+			return;
+		const Vec3& center = (*p.spheres_position_)[sphere_index];
+		Scalar radius = (*p.spheres_radius_)[sphere_index];
+		size_t cluster_size = (*p.spheres_cluster_)[sphere_index].size();
+		Scalar cluster_area = (*p.spheres_cluster_area_)[sphere_index];
+		Scalar error = (*p.spheres_error_)[sphere_index];
+		Scalar error_raw = (*p.spheres_error_not_normalized_)[sphere_index];
+		std::ostringstream oss;
+		oss << std::fixed << std::setprecision(6) << reason << " | sphere=" << sphere_index << " center=(" << center[0]
+			<< ", " << center[1] << ", " << center[2] << ")"
+			<< " radius=" << radius << " cluster_size=" << cluster_size << " cluster_area=" << cluster_area
+			<< " error=" << error << " error_raw=" << error_raw;
+		log_debug(p, oss.str());
+	}
+
+	void log_membership_anomaly(const SurfaceParameters& p, uint32 sample_index, Scalar sum) const
+	{
+		if (!p.debug_enable_logging_)
+			return;
+		std::ostringstream oss;
+		oss << std::fixed << std::setprecision(6) << "membership sum anomaly | sample=" << sample_index
+			<< " sum=" << sum;
+		log_debug(p, oss.str());
+	}
+
+	void clear_debug_highlight(SurfaceParameters& p)
+	{
+		if (p.spheres_highlight_flag_)
+			p.spheres_highlight_flag_->fill(false);
+		if (p.samples_highlight_flag_)
+			p.samples_highlight_flag_->fill(false);
+		p.debug_highlight_active_ = false;
+		p.debug_highlight_dirty_ = true;
+	}
+
+	void apply_debug_highlight(SurfaceParameters& p, const std::vector<uint32>& sphere_indices)
+	{
+		clear_debug_highlight(p);
+		if (sphere_indices.empty())
+			return;
+
+		p.debug_highlight_active_ = true;
+
+		for (uint32 sphere_index : sphere_indices)
+		{
+			if (!p.spheres_ || !p.spheres_highlight_flag_ || sphere_index >= nb_cells<PVertex>(*p.spheres_))
+				continue;
+
+			(*p.spheres_highlight_flag_)[sphere_index] = true;
+			(*p.spheres_color_)[sphere_index] = Vec4(1.0, 0.0, 0.0, 1.0);
+
+			if (!p.samples_ || !p.samples_highlight_flag_)
+				continue;
+
+			const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+			for (PVertex sample : cluster)
+			{
+				if (!sample.is_valid())
+					continue;
+				uint32 sample_index = index_of(*p.samples_, sample);
+				(*p.samples_highlight_flag_)[sample_index] = true;
+				(*p.samples_vertex_color_)[sample_index] = Vec4(1.0, 0.0, 0.0, 1.0);
+			}
+		}
+		p.debug_highlight_dirty_ = true;
+	}
+
+	
+
+	void log_sample_error(const SurfaceParameters& p, uint32 sphere_index, uint32 sample_index, Scalar membership,
+						  Scalar dist, Scalar dist_sqem, Scalar dist_other) const
+	{
+		if (!p.debug_enable_logging_)
+			return;
+		std::ostringstream oss;
+		oss << std::fixed << std::setprecision(6) << "sample error spike | sphere=" << sphere_index
+			<< " sample=" << sample_index << " membership=" << membership << " dist=" << dist
+			<< " dist_sqem=" << dist_sqem << " dist_other=" << dist_other;
+		log_debug(p, oss.str());
+	}
 	void compute_spheres_error(SurfaceParameters& p)
 	{
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) {
-			uint32 v_index = index_of(*p.spheres_, v);
+			uint32 sphere_index = index_of(*p.spheres_, v);
 
-			const Vec3& center = (*p.spheres_position_)[v_index];
-			Scalar radius = (*p.spheres_radius_)[v_index];
-			const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[v_index];
-
+			const Vec3& center = (*p.spheres_position_)[sphere_index];
+			Scalar radius = (*p.spheres_radius_)[sphere_index];
 			Scalar cluster_error = 0.0;
+
 			foreach_cell(*p.samples_, [&](PVertex sv) -> bool {
 				uint32 sv_index = index_of(*p.samples_, sv);
 				auto& mmap = (*p.samples_membership_)[sv_index];
-				auto it = mmap.find(v_index);
+				auto it = mmap.find(sphere_index);
 				if (it == mmap.end())
 					return true;
 				Scalar membership = it->second;
 
 				Scalar a = 1.0;
-				Scalar dist_sqem =
-					(*p.samples_quadric_)[sv_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
+				Scalar dist_sqem = (*p.samples_quadric_)[sv_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 				Scalar dist_other = 0.0;
 				switch (p.distance_mode_)
 				{
@@ -1217,15 +1351,11 @@ public:
 				}
 				break;
 				case SPHERE_POWER_DISTANCE: {
-					dist_other =
-						((*p.samples_position_)[sv_index] - center).dot((*p.samples_position_)[sv_index] - center) -
-						radius * radius;
+					dist_other = ((*p.samples_position_)[sv_index] - center).dot((*p.samples_position_)[sv_index] - center) - radius * radius;
 				}
 				break;
 				case SPHERE_POWER_DISTANCE_SQUARED: {
-					dist_other =
-						((*p.samples_position_)[sv_index] - center).dot((*p.samples_position_)[sv_index] - center) -
-						radius * radius;
+					dist_other = ((*p.samples_position_)[sv_index] - center).dot((*p.samples_position_)[sv_index] - center) - radius * radius;
 					dist_other *= dist_other;
 				}
 				break;
@@ -1233,19 +1363,44 @@ public:
 					break;
 				}
 				dist_other *= a;
-				Scalar dist = membership * (dist_sqem + p.sqem_clustering_lambda_ * dist_other);
+				Scalar combined = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
+				Scalar dist = membership * combined;
+
+				if (p.debug_enable_logging_)
+				{
+					if (!std::isfinite(dist_sqem) || !std::isfinite(dist_other) || !std::isfinite(combined) || !std::isfinite(dist) || std::fabs(combined) > p.debug_sample_error_threshold_)
+						log_sample_error(p, sphere_index, sv_index, membership, dist, dist_sqem, dist_other);
+				}
+
 				(*p.samples_vertex_error_)[sv_index] = dist;
 				cluster_error += dist;
 				return true;
 			});
-			(*p.spheres_error_)[v_index] = cluster_error / (*p.spheres_cluster_area_)[v_index];
-			(*p.spheres_error_not_normalized_)[v_index] = cluster_error;
 
+			Scalar cluster_area = (*p.spheres_cluster_area_)[sphere_index];
+			if (cluster_area != 0.0)
+			{
+				Scalar normalized = cluster_error / cluster_area;
+				(*p.spheres_error_)[sphere_index] = normalized;
+				(*p.spheres_error_not_normalized_)[sphere_index] = cluster_error;
+				if (p.debug_enable_logging_ && (!std::isfinite(normalized) || std::fabs(normalized) > p.debug_sphere_error_threshold_))
+					log_sphere_state(p, sphere_index, "sphere error threshold exceeded");
+			}
+			else
+			{
+				(*p.spheres_error_)[sphere_index] = 0.0;
+				(*p.spheres_error_not_normalized_)[sphere_index] = cluster_error;
+				if (p.debug_enable_logging_ && std::fabs(cluster_error) > std::numeric_limits<Scalar>::epsilon())
+					log_sphere_state(p, sphere_index, "cluster area zero");
+			}
+
+			if (p.debug_enable_logging_ && (!std::isfinite(radius) || radius < 0.0))
+				log_sphere_state(p, sphere_index, "radius anomaly");
 			return true;
 		});
 
 		p.min_error_ = std::numeric_limits<Scalar>::max();
-		p.max_error_ = std::numeric_limits<Scalar>::min();
+		p.max_error_ = std::numeric_limits<Scalar>::lowest();
 		p.max_error_sphere_ = PVertex();
 		p.total_error_ = 0.0;
 		p.total_error_not_normalized_ = 0.0;
@@ -1253,6 +1408,8 @@ public:
 		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			Scalar error = value<Scalar>(*p.spheres_, p.spheres_error_, v);
 			Scalar error_not_normalized = value<Scalar>(*p.spheres_, p.spheres_error_not_normalized_, v);
+			if (p.debug_enable_logging_ && !std::isfinite(error))
+				log_sphere_state(p, index_of(*p.spheres_, v), "non finite sphere error");
 			p.min_error_ = std::min(p.min_error_, error);
 			if (error > p.max_error_)
 			{
@@ -1264,14 +1421,19 @@ public:
 			return true;
 		});
 
-		p.total_error_diff_ = fabs(p.total_error_ - p.last_total_error_);
+		if (p.debug_enable_logging_ && (!std::isfinite(p.total_error_) || !std::isfinite(p.total_error_not_normalized_)))
+			log_debug(p, "non finite total error detected");
+
+		p.total_error_diff_ = std::fabs(p.total_error_ - p.last_total_error_);
 		p.last_total_error_ = p.total_error_;
 	}
+
 
 	void update_spheres_color(SurfaceParameters& p)
 	{
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.spheres_, v);
+
 			if (p.error_as_spheres_color_)
 				(*p.spheres_color_)[v_index] =
 					color_map((*p.spheres_error_)[v_index], p.min_error_, p.max_error_, p.spheres_transparency_);
@@ -1280,6 +1442,10 @@ public:
 				const Vec3& c = (*p.spheres_cluster_color_)[v_index];
 				(*p.spheres_color_)[v_index] = Vec4(c.x(), c.y(), c.z(), p.spheres_transparency_);
 			}
+
+			if (p.debug_highlight_active_ && p.spheres_highlight_flag_ && (*p.spheres_highlight_flag_)[v_index])
+				(*p.spheres_color_)[v_index] = Vec4(1.0, 0.0, 0.0, 1.0);
+
 			return true;
 		});
 	}
@@ -1372,7 +1538,11 @@ public:
 				if (delta_s.norm() < 1e-6) // stop early if converged
 					break;
 			}
-
+			if (r > 0.5)
+				std::cout << " bad optimization, sphere: " << sphere_index << ", center(before):" << c
+						  << ", radius(before):" << r << ", center(after): " << s.head<3>()
+						  << ", radius(after):" << s[3] << std::endl;
+				
 			c = s.head<3>();
 			r = s[3];
 		}
@@ -1760,7 +1930,45 @@ public:
 		// }
 		// }
 
+		Scalar prev_total_error = p.last_total_error_;
 		compute_spheres_error(p); // compute spheres error
+		if (p.debug_enable_logging_)
+		{
+			Scalar ratio = (prev_total_error > Scalar(1e-12)) ? p.total_error_ / prev_total_error : Scalar(0.0);
+			if (!std::isfinite(p.total_error_) || p.total_error_diff_ > p.debug_total_error_abs_threshold_ ||
+				(prev_total_error > Scalar(1e-12) && ratio > p.debug_total_error_ratio_threshold_))
+			{
+				std::ostringstream oss;
+				oss << std::fixed << std::setprecision(6)
+					<< "total error spike | prev=" << prev_total_error
+					<< " current=" << p.total_error_
+					<< " diff=" << p.total_error_diff_
+					<< " ratio=" << ((prev_total_error > Scalar(1e-12)) ? ratio : Scalar(0.0))
+					<< " spheres=" << p.nb_spheres_;
+				log_debug(p, oss.str());
+
+				std::vector<std::pair<Scalar, uint32>> sorted;
+				const uint32 sphere_count = nb_cells<PVertex>(*p.spheres_);
+				sorted.reserve(sphere_count);
+				for (uint32 idx = 0; idx < sphere_count; ++idx)
+					sorted.emplace_back((*p.spheres_error_)[idx], idx);
+				std::sort(sorted.begin(), sorted.end(), [](const std::pair<Scalar, uint32>& a, const std::pair<Scalar, uint32>& b) { return a.first > b.first; });
+				const uint32 topN = std::min(p.debug_top_spheres_to_log_, static_cast<uint32>(sorted.size()));
+				std::vector<uint32> highlighted_indices;
+				highlighted_indices.reserve(topN);
+				for (uint32 i = 0; i < topN; ++i)
+				{
+					uint32 sphere_index = sorted[i].second;
+					highlighted_indices.push_back(sphere_index);
+					log_sphere_state(p, sphere_index, "top error sphere");
+				}
+				if (!highlighted_indices.empty())
+					apply_debug_highlight(p, highlighted_indices);
+				p.stopping_ = true;
+			}
+			
+		}
+
 		// std::cout << p.total_error_not_normalized_ << std::endl;
 
 		if (p.auto_split_ &&
@@ -1890,6 +2098,8 @@ public:
 		PVertex new_sphere = add_vertex(*p.spheres_);
 		p.nb_spheres_++;
 		uint32 new_sphere_index = index_of(*p.spheres_, new_sphere);
+		if (p.spheres_highlight_flag_)
+			(*p.spheres_highlight_flag_)[new_sphere_index] = false;
 		(*p.spheres_position_)[new_sphere_index] = (*p.medial_axis_position_)[max_error_vertex_index];
 		(*p.spheres_radius_)[new_sphere_index] = (*p.medial_axis_radius_)[max_error_vertex_index];
 
@@ -2091,6 +2301,13 @@ public:
 	{
 		parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
+
+			if (p.debug_highlight_active_ && p.samples_highlight_flag_ && (*p.samples_highlight_flag_)[v_index])
+			{
+				(*p.samples_vertex_color_)[v_index] = Vec4(1.0, 0.0, 0.0, 1.0);
+				return true;
+			}
+
 			auto& mmap = (*p.samples_membership_)[v_index];
 			Vec4 color = Vec4(0, 0, 0, 1);
 			for (auto it = mmap.begin(); it != mmap.end(); ++it)
@@ -2137,6 +2354,7 @@ protected:
 			points_provider_->emit_attribute_changed(*p.samples_, p.samples_vertex_color_.get());
 
 			compute_skeleton(p);
+			p.debug_highlight_dirty_ = false;
 		}
 		else
 		{
@@ -2150,6 +2368,7 @@ protected:
 			points_provider_->emit_attribute_changed(*p.samples_, p.samples_vertex_color_.get());
 
 			compute_skeleton(p);
+			p.debug_highlight_dirty_ = false;
 		}
 
 		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
@@ -2158,6 +2377,12 @@ protected:
 
 	void start_spheres_update(SurfaceParameters& p)
 	{
+		clear_debug_highlight(p);
+		update_spheres_color(p);
+		update_samples_color(p);
+		points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_color_.get());
+		points_provider_->emit_attribute_changed(*p.samples_, p.samples_vertex_color_.get());
+		p.debug_highlight_dirty_ = false;
 		p.running_ = true;
 		p.iteration_count_ = 0;
 		p.total_error_diff_ = 0.0;
@@ -2200,6 +2425,8 @@ protected:
 					p.running_ = false;
 					break;
 				}
+				std::cout<<"Iteration: "<<p.iteration_count_<<", Sphere number: "<<p.nb_spheres_<<", Error: "<<p.total_error_ 
+				<<std::endl;
 			}
 			auto end = std::chrono::high_resolution_clock::now();
 			std::cout << "Sphere optimizations time: " << std::chrono::duration<Scalar>(end - start).count() << "s"
@@ -2503,6 +2730,15 @@ protected:
 				}
 
 				ImGui::Separator();
+				ImGui::Text("Debug tools");
+				ImGui::Checkbox("Enable debug logging", &p.debug_enable_logging_);
+				ImGui::InputFloat("Sample error warn", &p.debug_sample_error_threshold_, 0.0f, 0.0f, "%.6f");
+				ImGui::InputFloat("Sphere error warn", &p.debug_sphere_error_threshold_, 0.0f, 0.0f, "%.6f");
+				ImGui::InputFloat("Total error delta warn", &p.debug_total_error_abs_threshold_, 0.0f, 0.0f, "%.6f");
+				ImGui::InputFloat("Total error ratio warn", &p.debug_total_error_ratio_threshold_, 0.0f, 0.0f, "%.2f");
+				ImGui::InputFloat("Membership tol", &p.debug_membership_sum_tolerance_, 0.0f, 0.0f, "%.6f");
+				ImGui::InputScalar("Top spheres logged", ImGuiDataType_U32, &p.debug_top_spheres_to_log_);
+				ImGui::Separator();
 
 				ImGui::Text("Total error: %f", p.total_error_);
 				ImGui::Text("Min error: %f", p.min_error_);
@@ -2534,6 +2770,7 @@ private:
 	PVertex picked_sphere_;
 
 	std::array<std::mutex, 43> spheres_mutex_;
+	mutable std::mutex debug_output_mutex_;
 
 	std::unordered_map<const SURFACE*, std::vector<std::shared_ptr<boost::synapse::connection>>> surface_connections_;
 	std::shared_ptr<boost::synapse::connection> timer_connection_;
