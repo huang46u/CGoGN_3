@@ -1406,7 +1406,7 @@ public:
 		Vec3 c = (*p.spheres_position_)[sphere_index];
 		Scalar r = (*p.spheres_radius_)[sphere_index];
 		Spherical_Quadric q;
-		Scalar area = 0.0;
+		Scalar w = 0.0;
 		Vec3 h;
 		h.setZero();
 		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
@@ -1416,15 +1416,15 @@ public:
 			if (it == mmap.end())
 				return true;
 			const Scalar weight = std::max(0.0, it->second);
-			Spherical_Quadric quadric = (*p.samples_quadric_)[v];
+			Spherical_Quadric quadric = (*p.samples_quadric_)[v_index];
 			quadric *= weight;
 			q += quadric;
-			h += 1.0 * weight * (*p.samples_position_)[v];
-			area += 1.0;
+			h += 1.0 * weight * (*p.samples_position_)[v_index];
+			w += 1.0 * weight;
 			return true;
 		});
 		Mat4 As = Mat4::Identity();
-		As.block<3, 3>(0, 0) = 2 * Mat3::Identity() * area;
+		As.block<3, 3>(0, 0) = 2 * Mat3::Identity() * w;
 		As(3, 3) = 0;
 		Vec4 bs;
 		bs.head<3>() = 2 * h;
@@ -1505,7 +1505,7 @@ public:
 		Scalar r = (*p.spheres_radius_)[sphere_index];
 		// Verify if the SQEM is well conditioned
 		Spherical_Quadric q;
-		Scalar area = 0.0;
+		Scalar w = 0.0;
 		Vec3 h;
 		h.setZero();
 		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
@@ -1515,17 +1515,17 @@ public:
 			if (it == mmap.end())
 				return true;
 			const Scalar weight = std::max(0.0, it->second);
-			Spherical_Quadric quadric = (*p.samples_quadric_)[v];
+			Spherical_Quadric quadric = (*p.samples_quadric_)[v_index];
 			quadric *= weight;
 			q += quadric;
-			h += 1.0 * weight * (*p.samples_position_)[v];
-			area += 1.0;
+			h += 1.0 * weight * (*p.samples_position_)[v_index];
+			w += 1.0* weight;
 			return true;
 		});
 
 		Mat4 As = Mat4::Zero();
-		As.block<3, 3>(0, 0) = 2 * Mat3::Identity() * area;
-		As(3, 3) = -2 * area;
+		As.block<3, 3>(0, 0) = 2 * Mat3::Identity() * w;
+		As(3, 3) = -2 * w;
 		Vec4 bs;
 		bs.head<3>() = 2 * h;
 		bs(3) = 0;
