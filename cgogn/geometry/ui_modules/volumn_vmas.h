@@ -158,6 +158,7 @@ class Volumn_VMAS : public ViewModule
 		std::shared_ptr<PAttribute<bool>> spheres_do_not_split_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_not_normalized_ = nullptr;
+		std::shared_ptr<PAttribute<bool>> spheres_new_born_= nullptr;
 		// PAttribute<Scalar>* selected_spheres_error_ = nullptr;
 
 		//Volumn Samples
@@ -173,6 +174,7 @@ class Volumn_VMAS : public ViewModule
 		std::shared_ptr<PAttribute<PVertex>> samples_vertex_sphere_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> samples_vertex_error_ = nullptr;
 		std::shared_ptr<PAttribute<std::vector<PVertex>>> samples_vertex_knn_ = nullptr;
+		
 		uint32 sampels_numbers_ = 100000;
 		std::unique_ptr<Side_tester> inside_tester_;
 		CGAL_SurfaceMesh cgal_surface_mesh_;
@@ -214,11 +216,11 @@ class Volumn_VMAS : public ViewModule
 
 		//fuzzy membership
 		std::shared_ptr<PAttribute<std::unordered_map<uint32, Scalar>>> samples_membership_ = nullptr;
-		float tau_ = 0.01f;
+		std::shared_ptr<PAttribute<std::unordered_map<uint32, Scalar>>> prev_samples_membership_ = nullptr;
 		uint32 top_k_spheres_ = 8;
-		Scalar eps_ = 1e-12;
+		Scalar eps_ = 1e-4;
 
-		float theta_gap_log_ = 0.1f;
+		float eta_w_ = 1e6f;
 
 		uint32 iteration_count_ = 0;
 		std::mutex mutex_;
@@ -227,7 +229,7 @@ class Volumn_VMAS : public ViewModule
 		bool slow_down_ = true;
 		uint32 update_rate_ = 20;
 		// poisson disk sampling
-		Scalar r_ = 0.015;
+		Scalar r_ = 0.08;
 		uint32 K_ = 30;
 	};
 
@@ -593,6 +595,8 @@ public:
 		p.projected_samples_normal_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "projected_normal");
 		p.samples_membership_ =
 			get_or_add_attribute<std::unordered_map<uint32, Scalar>, PVertex>(*p.samples_, "membership");
+		p.prev_samples_membership_ =
+			get_or_add_attribute<std::unordered_map<uint32, Scalar>, PVertex>(*p.samples_, "prev_membership");
 		// initialize volumn samples
 		poisson_disk_sampling(p);
 
@@ -698,6 +702,7 @@ public:
 			get_or_add_attribute<PVertex, PVertex>(*p.samples_, "sphere"); // cluster of the surface vertex
 		p.spheres_neighbor_clusters_ =
 			get_or_add_attribute<std::set<PVertex>, PVertex>(*p.spheres_, "neighbor_clusters"); // neighbor clusters
+		p.spheres_new_born_ = get_or_add_attribute<bool, PVertex>(*p.spheres_, "new_born");
 
 		// create the skeleton mesh
 
@@ -711,7 +716,7 @@ public:
 		//compute_clusters(p);
 		compute_membership_soft(p);
 		materialize_top1_labels(p);
-
+		update_membership(p);
 		// update the render data (spheres and skeleton)
 		// (the skeleton is reconstructed)
 
@@ -762,7 +767,7 @@ public:
 		//compute_clusters(p);
 		compute_membership_soft(p);
 		materialize_top1_labels(p);
-
+		update_membership(p);
 		if (!p.running_)
 			update_render_data(p);
 	}
@@ -883,8 +888,6 @@ public:
 			return true;
 		});
 		p.samples_vertex_sphere_->fill(PVertex());
-
-		MeshData<POINTS>& md = points_provider_->mesh_data(*p.spheres_);
 		if (p.nb_spheres_ == 0)
 			return;
 		struct Cand
@@ -894,18 +897,17 @@ public:
 		};
 		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
+
 			
 			std::vector<Cand> candidates;
 			candidates.reserve(p.nb_spheres_);
+
 			// Each volumn sample has weight 1
 			Scalar a = 1.0;
-
-			const Vec3& vp = (*p.projected_samples_position_)[v_index];
-			Scalar total_weight = 0.0;
-			std::vector<std::pair<uint32, Scalar>> weights;
 			foreach_cell(*p.spheres_, [&](PVertex pv) {
 				uint32 pv_index = index_of(*p.spheres_, pv);
 				const Vec3& center = (*p.spheres_position_)[pv_index];
+		
 				Scalar radius = (*p.spheres_radius_)[pv_index];
 				Scalar dist_sqem =
 					(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
@@ -944,85 +946,71 @@ public:
 				return true;
 			});
 			const uint32 K = std::min(p.top_k_spheres_, uint32(candidates.size()));
+			const uint32 keep_max = 2 * p.top_k_spheres_;
 			std::nth_element(candidates.begin(), candidates.begin() + K, candidates.end(), [](const Cand& a, const Cand& b) {
 				return a.E < b.E;
 			});
+			auto cache_energy = candidates;
 			candidates.resize(K);
 			std::sort(candidates.begin(), candidates.end(), [](const Cand& a, const Cand& b) { return a.E < b.E; });
 			
-			
-			
-			Scalar Emin = candidates[0].E;
-			Scalar tau = p.tau_;
-			if (candidates.size() == 0)
-				return true;
-			std::vector<Scalar> log_e;
-			log_e.reserve(candidates.size());
-			for (const auto& c : candidates)
-				log_e.push_back(std::log(c.E + 1e-16));
-			
-		
-			
-			const Scalar eps = std::max<Scalar>(p.eps_, 1e-16);
-			std::vector<Scalar> gap;
-			gap.reserve((K > 1) ? (K - 1): 0);
+			const auto& prev_map = (*p.prev_samples_membership_)[v_index];
 
-			for (uint32 t = 0; t+1<K; ++t)
-			{ 
-				Scalar x_t = std::log(candidates[t].E + eps);
-				Scalar x_t1 = std::log(candidates[t + 1].E + eps);
-				gap.push_back(x_t1 - x_t);
-			
-			}
-			const Scalar theta_gap = p.theta_gap_log_;
-			uint32 pike =K - 1;
-			for (uint32 t = 0; t < gap.size(); ++t)
+			std::unordered_map<uint32, Scalar> Emap;
+			Emap.reserve(std::min<uint32>(keep_max, K + (uint32)prev_map.size()));
+			for (const auto& [sidx, wprev] : prev_map)
 			{
-				if (gap[t] >= p.theta_gap_log_)
+				if (wprev > 1e-6 && !Emap.count(sidx))
 				{
-					pike = t;
-					break;
+					auto it = std::find_if(cache_energy.begin(), cache_energy.end(),
+										   [&](const Cand& c) { return c.sidx == sidx; });
+					Emap[sidx] = it->E;
 				}
 			}
-			Scalar denom = 0.0;
-			std::vector<Cand> keep;
-			keep.reserve(pike+1);
-			for (uint32 t = 0; t <= pike; ++t)
-				keep.push_back(candidates[t]);
-			if (keep.empty())
-				keep.push_back(candidates.front());
-			/*if (keep.size() > 1)
+			// keep all previous spheres + best new spheres up to keep_max
+			const uint32 prev_count = (uint32)Emap.size();
+			if (prev_count < keep_max)
 			{
-				std::cout << "candidates: ";
-				for (const auto& c : candidates)
-					std::cout << c.E << " ";
-				std::cout << std::endl;
-				std::cout << "log_e: ";
-				for (const auto& le : log_e)
-					std::cout << le << " ";
-				std::cout << std::endl;
-				std::cout << " keep: ";
-				for (auto& c : keep)
-					std::cout << c.E << " ";
-				std::cout << std::endl;
-				std::cout << " ----------------------------------------" << std::endl;
-			}*/
-			const auto nK = keep.size();
-			std::vector<Scalar> ww(nK);
-			for (uint32 t = 0; t < nK; ++t)
+				const uint32 budget = keep_max - prev_count;
+				uint32 added = 0;
+				for (uint32 i = 0; i < candidates.size() && added < budget; ++i)
+				{
+					const auto& c = candidates[i];
+					if (!Emap.count(c.sidx))
+					{
+						Emap.emplace(c.sidx, c.E);
+						++added;
+					}
+				}
+			}
+			Scalar smax = -(std::numeric_limits<Scalar>::infinity)();
+			std::unordered_map<uint32, Scalar> keep;
+			keep.reserve(Emap.size());
+			for (auto& [sidx, E] : Emap)
 			{
-				Scalar w = std::exp(-keep[t].E/ tau);
-				denom += w;
-				ww[t] = w;
+				// use previous weight as prior
+				const Scalar wp = prev_map.count(sidx) ? prev_map.at(sidx) : 0.0;
+				// use current energy
+				const Scalar s = std::log(wp + p.eps_) - p.eta_w_ * E;
+				keep[sidx] = s;
+				smax = std::max(smax, s);
+			}
+			Scalar total = 0.0;
+			
+			for (auto& kv : keep)
+			{
+				kv.second = std::exp(kv.second - smax);
+				total += kv.second;
 			}
 			auto& mmap = (*p.samples_membership_)[v_index];
 			mmap.clear();
-			mmap.reserve(nK);
-			const Scalar inv = (denom > 0) ? (1.0/denom) : 1.0;
-			for (uint32 t = 0; t < nK; ++t)
+			mmap.reserve(keep.size());
+			const Scalar inv_denom = (total > 0) ? (1.0 / total) : 1.0;
+			for (auto& kv : keep)
 			{
-				Scalar w = ww[t] * inv;
-				if (w > 0) mmap[keep[t].sidx] = w;
+				Scalar w = kv.second * inv_denom;
+				if (w > 0)
+					mmap[kv.first] = w;
 			}
 			for (const auto& [sidx, w] : mmap)
 			{
@@ -1030,8 +1018,18 @@ public:
 				(*p.spheres_cluster_)[sidx].push_back(v);
 				(*p.spheres_cluster_area_)[sidx] += a * w;
 			}
+			std::cout << "Sample : " << v_index << ", Prev Membership:";
+			for (const auto& [sidx, w] : prev_map)
+				std::cout << " (" << sidx << ": " << w << ")";
+			std::cout << std::endl;
+			std::cout << ", New Membership:";
+			for (const auto& [sidx, w] : mmap)
+				std::cout << " (" << sidx << ": " << w << ")";
+			std::cout << std::endl;
+	
 			return true;
 		});
+	
 	}
 
 	void materialize_top1_labels(SurfaceParameters& p)
@@ -1055,6 +1053,40 @@ public:
 			(*p.spheres_cluster_)[best_idx].push_back(vi);
 			return true;
 		});
+	}
+
+	Scalar compute_kl_term(SurfaceParameters& p)
+	{
+		Scalar kl = 0.0;
+		foreach_cell(*p.samples_,[&](PVertex v)->bool {
+				uint32 v_index = index_of(*p.samples_, v);
+				const auto& mmap = (*p.samples_membership_)[v_index];
+				const auto& prev_map = (*p.prev_samples_membership_)[v_index];
+				auto in_prev = [&](uint32 sidx) { return prev_map.find(sidx) != prev_map.end(); };
+				auto slog = [](Scalar x) {
+					const Scalar m = 1e-30;
+					return std::log(x < m ? m : x);
+				};
+				Scalar denom = 0.0;
+				
+				for (auto& [sidx, wp] : prev_map)
+					denom += wp + p.eps_;
+				for (auto& [sid, w] : mmap)
+				{
+					if (!in_prev(sid))
+						denom += p.eps_;
+				}
+				for (auto& [sidx, wij] : mmap)
+				{
+					const auto it = prev_map.find(sidx);
+					const Scalar wq = it != prev_map.end() ? it->second + p.eps_ : p.eps_;
+					const Scalar w = wq  / denom;
+					kl += wij * (slog(wij) - slog(w));
+				}
+				return true;
+		});
+		kl /= p.eta_w_;
+		return kl;
 	}
 
 	void compute_spheres_error(SurfaceParameters& p)
@@ -1138,7 +1170,9 @@ public:
 			p.total_error_not_normalized_ += error_not_normalized;
 			return true;
 		});
-
+		Scalar kl_error_ = compute_kl_term(p);
+		std::cout << "geometry error: " << p.total_error_ << ", KL : " << kl_error_ << std::endl; 
+		p.total_error_ += compute_kl_term(p);
 		p.total_error_diff_ = fabs(p.total_error_ - p.last_total_error_);
 		p.last_total_error_ = p.total_error_;
 	}
@@ -1735,51 +1769,101 @@ public:
 		c = center;
 		r = radius;
 	}
-
+	void update_membership(SurfaceParameters& p)
+	{
+		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+			uint32 vi = index_of(*p.samples_, v);
+			(*p.prev_samples_membership_)[vi] = (*p.samples_membership_)[vi];
+			return true;
+		});
+	}
 	void update_spheres(SurfaceParameters& p)
 	{
 		// auto start = std::chrono::high_resolution_clock::now();
-
-		//compute_clusters(p);
-		compute_membership_soft(p);
-		materialize_top1_labels(p);
-		// switch (p.update_method_)
-		// {
-		// case FIT: {
-		// 	parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-		// 		update_sphere_fit(p, v);
-		// 		return true;
-		// 	});
-		// 	break;
-		// }
-		// case SQEM: {
-		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			switch (p.distance_mode_)
-			{
-			case SPHERE_EUCLIDEAN_DISTANCE:
-				update_fuzzy_sphere_euclidean_distance(p, v);
-				break;
-			case SPHERE_CENTER_DISTANCE:
-				update_fuzzy_sphere_center_distance(p, v);
-				break;
-			case SPHERE_POWER_DISTANCE:
-				update_fuzzy_power_distance(p, v);
-				break;
-			case SPHERE_POWER_DISTANCE_SQUARED:
-				update_fuzzy_power_distance_squared(p, v);
-				break;
-			}
-
-			if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
-				correct_sphere(p, v);
-			value<bool>(*p.spheres_, p.spheres_do_not_split_, v) = false;
+		Scalar Phi_old = p.iteration_count_ == 0 ? std::numeric_limits<Scalar>::max() : p.total_error_;
+		std::vector<Vec3> pos_backup;
+		std::vector<Scalar> radius_backup;
+		pos_backup.reserve(p.nb_spheres_);
+		radius_backup.reserve(p.nb_spheres_);
+		foreach_cell(*p.spheres_, [&](PVertex v) {
+			uint32 v_index = index_of(*p.spheres_, v);
+			pos_backup.push_back((*p.spheres_position_)[v_index]);
+			radius_backup.push_back((*p.spheres_radius_)[v_index]);
 			return true;
 		});
-		// 	break;
-		// }
-		// }
+		Scalar eta_original = p.eta_w_;
+		bool accepted = false;
+		//compute_clusters(p);
+		for (int trial = 0; trial < 5 && !accepted; ++trial)
+		{
 
-		compute_spheres_error(p); // compute spheres error
+			compute_membership_soft(p);
+			materialize_top1_labels(p);
+			// switch (p.update_method_)
+			// {
+			// case FIT: {
+			// 	parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			// 		update_sphere_fit(p, v);
+			// 		return true;
+			// 	});
+			// 	break;
+			// }
+			// case SQEM: {
+			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+				switch (p.distance_mode_)
+				{
+				case SPHERE_EUCLIDEAN_DISTANCE:
+					update_fuzzy_sphere_euclidean_distance(p, v);
+					break;
+				case SPHERE_CENTER_DISTANCE:
+					update_fuzzy_sphere_center_distance(p, v);
+					break;
+				case SPHERE_POWER_DISTANCE:
+					update_fuzzy_power_distance(p, v);
+					break;
+				case SPHERE_POWER_DISTANCE_SQUARED:
+					update_fuzzy_power_distance_squared(p, v);
+					break;
+				}
+
+				if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
+					correct_sphere(p, v);
+				value<bool>(*p.spheres_, p.spheres_do_not_split_, v) = false;
+				return true;
+			});
+			// 	break;
+			// }
+			// }
+
+			compute_spheres_error(p); // compute spheres error
+			Scalar Phi_new = p.total_error_;
+			if (Phi_new < Phi_old)
+			{
+				std::cout << "Trial: " << trial << ", Iteration " << p.iteration_count_ << " accepted: " << Phi_old
+						  << " -> " << Phi_new << " (eta_w=" << p.eta_w_ << ")" << std::endl;
+				parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+					uint32 vi = index_of(*p.samples_, v);
+					
+					(*p.prev_samples_membership_)[vi] = (*p.samples_membership_)[vi];
+					return true;
+				});
+				accepted = true;
+			}
+			else
+			{
+				std::cout << "Trial :" << trial << ", Iteration " << p.iteration_count_ << " rejected : " << Phi_old
+						  << "->" << Phi_new << " (eta_w=" << p.eta_w_ << ")" << std::endl;
+				int k = 0;
+				foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+					uint32 si = index_of(*p.spheres_, v);
+					(*p.spheres_position_)[si] = pos_backup[k];
+					(*p.spheres_radius_)[si] = radius_backup[k];
+					++k;
+					return true;
+				});
+				p.eta_w_ *= 0.5;
+			}
+		}
 		// std::cout << p.total_error_not_normalized_ << std::endl;
 
 		if (p.auto_split_ &&
@@ -2382,9 +2466,8 @@ protected:
 				{
 					if (sync_lambda)
 						p.sqem_update_lambda_ = p.sqem_clustering_lambda_;
-				}
-				ImGui::SliderFloat("Tau", &p.tau_, 0.0001f, 1.0f, "%.6f");
-				ImGui::SliderFloat("Threshold", &p.theta_gap_log_, 0.01f,5.0f, "%.2f");
+				}				
+				ImGui::SliderFloat("Eta", &p.eta_w_, 0.01f,5.0f, "%.2f");
 				if (ImGui::Button("Print weight"))
 				{
 					uint32 count = 0;
@@ -2408,8 +2491,7 @@ protected:
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
 						update_spheres(p);
-						compute_spheres_error(p);
-						update_render_data(p);
+						p.iteration_count_++;
 					}
 				}
 
