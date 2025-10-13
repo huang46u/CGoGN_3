@@ -155,6 +155,7 @@ class Volumn_VMAS : public ViewModule
 		std::shared_ptr<PAttribute<Scalar>> spheres_cluster_area_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> spheres_cluster_color_ = nullptr;
 		std::shared_ptr<PAttribute<std::set<PVertex>>> spheres_neighbor_clusters_ = nullptr;
+		std::shared_ptr<PAttribute<std::set<PVertex>>> spheres_neighbor_rpd_ = nullptr;
 		std::shared_ptr<PAttribute<bool>> spheres_do_not_split_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_not_normalized_ = nullptr;
@@ -170,7 +171,8 @@ class Volumn_VMAS : public ViewModule
 		std::shared_ptr<PAttribute<Vec3>> medial_axis_position_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> medial_axis_radius_ = nullptr;
 		std::shared_ptr<PAttribute<PVertex>> medial_axis_secondary_vertex_ = nullptr;
-		std::shared_ptr<PAttribute<PVertex>> samples_vertex_sphere_ = nullptr;
+		std::shared_ptr<PAttribute<PVertex>> samples_cluster_sphere_ = nullptr;
+		std::shared_ptr<PAttribute<PVertex>> samples_rpd_sphere_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> samples_vertex_error_ = nullptr;
 		std::shared_ptr<PAttribute<std::vector<PVertex>>> samples_vertex_knn_ = nullptr;
 		uint32 sampels_numbers_ = 100000;
@@ -214,7 +216,7 @@ class Volumn_VMAS : public ViewModule
 
 		//fuzzy membership
 		std::shared_ptr<PAttribute<std::unordered_map<uint32, Scalar>>> samples_membership_ = nullptr;
-		float tau_ = 0.01f;
+		float tau_ = 1e-7f;
 		uint32 top_k_spheres_ = 8;
 		Scalar eps_ = 1e-12;
 
@@ -593,6 +595,9 @@ public:
 		p.projected_samples_normal_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "projected_normal");
 		p.samples_membership_ =
 			get_or_add_attribute<std::unordered_map<uint32, Scalar>, PVertex>(*p.samples_, "membership");
+		p.samples_cluster_sphere_ = get_or_add_attribute<PVertex, PVertex>(*p.samples_, "cluster_sphere");
+		p.samples_rpd_sphere_ = get_or_add_attribute<PVertex, PVertex>(*p.samples_, "rpd_sphere");
+		p.samples_vertex_error_ = get_or_add_attribute<Scalar, PVertex>(*p.samples_, "error");
 		// initialize volumn samples
 		poisson_disk_sampling(p);
 
@@ -640,7 +645,6 @@ public:
 		compute_quadrics(p);
 
 		// compute shrinking balls for the surface vertices
-
 		p.medial_axis_position_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "medial_axis_position");
 		p.medial_axis_radius_ = get_or_add_attribute<Scalar, PVertex>(*p.samples_, "medial_axis_radius");
 		p.medial_axis_secondary_vertex_ =
@@ -656,19 +660,6 @@ public:
 			(*p.medial_axis_secondary_vertex_)[v_index] = q;
 			return true;
 		});
-
-		/* parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*p.samples_, v);
-			auto [c, r] = geometry::shrinking_ball_center(
-				*p.surface_,
-				(*p.projected_samples_position_)[v_index],
-				(*p.projected_samples_normal_)[v_index],
-				p.surface_bvh_,
-				p.surface_bvh_faces_);
-			(*p.medial_axis_position_)[v_index] = c;
-			(*p.medial_axis_radius_)[v_index] = r;
-			return true;
-		});*/
 
 		// create the spheres mesh
 
@@ -691,11 +682,8 @@ public:
 
 		p.spheres_do_not_split_ = get_or_add_attribute<bool, PVertex>(*p.spheres_, "do_not_split");
 
-		p.samples_vertex_error_ =
-			get_or_add_attribute<Scalar, PVertex>(*p.samples_, "error"); // error of a vertex w.r.t. its sphere
+		p.spheres_neighbor_rpd_ = get_or_add_attribute<std::set<PVertex>, PVertex>(*p.spheres_, "neighbor_rpd"); // rpd
 
-		p.samples_vertex_sphere_ =
-			get_or_add_attribute<PVertex, PVertex>(*p.samples_, "sphere"); // cluster of the surface vertex
 		p.spheres_neighbor_clusters_ =
 			get_or_add_attribute<std::set<PVertex>, PVertex>(*p.spheres_, "neighbor_clusters"); // neighbor clusters
 
@@ -709,6 +697,8 @@ public:
 		// (cleans out surface vertex sphere data)
 
 		//compute_clusters(p);
+		compute_implicit_rpd(p);
+		compute_rpd_neighbour(p);
 		compute_membership_soft(p);
 		materialize_top1_labels(p);
 
@@ -760,9 +750,10 @@ public:
 		// Vec3(rand() % 256 / 255.0f, rand() % 256 / 255.0f, rand() % 256 / 255.0f);
 
 		//compute_clusters(p);
+		compute_implicit_rpd(p);
+		compute_rpd_neighbour(p);
 		compute_membership_soft(p);
 		materialize_top1_labels(p);
-
 		if (!p.running_)
 			update_render_data(p);
 	}
@@ -882,9 +873,8 @@ public:
 			(*p.spheres_cluster_area_)[v_index] = 0.0;
 			return true;
 		});
-		p.samples_vertex_sphere_->fill(PVertex());
+		p.samples_cluster_sphere_->fill(PVertex());
 
-		MeshData<POINTS>& md = points_provider_->mesh_data(*p.spheres_);
 		if (p.nb_spheres_ == 0)
 			return;
 		struct Cand
@@ -894,16 +884,20 @@ public:
 		};
 		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
-			
+
 			std::vector<Cand> candidates;
 			candidates.reserve(p.nb_spheres_);
 			// Each volumn sample has weight 1
 			Scalar a = 1.0;
 
-			const Vec3& vp = (*p.projected_samples_position_)[v_index];
 			Scalar total_weight = 0.0;
 			std::vector<std::pair<uint32, Scalar>> weights;
-			foreach_cell(*p.spheres_, [&](PVertex pv) {
+			PVertex rpd_sphere = (*p.samples_rpd_sphere_)[v];
+			cgogn_message_assert(rpd_sphere != PVertex(), "vertex does not has a rpd sphere");
+			auto neighbours = (*p.spheres_neighbor_rpd_)[index_of(*p.spheres_, rpd_sphere)];
+			neighbours.insert(rpd_sphere);
+			for (PVertex pv : neighbours)
+			{
 				uint32 pv_index = index_of(*p.spheres_, pv);
 				const Vec3& center = (*p.spheres_position_)[pv_index];
 				Scalar radius = (*p.spheres_radius_)[pv_index];
@@ -940,94 +934,34 @@ public:
 				}
 				dist_other *= a;
 				Scalar dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
-				candidates.push_back({ pv_index, dist });
+				candidates.push_back({pv_index, dist});
+			}
+			if (candidates.empty())
 				return true;
-			});
-			const uint32 K = std::min(p.top_k_spheres_, uint32(candidates.size()));
-			std::nth_element(candidates.begin(), candidates.begin() + K, candidates.end(), [](const Cand& a, const Cand& b) {
-				return a.E < b.E;
-			});
-			candidates.resize(K);
+			uint32 nK = (uint32)candidates.size();
 			std::sort(candidates.begin(), candidates.end(), [](const Cand& a, const Cand& b) { return a.E < b.E; });
-			
-			
-			
+
 			Scalar Emin = candidates[0].E;
 			Scalar tau = p.tau_;
-			if (candidates.size() == 0)
-				return true;
-			std::vector<Scalar> log_e;
-			log_e.reserve(candidates.size());
-			for (const auto& c : candidates)
-				log_e.push_back(std::log(c.E + 1e-16));
-			
-		
-			
-			const Scalar eps = std::max<Scalar>(p.eps_, 1e-16);
-			std::vector<Scalar> gap;
-			gap.reserve((K > 1) ? (K - 1): 0);
-
-			for (uint32 t = 0; t+1<K; ++t)
-			{ 
-				Scalar x_t = std::log(candidates[t].E + eps);
-				Scalar x_t1 = std::log(candidates[t + 1].E + eps);
-				gap.push_back(x_t1 - x_t);
-			
-			}
-			const Scalar theta_gap = p.theta_gap_log_;
-			uint32 pike =K - 1;
-			for (uint32 t = 0; t < gap.size(); ++t)
+			// compute weights
+			for (const Cand& c : candidates)
 			{
-				if (gap[t] >= p.theta_gap_log_)
-				{
-					pike = t;
-					break;
-				}
-			}
-			Scalar denom = 0.0;
-			std::vector<Cand> keep;
-			keep.reserve(pike+1);
-			for (uint32 t = 0; t <= pike; ++t)
-				keep.push_back(candidates[t]);
-			if (keep.empty())
-				keep.push_back(candidates.front());
-			/*if (keep.size() > 1)
-			{
-				std::cout << "candidates: ";
-				for (const auto& c : candidates)
-					std::cout << c.E << " ";
-				std::cout << std::endl;
-				std::cout << "log_e: ";
-				for (const auto& le : log_e)
-					std::cout << le << " ";
-				std::cout << std::endl;
-				std::cout << " keep: ";
-				for (auto& c : keep)
-					std::cout << c.E << " ";
-				std::cout << std::endl;
-				std::cout << " ----------------------------------------" << std::endl;
-			}*/
-			const auto nK = keep.size();
-			std::vector<Scalar> ww(nK);
-			for (uint32 t = 0; t < nK; ++t)
-			{
-				Scalar w = std::exp(-keep[t].E/ tau);
-				denom += w;
-				ww[t] = w;
+				Scalar w = std::exp(-(c.E - Emin) / tau);
+				weights.push_back({c.sidx, w});
+				total_weight += w;
 			}
 			auto& mmap = (*p.samples_membership_)[v_index];
 			mmap.clear();
 			mmap.reserve(nK);
-			const Scalar inv = (denom > 0) ? (1.0/denom) : 1.0;
+			const Scalar inv = (total_weight > 0) ? (1.0 / total_weight) : 1.0;
 			for (uint32 t = 0; t < nK; ++t)
 			{
-				Scalar w = ww[t] * inv;
-				if (w > 0) mmap[keep[t].sidx] = w;
+				Scalar w = weights[t].second * inv;
+				if (w > 0) mmap[weights[t].first] = w;
 			}
 			for (const auto& [sidx, w] : mmap)
 			{
 				std::lock_guard<std::mutex> lock(spheres_mutex_[sidx % spheres_mutex_.size()]);
-				(*p.spheres_cluster_)[sidx].push_back(v);
 				(*p.spheres_cluster_area_)[sidx] += a * w;
 			}
 			return true;
@@ -1051,7 +985,7 @@ public:
 					best_idx = kv.first;
 				}
 			}
-			value<PVertex>(*p.samples_, p.samples_vertex_sphere_, vi) = of_index<PVertex>(*p.spheres_, best_idx);
+			value<PVertex>(*p.samples_, p.samples_cluster_sphere_, vi) = of_index<PVertex>(*p.spheres_, best_idx);
 			(*p.spheres_cluster_)[best_idx].push_back(vi);
 			return true;
 		});
@@ -1741,18 +1675,11 @@ public:
 		// auto start = std::chrono::high_resolution_clock::now();
 
 		//compute_clusters(p);
+
+		compute_implicit_rpd(p);
 		compute_membership_soft(p);
 		materialize_top1_labels(p);
-		// switch (p.update_method_)
-		// {
-		// case FIT: {
-		// 	parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-		// 		update_sphere_fit(p, v);
-		// 		return true;
-		// 	});
-		// 	break;
-		// }
-		// case SQEM: {
+
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			switch (p.distance_mode_)
 			{
@@ -1775,9 +1702,7 @@ public:
 			value<bool>(*p.spheres_, p.spheres_do_not_split_, v) = false;
 			return true;
 		});
-		// 	break;
-		// }
-		// }
+
 
 		compute_spheres_error(p); // compute spheres error
 		// std::cout << p.total_error_not_normalized_ << std::endl;
@@ -1921,7 +1846,10 @@ public:
 	{
 		const std::vector<PVertex>& cluster = value<std::vector<PVertex>>(*p.spheres_, p.spheres_cluster_, v);
 		for (PVertex sv : cluster)
-			value<PVertex>(*p.samples_, p.samples_vertex_sphere_, sv) = PVertex();
+		{
+			value<PVertex>(*p.samples_, p.samples_cluster_sphere_, sv) = PVertex();
+			value<PVertex>(*p.samples_, p.samples_rpd_sphere_, sv) = PVertex();
+		}
 		remove_vertex(*p.spheres_, v);
 		p.nb_spheres_--;
 	}
@@ -1944,6 +1872,7 @@ public:
 	};
 
 	
+
 	void compute_cluster_neighbour(SurfaceParameters& p)
 	{
 		// clean neighbor clusters sets
@@ -1956,10 +1885,10 @@ public:
 		// compute neighbor clusters
 		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
-			PVertex v_sphere = (*p.samples_vertex_sphere_)[v_index];
+			PVertex v_sphere = (*p.samples_cluster_sphere_)[v_index];
 			for (PVertex w : (*p.samples_vertex_knn_)[v_index])
 			{
-				PVertex w_sphere = value<PVertex>(*p.samples_, p.samples_vertex_sphere_, w);
+				PVertex w_sphere = value<PVertex>(*p.samples_, p.samples_cluster_sphere_, w);
 				if (v_sphere.is_valid() && w_sphere.is_valid() && v_sphere != w_sphere)
 				{
 					value<std::set<PVertex>>(*p.spheres_, p.spheres_neighbor_clusters_, v_sphere).insert(w_sphere);
@@ -1968,27 +1897,9 @@ public:
 			}
 			return true;
 		});
-
 	}
 
-	void compute_skeleton(SurfaceParameters& p, bool compute_neighbor_clusters_only = false)
-	{
-		// clean neighbor clusters sets
-		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*p.spheres_, v);
-			(*p.spheres_neighbor_clusters_)[v_index].clear();
-			(*p.spheres_cluster_)[v_index].clear();
-			(*p.spheres_cluster_area_)[v_index] = 0.0;
-			return true;
-		});
-
-		p.samples_vertex_sphere_->fill(PVertex());
-
-		MeshData<POINTS>& md = points_provider_->mesh_data(*p.spheres_);
-		if (p.nb_spheres_ == 0)
-			return;
-
-		// auto start = std::chrono::high_resolution_clock::now();
+	void compute_implicit_rpd(SurfaceParameters& p) {
 
 		parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
@@ -2006,10 +1917,11 @@ public:
 				Scalar radius = (*p.spheres_radius_)[pv_index];
 
 				Scalar power_distance =
-					((*p.samples_position_)[v_index] - center).dot((*p.samples_position_)[v_index] - center)-radius * radius;
-				
+					((*p.samples_position_)[v_index] - center).dot((*p.samples_position_)[v_index] - center) -
+					radius * radius;
+
 				power_distance *= a;
-				
+
 				if (power_distance < min_distance)
 				{
 					min_distance = power_distance;
@@ -2019,31 +1931,44 @@ public:
 				return true;
 			});
 
-			value<PVertex>(*p.samples_, p.samples_vertex_sphere_, v) = closest_sphere;
-
-			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
-			value<std::vector<PVertex>>(*p.spheres_, p.spheres_cluster_, closest_sphere).push_back(v);
-			value<Scalar>(*p.spheres_, p.spheres_cluster_area_, closest_sphere) += a;
-
+			value<PVertex>(*p.samples_, p.samples_rpd_sphere_, v) = closest_sphere;
 			return true;
 		});
-	
+	}
+
+	void compute_rpd_neighbour(SurfaceParameters& p)
+	{
+		// clean neighbor clusters sets
+		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.spheres_, v);
+			(*p.spheres_neighbor_rpd_)[v_index].clear();
+			return true;
+		});
+
 		// compute neighbor clusters
 		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
-			PVertex v_sphere = (*p.samples_vertex_sphere_)[v_index];
+			PVertex v_sphere = (*p.samples_rpd_sphere_)[v_index];
 			for (PVertex w : (*p.samples_vertex_knn_)[v_index])
 			{
-				PVertex w_sphere = value<PVertex>(*p.samples_, p.samples_vertex_sphere_, w);
+				PVertex w_sphere = value<PVertex>(*p.samples_, p.samples_rpd_sphere_, w);
 				if (v_sphere.is_valid() && w_sphere.is_valid() && v_sphere != w_sphere)
 				{
-					value<std::set<PVertex>>(*p.spheres_, p.spheres_neighbor_clusters_, v_sphere).insert(w_sphere);
-					value<std::set<PVertex>>(*p.spheres_, p.spheres_neighbor_clusters_, w_sphere).insert(v_sphere);
+					value<std::set<PVertex>>(*p.spheres_, p.spheres_neighbor_rpd_, v_sphere).insert(w_sphere);
+					value<std::set<PVertex>>(*p.spheres_, p.spheres_neighbor_rpd_, w_sphere).insert(v_sphere);
 				}
 			}
 			return true;
 		});
+	}
 
+	void compute_skeleton(SurfaceParameters& p, bool compute_neighbor_clusters_only = false)
+	{
+		if (p.nb_spheres_ == 0)
+			return;
+		// auto start = std::chrono::high_resolution_clock::now();
+		compute_implicit_rpd(p);
+		compute_rpd_neighbour(p);
 
 		clear(*p.skeleton_);
 
@@ -2063,7 +1988,7 @@ public:
 		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
 			uint32 pv_index = index_of(*p.spheres_, pv);
 			NMVertex nmv1 = (*spheres_skeleton_vertex_map)[pv_index];
-			const std::set<PVertex>& neighbors = (*p.spheres_neighbor_clusters_)[pv_index];
+			const std::set<PVertex>& neighbors = (*p.spheres_neighbor_rpd_)[pv_index];
 			for (PVertex neighbor : neighbors)
 			{
 				NMVertex nmv2 = value<NMVertex>(*p.spheres_, spheres_skeleton_vertex_map, neighbor);
@@ -2079,12 +2004,11 @@ public:
 
 		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
 			NMVertex nmv1 = value<NMVertex>(*p.spheres_, spheres_skeleton_vertex_map, pv);
-			const std::set<PVertex>& n_pv = value<std::set<PVertex>>(*p.spheres_, p.spheres_neighbor_clusters_, pv);
+			const std::set<PVertex>& n_pv = value<std::set<PVertex>>(*p.spheres_, p.spheres_neighbor_rpd_, pv);
 			for (const PVertex& ne1 : n_pv)
 			{
 				NMVertex nmv2 = value<NMVertex>(*p.spheres_, spheres_skeleton_vertex_map, ne1);
-				const std::set<PVertex>& ne_ne1 =
-					value<std::set<PVertex>>(*p.spheres_, p.spheres_neighbor_clusters_, ne1);
+				const std::set<PVertex>& ne_ne1 = value<std::set<PVertex>>(*p.spheres_, p.spheres_neighbor_rpd_, ne1);
 				for (const PVertex& ne2 : ne_ne1)
 				{
 					if (n_pv.find(ne2) != n_pv.end())
@@ -2283,6 +2207,8 @@ protected:
 				std::lock_guard<std::mutex> lock(p.mutex_);
 				split_sphere(p, picked_sphere_);
 				//compute_clusters(p);
+				compute_implicit_rpd(p);
+				compute_rpd_neighbour(p);
 				compute_membership_soft(p);
 				materialize_top1_labels(p);
 				compute_spheres_error(p);
@@ -2294,6 +2220,8 @@ protected:
 				std::lock_guard<std::mutex> lock(p.mutex_);
 				remove_sphere(p, picked_sphere_);
 				//compute_clusters(p);
+				compute_implicit_rpd(p);
+				compute_rpd_neighbour(p);
 				compute_membership_soft(p);
 				materialize_top1_labels(p);
 				compute_spheres_error(p);
@@ -2383,8 +2311,7 @@ protected:
 					if (sync_lambda)
 						p.sqem_update_lambda_ = p.sqem_clustering_lambda_;
 				}
-				ImGui::SliderFloat("Tau", &p.tau_, 0.0001f, 1.0f, "%.6f");
-				ImGui::SliderFloat("Threshold", &p.theta_gap_log_, 0.01f,5.0f, "%.2f");
+				ImGui::SliderFloat("Tau", &p.tau_, 1e-8f, 1e-3f, "%.7f");
 				if (ImGui::Button("Print weight"))
 				{
 					uint32 count = 0;
@@ -2408,8 +2335,6 @@ protected:
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
 						update_spheres(p);
-						compute_spheres_error(p);
-						update_render_data(p);
 					}
 				}
 
@@ -2419,6 +2344,8 @@ protected:
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
 						//compute_clusters(p);
+						compute_implicit_rpd(p);
+						compute_rpd_neighbour(p);
 						compute_membership_soft(p);
 						materialize_top1_labels(p);
 						compute_spheres_error(p);
@@ -2505,6 +2432,8 @@ protected:
 					std::lock_guard<std::mutex> lock(p.mutex_);
 					split_sphere(p, p.max_error_sphere_);
 					//compute_clusters(p);
+					compute_implicit_rpd(p);
+					compute_rpd_neighbour(p);
 					compute_membership_soft(p);
 					materialize_top1_labels(p);
 					compute_spheres_error(p);
