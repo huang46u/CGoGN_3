@@ -700,7 +700,6 @@ public:
 		compute_implicit_rpd(p);
 		compute_rpd_neighbour(p);
 		compute_membership_soft(p);
-		materialize_top1_labels(p);
 
 		// update the render data (spheres and skeleton)
 		// (the skeleton is reconstructed)
@@ -753,7 +752,6 @@ public:
 		compute_implicit_rpd(p);
 		compute_rpd_neighbour(p);
 		compute_membership_soft(p);
-		materialize_top1_labels(p);
 		if (!p.running_)
 			update_render_data(p);
 	}
@@ -962,34 +960,15 @@ public:
 			for (const auto& [sidx, w] : mmap)
 			{
 				std::lock_guard<std::mutex> lock(spheres_mutex_[sidx % spheres_mutex_.size()]);
+				(*p.spheres_cluster_)[sidx].push_back(v);
 				(*p.spheres_cluster_area_)[sidx] += a * w;
+
 			}
+			value<PVertex>(*p.samples_, p.samples_cluster_sphere_, v) = of_index<PVertex>(*p.spheres_, candidates[0].sidx);
 			return true;
 		});
 	}
 
-	void materialize_top1_labels(SurfaceParameters& p)
-	{
-		if (p.nb_spheres_ == 0)
-			return;
-		foreach_cell(*p.samples_, [&](PVertex vi)->bool {
-			const uint32 vi_idx = index_of(*p.samples_, vi);
-			const auto& mmap = (*p.samples_membership_)[vi_idx];
-			assert(!mmap.empty());
-			uint32 best_idx = 0; 
-			Scalar bw = -1.0;
-			for (const auto& kv : mmap) {
-				if (kv.second > bw)
-				{
-					bw = kv.second;
-					best_idx = kv.first;
-				}
-			}
-			value<PVertex>(*p.samples_, p.samples_cluster_sphere_, vi) = of_index<PVertex>(*p.spheres_, best_idx);
-			(*p.spheres_cluster_)[best_idx].push_back(vi);
-			return true;
-		});
-	}
 
 	void compute_spheres_error(SurfaceParameters& p)
 	{
@@ -1678,7 +1657,6 @@ public:
 
 		compute_implicit_rpd(p);
 		compute_membership_soft(p);
-		materialize_top1_labels(p);
 
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			switch (p.distance_mode_)
@@ -2210,7 +2188,6 @@ protected:
 				compute_implicit_rpd(p);
 				compute_rpd_neighbour(p);
 				compute_membership_soft(p);
-				materialize_top1_labels(p);
 				compute_spheres_error(p);
 				if (!p.running_)
 					update_render_data(p);
@@ -2223,7 +2200,6 @@ protected:
 				compute_implicit_rpd(p);
 				compute_rpd_neighbour(p);
 				compute_membership_soft(p);
-				materialize_top1_labels(p);
 				compute_spheres_error(p);
 				if (!p.running_)
 					update_render_data(p);
@@ -2347,7 +2323,6 @@ protected:
 						compute_implicit_rpd(p);
 						compute_rpd_neighbour(p);
 						compute_membership_soft(p);
-						materialize_top1_labels(p);
 						compute_spheres_error(p);
 						update_render_data(p);
 					}
@@ -2435,7 +2410,6 @@ protected:
 					compute_implicit_rpd(p);
 					compute_rpd_neighbour(p);
 					compute_membership_soft(p);
-					materialize_top1_labels(p);
 					compute_spheres_error(p);
 					if (!p.running_)
 						update_render_data(p);
