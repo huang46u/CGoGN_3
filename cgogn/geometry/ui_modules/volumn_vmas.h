@@ -36,6 +36,7 @@
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
+#include <cgogn/geometry/types/volume_poisson_disk_sampler.h>
 
 #include <Eigen/Sparse>
 #include <libacc/bvh_tree.h>
@@ -88,6 +89,7 @@ class Volumn_VMAS : public ViewModule
 	using NMAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
 	using NMVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
 	using NMEdge = typename mesh_traits<NONMANIFOLD>::Edge;
+	using VolumePoissonDiskSampler = cgogn::geometry::VolumePoissonDiskSampler<POINTS>;
 
 	// enum UpdateMethod : uint32
 	// {
@@ -162,6 +164,7 @@ class Volumn_VMAS : public ViewModule
 
 		//Volumn Samples
 		POINTS* samples_;
+		std::unique_ptr<VolumePoissonDiskSampler> volume_sampler_;
 		std::shared_ptr<PAttribute<Vec3>> samples_position_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> samples_vertex_color_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> projected_samples_position_ = nullptr;
@@ -173,6 +176,7 @@ class Volumn_VMAS : public ViewModule
 		std::shared_ptr<PAttribute<PVertex>> samples_vertex_sphere_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> samples_vertex_error_ = nullptr;
 		std::shared_ptr<PAttribute<std::vector<PVertex>>> samples_vertex_knn_ = nullptr;
+		std::shared_ptr<PAttribute<uint8>> poisson_sample_depth_ = nullptr;
 		uint32 sampels_numbers_ = 100000;
 		std::unique_ptr<Side_tester> inside_tester_;
 		CGAL_SurfaceMesh cgal_surface_mesh_;
@@ -263,139 +267,64 @@ public:
 		CGAL::Bounded_side res = (*p.inside_tester_)(query);
 		return res == CGAL::ON_BOUNDED_SIDE;
 	}
-	Vec3 random_sample_around(const Vec3& p, Scalar R)
+	
+	
+	inline void on_accept_project_to_surface(SurfaceParameters& p, uint32 vid, const Vec3& pos, uint8 depth)
 	{
-		static thread_local std::mt19937 rng{std::random_device{}()};
-		static thread_local std::uniform_real_distribution<Scalar> U(0.0, 1.0);
+		std::pair<uint32, Vec3> bvh_res;
+		p.surface_bvh_->closest_point(pos, &bvh_res);
+		Vec3 closest_surface_position = bvh_res.second;
 
-		Scalar u = U(rng);
-		Scalar v = U(rng);
-		Scalar w = U(rng);
-
-		Scalar R3 = R * R * R;
-		Scalar r = std::cbrt(R3 + u * (8 * R3 - R3)); // r = pow((R^3 + u(8R^3 - R^3)), 1/3)
-
-		Scalar phi = v * 2.0 * M_PI;
-		Scalar theta = std::acos(1.0 - 2.0 * w);
-
-		Scalar x = r * std::sin(theta) * std::cos(phi);
-		Scalar y = r * std::sin(theta) * std::sin(phi);
-		Scalar z = r * std::cos(theta);
-
-		return p + Vec3(x, y, z);
-	}
-
-	std::tuple<uint32, uint32, uint32> pos_to_grid_cell(const Vec3& pos, Scalar cell_size, uint32 grid_size)
-	{
-		uint32 x = std::min(uint32(pos.x() / cell_size), grid_size - 1);
-		uint32 y = std::min(uint32(pos.y() / cell_size), grid_size - 1);
-		uint32 z = std::min(uint32(pos.z() / cell_size), grid_size - 1);
-		return {x, y, z};
+		SFace closest_face = p.surface_bvh_faces_[bvh_res.first];
+		Vec3 closest_face_normal = value<Vec3>(*p.surface_, p.surface_face_normal_, closest_face);
+		(*p.samples_position_)[vid] = pos;
+		(*p.poisson_sample_depth_)[vid] = depth;
+		(*p.projected_samples_position_)[vid] = closest_surface_position;
+		(*p.projected_samples_normal_)[vid] = closest_face_normal;
 	}
 	void poisson_disk_sampling(SurfaceParameters& p)
 	{
-		using SampleIndex = std::size_t;
-		const SampleIndex INVALID = -1;
-		Scalar cell_size = p.r_ / std::sqrt(3.0);
-		uint32 grid_size = uint32(std::ceil(1.0 / cell_size));
-		std::vector<std::vector<std::vector<SampleIndex>>> grid(
-			grid_size, std::vector<std::vector<SampleIndex>>(grid_size, std::vector<SampleIndex>(grid_size, INVALID)));
-		std::vector<SampleIndex> active_list;
-		std::vector<Vec3> samples;
-		std::mt19937 rng{std::random_device{}()};
-		auto pick_active_index = [&](void) -> size_t {
-			std::uniform_int_distribution<size_t> dist(0, active_list.size() - 1);
-			return dist(rng);
+		auto inside = [&](const Vec3& pos) -> bool { return is_inside(p, pos); };
+		auto on_accept = [&](uint32 vid,const Vec3& pos, const uint8 depth) {
+			on_accept_project_to_surface(p, vid, pos, depth);
 		};
-		Vec3 bias = Vec3(0.5, 0.5, 0.5);
-		CGAL::Random_points_in_cube_3<Point_3> generator(0.5); // sample first point
-		while (active_list.empty())
-		{
-			Point_3 s = *generator++;
-			Vec3 pos = Vec3(s.x(), s.y(), s.z()) + bias;
-			if (!is_inside(p, pos))
-				continue;
-			auto [x, y, z] = pos_to_grid_cell(pos, cell_size, grid_size);
-			SampleIndex new_index = (SampleIndex)samples.size();
-			samples.push_back(pos);
-			grid[x][y][z] = new_index;
-			active_list.push_back(new_index);
-		}
-		while (active_list.size() != 0)
-		{ // Randomly pick a point from the active list
-			size_t idx = pick_active_index();
-			SampleIndex current_index = active_list[idx];
-			Vec3 current_sample = samples[current_index];
-			bool permenantly_remove = true;
-			for (uint32 i = 0; i < p.K_; i++)
-			{
-				Vec3 next_pos;
-				next_pos = random_sample_around(current_sample, p.r_);
-				if (!is_inside(p, next_pos))
-					continue;
-				auto [x, y, z] = pos_to_grid_cell(next_pos, cell_size,
-												  grid_size); // Test if next_pos is at least R far from other samples
-				bool valid = true;
-				if (grid[x][y][z] != INVALID)
-				{
-					valid = false;
-				}
-				for (int32 dx = -2; dx <= 2 && valid; dx++)
-				{
-					for (int32 dy = -2; dy <= 2 && valid; dy++)
-					{
-						for (int32 dz = -2; dz <= 2 && valid; dz++)
-						{
-							int32 nx = int32(x) + dx;
-							int32 ny = int32(y) + dy;
-							int32 nz = int32(z) + dz;
-							if (nx >= 0 && nx < int32(grid_size) && ny >= 0 && ny < int32(grid_size) && nz >= 0 &&
-								nz < int32(grid_size))
-							{
-								SampleIndex si = grid[nx][ny][nz];
-								if (si != INVALID)
-								{
-									const Vec3& neighbor_pos = samples[si];
-									Vec3 cp = next_pos - neighbor_pos;
-									if (cp.dot(cp) < p.r_ * p.r_)
-									{
-										valid = false;
-									}
-								}
-							}
-						}
-					}
-				}
-				if (valid)
-				{
-					SampleIndex new_index = (SampleIndex)samples.size();
-					samples.push_back(next_pos);
-					active_list.push_back(new_index);
-					grid[x][y][z] = new_index;
-					permenantly_remove = false;
-					break;
-				}
-			}
-			if (permenantly_remove)
-			{
-				active_list[idx] = active_list.back();
-				active_list.pop_back();
-			}
-		}
-		for (const Vec3& pos : samples)
-		{
-			PVertex new_sample = add_vertex(*p.samples_);
+		p.volume_sampler_->sample_fill_at_depth(0, on_accept, inside);
+		p.volume_sampler_->sample_fill_at_depth(1, on_accept, inside);
+		p.volume_sampler_->sample_fill_at_depth(2, on_accept, inside);
+		points_provider_->emit_connectivity_changed(*p.samples_);
+	}
+
+	/*void poisson_disk_sampling_local(SurfaceParameters& p, PVertex sphere)
+	{
+		auto on_accept = [&](const Vec3& pos, uint32 vid, const uint8 depth) -> uint32 {
+			on_accept_project_to_surface(p, vid, pos, depth);
+		};
+		auto in_cluster = [&](Vec3& pos) {
+			uint32 s_index = index_of(*p.spheres_, sphere);
 			std::pair<uint32, Vec3> bvh_res;
 			p.surface_bvh_->closest_point(pos, &bvh_res);
 			Vec3 closest_surface_position = bvh_res.second;
 			SFace closest_face = p.surface_bvh_faces_[bvh_res.first];
 			Vec3 closest_face_normal = value<Vec3>(*p.surface_, p.surface_face_normal_, closest_face);
-			value<Vec3>(*p.samples_, p.samples_position_, new_sample) = pos;
-			value<Vec3>(*p.samples_, p.projected_samples_position_, new_sample) = closest_surface_position;
-			value<Vec3>(*p.samples_, p.projected_samples_normal_, new_sample) = closest_face_normal;
+			auto spheres_neighbor_clusters_ = (*p.spheres_neighbor_clusters_)[s_index];
+			for (PVertex neighbor_sphere : spheres_neighbor_clusters_)
+			{
+				uint32 neighbor_index = index_of(*p.spheres_, neighbor_sphere);
+				Scalar r = (*p.spheres_radius_)[neighbor_index];
+				Vec3 center = (*p.spheres_position_)[neighbor_index];
+				if ((pos - center).squaredNorm() < r * r)
+				{
+					return true;
+				}
+			}
+
+
 		}
+		auto spheres_clusters_ = (*p.spheres_cluster_)[index_of(*p.surface_, sphere)];
+		p.volume_sampler_->sample_cluster(0, on_accept,
+												[&](const Vec3& pos) -> bool { return is_inside(p, pos); });
 		points_provider_->emit_connectivity_changed(*p.samples_);
-	}
+	}*/
 
 	void set_selected_surface(SURFACE& s)
 	{
@@ -583,7 +512,8 @@ public:
 		p.samples_vertex_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_, "color");
 		p.projected_samples_position_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "projected_position");
 		p.projected_samples_normal_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "projected_normal");
-
+		p.poisson_sample_depth_ = get_or_add_attribute<uint8, PVertex>(*p.samples_, "poisson_sample_depth");
+		p.volume_sampler_ = std::make_unique<VolumePoissonDiskSampler>(*p.samples_);
 		// initialize volumn samples
 		poisson_disk_sampling(p);
 
@@ -628,6 +558,7 @@ public:
 
 		// initialize SQEM quadrics
 		p.samples_quadric_ = get_or_add_attribute<Spherical_Quadric, PVertex>(*p.samples_, "quadric");
+		
 		compute_quadrics(p);
 
 		// compute shrinking balls for the surface vertices
