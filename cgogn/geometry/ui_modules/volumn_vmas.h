@@ -136,8 +136,8 @@ class Volumn_VMAS : public ViewModule
 
 		acc::BVHTree<uint32, Vec3>* surface_bvh_ = nullptr;
 		std::vector<SFace> surface_bvh_faces_;
-		acc::KDTree<3, uint32>* projected_surface_kdt_ = nullptr;
-		std::vector<PVertex> projected_kdt_vertices_;
+		acc::KDTree<3, uint32>* surface_kdt_ = nullptr;
+		std::vector<SVertex> surface_kdt_vertices_;
 		acc::KDTree<3, uint32>* samples_kdt_ = nullptr;
 		std::vector<PVertex> samples_kdt_vertices_;
 
@@ -176,7 +176,7 @@ class Volumn_VMAS : public ViewModule
 		std::shared_ptr<PAttribute<PVertex>> samples_vertex_sphere_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> samples_vertex_error_ = nullptr;
 		std::shared_ptr<PAttribute<std::vector<PVertex>>> samples_vertex_knn_ = nullptr;
-		std::shared_ptr<PAttribute<uint8>> poisson_sample_depth_ = nullptr;
+		std::shared_ptr<PAttribute<uint8>> samples_poisson_depth = nullptr;
 		uint32 sampels_numbers_ = 100000;
 		std::unique_ptr<Side_tester> inside_tester_;
 		CGAL_SurfaceMesh cgal_surface_mesh_;
@@ -269,8 +269,9 @@ public:
 	}
 	
 	
-	inline void on_accept_project_to_surface(SurfaceParameters& p, uint32 vid, const Vec3& pos, uint8 depth)
+	inline void on_accept_post(SurfaceParameters& p, PVertex& v, const Vec3& pos, uint8 depth)
 	{
+		uint32 vid = index_of(*p.samples_, v);
 		std::pair<uint32, Vec3> bvh_res;
 		p.surface_bvh_->closest_point(pos, &bvh_res);
 		Vec3 closest_surface_position = bvh_res.second;
@@ -278,53 +279,116 @@ public:
 		SFace closest_face = p.surface_bvh_faces_[bvh_res.first];
 		Vec3 closest_face_normal = value<Vec3>(*p.surface_, p.surface_face_normal_, closest_face);
 		(*p.samples_position_)[vid] = pos;
-		(*p.poisson_sample_depth_)[vid] = depth;
+		(*p.samples_poisson_depth)[vid] = depth;
 		(*p.projected_samples_position_)[vid] = closest_surface_position;
 		(*p.projected_samples_normal_)[vid] = closest_face_normal;
 	}
 	void poisson_disk_sampling(SurfaceParameters& p)
 	{
-		auto inside = [&](const Vec3& pos) -> bool { return is_inside(p, pos); };
-		auto on_accept = [&](uint32 vid,const Vec3& pos, const uint8 depth) {
-			on_accept_project_to_surface(p, vid, pos, depth);
+		auto in_volume = [&](const Vec3& pos) -> bool { return is_inside(p, pos); };
+		auto on_accept = [&](const Vec3& pos, PVertex& v, const uint8 depth) {
+			on_accept_post(p, v, pos, depth);
 		};
-		p.volume_sampler_->sample_fill_at_depth(0, on_accept, inside);
-		p.volume_sampler_->sample_fill_at_depth(1, on_accept, inside);
-		p.volume_sampler_->sample_fill_at_depth(2, on_accept, inside);
+		p.volume_sampler_->sample_fill_at_depth(0, on_accept, in_volume);
 		points_provider_->emit_connectivity_changed(*p.samples_);
 	}
 
-	/*void poisson_disk_sampling_local(SurfaceParameters& p, PVertex sphere)
+	void poisson_disk_sampling_local(SurfaceParameters& p, PVertex sphere, uint32 target_count)
 	{
-		auto on_accept = [&](const Vec3& pos, uint32 vid, const uint8 depth) -> uint32 {
-			on_accept_project_to_surface(p, vid, pos, depth);
+		uint32 s_index = index_of(*p.spheres_, sphere);
+		auto in_volume = [&](const Vec3& pos) -> bool { return is_inside(p, pos); };
+		auto on_accept = [&](const Vec3& pos, PVertex& v, const uint8 depth) {
+			uint32 vid = index_of(*p.samples_, v);
+			std::pair<uint32, Vec3> bvh_res;
+			p.surface_bvh_->closest_point(pos, &bvh_res);
+			Vec3 closest_surface_position = bvh_res.second;
+
+			SFace closest_face = p.surface_bvh_faces_[bvh_res.first];
+			Vec3 closest_face_normal = value<Vec3>(*p.surface_, p.surface_face_normal_, closest_face);
+			(*p.samples_position_)[vid] = pos;
+			(*p.samples_poisson_depth)[vid] = depth;
+			(*p.projected_samples_position_)[vid] = closest_surface_position;
+			(*p.projected_samples_normal_)[vid] = closest_face_normal;
+			// compute quadric
+			Spherical_Quadric& q = (*p.samples_quadric_)[vid];
+			q.clear();
+			const Vec3& n = closest_face_normal;
+			q = Spherical_Quadric(
+				Vec4(closest_surface_position.x(), closest_surface_position.y(), closest_surface_position.z(), 0),
+				Vec4(n.x(), n.y(), n.z(), 1));
+			// update sphere assignment
+			(*p.samples_vertex_sphere_)[vid] = sphere;
+			// update color
+			(*p.samples_vertex_color_)[vid] = (*p.spheres_color_)[s_index];
+			// compute shrinking ball
+			auto [center, radius] =
+				geometry::shrinking_ball_center(closest_surface_position, closest_face_normal, p.surface_kdt_);
+			(*p.medial_axis_position_)[vid] = center;
+			(*p.medial_axis_radius_)[vid] = radius;
+			// add to sphere cluster
+			(*p.spheres_cluster_)[s_index].push_back(v);
+			(*p.spheres_cluster_area_)[s_index] += depth > 0 ? std::pow(2, 1.0 / depth) : 1;
+
 		};
+		
 		auto in_cluster = [&](Vec3& pos) {
-			uint32 s_index = index_of(*p.spheres_, sphere);
+			if (!is_inside(p, pos))
+				return false;
+			
 			std::pair<uint32, Vec3> bvh_res;
 			p.surface_bvh_->closest_point(pos, &bvh_res);
 			Vec3 closest_surface_position = bvh_res.second;
 			SFace closest_face = p.surface_bvh_faces_[bvh_res.first];
 			Vec3 closest_face_normal = value<Vec3>(*p.surface_, p.surface_face_normal_, closest_face);
 			auto spheres_neighbor_clusters_ = (*p.spheres_neighbor_clusters_)[s_index];
-			for (PVertex neighbor_sphere : spheres_neighbor_clusters_)
+			Scalar min_energy = std::numeric_limits<Scalar>::max();
+			Scalar best_index = s_index;
+			std::vector<PVertex> candidate_spheres(spheres_neighbor_clusters_.begin(),
+												   spheres_neighbor_clusters_.end());
+			candidate_spheres.push_back(sphere);
+			for (PVertex neighbor_sphere : candidate_spheres)
 			{
 				uint32 neighbor_index = index_of(*p.spheres_, neighbor_sphere);
 				Scalar r = (*p.spheres_radius_)[neighbor_index];
 				Vec3 center = (*p.spheres_position_)[neighbor_index];
-				if ((pos - center).squaredNorm() < r * r)
+				Scalar dist_SQEM = (closest_surface_position - center).dot(closest_face_normal) - r;
+				Scalar dist_power = (pos - center).squaredNorm() - r * r;
+				Scalar energy = dist_SQEM * dist_SQEM + p.sqem_update_lambda_ * dist_power * dist_power;
+				if (energy < min_energy)
 				{
-					return true;
+					min_energy = energy;
+					best_index = neighbor_index;
 				}
 			}
+			return best_index == s_index;
+		};
+		auto spheres_clusters_ = (*p.spheres_cluster_)[s_index];
+		p.volume_sampler_->sample_cluster(spheres_clusters_, on_accept,in_volume,in_cluster, target_count);
+		//recompute kd_tree
+		if (p.samples_kdt_)
+			delete p.samples_kdt_;
+		p.samples_kdt_ = construct_kd_tree(*p.samples_, p.samples_kdt_vertices_, p.samples_position_);
 
-
-		}
-		auto spheres_clusters_ = (*p.spheres_cluster_)[index_of(*p.surface_, sphere)];
-		p.volume_sampler_->sample_cluster(0, on_accept,
-												[&](const Vec3& pos) -> bool { return is_inside(p, pos); });
+		// recompute knn graph
+		p.samples_vertex_knn_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.samples_, "knn");
+		foreach_cell(*p.samples_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.samples_, v);
+			(*p.samples_vertex_knn_)[v_index].clear();
+			const Vec3& pos = (*p.samples_position_)[v_index];
+			std::vector<std::pair<uint32, Scalar>> k_res;
+			p.samples_kdt_->find_nns(pos, k, &k_res);
+			(*p.samples_vertex_knn_)[v_index].clear();
+			(*p.samples_vertex_knn_)[v_index].reserve(k_res.size());
+			for (const auto& [idx, dist] : k_res)
+			{
+				PVertex nv = p.samples_kdt_vertices_[idx];
+				if (nv != v)
+					(*p.samples_vertex_knn_)[v_index].push_back(nv);
+			}
+			return true;
+		});
 		points_provider_->emit_connectivity_changed(*p.samples_);
-	}*/
+	}
 
 	void set_selected_surface(SURFACE& s)
 	{
@@ -376,6 +440,8 @@ public:
 		surface_provider_->emit_attribute_changed(*p.surface_, p.surface_vertex_position_.get());
 	}
 
+
+
 	void compute_quadrics(SurfaceParameters& p)
 	{
 		parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
@@ -387,6 +453,25 @@ public:
 			q = Spherical_Quadric(Vec4(pos.x(), pos.y(), pos.z(), 0), Vec4(n.x(), n.y(), n.z(), 1));
 			return true;
 		});
+	}
+
+	template<class MESH>
+	acc::KDTree<3, uint32>* construct_kd_tree(
+		MESH& mesh, std::vector<typename mesh_traits<MESH>::Vertex>& vertices,
+						   std::shared_ptr<typename mesh_traits<MESH>::template Attribute<Vec3>> pos_attribute)
+	{
+		vertices.clear();
+		uint32 nb_vertices = nb_cells<typename mesh_traits<MESH>::Vertex>(mesh);
+		vertices.reserve(nb_vertices);
+		std::vector<Vec3> position_vector;
+		position_vector.reserve(nb_vertices);
+		foreach_cell(mesh, [&](typename mesh_traits<MESH>::Vertex v) {
+			vertices.push_back(v);
+			position_vector.push_back(value<Vec3>(mesh, pos_attribute, v));
+			return true;
+		});
+		auto* tree = new acc::KDTree<3, uint32>(position_vector);
+		return tree;
 	}
 
 	void init_surface_data(SURFACE& s)
@@ -410,7 +495,7 @@ public:
 					init_surface_data(s);
 				}));
 			surface_connections_[&s].push_back(
-				boost::synapse::connect<typename MeshProvider<SURFACE>::template attribute_changed_t<Vec3>>(
+				boost::synapse::connect<typename MeshProvider<SURFACE>::attribute_changed_t<Vec3>>(
 					&s, [this, &s = s](SAttribute<Vec3>* attribute) {
 						SurfaceParameters& p = surface_parameters_[&s];
 						if (attribute == p.surface_vertex_position_.get())
@@ -512,31 +597,20 @@ public:
 		p.samples_vertex_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_, "color");
 		p.projected_samples_position_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "projected_position");
 		p.projected_samples_normal_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_, "projected_normal");
-		p.poisson_sample_depth_ = get_or_add_attribute<uint8, PVertex>(*p.samples_, "poisson_sample_depth");
+		p.samples_poisson_depth = get_or_add_attribute<uint8, PVertex>(*p.samples_, "poisson_sample_depth");
 		p.volume_sampler_ = std::make_unique<VolumePoissonDiskSampler>(*p.samples_);
 		// initialize volumn samples
 		poisson_disk_sampling(p);
 
 		// create KDTree for the projected surface vertices
-		p.projected_kdt_vertices_.clear();
-		p.samples_kdt_vertices_.clear();
-		p.projected_kdt_vertices_.reserve(p.sampels_numbers_);
-		p.samples_kdt_vertices_.reserve(p.sampels_numbers_);
-		std::vector<Vec3> projected_surface_position_vector;
-		std::vector<Vec3> samples_position_vector;
-		foreach_cell(*p.samples_, [&](PVertex v) {
-			p.projected_kdt_vertices_.push_back(v);
-			p.samples_kdt_vertices_.push_back(v);
-			samples_position_vector.push_back(value<Vec3>(*p.samples_, p.samples_position_, v));
-			projected_surface_position_vector.push_back(value<Vec3>(*p.samples_, p.projected_samples_position_, v));
-			return true;
-		});
-		if (p.projected_surface_kdt_)
-			delete p.projected_surface_kdt_;
+		if (p.surface_kdt_)
+			delete p.surface_kdt_;
 		if (p.samples_kdt_)
 			delete p.samples_kdt_;
-		p.samples_kdt_ = new acc::KDTree<3, uint32>(samples_position_vector);
-		p.projected_surface_kdt_ = new acc::KDTree<3, uint32>(projected_surface_position_vector);
+		p.surface_kdt_ =
+			construct_kd_tree(*p.surface_, p.surface_kdt_vertices_, p.surface_vertex_position_);		
+		p.samples_kdt_ = construct_kd_tree(*p.samples_, p.samples_kdt_vertices_, p.samples_position_);
+
 
 		// compute knn graph
 		p.samples_vertex_knn_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.samples_, "knn");
@@ -570,12 +644,11 @@ public:
 
 		parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
-			auto [c, r, q] = geometry::shrinking_ball_center(
-				*p.samples_, (*p.projected_samples_position_)[v_index], (*p.projected_samples_normal_)[v_index],
-				p.projected_samples_position_.get(), p.projected_surface_kdt_, p.projected_kdt_vertices_);
+			auto [c, r] = geometry::shrinking_ball_center((*p.projected_samples_position_)[v_index], (*p.projected_samples_normal_)[v_index],
+				p.surface_kdt_);
 			(*p.medial_axis_position_)[v_index] = c;
 			(*p.medial_axis_radius_)[v_index] = r;
-			(*p.medial_axis_secondary_vertex_)[v_index] = q;
+			
 			return true;
 		});
 
@@ -781,12 +854,9 @@ public:
 		// remove small clusters
 		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			std::vector<PVertex>& cluster = value<std::vector<PVertex>>(*p.spheres_, p.spheres_cluster_, v);
-			if (cluster.size() < 4)
+			if (cluster.size() < 20)
 			{
-				for (PVertex sv : cluster)
-					value<PVertex>(*p.samples_, p.samples_vertex_sphere_, sv) = PVertex();
-				remove_vertex(*p.spheres_, v);
-				p.nb_spheres_--;
+				poisson_disk_sampling_local(p, v, 10);
 			}
 			return true;
 		});
@@ -996,9 +1066,8 @@ public:
 			if ((*p.inside_tester_)(Point_3(c.x(), c.y(), c.z())) == CGAL::ON_UNBOUNDED_SIDE)
 				closest_point_dir = -closest_point_dir;
 
-			auto [center, radius, secondary] = geometry::shrinking_ball_center(
-				*p.samples_, closest_point_position, closest_point_dir, p.projected_samples_position_.get(),
-				p.projected_surface_kdt_, p.projected_kdt_vertices_, p.point_cloud_mode_, 0.25f);
+			auto [center, radius] =
+				geometry::shrinking_ball_center(closest_point_position, closest_point_dir,p.surface_kdt_);
 			c = center;
 			r = radius;
 		}
@@ -1054,9 +1123,8 @@ public:
 			if ((*p.inside_tester_)(Point_3(c.x(), c.y(), c.z())) == CGAL::ON_UNBOUNDED_SIDE)
 				closest_point_dir = -closest_point_dir;
 
-			auto [center, radius, secondary] = geometry::shrinking_ball_center(
-				*p.samples_, closest_point_position, closest_point_dir, p.projected_samples_position_.get(),
-				p.projected_surface_kdt_, p.projected_kdt_vertices_, p.point_cloud_mode_, 0.25f);
+			auto [center, radius] =
+				geometry::shrinking_ball_center(closest_point_position, closest_point_dir, p.surface_kdt_);
 			c = center;
 			r = radius;
 		}
@@ -1112,9 +1180,8 @@ public:
 			if ((*p.inside_tester_)(Point_3(c.x(), c.y(), c.z())) == CGAL::ON_UNBOUNDED_SIDE)
 				closest_point_dir = -closest_point_dir;
 
-			auto [center, radius, secondary] = geometry::shrinking_ball_center(
-				*p.samples_, closest_point_position, closest_point_dir, p.projected_samples_position_.get(),
-				p.projected_surface_kdt_, p.projected_kdt_vertices_, p.point_cloud_mode_, 0.25f);
+			auto [center, radius] =
+				geometry::shrinking_ball_center(closest_point_position, closest_point_dir, p.surface_kdt_);
 			c = center;
 			r = radius;
 		}
@@ -1202,9 +1269,8 @@ public:
 			if ((*p.inside_tester_)(Point_3(c.x(), c.y(), c.z())) == CGAL::ON_UNBOUNDED_SIDE)
 				closest_point_dir = -closest_point_dir;
 
-			auto [center, radius, secondary] = geometry::shrinking_ball_center(
-				*p.samples_, closest_point_position, closest_point_dir, p.projected_samples_position_.get(),
-				p.projected_surface_kdt_, p.projected_kdt_vertices_, p.point_cloud_mode_, 0.25f);
+			auto [center, radius] =
+				geometry::shrinking_ball_center(closest_point_position, closest_point_dir, p.surface_kdt_);
 			c = center;
 			r = radius;
 		}
@@ -1224,12 +1290,12 @@ public:
 		if (p.point_cloud_mode_)
 		{
 			std::pair<uint32, Scalar> k_res;
-			p.projected_surface_kdt_->find_nn(c, &k_res);
-			PVertex closest_vertex = p.projected_kdt_vertices_[k_res.first];
-			closest_point_position = p.projected_surface_kdt_->vertex(k_res.first);
+			p.surface_kdt_->find_nn(c, &k_res);
+			SVertex closest_vertex = p.surface_kdt_vertices_[k_res.first];
+			closest_point_position = p.surface_kdt_->vertex(k_res.first);
 			closest_point_dir = (closest_point_position - c).normalized();
 
-			const Vec3& closest_vertex_normal = value<Vec3>(*p.samples_, p.projected_samples_normal_, closest_vertex);
+			const Vec3& closest_vertex_normal = value<Vec3>(*p.surface_, p.surface_vertex_normal_, closest_vertex);
 			// TODO: exterior detection is not reliable
 			if (closest_point_dir.dot(closest_vertex_normal) <= 0.0)
 				closest_point_dir = -closest_point_dir;
@@ -1248,9 +1314,8 @@ public:
 				closest_point_dir = -closest_point_dir;
 		}
 
-		auto [center, radius, secondary] = geometry::shrinking_ball_center(
-			*p.samples_, closest_point_position, closest_point_dir, p.projected_samples_position_.get(),
-			p.projected_surface_kdt_, p.projected_kdt_vertices_, p.point_cloud_mode_, 0.25f);
+		auto [center, radius] =
+			geometry::shrinking_ball_center(closest_point_position, closest_point_dir, p.surface_kdt_);
 
 		c = center;
 		r = radius;
@@ -1919,7 +1984,13 @@ protected:
 						update_render_data(p);
 					}
 				}
-
+				if (ImGui::Button("Local sample"))
+				{
+					uint32 s_index = 0;
+					PVertex sphere = of_index<PVertex>(*p.spheres_, s_index);
+			
+					poisson_disk_sampling_local(p, sphere, 200);
+				}
 				ImGui::Checkbox("Sphere correction step", &p.sphere_correction_);
 				if (p.sphere_correction_)
 				{

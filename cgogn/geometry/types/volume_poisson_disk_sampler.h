@@ -25,8 +25,8 @@
 #define CGOGN_GEOMETRY_ALGOS_VOLUME_POISSON_DISK_SAMPLER_H_
 #include <algorithm>
 #include <cmath>
-#include <unordered_map>
 #include <random>
+#include <unordered_map>
 namespace cgogn
 {
 
@@ -212,7 +212,7 @@ public:
 			{
 				for (int x = loX; x <= hiX; ++x)
 				{
-					if (x == ix&& y == iy&& z == iz)
+					if (x == ix && y == iy && z == iz)
 						continue;
 					Key key = morton3D(uint32(x), uint32(y), uint32(z));
 					auto it = cells_.find(key);
@@ -309,19 +309,18 @@ public:
 		: location_(loc), center_(center), half_size_(half), grid_(16)
 	{
 		cell_size_ = (2.0 * half_size_) / Scalar(grid_.resolution());
-		local_radius_ = cell_size_ * std::sqrt(3.0)/ 2.0;
+		local_radius_ = cell_size_ * std::sqrt(3.0) / 2.0;
 	}
 
 	template <typename ConflictPred>
 	bool can_insert(const Vec3& p, ConflictPred&& is_conflict)
 	{
-		Vec3 local =to_local01(p);
+		Vec3 local = to_local01(p);
 		auto idx = grid_.cell_of_local(local);
 		if (grid_.occupied(idx))
 			return false;
-		if (grid_.adjacent_hit_local(local, local_radius_, cell_size_, [&](uint32 sampleId) { 
-			return is_conflict(sampleId, p, local_radius_);
-			}))
+		if (grid_.adjacent_hit_local(local, local_radius_, cell_size_,
+									 [&](uint32 sampleId) { return is_conflict(sampleId, p, local_radius_); }))
 			return false;
 		return true;
 	}
@@ -347,7 +346,7 @@ public:
 		return local_radius_;
 	}
 
-	Vec3 random_sample_around(const Vec3& p, std::mt19937& rng,std::uniform_real_distribution<Scalar>& Uni)
+	Vec3 random_sample_around(const Vec3& p, std::mt19937& rng, std::uniform_real_distribution<Scalar>& Uni)
 	{
 		Scalar u = Uni(rng);
 		Scalar v = Uni(rng);
@@ -394,7 +393,6 @@ public:
 	using Node = OctreeNode;
 	using Grid_Index = typename SparseGrid::Grid_Index;
 
-
 	NestedOctree() = default;
 
 	Node& get_or_add_node(const OctreeLocationCode& loc)
@@ -434,7 +432,7 @@ public:
 	Vec3 next_pos(const Vec3& pos, uint8 depth, std::mt19937& rng, std::uniform_real_distribution<Scalar>& Uni)
 	{
 		OctreeLocationCode loc = OctreeLocationCode::root();
-		
+
 		for (uint8 d = 0; d < depth; ++d)
 		{
 			Node& node = get_or_add_node(loc);
@@ -444,7 +442,7 @@ public:
 		Node& node = get_or_add_node(loc);
 		return node.random_sample_around(pos, rng, Uni);
 	}
-	template <typename ConflictPred, typename AcceptCallBack >
+	template <typename ConflictPred, typename AcceptCallBack>
 	bool insert(const Vec3& p, uint8 depth, ConflictPred&& is_conflict, AcceptCallBack&& on_accept)
 	{
 		OctreeLocationCode loc = OctreeLocationCode::root();
@@ -465,7 +463,7 @@ public:
 			return false;
 		uint32 sampleId = on_accept(p, depth);
 		node.grid().set(idx, sampleId);
-		return true; 
+		return true;
 	}
 	void clear()
 	{
@@ -523,55 +521,53 @@ class VolumePoissonDiskSampler
 	using Vertex = typename mesh_traits<MESH>::Vertex;
 	template <typename T>
 	using Attribute = typename mesh_traits<MESH>::template Attribute<T>;
-	static constexpr uint8 MAX_DEPTH = (1u << 8);
+	static constexpr uint8 MAX_DEPTH = 21;
 
 public:
 	VolumePoissonDiskSampler(MESH& m, uint32 max_trials = 30, uint32 seed = 42)
-		:mesh_(m), max_trials_(max_trials), rng_(seed), uni_(0.0, 1.0)
+		: mesh_(m), max_trials_(max_trials), rng_(seed), uni_(0.0, 1.0)
 	{
 		sample_position_ = get_or_add_attribute<Vec3, Vertex>(mesh_, "position");
 		poisson_sample_depth_ = get_or_add_attribute<uint8, Vertex>(mesh_, "poisson_sample_depth");
 	}
 
 	template <class Domain, class OnAccept>
-	uint32 sample_fill_at_depth(uint8 depth, OnAccept&& post, Domain&& domain, 
+	uint32 sample_fill_at_depth(uint8 depth, OnAccept&& post, Domain&& domain,
 								uint32 target_count = (std::numeric_limits<uint32>::max)())
 	{
-		active_list_.clear();
+
 		uint32 added = 0;
 		auto is_conflict = [&](uint32 sid, const Vec3& q, Scalar R) -> bool {
 			Vec3 s_pos = (*sample_position_)[sid];
-			return (s_pos-q).dot(s_pos - q) < (R * R);
+			return (s_pos - q).dot(s_pos - q) < (R * R);
 		};
-		auto on_accept = [&]( const Vec3& pos, const uint8 depth) -> uint32 {
+		auto on_accept = [&](const Vec3& pos, const uint8 depth) -> uint32 {
 			Vertex v = add_vertex(mesh_);
 			uint32 vid = index_of(mesh_, v);
 			active_list_.push_back(vid);
-			post(vid, pos, depth);
+			post(pos, v, depth);
 			return vid;
 		};
 		const uint32 max_seed_trials = std::max<uint32>(256, 10 * max_trials_);
-		bool seeded = false;
-		for (uint32 t = 0; t < max_seed_trials; ++t)
+		if (active_list_.empty())
 		{
-			Vec3 s = pick_seed(domain); 
+			bool seeded = false;
+			Vec3 s = pick_seed(domain, max_seed_trials);
 			if (octree_.insert(s, depth, is_conflict, on_accept))
 			{
 				++added;
 				seeded = true;
-				break;
 			}
-		}
-		if (!seeded)
-		{
-			std::cout << "VolumePoissonDiskSampler: depth: " << depth << "is full"
-					  << std::endl;
-			return 0;
-		}
-		if (added >= target_count)
-			return added;
 
-		while (!active_list_.empty() && added< target_count)
+			if (!seeded)
+			{
+				/*std::cout << "[VolumePoissonDiskSampler] sample_fill_at_depth depth: " << depth << "is full" << std::endl;*/
+				return 0;
+			}
+			if (added >= target_count)
+				return added;
+		}
+		while (!active_list_.empty() && added < target_count)
 		{
 			size_t idx = uni_(rng_) * active_list_.size();
 			const uint32 seed_vid = active_list_[idx];
@@ -586,6 +582,7 @@ public:
 				{
 					++added;
 					accepted = true;
+					/*std::cout << "[VolumePoissonDiskSampler] sample_fill_at_depth Added sample at depth " << int(depth) << " after " << i << " trials" << std::endl;*/
 					break;
 				}
 			}
@@ -596,19 +593,15 @@ public:
 				if (active_list_.empty() && added < target_count)
 				{
 					bool seeded = false;
-					for (uint32 t = 0; t < max_seed_trials; ++t)
+					Vec3 s = pick_seed(domain, max_seed_trials);
+					if (octree_.insert(s, depth, is_conflict, on_accept))
 					{
-						Vec3 s = pick_seed(domain);
-						if (octree_.insert(s, depth, is_conflict, on_accept))
-						{
-							++added;
-							seeded = true;
-							break;
-						}
+						++added;
+						seeded = true;
 					}
 					if (!seeded)
 					{
-						std::cout << "VolumePoissonDiskSampler: depth: " << depth << "is full" << std::endl;
+						/*std::cout << "[VolumePoissonDiskSampler] sample_fill_at_depth depth: " << int(depth) << "is full" << std::endl;*/
 						break;
 					}
 				}
@@ -617,19 +610,93 @@ public:
 		return added;
 	}
 
-	template <typename LocalDomain>
-	void sample_cluster(std::vector<Vertex>& cluster, uint32 target_number, const LocalDomain& local_domain,
-						uint8 default_depth = 0)
+	template <class Domain, class ClusterDomain, class OnAccept>
+	uint32 sample_cluster_at_depth(uint8 depth, OnAccept&& post, Domain&& domain, ClusterDomain&& cluster_domain,
+								   Vec3 bb_min, Vec3 bb_max, uint32 target_count = (std::numeric_limits<uint32>::max)())
+	{
+
+		uint32 added = 0;
+		auto is_conflict = [&](uint32 sid, const Vec3& q, Scalar R) -> bool {
+			Vec3 s_pos = (*sample_position_)[sid];
+			return (s_pos - q).dot(s_pos - q) < (R * R);
+		};
+		auto on_accept = [&](const Vec3& pos, const uint8 depth) -> uint32 {
+			Vertex v = add_vertex(mesh_);
+			uint32 vid = index_of(mesh_, v);
+			active_list_.push_back(vid);
+			post(pos, v, depth);
+			return vid;
+		};
+		const uint32 max_seed_trials = std::max<uint32>(256, 10 * max_trials_);
+		if (active_list_.empty())
+		{
+			bool seeded = false;
+			Vec3 s = pick_seed_in_bbox(bb_min, bb_max,domain, cluster_domain, max_seed_trials);
+			if (octree_.insert(s, depth, is_conflict, on_accept))
+			{
+				++added;
+				seeded = true;
+			}
+
+			if (!seeded)
+			{
+				/*std::cout << "[VolumePoissonDiskSampler] sample_cluster_at_depth: depth " << int(depth) << " is full" << std::endl;*/
+				return 0;
+			}
+			if (added >= target_count)
+				return added;
+		}
+		while (!active_list_.empty() && added < target_count)
+		{
+			size_t idx = uni_(rng_) * active_list_.size();
+			const uint32 seed_vid = active_list_[idx];
+			const Vec3 current_pos = (*sample_position_)[seed_vid];
+			bool accepted = false;
+			for (uint32 i = 0; i < max_trials_; i++)
+			{
+				Vec3 candidate = octree_.next_pos(current_pos, depth, rng_, uni_);
+				if (!domain(candidate) || !cluster_domain(candidate))
+					continue;
+				if (octree_.insert(candidate, depth, is_conflict, on_accept))
+				{
+					++added;
+					accepted = true;
+					/*std::cout << "[VolumePoissonDiskSampler] sample_cluster_at_depth Added sample at depth " << int(depth) << " after " << i << " trials" << std::endl;*/
+					break;
+				}
+			}
+			if (!accepted)
+			{
+				active_list_[idx] = active_list_.back();
+				active_list_.pop_back();
+				if (active_list_.empty() && added < target_count)
+				{
+					bool seeded = false;
+					Vec3 s = pick_seed_in_bbox(bb_min, bb_max, domain,cluster_domain, max_seed_trials);
+					if (octree_.insert(s, depth, is_conflict, on_accept))
+					{
+						++added;
+						seeded = true;
+						break;
+					}
+					if (!seeded)
+					{
+						/*std::cout << "[VolumePoissonDiskSampler] sample_cluster_at_depth: depth " << int(depth)  << " is full" << std::endl;*/
+						break;
+					}
+				}
+			}
+		}
+		return added;
+	}
+
+	template <typename OnAccept, typename Domain, typename ClusterDomain>
+	uint32 sample_cluster(std::vector<Vertex>& cluster, OnAccept&& post, Domain&& domain, ClusterDomain&& cluster_domain,
+						  uint32 target_count = (std::numeric_limits<uint32>::max)(), uint8 default_depth = 1)
 	{
 		active_list_.clear();
+		auto [bb_min, bb_max] = compute_cluster_bbox(cluster);
 		uint8 work_depth = default_depth;
-		for (Vertex v : cluster)
-		{
-			const uint32 v_index = index_of(mesh_, v);
-			const uint8 d = (*poisson_sample_depth_)[v_index];
-			if (d > work_depth)
-				work_depth = d;
-		}
 		for (Vertex v : cluster)
 		{
 			const uint32 v_index = index_of(mesh_, v);
@@ -638,22 +705,23 @@ public:
 			const Vec3& p = (*sample_position_)[v_index];
 			active_list_.push_back(v_index);
 		}
-		uint32 remaining = target_number;
+		uint32 remaining = target_count;
 		while (remaining > 0)
 		{
-			const uint32 added = sample_fill_at_depth(depth, remaining, local_domain);
+			const uint32 added = sample_cluster_at_depth(work_depth, post, domain, cluster_domain, bb_min, bb_max, remaining);
 			if (added > remaining)
-				return target_number;
+				return target_count;
 			remaining -= added;
 			if (work_depth >= MAX_DEPTH)
 			{
-				return target_number - remaining;
+				/*std::cout << "VolumePoissonDiskSampler: reached max depth " << int(MAX_DEPTH) << " with " << remaining
+						  << " samples remaining" << std::endl;*/
+				return target_count - remaining;
 			}
 			++work_depth;
 		}
-		return target_number;
+		return target_count;
 	}
-
 
 	void clear()
 	{
@@ -662,18 +730,55 @@ public:
 	}
 
 private:
+	std::pair<Vec3, Vec3> compute_cluster_bbox(std::vector<Vertex>& cluster)
+	{
+		Vec3 bbox_min(std::numeric_limits<Scalar>::max(), std::numeric_limits<Scalar>::max(),
+					  std::numeric_limits<Scalar>::max());
+		Vec3 bbox_max(std::numeric_limits<Scalar>::lowest(), std::numeric_limits<Scalar>::lowest(),
+					  std::numeric_limits<Scalar>::lowest());
+		for (Vertex v : cluster)
+		{
+			const Vec3& p = (*sample_position_)[index_of(mesh_, v)];
+			bbox_min.x() = std::min(bbox_min.x(), p.x());
+			bbox_min.y() = std::min(bbox_min.y(), p.y());
+			bbox_min.z() = std::min(bbox_min.z(), p.z());
+			bbox_max.x() = std::max(bbox_max.x(), p.x());
+			bbox_max.y() = std::max(bbox_max.y(), p.y());
+			bbox_max.z() = std::max(bbox_max.z(), p.z());
+		}
+		return {bbox_min, bbox_max};
+	}
 
 	template <typename Domain>
-	Vec3 pick_seed(Domain&& domain)
+	Vec3 pick_seed(Domain&& domain, uint32 max_trials = 1000)
 	{
-	
-		while (true)
+
+		while ((max_trials--) > 0)
 		{
 			Scalar x = uni_(rng_);
 			Scalar y = uni_(rng_);
 			Scalar z = uni_(rng_);
 			Vec3 p(x, y, z);
 			if (domain(p))
+			{
+				return p;
+			}
+		}
+	}
+
+	template <typename Domain, typename LocalDomain>
+	Vec3 pick_seed_in_bbox(const Vec3 bbox_min, const Vec3 bbox_max, Domain&& domain, LocalDomain&& local_domain,
+						   uint32 max_trials = 1000)
+	{
+		const Vec3 extent = bbox_max - bbox_min;
+
+		for (uint32 i = 0; i < max_trials; ++i)
+		{
+			Scalar x = uni_(rng_) * extent.x() + bbox_min.x();
+			Scalar y = uni_(rng_) * extent.y() + bbox_min.y();
+			Scalar z = uni_(rng_) * extent.z() + bbox_min.z();
+			Vec3 p(x, y, z);
+			if (domain(p) && local_domain(p))
 			{
 				return p;
 			}

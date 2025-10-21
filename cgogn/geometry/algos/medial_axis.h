@@ -331,6 +331,66 @@ std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_cent
 	return {c, r, q_next_v};
 }
 
+std::pair<Vec3, Scalar> shrinking_ball_center(
+	const Vec3& p, const Vec3& n,
+	const acc::KDTree<3, uint32>* surface_kdt, double initial_radius = 0.25)
+{
+	// initial radius is only used when use_kdt_only is true
+
+
+	uint32 j = 0;
+	Scalar r = 0.0;
+
+	// if (use_kdt_only)
+	r = initial_radius;
+	
+	Vec3 c = p - (r * n);
+	Vec3 q = p - (2 * r * n);
+
+
+	while (true)
+	{
+		// Find closest point to c
+
+		Scalar d;
+		Vec3 q_next;
+
+		// if (use_kdt_only)
+		// {
+		std::pair<uint32, Scalar> k_res;
+		surface_kdt->find_nn(c, &k_res);
+		q_next = surface_kdt->vertex(k_res.first);
+		d = k_res.second;
+
+		// }
+
+		// If the closest point is (almost) the same as the previous one, or if the ball no longer shrinks, we stop
+		if (fabs(d - r) <= delta_convergence || (q_next - q).norm() < delta_convergence)
+			break;
+
+		// Compute next ball center
+		Scalar r_next = compute_radius(p, n, q_next);
+		Vec3 c_next = p - (r_next * n);
+
+		// Denoising
+		Scalar separation_angle = geometry::angle(p - c_next, q_next - c_next);
+		if (j > 0 && separation_angle < denoise_preserve) // && r_next > // (q_next - p).norm())
+			break;
+
+		c = c_next;
+		r = r_next;
+		q = q_next;
+		
+
+		j++;
+		if (j > iteration_limit)
+			break;
+	}
+
+	return {c, r};
+}
+
+
 template <typename MESH>
 std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_center(
 	const MESH& m, const Vec3& p, const Vec3& n,

@@ -85,7 +85,7 @@ bool import_OBJ(MESH& m, const std::string& filename)
 		getline_safe(fp, line);
 		if (tag == std::string("f"))
 		{
-			surface_data.nb_faces_++;
+			
 			std::vector<uint32> indices;
 			std::istringstream iss(line);
 			std::string str;
@@ -103,9 +103,13 @@ bool import_OBJ(MESH& m, const std::string& filename)
 					indices.push_back(index - 1);
 				}
 			}
-			surface_data.faces_nb_vertices_.push_back(indices.size());
-			surface_data.faces_vertex_indices_.insert(surface_data.faces_vertex_indices_.end(), indices.begin(),
-													  indices.end());
+			if (!indices.empty())
+			{
+				surface_data.nb_faces_++;
+				surface_data.faces_nb_vertices_.push_back(indices.size());
+				surface_data.faces_vertex_indices_.insert(surface_data.faces_vertex_indices_.end(), indices.begin(),
+														  indices.end());
+			}
 		}
 	} while (!fp.eof());
 
