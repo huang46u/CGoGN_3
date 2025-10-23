@@ -32,8 +32,18 @@ namespace cgogn
 namespace geometry
 {
 
+enum class SQEM_CASE
+{
+	Case1_Full,
+	Case2_Line,
+	Case3_Plane,
+	Case4_Degenerate
+};
+
 struct Spherical_Quadric
 {
+	
+
 	Spherical_Quadric()
 	{
 		this->clear();
@@ -101,22 +111,44 @@ struct Spherical_Quadric
 		return _A * p - _b;
 	}
 
-	bool well_conditioned() const
+	SQEM_CASE well_conditioned(Scalar& r_out) const
 	{
 		Eigen::JacobiSVD<Mat4> svd(_A, Eigen::ComputeFullU | Eigen::ComputeFullV);
 		Mat4 U = svd.matrixU();
 		Vec4 S = svd.singularValues();
 		Mat4 V = svd.matrixV();
-		std::vector<double> sorted_sv(S.data(), S.data() + S.size());
+		std::vector<double> sorted_sv{S(0), S(1), S(2), S(3)};
 
 		std::sort(sorted_sv.begin(), sorted_sv.end(), std::greater<>());
-		if (sorted_sv[1] <= 1e-6 && sorted_sv[2] <= 1e-6 && sorted_sv[3]<=1e-6)
+		int rank = 0;
+		for(int i = 0; i < 4; ++i)
 		{
-			std::cout << "Spherical quadric is not well conditioned: " << sorted_sv[0] << ", " << sorted_sv[1] << ", "
-					  << sorted_sv[2] << ", " << sorted_sv[3] << std::endl;
-			return false; // not well-conditioned
+			if(sorted_sv[i] > 1e-6)
+				rank++;
 		}
-		return true; // threshold for well-conditioned quadric
+		if(rank>1){
+			Mat4 Sp = Mat4::Zero();
+			for(int i = 0; i < 4; ++i)
+			{
+				if(S(i) > 1e-6)
+					Sp(i,i) = 1.0 / S(i);
+				else 
+					Sp(i,i) = 0;	
+			}
+			Vec4 m = V * Sp * U.transpose() * _b;
+			r_out = m(3);
+		}
+		switch (rank)
+		{
+		case 4:
+			return SQEM_CASE::Case1_Full;
+		case 3:
+			return SQEM_CASE::Case2_Line;
+		case 2:
+			return SQEM_CASE::Case3_Plane;
+		default:
+			return SQEM_CASE::Case4_Degenerate;
+		}
 	}
 
 	bool optimized(Vec4& sphere)

@@ -691,11 +691,22 @@ public:
 	}
 
 	template <typename OnAccept, typename Domain, typename ClusterDomain>
-	uint32 sample_cluster(std::vector<Vertex>& cluster, OnAccept&& post, Domain&& domain, ClusterDomain&& cluster_domain,
+	uint32 sample_cluster(Vec3& center, Scalar r, std::vector<Vertex>& cluster, OnAccept&& post, Domain&& domain, ClusterDomain&& cluster_domain,
 						  uint32 target_count = (std::numeric_limits<uint32>::max)(), uint8 default_depth = 1)
-	{
+	{	
 		active_list_.clear();
-		auto [bb_min, bb_max] = compute_cluster_bbox(cluster);
+		Vec3 bb_min, bb_max;
+		if (cluster.empty())
+		{
+			bb_min = center - Vec3(r, r, r);
+			bb_max = center + Vec3(r, r, r);
+		}
+		else
+		{
+			auto bbox = compute_cluster_bbox(cluster);
+			bb_min = bbox.first;
+			bb_max = bbox.second;
+		}
 		uint8 work_depth = default_depth;
 		for (Vertex v : cluster)
 		{
