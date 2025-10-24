@@ -288,8 +288,11 @@ public:
 	void poisson_disk_sampling(SurfaceParameters& p)
 	{
 		auto in_volume = [&](const Vec3& pos) -> bool { return is_inside(p, pos); };
-		auto on_accept = [&](const Vec3& pos, PVertex& v, const uint8 depth) { on_accept_post(p, v, pos, depth); };
+		auto on_accept = [&](const Vec3& pos, PVertex& v, const uint8 depth) {
+			cgogn_message_assert(is_inside(p, pos), "pos is not inside");
+			on_accept_post(p, v, pos, depth); };
 		p.volume_sampler_->sample_fill_at_depth(0, on_accept, in_volume);
+		p.volume_sampler_->sample_fill_at_depth(1, on_accept, in_volume);
 		points_provider_->emit_connectivity_changed(*p.samples_);
 	}
 
@@ -298,6 +301,7 @@ public:
 		uint32 s_index = index_of(*p.spheres_, sphere);
 		auto in_volume = [&](const Vec3& pos) -> bool { return is_inside(p, pos); };
 		auto on_accept = [&](const Vec3& pos, PVertex& v, const uint8 depth) {
+			cgogn_message_assert(is_inside(p, pos), "pos is not inside");
 			uint32 vid = index_of(*p.samples_, v);
 			std::pair<uint32, Vec3> bvh_res;
 			p.surface_bvh_->closest_point(pos, &bvh_res);
@@ -1384,6 +1388,7 @@ protected:
 					(*p.samples_vertex_color_)[v_index] = value<Vec4>(*p.spheres_, p.spheres_color_, sphere);
 				return true;
 			});
+			points_provider_->emit_attribute_changed(*p.samples_, p.samples_position_.get());
 			points_provider_->emit_attribute_changed(*p.samples_, p.samples_vertex_color_.get());
 
 			compute_skeleton(p);
@@ -1404,6 +1409,7 @@ protected:
 					(*p.samples_vertex_color_)[v_index] = value<Vec4>(*p.spheres_, p.spheres_color_, sphere);
 				return true;
 			});
+			points_provider_->emit_attribute_changed(*p.samples_, p.samples_position_.get());
 			points_provider_->emit_attribute_changed(*p.samples_, p.samples_vertex_color_.get());
 
 			compute_skeleton(p);

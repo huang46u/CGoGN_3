@@ -131,6 +131,29 @@ public:
 		return {ix, iy, iz};
 	}
 
+	static constexpr uint32 reverse_bits_depth(uint32 v, uint8 depth) noexcept
+	{
+		uint32 r = 0;
+		for (uint8 k = 0; k < depth; ++k)
+		{
+			r |= ((v >> k) & 1u) << (depth - 1 - k);
+		}
+		return r;
+	}
+
+	inline std::tuple<uint32, uint32, uint32> to_grid_ijk() const
+	{
+		auto [ix, iy, iz] = to_ijk();
+		const uint8 d = depth_;
+		return {reverse_bits_depth(ix, d), 
+				reverse_bits_depth(iy, d), reverse_bits_depth(iz, d)};
+	}
+
+	static inline OctreeLocationCode from_grid_ijk(uint32 gx, uint32 gy, uint32 gz, uint8 depth)
+	{
+		return from_ijk(reverse_bits_depth(gx, depth), reverse_bits_depth(gy, depth), reverse_bits_depth(gz, depth),
+						depth);
+	}
 	uint8 depth() const
 	{
 		return depth_;
@@ -261,8 +284,7 @@ public:
 
 	Grid_Index cell_of_local(const Vec3& local01) const
 	{
-		// Clamp coordinates to [0, res_) range BEFORE casting to uint32
-		// to avoid uint32 overflow when local01 components are slightly negative
+		
 		Scalar fx = std::clamp(Scalar(local01.x() * float(res_)), Scalar(0.0), Scalar(float(res_) - 0.0001f));
 		Scalar fy = std::clamp(Scalar(local01.y() * float(res_)), Scalar(0.0), Scalar(float(res_) - 0.0001f));
 		Scalar fz = std::clamp(Scalar(local01.z() * float(res_)), Scalar(0.0), Scalar(float(res_) - 0.0001f));
@@ -540,7 +562,7 @@ private:
 
 			const uint8 k = ac.depth();
 			const int N = 1 << k;
-			auto t = ac.to_ijk();
+			auto t = ac.to_grid_ijk();
 			const int ix = static_cast<int>(std::get<0>(t));
 			const int iy = static_cast<int>(std::get<1>(t));
 			const int iz = static_cast<int>(std::get<2>(t));
@@ -556,7 +578,7 @@ private:
 						if (nx < 0 || ny < 0 || nz < 0 || nx >= N || ny >= N || nz >= N)
 							continue;
 
-						OctreeLocationCode neighbor_code = OctreeLocationCode::from_ijk(nx, ny, nz, k);
+						OctreeLocationCode neighbor_code = OctreeLocationCode::from_grid_ijk(nx, ny, nz, k);
 						auto neighbor_it = node_indices_.find(neighbor_code);
 						if (neighbor_it == node_indices_.end())
 							continue;
@@ -586,7 +608,7 @@ private:
 	bool conflict_same_depth_neighbors(const OctreeLocationCode& loc, const Vec3& p, Scalar R, Scalar cell_size,
 									   ConflictPred&& is_conflict)
 	{
-		auto t = loc.to_ijk();
+		auto t = loc.to_grid_ijk();
 		const int ix = static_cast<int>(std::get<0>(t));
 		const int iy = static_cast<int>(std::get<1>(t));
 		const int iz = static_cast<int>(std::get<2>(t));
@@ -603,7 +625,7 @@ private:
 						continue;
 
 					OctreeLocationCode ncode =
-						OctreeLocationCode::from_ijk(uint32(nx), uint32(ny), uint32(nz), loc.depth());
+						OctreeLocationCode::from_grid_ijk(uint32(nx), uint32(ny), uint32(nz), loc.depth());
 					auto it = node_indices_.find(ncode);
 					if (it == node_indices_.end())
 						continue;
@@ -674,8 +696,7 @@ public:
 			uint32 vid = index_of(mesh_, v);
 			active_list_.push_back(vid);
 			
-			// Calculate and store the radius for this depth
-			// At depth d, node covers space of size 1.0/(2^d), with grid resolution 16
+			
 			Scalar node_size = 1.0 / Scalar(1u << depth);
 			Scalar cell_size = node_size / 16.0; 
 			Scalar radius = cell_size * std::sqrt(3.0) / 2.0;
