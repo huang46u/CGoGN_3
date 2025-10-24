@@ -178,6 +178,9 @@ public:
 		}
 	};
 
+	uint64 bits() const { return bits_; }
+	uint8 depth_value() const { return depth_; }
+
 private:
 	uint64 bits_ = 0;
 	uint8 depth_ = 0;
@@ -193,12 +196,16 @@ public:
 	{
 	}
 
-	template <typename Func>
-	bool any_neighbor(const Grid_Index& idx, uint32 w, Func&& func) const
+	// New method: check neighbors INCLUDING the center cell
+	template <class Func>
+	bool adjacent_hit_local(const Vec3& local01, Scalar r_world, Scalar cell_size, Func&& func) const
 	{
-		const int ix = int(std::get<0>(idx));
-		const int iy = int(std::get<1>(idx));
-		const int iz = int(std::get<2>(idx));
+		Grid_Index q = cell_of_local(local01);
+		uint32 w = (uint32)std::ceil(r_world / cell_size);
+		
+		const int ix = int(std::get<0>(q));
+		const int iy = int(std::get<1>(q));
+		const int iz = int(std::get<2>(q));
 		const int loX = std::clamp(ix - int(w), 0, int(res_) - 1);
 		const int hiX = std::clamp(ix + int(w), 0, int(res_) - 1);
 		const int loY = std::clamp(iy - int(w), 0, int(res_) - 1);
@@ -212,8 +219,6 @@ public:
 			{
 				for (int x = loX; x <= hiX; ++x)
 				{
-					if (x == ix && y == iy && z == iz)
-						continue;
 					Key key = morton3D(uint32(x), uint32(y), uint32(z));
 					auto it = cells_.find(key);
 					if (it == cells_.end())
@@ -225,14 +230,7 @@ public:
 		}
 		return false;
 	}
-
-	template <class Func>
-	bool adjacent_hit_local(const Vec3& local01, Scalar r_world, Scalar cell_size, Func&& func) const
-	{
-		Grid_Index q = cell_of_local(local01);
-		uint32 w = (uint32)std::ceil(r_world / cell_size);
-		return any_neighbor(q, w, std::forward<Func>(func));
-	}
+	
 	bool occupied(const Grid_Index& idx) const
 	{
 		return occupied(morton_of(idx));
@@ -263,12 +261,14 @@ public:
 
 	Grid_Index cell_of_local(const Vec3& local01) const
 	{
-		float fx = local01.x() * float(res_);
-		float fy = local01.y() * float(res_);
-		float fz = local01.z() * float(res_);
-		uint32 x = std::min(uint32(std::floor(fx)), res_ - 1);
-		uint32 y = std::min(uint32(std::floor(fy)), res_ - 1);
-		uint32 z = std::min(uint32(std::floor(fz)), res_ - 1);
+		// Clamp coordinates to [0, res_) range BEFORE casting to uint32
+		// to avoid uint32 overflow when local01 components are slightly negative
+		Scalar fx = std::clamp(Scalar(local01.x() * float(res_)), Scalar(0.0), Scalar(float(res_) - 0.0001f));
+		Scalar fy = std::clamp(Scalar(local01.y() * float(res_)), Scalar(0.0), Scalar(float(res_) - 0.0001f));
+		Scalar fz = std::clamp(Scalar(local01.z() * float(res_)), Scalar(0.0), Scalar(float(res_) - 0.0001f));
+		uint32 x = uint32(std::floor(fx));
+		uint32 y = uint32(std::floor(fy));
+		uint32 z = uint32(std::floor(fz));
 		return {x, y, z};
 	}
 
@@ -316,12 +316,20 @@ public:
 	bool can_insert(const Vec3& p, ConflictPred&& is_conflict)
 	{
 		Vec3 local = to_local01(p);
-		auto idx = grid_.cell_of_local(local);
+		// Clamp local coordinates to [0,1] to handle boundary cases
+		// where p is exactly on or slightly outside the node boundary
+		Vec3 clamped_local(
+			std::clamp(local.x(), Scalar(0), Scalar(1)),
+			std::clamp(local.y(), Scalar(0), Scalar(1)),
+			std::clamp(local.z(), Scalar(0), Scalar(1))
+		);
+		auto idx = grid_.cell_of_local(clamped_local);
 		if (grid_.occupied(idx))
 			return false;
-		if (grid_.adjacent_hit_local(local, local_radius_, cell_size_,
+		if (grid_.adjacent_hit_local(clamped_local, local_radius_, cell_size_,
 									 [&](uint32 sampleId) { return is_conflict(sampleId, p, local_radius_); }))
 			return false;
+		
 		return true;
 	}
 
@@ -375,6 +383,17 @@ public:
 		if (local.z() >= 0.5)
 			oct |= 4u;
 		return oct;
+	}
+
+	bool sphere_overlap_node(const Vec3& q, Scalar r)
+	{
+		const Scalar ax = std::abs(q.x() - center_.x());
+		const Scalar ay = std::abs(q.y() - center_.y());
+		const Scalar az = std::abs(q.z() - center_.z());
+		const Scalar dx = std::max(Scalar(0), ax - half_size_);
+		const Scalar dy = std::max(Scalar(0), ay - half_size_);
+		const Scalar dz = std::max(Scalar(0), az - half_size_);
+		return (dx * dx + dy * dy + dz * dz) <= r * r;
 	}
 
 private:
@@ -453,14 +472,28 @@ public:
 			loc.push_octant(oct);
 		}
 		Node& node = get_or_add_node(loc);
+		
 		if (!node.can_insert(p, is_conflict))
 			return false;
+		
 		Vec3 local = node.to_local01(p);
-		auto idx = node.grid().cell_of_local(local);
+		// Clamp local coordinates to [0,1] before computing grid cell
+		// to avoid uint32 overflow when local coords are slightly negative
+		Vec3 clamped_local(
+			std::clamp(local.x(), Scalar(0), Scalar(1)),
+			std::clamp(local.y(), Scalar(0), Scalar(1)),
+			std::clamp(local.z(), Scalar(0), Scalar(1))
+		);
+		auto idx = node.grid().cell_of_local(clamped_local);
 		const Scalar R = node.radius();
 		const Scalar cs = node.cell_size();
-		if (conflict_same_depth_neighbors(loc, p, R, is_conflict))
+		
+		if (conflict_ancestors(loc, p, R, cs, is_conflict))
 			return false;
+		
+		if (conflict_same_depth_neighbors(loc, p, R, cs, is_conflict))
+			return false;
+		
 		uint32 sampleId = on_accept(p, depth);
 		node.grid().set(idx, sampleId);
 		return true;
@@ -472,14 +505,91 @@ public:
 	}
 
 private:
+	template <class ConflictPred>
+	bool conflict_ancestors(const OctreeLocationCode& loc, const Vec3& p, Scalar R, Scalar cell_size, ConflictPred&& is_conflict)
+	{
+		const uint8 depth = loc.depth();
+		if (depth == 0)
+			return false;
+
+		for (int ancestor_depth = int(depth); ancestor_depth > 0; --ancestor_depth)
+		{
+			OctreeLocationCode ac = loc.truncated(uint8(ancestor_depth - 1));
+
+			if (auto it = node_indices_.find(ac); it != node_indices_.end())
+			{
+				Node& an = nodes_[it->second];
+				
+				const Vec3 local = an.to_local01(p);
+				// Clamp local coordinates to [0,1] to handle boundary cases
+				Vec3 clamped_local(
+					std::clamp(local.x(), Scalar(0), Scalar(1)),
+					std::clamp(local.y(), Scalar(0), Scalar(1)),
+					std::clamp(local.z(), Scalar(0), Scalar(1))
+				);
+				const Scalar ancestor_cell_size = an.cell_size();
+				
+				if (an.grid().adjacent_hit_local(clamped_local, R, ancestor_cell_size,
+												 [&](int sid) { 
+													return is_conflict(uint32(sid), p, R); 
+												}))
+				{
+					return true;
+				}
+			}
+
+			const uint8 k = ac.depth();
+			const int N = 1 << k;
+			auto t = ac.to_ijk();
+			const int ix = static_cast<int>(std::get<0>(t));
+			const int iy = static_cast<int>(std::get<1>(t));
+			const int iz = static_cast<int>(std::get<2>(t));
+
+			int neighbors_checked = 0;
+			for (int dz = -1; dz <= 1; ++dz)
+				for (int dy = -1; dy <= 1; ++dy)
+					for (int dx = -1; dx <= 1; ++dx)
+					{
+						if (dx == 0 && dy == 0 && dz == 0)
+							continue;
+						int nx = ix + dx, ny = iy + dy, nz = iz + dz;
+						if (nx < 0 || ny < 0 || nz < 0 || nx >= N || ny >= N || nz >= N)
+							continue;
+
+						OctreeLocationCode neighbor_code = OctreeLocationCode::from_ijk(nx, ny, nz, k);
+						auto neighbor_it = node_indices_.find(neighbor_code);
+						if (neighbor_it == node_indices_.end())
+							continue;
+
+						neighbors_checked++;
+						Node& neighbor = nodes_[neighbor_it->second];
+						Vec3 nlocal = neighbor.to_local01(p);
+						
+						if (!neighbor.sphere_overlap_node(p, R))
+							continue;
+						Vec3 clamped_local(std::clamp(nlocal.x(), Scalar(0), Scalar(1)),
+										   std::clamp(nlocal.y(), Scalar(0), Scalar(1)),
+										   std::clamp(nlocal.z(), Scalar(0), Scalar(1)));
+						const Scalar neighbor_cell_size = neighbor.cell_size();
+						
+						if (neighbor.grid().adjacent_hit_local(clamped_local, R, neighbor_cell_size,
+															   [&](int sid) {
+								return is_conflict(uint32(sid), p, R);
+							}))
+							return true;
+					}
+		}
+		return false;
+	}
+
 	template <typename ConflictPred>
-	bool conflict_same_depth_neighbors(const OctreeLocationCode& loc, const Vec3& p, Scalar R,
+	bool conflict_same_depth_neighbors(const OctreeLocationCode& loc, const Vec3& p, Scalar R, Scalar cell_size,
 									   ConflictPred&& is_conflict)
 	{
-		auto ijk = loc.to_ijk();
-		int ix = int(std::get<0>(ijk));
-		int iy = int(std::get<1>(ijk));
-		int iz = int(std::get<2>(ijk));
+		auto t = loc.to_ijk();
+		const int ix = static_cast<int>(std::get<0>(t));
+		const int iy = static_cast<int>(std::get<1>(t));
+		const int iz = static_cast<int>(std::get<2>(t));
 		const int N = 1 << loc.depth();
 
 		for (int dz = -1; dz <= 1; ++dz)
@@ -499,11 +609,22 @@ private:
 						continue;
 
 					Node& nb = nodes_[it->second];
+					if (!nb.sphere_overlap_node(p, R))
+						continue;
+					
 					Vec3 nlocal = nb.to_local01(p);
-					int w = int(std::ceil(R / nb.cell_size()));
-					if (nb.grid().adjacent_hit_local(nlocal, R, nb.cell_size(),
-													 [&](int sid) { return is_conflict(sid, p, R); }))
+					Vec3 clamped_local(
+						std::clamp(nlocal.x(), Scalar(0), Scalar(1)),
+						std::clamp(nlocal.y(), Scalar(0), Scalar(1)),
+						std::clamp(nlocal.z(), Scalar(0), Scalar(1))
+					);
+					
+				const Scalar neighbor_cell_size = nb.cell_size();
+				if (nb.grid().adjacent_hit_local(clamped_local, R, neighbor_cell_size,
+															 [&](int sid) { return is_conflict(sid, p, R); }))
+					{
 						return true;
+					}
 				}
 		return false;
 	}
@@ -529,6 +650,7 @@ public:
 	{
 		sample_position_ = get_or_add_attribute<Vec3, Vertex>(mesh_, "position");
 		poisson_sample_depth_ = get_or_add_attribute<uint8, Vertex>(mesh_, "poisson_sample_depth");
+		poisson_sample_radius_ = get_or_add_attribute<Scalar, Vertex>(mesh_, "poisson_sample_radius");
 	}
 
 	template <class Domain, class OnAccept>
@@ -537,31 +659,42 @@ public:
 	{
 
 		uint32 added = 0;
-		auto is_conflict = [&](uint32 sid, const Vec3& q, Scalar R) -> bool {
+		auto is_conflict = [&](uint32 sid, const Vec3& q, Scalar R_candidate) -> bool {
 			Vec3 s_pos = (*sample_position_)[sid];
-			return (s_pos - q).dot(s_pos - q) < (R * R);
+			Scalar R_existing = (*poisson_sample_radius_)[sid];
+			// Use the smaller radius for conflict detection (cross-layer constraint)
+			Scalar R_threshold = std::min(R_candidate, R_existing);
+			Scalar dist_sq = (s_pos - q).dot(s_pos - q);
+			bool conflict = dist_sq < (R_threshold * R_threshold);
+			
+			return conflict;
 		};
 		auto on_accept = [&](const Vec3& pos, const uint8 depth) -> uint32 {
 			Vertex v = add_vertex(mesh_);
 			uint32 vid = index_of(mesh_, v);
 			active_list_.push_back(vid);
+			
+			// Calculate and store the radius for this depth
+			// At depth d, node covers space of size 1.0/(2^d), with grid resolution 16
+			Scalar node_size = 1.0 / Scalar(1u << depth);
+			Scalar cell_size = node_size / 16.0; 
+			Scalar radius = cell_size * std::sqrt(3.0) / 2.0;
+			(*poisson_sample_radius_)[vid] = radius;
+			
 			post(pos, v, depth);
 			return vid;
 		};
 		const uint32 max_seed_trials = std::max<uint32>(256, 10 * max_trials_);
 		if (active_list_.empty())
 		{
-			bool seeded = false;
-			Vec3 s = pick_seed(domain, max_seed_trials);
-			if (octree_.insert(s, depth, is_conflict, on_accept))
+			Vec3 seed_pos;
+			if (pick_seed(domain, seed_pos, max_seed_trials) &&
+				octree_.insert(seed_pos, depth, is_conflict, on_accept))
 			{
 				++added;
-				seeded = true;
 			}
-
-			if (!seeded)
+			else
 			{
-				/*std::cout << "[VolumePoissonDiskSampler] sample_fill_at_depth depth: " << depth << "is full" << std::endl;*/
 				return 0;
 			}
 			if (added >= target_count)
@@ -582,7 +715,6 @@ public:
 				{
 					++added;
 					accepted = true;
-					/*std::cout << "[VolumePoissonDiskSampler] sample_fill_at_depth Added sample at depth " << int(depth) << " after " << i << " trials" << std::endl;*/
 					break;
 				}
 			}
@@ -592,16 +724,14 @@ public:
 				active_list_.pop_back();
 				if (active_list_.empty() && added < target_count)
 				{
-					bool seeded = false;
-					Vec3 s = pick_seed(domain, max_seed_trials);
-					if (octree_.insert(s, depth, is_conflict, on_accept))
+					Vec3 seed_pos;
+					if (pick_seed(domain, seed_pos, max_seed_trials) &&
+						octree_.insert(seed_pos, depth, is_conflict, on_accept))
 					{
 						++added;
-						seeded = true;
 					}
-					if (!seeded)
+					else
 					{
-						/*std::cout << "[VolumePoissonDiskSampler] sample_fill_at_depth depth: " << int(depth) << "is full" << std::endl;*/
 						break;
 					}
 				}
@@ -616,31 +746,39 @@ public:
 	{
 
 		uint32 added = 0;
-		auto is_conflict = [&](uint32 sid, const Vec3& q, Scalar R) -> bool {
+		auto is_conflict = [&](uint32 sid, const Vec3& q, Scalar R_candidate) -> bool {
 			Vec3 s_pos = (*sample_position_)[sid];
-			return (s_pos - q).dot(s_pos - q) < (R * R);
+			Scalar R_existing = (*poisson_sample_radius_)[sid];
+			// Use the smaller radius for conflict detection (cross-layer constraint)
+			Scalar R_threshold = std::min(R_candidate, R_existing);
+			return (s_pos - q).dot(s_pos - q) < (R_threshold * R_threshold);
 		};
 		auto on_accept = [&](const Vec3& pos, const uint8 depth) -> uint32 {
 			Vertex v = add_vertex(mesh_);
 			uint32 vid = index_of(mesh_, v);
 			active_list_.push_back(vid);
+			
+			// Calculate and store the radius for this depth
+			// At depth d, node covers space of size 1.0/(2^d), with grid resolution 16
+			Scalar node_size = 1.0 / Scalar(1u << depth);
+			Scalar cell_size = node_size / 16.0; // Corrected: was incorrectly using (2.0 * node_size) / 16
+			Scalar radius = cell_size * std::sqrt(3.0) / 2.0;
+			(*poisson_sample_radius_)[vid] = radius;
+			
 			post(pos, v, depth);
 			return vid;
 		};
 		const uint32 max_seed_trials = std::max<uint32>(256, 10 * max_trials_);
 		if (active_list_.empty())
 		{
-			bool seeded = false;
-			Vec3 s = pick_seed_in_bbox(bb_min, bb_max,domain, cluster_domain, max_seed_trials);
-			if (octree_.insert(s, depth, is_conflict, on_accept))
+			Vec3 seed_pos;
+			if (pick_seed_in_bbox(bb_min, bb_max, domain, cluster_domain, seed_pos, max_seed_trials) &&
+				octree_.insert(seed_pos, depth, is_conflict, on_accept))
 			{
 				++added;
-				seeded = true;
 			}
-
-			if (!seeded)
+			else
 			{
-				/*std::cout << "[VolumePoissonDiskSampler] sample_cluster_at_depth: depth " << int(depth) << " is full" << std::endl;*/
 				return 0;
 			}
 			if (added >= target_count)
@@ -661,7 +799,6 @@ public:
 				{
 					++added;
 					accepted = true;
-					/*std::cout << "[VolumePoissonDiskSampler] sample_cluster_at_depth Added sample at depth " << int(depth) << " after " << i << " trials" << std::endl;*/
 					break;
 				}
 			}
@@ -671,19 +808,14 @@ public:
 				active_list_.pop_back();
 				if (active_list_.empty() && added < target_count)
 				{
-					bool seeded = false;
-					Vec3 s = pick_seed_in_bbox(bb_min, bb_max, domain,cluster_domain, max_seed_trials);
-					if (octree_.insert(s, depth, is_conflict, on_accept))
+					Vec3 seed_pos;
+					if (pick_seed_in_bbox(bb_min, bb_max, domain, cluster_domain, seed_pos, max_seed_trials) &&
+						octree_.insert(seed_pos, depth, is_conflict, on_accept))
 					{
 						++added;
-						seeded = true;
 						break;
 					}
-					if (!seeded)
-					{
-						/*std::cout << "[VolumePoissonDiskSampler] sample_cluster_at_depth: depth " << int(depth)  << " is full" << std::endl;*/
-						break;
-					}
+					break;
 				}
 			}
 		}
@@ -691,9 +823,10 @@ public:
 	}
 
 	template <typename OnAccept, typename Domain, typename ClusterDomain>
-	uint32 sample_cluster(Vec3& center, Scalar r, std::vector<Vertex>& cluster, OnAccept&& post, Domain&& domain, ClusterDomain&& cluster_domain,
-						  uint32 target_count = (std::numeric_limits<uint32>::max)(), uint8 default_depth = 1)
-	{	
+	uint32 sample_cluster(Vec3& center, Scalar r, std::vector<Vertex>& cluster, OnAccept&& post, Domain&& domain,
+						  ClusterDomain&& cluster_domain, uint32 target_count = (std::numeric_limits<uint32>::max)(),
+						  uint8 default_depth = 1)
+	{
 		active_list_.clear();
 		Vec3 bb_min, bb_max;
 		if (cluster.empty())
@@ -719,14 +852,13 @@ public:
 		uint32 remaining = target_count;
 		while (remaining > 0)
 		{
-			const uint32 added = sample_cluster_at_depth(work_depth, post, domain, cluster_domain, bb_min, bb_max, remaining);
+			const uint32 added =
+				sample_cluster_at_depth(work_depth, post, domain, cluster_domain, bb_min, bb_max, remaining);
 			if (added > remaining)
 				return target_count;
 			remaining -= added;
 			if (work_depth >= MAX_DEPTH)
 			{
-				/*std::cout << "VolumePoissonDiskSampler: reached max depth " << int(MAX_DEPTH) << " with " << remaining
-						  << " samples remaining" << std::endl;*/
 				return target_count - remaining;
 			}
 			++work_depth;
@@ -761,9 +893,8 @@ private:
 	}
 
 	template <typename Domain>
-	Vec3 pick_seed(Domain&& domain, uint32 max_trials = 1000)
+	bool pick_seed(Domain&& domain, Vec3& out, uint32 max_trials = 1000)
 	{
-
 		while ((max_trials--) > 0)
 		{
 			Scalar x = uni_(rng_);
@@ -772,14 +903,16 @@ private:
 			Vec3 p(x, y, z);
 			if (domain(p))
 			{
-				return p;
+				out = p;
+				return true;
 			}
 		}
+		return false;
 	}
 
 	template <typename Domain, typename LocalDomain>
-	Vec3 pick_seed_in_bbox(const Vec3 bbox_min, const Vec3 bbox_max, Domain&& domain, LocalDomain&& local_domain,
-						   uint32 max_trials = 1000)
+	bool pick_seed_in_bbox(const Vec3 bbox_min, const Vec3 bbox_max, Domain&& domain, LocalDomain&& local_domain,
+						   Vec3& out, uint32 max_trials = 1000)
 	{
 		const Vec3 extent = bbox_max - bbox_min;
 
@@ -791,9 +924,11 @@ private:
 			Vec3 p(x, y, z);
 			if (domain(p) && local_domain(p))
 			{
-				return p;
+				out = p;
+				return true;
 			}
 		}
+		return false;
 	}
 
 private:
@@ -801,6 +936,7 @@ private:
 	NestedOctree octree_;
 	std::shared_ptr<Attribute<uint8>> poisson_sample_depth_;
 	std::shared_ptr<Attribute<Vec3>> sample_position_;
+	std::shared_ptr<Attribute<Scalar>> poisson_sample_radius_;
 	uint32 max_trials_;
 	std::mt19937 rng_;
 	std::uniform_real_distribution<Scalar> uni_;
