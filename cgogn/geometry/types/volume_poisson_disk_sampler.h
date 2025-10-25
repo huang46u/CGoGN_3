@@ -166,7 +166,7 @@ public:
 	std::string to_string() const
 	{
 		std::string s = "d=" + std::to_string(depth_) + " [";
-		for (uint8_t k = 0; k < depth_; ++k)
+		for (uint8 k = 0; k < depth_; ++k)
 		{
 			s += std::to_string(octant_at(k));
 			if (k + 1 < depth_)
@@ -213,7 +213,7 @@ class SparseGrid
 {
 public:
 	using Key = uint32;
-	using Grid_Index = std::tuple<uint32, uint32, uint32>;
+	using Grid_Index = std::tuple<int, int, int>;
 
 	SparseGrid(uint32 res) : res_(res)
 	{
@@ -224,17 +224,17 @@ public:
 	bool adjacent_hit_local(const Vec3& local01, Scalar r_world, Scalar cell_size, Func&& func) const
 	{
 		Grid_Index q = cell_of_local(local01);
-		uint32 w = (uint32)std::ceil(r_world / cell_size);
+		int w = int(std::ceil(r_world / cell_size));
 		
-		const int ix = int(std::get<0>(q));
-		const int iy = int(std::get<1>(q));
-		const int iz = int(std::get<2>(q));
-		const int loX = std::clamp(ix - int(w), 0, int(res_) - 1);
-		const int hiX = std::clamp(ix + int(w), 0, int(res_) - 1);
-		const int loY = std::clamp(iy - int(w), 0, int(res_) - 1);
-		const int hiY = std::clamp(iy + int(w), 0, int(res_) - 1);
-		const int loZ = std::clamp(iz - int(w), 0, int(res_) - 1);
-		const int hiZ = std::clamp(iz + int(w), 0, int(res_) - 1);
+		const int ix =std::get<0>(q);
+		const int iy =std::get<1>(q);
+		const int iz =std::get<2>(q);
+		const int loX = std::clamp(ix - w, 0, int(res_) - 1);
+		const int hiX = std::clamp(ix + w, 0, int(res_) - 1);
+		const int loY = std::clamp(iy - w, 0, int(res_) - 1);
+		const int hiY = std::clamp(iy + w, 0, int(res_) - 1);
+		const int loZ = std::clamp(iz - w, 0, int(res_) - 1);
+		const int hiZ = std::clamp(iz + w, 0, int(res_) - 1);
 
 		for (int z = loZ; z <= hiZ; ++z)
 		{
@@ -242,6 +242,8 @@ public:
 			{
 				for (int x = loX; x <= hiX; ++x)
 				{
+					if (!is_legal(Grid_Index{x, y, z}))
+						continue;
 					Key key = morton3D(uint32(x), uint32(y), uint32(z));
 					auto it = cells_.find(key);
 					if (it == cells_.end())
@@ -273,30 +275,29 @@ public:
 			return it->second;
 		return -1;
 	}
-	void set(const Grid_Index& idx, int value)
+	void set(const Grid_Index& idx, uint32 value)
 	{
 		set(morton_of(idx), value);
 	}
-	void set(const uint32 key, int value)
+	void set(const uint32 key, uint32 value)
 	{
 		cells_[key] = value;
 	}
 
 	Grid_Index cell_of_local(const Vec3& local01) const
 	{
-		
-		Scalar fx = std::clamp(Scalar(local01.x() * float(res_)), Scalar(0.0), Scalar(float(res_) - 0.0001f));
-		Scalar fy = std::clamp(Scalar(local01.y() * float(res_)), Scalar(0.0), Scalar(float(res_) - 0.0001f));
-		Scalar fz = std::clamp(Scalar(local01.z() * float(res_)), Scalar(0.0), Scalar(float(res_) - 0.0001f));
-		uint32 x = uint32(std::floor(fx));
-		uint32 y = uint32(std::floor(fy));
-		uint32 z = uint32(std::floor(fz));
+		Scalar fx = local01.x() * Scalar(res_);
+		Scalar fy = local01.y() * Scalar(res_);
+		Scalar fz = local01.z() * Scalar(res_);
+		int x = int(std::floor(fx));
+		int y = int(std::floor(fy));
+		int z = int(std::floor(fz));
 		return {x, y, z};
 	}
 
 	Key morton_of(const Grid_Index& q) const
 	{
-		return morton3D(uint32_t(std::get<0>(q)), uint32_t(std::get<1>(q)), uint32_t(std::get<2>(q)));
+		return morton3D(uint32(std::get<0>(q)), std::get<1>(q), std::get<2>(q));
 	}
 
 	uint32 resolution() const
@@ -319,8 +320,16 @@ public:
 		cells_.clear();
 	}
 
+	bool is_legal(Grid_Index idx) const
+	{
+		return (std::get<0>(idx) >= 0 && std::get<0>(idx) < int(res_) && std::get<1>(idx) >= 0 &&
+				std::get<1>(idx) < int(res_) && std::get<2>(idx) >= 0 && std::get<2>(idx) < int(res_));
+	}
+
 private:
-	std::unordered_map<uint32, int> cells_;
+	
+
+	std::unordered_map<uint32, uint32> cells_; // morton code -> sample ID
 	uint32 res_;
 };
 
@@ -338,17 +347,12 @@ public:
 	bool can_insert(const Vec3& p, ConflictPred&& is_conflict)
 	{
 		Vec3 local = to_local01(p);
-		// Clamp local coordinates to [0,1] to handle boundary cases
-		// where p is exactly on or slightly outside the node boundary
-		Vec3 clamped_local(
-			std::clamp(local.x(), Scalar(0), Scalar(1)),
-			std::clamp(local.y(), Scalar(0), Scalar(1)),
-			std::clamp(local.z(), Scalar(0), Scalar(1))
-		);
-		auto idx = grid_.cell_of_local(clamped_local);
+		auto idx = grid_.cell_of_local(local);
+		if (!grid_.is_legal(idx))
+			return false;
 		if (grid_.occupied(idx))
 			return false;
-		if (grid_.adjacent_hit_local(clamped_local, local_radius_, cell_size_,
+		if (grid_.adjacent_hit_local(local, local_radius_, cell_size_,
 									 [&](uint32 sampleId) { return is_conflict(sampleId, p, local_radius_); }))
 			return false;
 		
@@ -363,7 +367,8 @@ public:
 	Vec3 to_local01(const Vec3& p) const
 	{
 		const Scalar inv = 1.0 / (2.0 * half_size_);
-		return (p - (center_ - Vec3(half_size_, half_size_, half_size_))) * inv;
+		Vec3 local = (p - (center_ - Vec3(half_size_, half_size_, half_size_))) * inv;
+		return local;
 	}
 
 	SparseGrid& grid()
@@ -394,17 +399,11 @@ public:
 
 		return p + Vec3(x, y, z);
 	}
-	inline uint8_t octant_of(const Vec3& p) const
+	inline uint8 octant_of(const Vec3& p) const
 	{
-		Vec3 local = to_local01(p);
-		uint8_t oct = 0;
-		if (local.x() >= 0.5)
-			oct |= 1u;
-		if (local.y() >= 0.5)
-			oct |= 2u;
-		if (local.z() >= 0.5)
-			oct |= 4u;
-		return oct;
+		
+		return (p.x() >= center_.x()) | ((p.y() >= center_.y()) << 1) | ((p.z() >= center_.z()) << 2);
+		
 	}
 
 	bool sphere_overlap_node(const Vec3& q, Scalar r)
@@ -499,14 +498,7 @@ public:
 			return false;
 		
 		Vec3 local = node.to_local01(p);
-		// Clamp local coordinates to [0,1] before computing grid cell
-		// to avoid uint32 overflow when local coords are slightly negative
-		Vec3 clamped_local(
-			std::clamp(local.x(), Scalar(0), Scalar(1)),
-			std::clamp(local.y(), Scalar(0), Scalar(1)),
-			std::clamp(local.z(), Scalar(0), Scalar(1))
-		);
-		auto idx = node.grid().cell_of_local(clamped_local);
+		auto idx = node.grid().cell_of_local(local);
 		const Scalar R = node.radius();
 		const Scalar cs = node.cell_size();
 		
@@ -543,15 +535,10 @@ private:
 				Node& an = nodes_[it->second];
 				
 				const Vec3 local = an.to_local01(p);
-				// Clamp local coordinates to [0,1] to handle boundary cases
-				Vec3 clamped_local(
-					std::clamp(local.x(), Scalar(0), Scalar(1)),
-					std::clamp(local.y(), Scalar(0), Scalar(1)),
-					std::clamp(local.z(), Scalar(0), Scalar(1))
-				);
+				
 				const Scalar ancestor_cell_size = an.cell_size();
 				
-				if (an.grid().adjacent_hit_local(clamped_local, R, ancestor_cell_size,
+				if (an.grid().adjacent_hit_local(local, R, ancestor_cell_size,
 												 [&](int sid) { 
 													return is_conflict(uint32(sid), p, R); 
 												}))
@@ -567,7 +554,6 @@ private:
 			const int iy = static_cast<int>(std::get<1>(t));
 			const int iz = static_cast<int>(std::get<2>(t));
 
-			int neighbors_checked = 0;
 			for (int dz = -1; dz <= 1; ++dz)
 				for (int dy = -1; dy <= 1; ++dy)
 					for (int dx = -1; dx <= 1; ++dx)
@@ -583,18 +569,14 @@ private:
 						if (neighbor_it == node_indices_.end())
 							continue;
 
-						neighbors_checked++;
 						Node& neighbor = nodes_[neighbor_it->second];
 						Vec3 nlocal = neighbor.to_local01(p);
 						
 						if (!neighbor.sphere_overlap_node(p, R))
 							continue;
-						Vec3 clamped_local(std::clamp(nlocal.x(), Scalar(0), Scalar(1)),
-										   std::clamp(nlocal.y(), Scalar(0), Scalar(1)),
-										   std::clamp(nlocal.z(), Scalar(0), Scalar(1)));
 						const Scalar neighbor_cell_size = neighbor.cell_size();
 						
-						if (neighbor.grid().adjacent_hit_local(clamped_local, R, neighbor_cell_size,
+						if (neighbor.grid().adjacent_hit_local(nlocal, R, neighbor_cell_size,
 															   [&](int sid) {
 								return is_conflict(uint32(sid), p, R);
 							}))
@@ -635,14 +617,9 @@ private:
 						continue;
 					
 					Vec3 nlocal = nb.to_local01(p);
-					Vec3 clamped_local(
-						std::clamp(nlocal.x(), Scalar(0), Scalar(1)),
-						std::clamp(nlocal.y(), Scalar(0), Scalar(1)),
-						std::clamp(nlocal.z(), Scalar(0), Scalar(1))
-					);
 					
 				const Scalar neighbor_cell_size = nb.cell_size();
-				if (nb.grid().adjacent_hit_local(clamped_local, R, neighbor_cell_size,
+					if (nb.grid().adjacent_hit_local(nlocal, R, neighbor_cell_size,
 															 [&](int sid) { return is_conflict(sid, p, R); }))
 					{
 						return true;
@@ -709,12 +686,21 @@ public:
 		if (active_list_.empty())
 		{
 			Vec3 seed_pos;
-			if (pick_seed(domain, seed_pos, max_seed_trials) &&
-				octree_.insert(seed_pos, depth, is_conflict, on_accept))
+			bool accetped = false;
+			for (int i = 0; i < max_trials_; ++i)
 			{
-				++added;
+				if (pick_seed(domain, seed_pos, max_seed_trials))
+				{
+
+					if (octree_.insert(seed_pos, depth, is_conflict, on_accept))
+					{
+						accetped = true;
+						++added;
+						break;
+					}
+				}
 			}
-			else
+			if (!accetped)
 			{
 				return 0;
 			}
@@ -746,12 +732,21 @@ public:
 				if (active_list_.empty() && added < target_count)
 				{
 					Vec3 seed_pos;
-					if (pick_seed(domain, seed_pos, max_seed_trials) &&
-						octree_.insert(seed_pos, depth, is_conflict, on_accept))
+					bool accetped = false;
+					for (int i = 0; i < max_trials_; ++i)
 					{
-						++added;
+						if (pick_seed(domain, seed_pos, max_seed_trials))
+						{
+
+							if (octree_.insert(seed_pos, depth, is_conflict, on_accept))
+							{
+								accetped = true;
+								++added;
+								break;
+							}
+						}
 					}
-					else
+					if (!accetped)
 					{
 						break;
 					}
@@ -779,10 +774,8 @@ public:
 			uint32 vid = index_of(mesh_, v);
 			active_list_.push_back(vid);
 			
-			// Calculate and store the radius for this depth
-			// At depth d, node covers space of size 1.0/(2^d), with grid resolution 16
 			Scalar node_size = 1.0 / Scalar(1u << depth);
-			Scalar cell_size = node_size / 16.0; // Corrected: was incorrectly using (2.0 * node_size) / 16
+			Scalar cell_size = node_size / 16.0; 
 			Scalar radius = cell_size * std::sqrt(3.0) / 2.0;
 			(*poisson_sample_radius_)[vid] = radius;
 			
@@ -793,12 +786,21 @@ public:
 		if (active_list_.empty())
 		{
 			Vec3 seed_pos;
-			if (pick_seed_in_bbox(bb_min, bb_max, domain, cluster_domain, seed_pos, max_seed_trials) &&
-				octree_.insert(seed_pos, depth, is_conflict, on_accept))
+			bool accetped = false;
+			for (int i = 0; i < max_trials_; ++i)
 			{
-				++added;
+				if (pick_seed_in_bbox(bb_min, bb_max, domain, cluster_domain, seed_pos, max_seed_trials))
+				{
+
+					if (octree_.insert(seed_pos, depth, is_conflict, on_accept))
+					{
+						accetped = true;
+						++added;
+						break;
+					}
+				}
 			}
-			else
+			if (!accetped)
 			{
 				return 0;
 			}
@@ -830,13 +832,24 @@ public:
 				if (active_list_.empty() && added < target_count)
 				{
 					Vec3 seed_pos;
-					if (pick_seed_in_bbox(bb_min, bb_max, domain, cluster_domain, seed_pos, max_seed_trials) &&
-						octree_.insert(seed_pos, depth, is_conflict, on_accept))
+					bool accetped = false;
+					for (int i = 0; i < max_trials_; ++i)
 					{
-						++added;
+						if (pick_seed_in_bbox(bb_min, bb_max, domain, cluster_domain, seed_pos, max_seed_trials))
+						{
+
+							if (octree_.insert(seed_pos, depth, is_conflict, on_accept))
+							{
+								accetped = true;
+								++added;
+								break;
+							}
+						}
+					}
+					if (!accetped)
+					{
 						break;
 					}
-					break;
 				}
 			}
 		}
@@ -862,17 +875,19 @@ public:
 			bb_max = bbox.second;
 		}
 		uint8 work_depth = default_depth;
-		for (Vertex v : cluster)
-		{
-			const uint32 v_index = index_of(mesh_, v);
-			if ((*poisson_sample_depth_)[v_index] != work_depth)
-				continue;
-			const Vec3& p = (*sample_position_)[v_index];
-			active_list_.push_back(v_index);
-		}
+		
 		uint32 remaining = target_count;
 		while (remaining > 0)
 		{
+			active_list_.clear();
+			for (Vertex v : cluster)
+			{
+				const uint32 v_index = index_of(mesh_, v);
+				if ((*poisson_sample_depth_)[v_index] != work_depth)
+					continue;
+				const Vec3& p = (*sample_position_)[v_index];
+				active_list_.push_back(v_index);
+			}
 			const uint32 added =
 				sample_cluster_at_depth(work_depth, post, domain, cluster_domain, bb_min, bb_max, remaining);
 			if (added > remaining)

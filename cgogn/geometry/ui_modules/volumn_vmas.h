@@ -292,10 +292,37 @@ public:
 			cgogn_message_assert(is_inside(p, pos), "pos is not inside");
 			on_accept_post(p, v, pos, depth); };
 		p.volume_sampler_->sample_fill_at_depth(0, on_accept, in_volume);
-		p.volume_sampler_->sample_fill_at_depth(1, on_accept, in_volume);
 		points_provider_->emit_connectivity_changed(*p.samples_);
 	}
 
+	void verify_conflicts(SurfaceParameters& p)
+	{
+		auto poisson_sample_radius_ = get_or_add_attribute<Scalar, PVertex>(*p.samples_, "poisson_sample_radius");
+		foreach_cell(*p.samples_, [&](PVertex v) {
+			const uint32 v_index = index_of(*p.samples_, v);
+			const Vec3& p_pos = (*p.samples_position_)[v_index];
+			Scalar R = (*poisson_sample_radius_)[v_index];
+			std::vector<PVertex> knn = (*p.samples_vertex_knn_)[v_index];
+			for (PVertex& iv : knn)
+			{
+				const uint32 iv_index = index_of(*p.samples_, iv);
+				if (iv_index == v_index)
+					continue;
+				const Vec3& q_pos = (*p.samples_position_)[iv_index];
+				Scalar R_iv = (*poisson_sample_radius_)[iv_index];
+				Scalar R_threshold = std::min(R, R_iv);
+				if ((p_pos - q_pos).dot(p_pos - q_pos) < (R_threshold * R_threshold))
+				{
+					std::cout << "Conflict between " << v_index << " and " << iv_index << std::endl;
+					std::cout << "Depth: " << (int)(*p.samples_poisson_depth_)[v_index] << " and "
+							  << (int)(*p.samples_poisson_depth_)[iv_index] << std::endl;
+					//radius
+					std::cout << "Radius: " << R << " and " << R_iv << std::endl;
+				}
+			}
+			return true;
+		});
+	}
 	void poisson_disk_sampling_local(SurfaceParameters& p, PVertex sphere, uint32 target_count)
 	{
 		uint32 s_index = index_of(*p.spheres_, sphere);
@@ -366,7 +393,7 @@ public:
 			}
 			return best_index == s_index;
 		};
-		auto spheres_clusters_ = (*p.spheres_cluster_)[s_index];
+		auto& spheres_clusters_ = (*p.spheres_cluster_)[s_index];
 		auto& center = (*p.spheres_position_)[s_index];
 		auto& radius = (*p.spheres_radius_)[s_index];
 		p.volume_sampler_->sample_cluster(center, radius, spheres_clusters_, on_accept, in_volume, in_cluster, target_count);
@@ -1643,6 +1670,10 @@ protected:
 						compute_spheres_error(p);
 						update_render_data(p);
 					}
+				}
+				if (ImGui::Button("Verify Conflict"))
+				{
+					verify_conflicts(p);
 				}
 				if (ImGui::Button("Local sample"))
 				{
