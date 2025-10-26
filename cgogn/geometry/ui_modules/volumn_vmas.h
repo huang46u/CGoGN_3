@@ -396,9 +396,13 @@ public:
 		auto& spheres_clusters_ = (*p.spheres_cluster_)[s_index];
 		auto& center = (*p.spheres_position_)[s_index];
 		auto& radius = (*p.spheres_radius_)[s_index];
-		p.volume_sampler_->sample_cluster(center, radius, spheres_clusters_, on_accept, in_volume, in_cluster, target_count);
+		uint32 added = p.volume_sampler_->sample_cluster(center, radius, spheres_clusters_, on_accept, in_volume, in_cluster, target_count);
 		// recompute kd_tree
-
+		if (added < target_count)
+		{
+			std::cout << "Sample cluster failed: target: " << target_count
+					  << ", but only " << added << " samples added." << std::endl;
+		}
 		points_provider_->emit_connectivity_changed(*p.samples_);
 	}
 

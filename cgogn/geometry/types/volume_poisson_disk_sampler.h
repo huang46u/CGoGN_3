@@ -297,7 +297,7 @@ public:
 
 	Key morton_of(const Grid_Index& q) const
 	{
-		return morton3D(uint32(std::get<0>(q)), std::get<1>(q), std::get<2>(q));
+		return morton3D(uint32(std::get<0>(q)), uint32(std::get<1>(q)),uint32(std::get<2>(q)));
 	}
 
 	uint32 resolution() const
@@ -343,21 +343,21 @@ public:
 		local_radius_ = cell_size_ * std::sqrt(3.0) / 2.0;
 	}
 
-	template <typename ConflictPred>
-	bool can_insert(const Vec3& p, ConflictPred&& is_conflict)
-	{
-		Vec3 local = to_local01(p);
-		auto idx = grid_.cell_of_local(local);
-		if (!grid_.is_legal(idx))
-			return false;
-		if (grid_.occupied(idx))
-			return false;
-		if (grid_.adjacent_hit_local(local, local_radius_, cell_size_,
-									 [&](uint32 sampleId) { return is_conflict(sampleId, p, local_radius_); }))
-			return false;
-		
-		return true;
-	}
+	//template <typename ConflictPred>
+	//bool can_insert(const Vec3& p, ConflictPred&& is_conflict)
+	//{
+	//	Vec3 local = to_local01(p);
+	//	auto idx = grid_.cell_of_local(local);
+	//	if (!grid_.is_legal(idx))
+	//		return false;
+	//	if (grid_.occupied(idx))
+	//		return false;
+	//	if (grid_.adjacent_hit_local(local, local_radius_, cell_size_,
+	//								 [&](uint32 sampleId) { return is_conflict(sampleId, p, local_radius_); }))
+	//		return false;
+	//	
+	//	return true;
+	//}
 
 	Scalar cell_size() const
 	{
@@ -381,24 +381,7 @@ public:
 		return local_radius_;
 	}
 
-	Vec3 random_sample_around(const Vec3& p, std::mt19937& rng, std::uniform_real_distribution<Scalar>& Uni)
-	{
-		Scalar u = Uni(rng);
-		Scalar v = Uni(rng);
-		Scalar w = Uni(rng);
-
-		Scalar R3 = local_radius_ * local_radius_ * local_radius_;
-		Scalar r = std::cbrt(R3 + u * (8 * R3 - R3)); // r = pow((R^3 + u(8R^3 - R^3)), 1/3)
-
-		Scalar phi = v * 2.0 * M_PI;
-		Scalar theta = std::acos(1.0 - 2.0 * w);
-
-		Scalar x = r * std::sin(theta) * std::cos(phi);
-		Scalar y = r * std::sin(theta) * std::sin(phi);
-		Scalar z = r * std::cos(theta);
-
-		return p + Vec3(x, y, z);
-	}
+	
 	inline uint8 octant_of(const Vec3& p) const
 	{
 		
@@ -443,25 +426,7 @@ public:
 			return nodes_[it->second];
 		}
 		// create new node
-		Vec3 center(0.5, 0.5, 0.5);
-		Scalar half = 0.5;
-		for (uint8 d = 0; d < loc.depth(); ++d)
-		{
-			uint8 oct = loc.octant_at(d);
-			half *= 0.5;
-			if (oct & 1u)
-				center.x() += half;
-			else
-				center.x() -= half;
-			if (oct & 2u)
-				center.y() += half;
-			else
-				center.y() -= half;
-			if (oct & 4u)
-				center.z() += half;
-			else
-				center.z() -= half;
-		}
+		auto [center, half] = get_center_and_half(loc);
 		OctreeNode node(loc, center, half);
 		nodes_.push_back(node);
 		NodeVecIdx idx = nodes_.size() - 1;
@@ -469,45 +434,32 @@ public:
 		return nodes_[idx];
 	}
 
-	Vec3 next_pos(const Vec3& pos, uint8 depth, std::mt19937& rng, std::uniform_real_distribution<Scalar>& Uni)
-	{
-		OctreeLocationCode loc = OctreeLocationCode::root();
 
-		for (uint8 d = 0; d < depth; ++d)
-		{
-			Node& node = get_or_add_node(loc);
-			uint8 oct = node.octant_of(pos);
-			loc.push_octant(oct);
-		}
-		Node& node = get_or_add_node(loc);
-		return node.random_sample_around(pos, rng, Uni);
-	}
 	template <typename ConflictPred, typename AcceptCallBack>
 	bool insert(const Vec3& p, uint8 depth, ConflictPred&& is_conflict, AcceptCallBack&& on_accept)
 	{
 		OctreeLocationCode loc = OctreeLocationCode::root();
 		for (uint8 d = 0; d < depth; ++d)
 		{
-			Node& node = get_or_add_node(loc);
-			uint8 oct = node.octant_of(p);
+			uint8 oct = octant_of_code(loc, p);
 			loc.push_octant(oct);
 		}
+		Scalar node_size = Scalar(1.0) / Scalar(1u << depth);
+		Scalar cell_size = node_size / 16.0;
+		Scalar R = cell_size * std::sqrt(3.0) / 2.0;
+
+		/*if (conflict_same_depth_neighbors(loc, p, R, cell_size, is_conflict))
+			return false;*/
+
+		if (detect_conflicts(p, R, is_conflict))
+			return false;
+
 		Node& node = get_or_add_node(loc);
-		
-		if (!node.can_insert(p, is_conflict))
+		const Vec3 local = node.to_local01(p);
+		const auto idx = node.grid().cell_of_local(local);
+		if (!node.grid().is_legal(idx) || node.grid().occupied(idx))
 			return false;
-		
-		Vec3 local = node.to_local01(p);
-		auto idx = node.grid().cell_of_local(local);
-		const Scalar R = node.radius();
-		const Scalar cs = node.cell_size();
-		
-		if (conflict_ancestors(loc, p, R, cs, is_conflict))
-			return false;
-		
-		if (conflict_same_depth_neighbors(loc, p, R, cs, is_conflict))
-			return false;
-		
+
 		uint32 sampleId = on_accept(p, depth);
 		node.grid().set(idx, sampleId);
 		return true;
@@ -518,38 +470,107 @@ public:
 		node_indices_.clear();
 	}
 
-private:
-	template <class ConflictPred>
-	bool conflict_ancestors(const OctreeLocationCode& loc, const Vec3& p, Scalar R, Scalar cell_size, ConflictPred&& is_conflict)
+	uint8 max_depth()
 	{
-		const uint8 depth = loc.depth();
-		if (depth == 0)
-			return false;
+		return max_depth_;
+	}
+	void set_max_depth(uint8 depth)
+	{
+		max_depth_ = depth;
+	}
 
-		for (int ancestor_depth = int(depth); ancestor_depth > 0; --ancestor_depth)
+private:
+
+	static std::pair<Vec3, Scalar> get_center_and_half(const OctreeLocationCode& code)
+	{
+		Vec3 c = Vec3(0.5, 0.5, 0.5);
+		Scalar half = 0.5;
+		for (uint8 d = 0; d < code.depth(); ++d)
 		{
-			OctreeLocationCode ac = loc.truncated(uint8(ancestor_depth - 1));
+			half *= 0.5;
+			const uint8 oct = code.octant_at(d);
+			c.x() += (oct & 1u) ? half : -half;
+			c.y() += (oct & 2u) ? half : -half;
+			c.z() += (oct & 4u) ? half : -half;
+		}
+		return {c, half};
+	}
 
-			if (auto it = node_indices_.find(ac); it != node_indices_.end())
-			{
-				Node& an = nodes_[it->second];
-				
-				const Vec3 local = an.to_local01(p);
-				
-				const Scalar ancestor_cell_size = an.cell_size();
-				
-				if (an.grid().adjacent_hit_local(local, R, ancestor_cell_size,
-												 [&](int sid) { 
-													return is_conflict(uint32(sid), p, R); 
-												}))
-				{
-					return true;
-				}
-			}
+	static uint8 octant_of_code(const OctreeLocationCode& code, const Vec3& p)
+	{
+		
+		auto [c, half] = get_center_and_half(code);
+		uint8 oct = 0;
+		if (p.x() >= c.x())
+			oct |= 1u;
+		if (p.y() >= c.y())
+			oct |= 2u;
+		if (p.z() >= c.z())
+			oct |= 4u;
+		return oct;
+	}
 
-			const uint8 k = ac.depth();
-			const int N = 1 << k;
-			auto t = ac.to_grid_ijk();
+	//template <class ConflictPred>
+	//bool detect_conflicts(const Vec3& p, Scalar R, ConflictPred&& is_conflict)
+	//{
+	//	OctreeLocationCode loc = OctreeLocationCode::root();
+
+	//	for (int depth = 0; depth <= max_depth_; ++depth)
+	//	{
+	//		const int N = 1 << depth;
+	//		const Scalar node_size = Scalar(1.0) / Scalar(N);
+	//		int span = int(std::ceil(R / node_size));
+
+	//		auto t = loc.to_grid_ijk();
+	//		const int ix = static_cast<int>(std::get<0>(t));
+	//		const int iy = static_cast<int>(std::get<1>(t));
+	//		const int iz = static_cast<int>(std::get<2>(t));
+
+	//		for (int dz = -span; dz <= span; ++dz)
+	//			for (int dy = -span; dy <= span; ++dy)
+	//				for (int dx = -span; dx <= span; ++dx)
+	//				{
+	//					int nx = ix + dx, ny = iy + dy, nz = iz + dz;
+	//					if (nx < 0 || ny < 0 || nz < 0 || nx >= N || ny >= N || nz >= N)
+	//						continue;
+	//					OctreeLocationCode neighbor_code =
+	//						OctreeLocationCode::from_grid_ijk(uint32(nx), uint32(ny), uint32(nz), uint8(depth));
+	//					auto neighbor_it = node_indices_.find(neighbor_code);
+	//					if (neighbor_it == node_indices_.end())
+	//						continue;
+
+	//					Node& neighbor = nodes_[neighbor_it->second];
+
+	//					if (!neighbor.sphere_overlap_node(p, R))
+	//						continue;
+
+	//					Vec3 nlocal = neighbor.to_local01(p);
+	//					const Scalar neighbor_cell_size = neighbor.cell_size();
+
+	//					if (neighbor.grid().adjacent_hit_local(nlocal, R, neighbor_cell_size,
+	//														   [&](uint32 sid) { return is_conflict(sid, p, R); }))
+	//					{
+	//						/*std::cout << "[DEBUG conflict_ancestors] Found conflict in ancestor neighbor at depth "
+	//								  << int(depth) << " (checking from depth " << int(depth) << ")" << std::endl;*/
+	//						return true;
+	//					}
+	//				}
+	//		const uint8 oct = octant_of_code(loc, p);
+	//		loc.push_octant(oct);
+	//	}
+	//	return false;
+	//}
+
+	template <class ConflictPred>
+	bool detect_conflicts(const Vec3& p, Scalar R, ConflictPred&& is_conflict)
+	{
+		OctreeLocationCode loc = OctreeLocationCode::root();
+
+		for (int depth = 0; depth <= max_depth_; ++depth)
+		{
+			
+			const int N = 1 << depth;
+			auto t = loc.to_grid_ijk();
 			const int ix = static_cast<int>(std::get<0>(t));
 			const int iy = static_cast<int>(std::get<1>(t));
 			const int iz = static_cast<int>(std::get<2>(t));
@@ -558,35 +579,37 @@ private:
 				for (int dy = -1; dy <= 1; ++dy)
 					for (int dx = -1; dx <= 1; ++dx)
 					{
-						if (dx == 0 && dy == 0 && dz == 0)
-							continue;
 						int nx = ix + dx, ny = iy + dy, nz = iz + dz;
 						if (nx < 0 || ny < 0 || nz < 0 || nx >= N || ny >= N || nz >= N)
 							continue;
 
-						OctreeLocationCode neighbor_code = OctreeLocationCode::from_grid_ijk(nx, ny, nz, k);
+						OctreeLocationCode neighbor_code = OctreeLocationCode::from_grid_ijk(nx, ny, nz, depth);
 						auto neighbor_it = node_indices_.find(neighbor_code);
 						if (neighbor_it == node_indices_.end())
 							continue;
 
 						Node& neighbor = nodes_[neighbor_it->second];
 						Vec3 nlocal = neighbor.to_local01(p);
-						
+
 						if (!neighbor.sphere_overlap_node(p, R))
 							continue;
 						const Scalar neighbor_cell_size = neighbor.cell_size();
-						
+
 						if (neighbor.grid().adjacent_hit_local(nlocal, R, neighbor_cell_size,
-															   [&](int sid) {
-								return is_conflict(uint32(sid), p, R);
-							}))
+															   [&](uint32 sid) { return is_conflict(sid, p, R); }))
+						{
+							/*std::cout << "[DEBUG conflict_ancestors] Found conflict in ancestor neighbor at depth "
+									  << int(depth) << " (checking from depth " << int(depth) << ")" << std::endl;*/
 							return true;
+						}
 					}
+			const uint8 oct = octant_of_code(loc, p);
+			loc.push_octant(oct);
 		}
 		return false;
 	}
 
-	template <typename ConflictPred>
+	/*template <typename ConflictPred>
 	bool conflict_same_depth_neighbors(const OctreeLocationCode& loc, const Vec3& p, Scalar R, Scalar cell_size,
 									   ConflictPred&& is_conflict)
 	{
@@ -626,9 +649,11 @@ private:
 					}
 				}
 		return false;
-	}
+	}*/
 
-private:
+	
+	private:
+
 	uint8 max_depth_;
 	std::vector<OctreeNode> nodes_;
 	std::unordered_map<OctreeLocationCode, NodeVecIdx, OctreeLocationCode::Hasher> node_indices_;
@@ -673,7 +698,6 @@ public:
 			uint32 vid = index_of(mesh_, v);
 			active_list_.push_back(vid);
 			
-			
 			Scalar node_size = 1.0 / Scalar(1u << depth);
 			Scalar cell_size = node_size / 16.0; 
 			Scalar radius = cell_size * std::sqrt(3.0) / 2.0;
@@ -715,7 +739,7 @@ public:
 			bool accepted = false;
 			for (uint32 i = 0; i < max_trials_; i++)
 			{
-				Vec3 candidate = octree_.next_pos(current_pos, depth, rng_, uni_);
+				Vec3 candidate = next_pos(current_pos, depth);
 				if (!domain(candidate))
 					continue;
 				if (octree_.insert(candidate, depth, is_conflict, on_accept))
@@ -756,28 +780,47 @@ public:
 		return added;
 	}
 
-	template <class Domain, class ClusterDomain, class OnAccept>
+	template <typename OnAccept, typename Domain, typename ClusterDomain>
 	uint32 sample_cluster_at_depth(uint8 depth, OnAccept&& post, Domain&& domain, ClusterDomain&& cluster_domain,
 								   Vec3 bb_min, Vec3 bb_max, uint32 target_count = (std::numeric_limits<uint32>::max)())
 	{
+		/*std::cout << "[DEBUG cluster_at_depth] Starting depth=" << int(depth)
+				  << ", target=" << target_count
+				  << ", active_list size=" << active_list_.size() << std::endl;*/
 
 		uint32 added = 0;
 		auto is_conflict = [&](uint32 sid, const Vec3& q, Scalar R_candidate) -> bool {
 			Vec3 s_pos = (*sample_position_)[sid];
 			Scalar R_existing = (*poisson_sample_radius_)[sid];
+			uint8 existing_depth = (*poisson_sample_depth_)[sid];
 			// Use the smaller radius for conflict detection (cross-layer constraint)
 			Scalar R_threshold = std::min(R_candidate, R_existing);
-			return (s_pos - q).dot(s_pos - q) < (R_threshold * R_threshold);
+			bool conflict = (s_pos - q).dot(s_pos - q) < (R_threshold * R_threshold);
+			
+			if (conflict && existing_depth != depth) {
+				/*std::cout << "[DEBUG CROSS-LAYER CONFLICT] Sample " << sid 
+				          << " at depth " << int(existing_depth)
+				          << " conflicts with candidate at depth " << int(depth)
+				          << ", distance=" << (s_pos - q).norm()
+				          << ", R_threshold=" << R_threshold << std::endl;*/
+			}
+			
+			return conflict;
 		};
 		auto on_accept = [&](const Vec3& pos, const uint8 depth) -> uint32 {
 			Vertex v = add_vertex(mesh_);
 			uint32 vid = index_of(mesh_, v);
 			active_list_.push_back(vid);
 			
-			Scalar node_size = 1.0 / Scalar(1u << depth);
-			Scalar cell_size = node_size / 16.0; 
-			Scalar radius = cell_size * std::sqrt(3.0) / 2.0;
+			Scalar radius = radius_at_depth(depth, 16);
 			(*poisson_sample_radius_)[vid] = radius;
+			(*poisson_sample_depth_)[vid] = depth;
+			
+			/*std::cout << "[DEBUG on_accept] Created sample " << vid 
+			          << " at depth " << int(depth) 
+			          << ", radius=" << radius 
+			          << ", pos=(" << pos.x() << "," << pos.y() << "," << pos.z() << ")"
+			          << ", active_list.size now=" << active_list_.size() << std::endl;*/
 			
 			post(pos, v, depth);
 			return vid;
@@ -794,6 +837,8 @@ public:
 
 					if (octree_.insert(seed_pos, depth, is_conflict, on_accept))
 					{
+						if (octree_.max_depth() < depth)
+							octree_.set_max_depth(depth);
 						accetped = true;
 						++added;
 						break;
@@ -812,12 +857,21 @@ public:
 			size_t idx = uni_(rng_) * active_list_.size();
 			const uint32 seed_vid = active_list_[idx];
 			const Vec3 current_pos = (*sample_position_)[seed_vid];
+			const uint8 seed_depth = (*poisson_sample_depth_)[seed_vid];
+			
+			if (seed_depth != depth) {
+				/*std::cout << "[DEBUG WARNING] Active list contains sample " << seed_vid 
+				          << " at depth " << int(seed_depth) 
+				          << " but we're sampling at depth " << int(depth) << std::endl;*/
+			}
+			
 			bool accepted = false;
 			for (uint32 i = 0; i < max_trials_; i++)
 			{
-				Vec3 candidate = octree_.next_pos(current_pos, depth, rng_, uni_);
+				Vec3 candidate = next_pos(current_pos, depth);
 				if (!domain(candidate) || !cluster_domain(candidate))
 					continue;
+				
 				if (octree_.insert(candidate, depth, is_conflict, on_accept))
 				{
 					++added;
@@ -853,6 +907,11 @@ public:
 				}
 			}
 		}
+		
+		/*std::cout << "[DEBUG cluster_at_depth] Finished depth=" << int(depth)
+				  << ", added=" << added
+				  << ", final active_list.size=" << active_list_.size() << std::endl;*/
+		
 		return added;
 	}
 
@@ -862,35 +921,56 @@ public:
 						  uint8 default_depth = 1)
 	{
 		active_list_.clear();
-		Vec3 bb_min, bb_max;
-		if (cluster.empty())
-		{
-			bb_min = center - Vec3(r, r, r);
-			bb_max = center + Vec3(r, r, r);
-		}
-		else
-		{
-			auto bbox = compute_cluster_bbox(cluster);
-			bb_min = bbox.first;
-			bb_max = bbox.second;
-		}
+		Vec3 bb_min, bb_max; 
 		uint8 work_depth = default_depth;
+		choose_bbox_for_cluster_or_sphere(cluster, center, r, work_depth, 16, bb_min, bb_max);
+		/*std::cout << "[DEBUG sample_cluster] Starting cluster refinement, default_depth=" 
+		          << int(default_depth) << ", target=" << target_count 
+		          << ", cluster.size=" << cluster.size() << std::endl;*/
 		
 		uint32 remaining = target_count;
+		int iteration = 0;
 		while (remaining > 0)
 		{
+			++iteration;
+			/*std::cout << "\n[DEBUG sample_cluster] === Iteration " << iteration 
+			          << ", work_depth=" << int(work_depth) 
+			          << ", remaining=" << remaining << " ===" << std::endl;*/
+			
 			active_list_.clear();
+			uint32 matched_count = 0;
 			for (Vertex v : cluster)
 			{
 				const uint32 v_index = index_of(mesh_, v);
-				if ((*poisson_sample_depth_)[v_index] != work_depth)
+				const uint8 v_depth = (*poisson_sample_depth_)[v_index];
+				if (v_depth != work_depth)
 					continue;
 				const Vec3& p = (*sample_position_)[v_index];
 				active_list_.push_back(v_index);
+				matched_count++;
 			}
+			/*
+			std::cout << "[DEBUG sample_cluster] Matched " << matched_count
+					  << " samples at work_depth=" << int(work_depth)
+					  << " from cluster (cluster.size=" << cluster.size() << ")"
+					  << ", active_list.size=" << active_list_.size() << std::endl;*/
+			
+			//uint32 total_samples_at_depth = 0;
+			//foreach_cell(mesh_, [&](typename mesh_traits<MESH>::Vertex v) -> bool {
+			//	const uint32 v_index = index_of(mesh_, v);
+			//	if ((*poisson_sample_depth_)[v_index] == work_depth) {
+			//		total_samples_at_depth++;
+			//	}
+			//	return true;  // continue iteration
+			//});
+			/*std::cout << "[DEBUG sample_cluster] Total samples in mesh at depth "
+					  << int(work_depth) << " = " << total_samples_at_depth << std::endl;*/
+			
 			const uint32 added =
 				sample_cluster_at_depth(work_depth, post, domain, cluster_domain, bb_min, bb_max, remaining);
-			if (added > remaining)
+				
+			/*std::cout << "[DEBUG sample_cluster] Added " << added << " new samples" << std::endl;*/
+			if (added >= remaining)
 				return target_count;
 			remaining -= added;
 			if (work_depth >= MAX_DEPTH)
@@ -909,6 +989,93 @@ public:
 	}
 
 private:
+	inline Scalar radius_at_depth(uint8 depth, uint32 gridRes = 16)
+	{
+		Scalar node_size = 1.0 / Scalar(1u << depth);
+		Scalar cell_size = node_size / Scalar(gridRes);
+		return cell_size * std::sqrt(3.0) * Scalar(0.5);
+	}
+
+	inline void inflate_bbox_minmax(Vec3& mn, Vec3& mx, Scalar pad)
+	{
+		for (int a = 0; a < 3; ++a)
+		{
+			Scalar len = mx[a] - mn[a];
+			if (len < 2 * pad)
+			{
+				Scalar c = (mx[a] + mn[a]) * Scalar(0.5);
+				mn[a] = c - pad;
+				mx[a] = c + pad;
+			}
+		}
+	}
+
+	Vec3 random_sample_around(const Vec3& p, const Scalar radius)
+	{
+		Scalar u = uni_(rng_);
+		Scalar v = uni_(rng_);
+		Scalar w = uni_(rng_);
+
+		Scalar R3 = radius * radius * radius;
+		Scalar r = std::cbrt(R3 + u * (8 * R3 - R3)); // r = pow((R^3 + u(8R^3 - R^3)), 1/3)
+
+		Scalar phi = v * 2.0 * M_PI;
+		Scalar theta = std::acos(1.0 - 2.0 * w);
+
+		Scalar x = r * std::sin(theta) * std::cos(phi);
+		Scalar y = r * std::sin(theta) * std::sin(phi);
+		Scalar z = r * std::cos(theta);
+
+		return p + Vec3(x, y, z);
+	}
+
+	Vec3 next_pos(const Vec3& pos, uint8 depth)
+	{
+		Scalar R = radius_at_depth(depth, 16);
+		return random_sample_around(pos, R);
+	}
+	
+	inline void choose_bbox_for_cluster_or_sphere(std::vector<Vertex>& cluster, const Vec3& center,
+												  Scalar sphere_r, uint8 depth, uint32 gridRes, Vec3& bb_min,
+												  Vec3& bb_max)
+	{
+		bool use_cluster = !cluster.empty();
+		Vec3 cmin, cmax;
+		if (use_cluster)
+		{
+			auto bbox = compute_cluster_bbox(cluster); 
+			cmin = bbox.first;
+			cmax = bbox.second;
+		}
+
+		const Scalar Rw = radius_at_depth(depth, gridRes);
+		const Scalar min_axis = 2 * Rw; 
+
+		if (use_cluster)
+		{
+			Vec3 ext = cmax - cmin;
+			const bool too_small = (ext.x() < min_axis) || (ext.y() < min_axis) || (ext.z() < min_axis);
+			if (!too_small)
+			{
+				bb_min = cmin;
+				bb_max = cmax; 
+			}
+			else
+			{
+				bb_min = center - Vec3(sphere_r, sphere_r, sphere_r);
+				bb_max = center + Vec3(sphere_r, sphere_r, sphere_r);
+			}
+		}
+		else
+		{
+			bb_min = center - Vec3(sphere_r, sphere_r, sphere_r);
+			bb_max = center + Vec3(sphere_r, sphere_r, sphere_r);
+		}
+	
+		inflate_bbox_minmax(bb_min, bb_max, 2 * Rw);
+	}
+
+
 	std::pair<Vec3, Vec3> compute_cluster_bbox(std::vector<Vertex>& cluster)
 	{
 		Vec3 bbox_min(std::numeric_limits<Scalar>::max(), std::numeric_limits<Scalar>::max(),
