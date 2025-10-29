@@ -711,7 +711,7 @@ public:
 		{
 			Vec3 seed_pos;
 			bool accetped = false;
-			for (int i = 0; i < max_trials_; ++i)
+			for (uint32 i = 0; i < max_trials_; ++i)
 			{
 				if (pick_seed(domain, seed_pos, max_seed_trials))
 				{
@@ -757,7 +757,7 @@ public:
 				{
 					Vec3 seed_pos;
 					bool accetped = false;
-					for (int i = 0; i < max_trials_; ++i)
+					for (uint32 i = 0; i < max_trials_; ++i)
 					{
 						if (pick_seed(domain, seed_pos, max_seed_trials))
 						{
@@ -830,7 +830,7 @@ public:
 		{
 			Vec3 seed_pos;
 			bool accetped = false;
-			for (int i = 0; i < max_trials_; ++i)
+			for (uint32 i = 0; i < max_trials_; ++i)
 			{
 				if (pick_seed_in_bbox(bb_min, bb_max, domain, cluster_domain, seed_pos, max_seed_trials))
 				{
@@ -887,7 +887,7 @@ public:
 				{
 					Vec3 seed_pos;
 					bool accetped = false;
-					for (int i = 0; i < max_trials_; ++i)
+					for (uint32 i = 0; i < max_trials_; ++i)
 					{
 						if (pick_seed_in_bbox(bb_min, bb_max, domain, cluster_domain, seed_pos, max_seed_trials))
 						{
