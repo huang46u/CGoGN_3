@@ -33,6 +33,21 @@ if (CGOGN_USE_CGAL)
 	)
 endif()
 
+
+if (CGOGN_USE_CGAL)
+	find_package(CGAL REQUIRED)
+	add_executable(ball_merge ball_merge.cpp)
+	target_link_libraries(ball_merge
+		CGAL::CGAL
+		cgogn::core
+		cgogn::ui
+		cgogn::io
+		cgogn::rendering
+		cgogn::modeling
+		${CMAKE_DL_LIBS}
+	)
+endif()
+
 add_executable(tubular_mesh tubular_mesh.cpp)
 target_link_libraries(tubular_mesh
 	cgogn::core
