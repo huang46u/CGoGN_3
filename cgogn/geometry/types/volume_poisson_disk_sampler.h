@@ -709,25 +709,9 @@ public:
 		const uint32 max_seed_trials = std::max<uint32>(256, 10 * max_trials_);
 		if (active_list_.empty())
 		{
-			Vec3 seed_pos;
-			bool accetped = false;
-			for (uint32 i = 0; i < max_trials_; ++i)
-			{
-				if (pick_seed(domain, seed_pos, max_seed_trials))
-				{
-
-					if (octree_.insert(seed_pos, depth, is_conflict, on_accept))
-					{
-						accetped = true;
-						++added;
-						break;
-					}
-				}
-			}
-			if (!accetped)
-			{
+			if (!try_seed_candidate(depth, domain, is_conflict, on_accept, max_seed_trials))
 				return 0;
-			}
+			++added;
 			if (added >= target_count)
 				return added;
 		}
@@ -735,45 +719,19 @@ public:
 		{
 			size_t idx = uni_(rng_) * active_list_.size();
 			const uint32 seed_vid = active_list_[idx];
-			const Vec3 current_pos = (*sample_position_)[seed_vid];
-			bool accepted = false;
-			for (uint32 i = 0; i < max_trials_; i++)
+			if (try_extend_from_active(depth, domain, is_conflict, on_accept, seed_vid))
 			{
-				Vec3 candidate = next_pos(current_pos, depth);
-				if (!domain(candidate))
-					continue;
-				if (octree_.insert(candidate, depth, is_conflict, on_accept))
-				{
-					++added;
-					accepted = true;
-					break;
-				}
+				++added;
 			}
-			if (!accepted)
+			else
 			{
 				active_list_[idx] = active_list_.back();
 				active_list_.pop_back();
 				if (active_list_.empty() && added < target_count)
 				{
-					Vec3 seed_pos;
-					bool accetped = false;
-					for (uint32 i = 0; i < max_trials_; ++i)
-					{
-						if (pick_seed(domain, seed_pos, max_seed_trials))
-						{
-
-							if (octree_.insert(seed_pos, depth, is_conflict, on_accept))
-							{
-								accetped = true;
-								++added;
-								break;
-							}
-						}
-					}
-					if (!accetped)
-					{
+					if (!try_seed_candidate(depth, domain, is_conflict, on_accept, max_seed_trials))
 						break;
-					}
+					++added;
 				}
 			}
 		}
@@ -989,6 +947,45 @@ public:
 	}
 
 private:
+	template <typename Domain, typename ConflictFn, typename AcceptFn>
+	bool evaluate_candidate(uint8 depth, const Vec3& candidate, Domain& domain, ConflictFn& is_conflict,
+							AcceptFn& on_accept)
+	{
+		if (!domain(candidate))
+			return false;
+		return octree_.insert(candidate, depth, is_conflict, on_accept);
+	}
+
+	template <typename Domain, typename ConflictFn, typename AcceptFn>
+	bool try_seed_candidate(uint8 depth, Domain& domain, ConflictFn& is_conflict, AcceptFn& on_accept,
+							uint32 max_seed_trials)
+	{
+		for (uint32 i = 0; i < max_trials_; ++i)
+		{
+			for (uint32 trial = 0; trial < max_seed_trials; ++trial)
+			{
+				Vec3 candidate(uni_(rng_), uni_(rng_), uni_(rng_));
+				if (evaluate_candidate(depth, candidate, domain, is_conflict, on_accept))
+					return true;
+			}
+		}
+		return false;
+	}
+
+	template <typename Domain, typename ConflictFn, typename AcceptFn>
+	bool try_extend_from_active(uint8 depth, Domain& domain, ConflictFn& is_conflict, AcceptFn& on_accept,
+								uint32 seed_vid)
+	{
+		const Vec3 current_pos = (*sample_position_)[seed_vid];
+		for (uint32 i = 0; i < max_trials_; ++i)
+		{
+			Vec3 candidate = next_pos(current_pos, depth);
+			if (evaluate_candidate(depth, candidate, domain, is_conflict, on_accept))
+				return true;
+		}
+		return false;
+	}
+
 	inline Scalar radius_at_depth(uint8 depth, uint32 gridRes = 16)
 	{
 		Scalar node_size = 1.0 / Scalar(1u << depth);

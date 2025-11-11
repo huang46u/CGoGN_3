@@ -36,6 +36,7 @@
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
+#include <cgogn/geometry/types/line_quadric.h>
 #include <cgogn/geometry/types/volume_poisson_disk_sampler.h>
 
 #include <Eigen/Sparse>
@@ -64,6 +65,7 @@ using geometry::Mat3;
 using geometry::Mat4;
 using geometry::Scalar;
 using geometry::Spherical_Quadric;
+using geometry::Line_Quadric;
 using geometry::SQEM_CASE;
 using geometry::Vec3;
 using geometry::Vec4;
@@ -169,6 +171,7 @@ class Volumn_VMAS : public ViewModule
 		std::shared_ptr<PAttribute<Vec3>> projected_samples_position_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> projected_samples_normal_ = nullptr;
 		std::shared_ptr<PAttribute<Spherical_Quadric>> samples_quadric_ = nullptr;
+		std::shared_ptr<PAttribute<Line_Quadric>> samples_line_quadric_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> medial_axis_position_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> medial_axis_radius_ = nullptr;
 		std::shared_ptr<PAttribute<PVertex>> medial_axis_secondary_vertex_ = nullptr;
@@ -195,6 +198,7 @@ class Volumn_VMAS : public ViewModule
 
 		bool sphere_correction_ = false;
 		CorrectionMode sphere_correction_mode_ = CORRECT_ALWAYS;
+		bool use_line_quadric_ = false;
 
 		bool auto_stop_ = false;
 		bool auto_split_ = true;
@@ -360,12 +364,17 @@ public:
 			(*p.projected_samples_normal_)[vid] = closest_face_normal;
 			(*p.samples_volume_weight_)[vid] = std::pow(2, 1.0 / depth);
 			// compute quadric
+			Line_Quadric& lq = (*p.samples_line_quadric_)[vid];
+			lq.zero();
+
 			Spherical_Quadric& q = (*p.samples_quadric_)[vid];
 			q.clear();
 			const Vec3& n = closest_face_normal;
+			lq = Line_Quadric(pos, n);
 			q = Spherical_Quadric(
 				Vec4(closest_surface_position.x(), closest_surface_position.y(), closest_surface_position.z(), 0),
 				Vec4(n.x(), n.y(), n.z(), 1));
+			
 			// update sphere assignment
 			(*p.samples_vertex_sphere_)[vid] = sphere;
 			// update color
@@ -496,9 +505,11 @@ public:
 		parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
 			Spherical_Quadric& q = (*p.samples_quadric_)[v_index];
+			Line_Quadric& lq = (*p.samples_line_quadric_)[v_index];
 			q.clear();
 			const Vec3& pos = (*p.projected_samples_position_)[v_index];
 			const Vec3& n = (*p.projected_samples_normal_)[v_index];
+			lq = Line_Quadric(pos, n);
 			q = Spherical_Quadric(Vec4(pos.x(), pos.y(), pos.z(), 0), Vec4(n.x(), n.y(), n.z(), 1));
 			return true;
 		});
@@ -679,8 +690,8 @@ public:
 		});
 
 		// initialize SQEM quadrics
+		p.samples_line_quadric_ = get_or_add_attribute<Line_Quadric, PVertex>(*p.samples_, "line_quadric");
 		p.samples_quadric_ = get_or_add_attribute<Spherical_Quadric, PVertex>(*p.samples_, "quadric");
-
 		compute_quadrics(p);
 
 		// compute shrinking balls for the surface vertices
@@ -852,13 +863,13 @@ public:
 				}
 				dist_other *= a;
 				Scalar dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
-				if (v_index  < 5)
+				/*if (v_index  < 5)
 				{
 					std::cout << "Sample " <<v_index
 					<< ", volumn: " << a << ", dist_sqem=" << dist_sqem
 							  << ", dist_other=" << dist_other
 							  << ", total=" << dist << std::endl;
-				}
+				}*/
 				if (dist < min_distance)
 				{
 					min_distance = dist;
@@ -1179,6 +1190,108 @@ public:
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
 
+	//void update_sphere_center_distance(SurfaceParameters& p, PVertex sphere)
+	//{
+	//	uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+	//	const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+	//	if (cluster.size() == 0)
+	//	{
+	//		std::cout << "Warning: empty cluster for sphere " << sphere_index << std::endl;
+	//		return;
+	//	}
+	//	Vec3 c = (*p.spheres_position_)[sphere_index];
+	//	Scalar r = (*p.spheres_radius_)[sphere_index];
+	//	// Verify if the SQEM is well conditioned
+	//	Spherical_Quadric q;
+	//	Line_Quadric lq;
+
+	//	Scalar area = 0.0;
+	//	Vec3 h;
+	//	h.setZero();
+	//	for (PVertex v : cluster)
+	//	{
+	//		uint32 v_index = index_of(*p.samples_, v);
+	//		Scalar weight = value<Scalar>(*p.samples_, p.samples_volume_weight_, v);
+	//		if(weight <= 0.0)
+	//			std::cout << "Warning: sample with zero volume weight in sphere " << sphere_index << std::endl;
+	//		q += (*p.samples_quadric_)[v_index] * weight;
+	//		h += weight * (*p.samples_position_)[v_index];
+	//		if (p.use_line_quadric_)
+	//		{
+	//			lq += (*p.samples_line_quadric_)[v_index] * weight;
+	//		}
+	//		area += weight;
+	//	}
+	//	Scalar r_sqem = 0.0;
+	//	//if well conditioned, compute optimal sphere parameters
+	//	//Solve SQEM for optimal r 
+	//	// Fix r and solve for c
+	//	SQEM_CASE sc = q.well_conditioned(r_sqem);
+	//	if (sc == SQEM_CASE::Case2_Line || sc == SQEM_CASE::Case3_Plane){
+	//		if (p.use_line_quadric_)
+	//		{
+	//			lq.optimized(c);
+	//			//std::cout << "Using line quadric for sphere " << sphere_index << std::endl;
+	//		}
+	//		else
+	//		{
+	//			Mat3 As = 2 * Mat3::Identity() * area;
+	//			Vec3 bs = 2 * h;
+	//			Mat3 A = q._A.block<3, 3>(0, 0) + p.sqem_update_lambda_ * As;
+	//			Vec3 b = (q._b.head<3>() + p.sqem_update_lambda_ * bs) - q._A.block<3, 1>(0, 3) * r_sqem;
+	//			c = A.ldlt().solve(b);
+	//		}
+	//		r = r_sqem;
+	//	}
+	//	else if (sc == SQEM_CASE::Case1_Full)
+	//	{
+	//		Vec4 s;
+	//		q.optimized(s);
+	//		c = s.head<3>();
+	//		r = s[3];
+	//	}
+	//	else
+	//	{
+	//		std::cout << "Sphere " << sphere_index << " is not well conditioned, using shrinking ball" << std::endl;
+	//		// apply shrinking ball
+	//		std::pair<uint32, Vec3> bvh_res;
+	//		p.surface_bvh_->closest_point(c, &bvh_res);
+	//		Vec3 closest_point_position = bvh_res.second;
+	//		Vec3 closest_point_dir = (closest_point_position - c).normalized();
+
+	//		const Vec3& closest_face_normal =
+	//			value<Vec3>(*p.surface_, p.surface_face_normal_, p.surface_bvh_faces_[bvh_res.first]);
+	//		if ((*p.inside_tester_)(Point_3(c.x(), c.y(), c.z())) == CGAL::ON_UNBOUNDED_SIDE)
+	//			closest_point_dir = -closest_point_dir;
+
+	//		auto [center, radius] =
+	//			geometry::shrinking_ball_center(closest_point_position, closest_point_dir, p.surface_kdt_);
+	//		c = center;
+	//		r = radius;
+	//		std::cout << "Case 4 (Degenerate)" << " for sphere " << sphere_index << std::endl;
+	//	}
+	//	if (!is_inside(p, c))
+	//	{
+	//		std::pair<uint32, Vec3> bvh_res;
+	//		p.surface_bvh_->closest_point(c, &bvh_res);
+	//		Vec3 closest_point_position = bvh_res.second;
+	//		Vec3 closest_point_dir = (closest_point_position - c).normalized();
+
+	//		closest_point_dir = -closest_point_dir;
+
+	//		auto [center, radius] =
+	//			geometry::shrinking_ball_center(closest_point_position, closest_point_dir, p.surface_kdt_);
+	//		c = center;
+	//		r = radius;
+	//		std::cout << "Sphere " << sphere_index << " center is outside after optimization, applying shrinking ball"
+	//				  << std::endl;
+	//	}
+	//	/*std::cout << "Updated sphere " << sphere_index << " center to (" << c.x() << ", " << c.y() << ", " << c.z()
+	//			  << "), radius to " << r << std::endl;*/
+	//	(*p.spheres_position_)[sphere_index] = c;
+	//	(*p.spheres_radius_)[sphere_index] = r;
+	//}
 	void update_sphere_center_distance(SurfaceParameters& p, PVertex sphere)
 	{
 		uint32 sphere_index = index_of(*p.spheres_, sphere);
@@ -1193,6 +1306,8 @@ public:
 		Scalar r = (*p.spheres_radius_)[sphere_index];
 		// Verify if the SQEM is well conditioned
 		Spherical_Quadric q;
+		Line_Quadric lq;
+
 		Scalar area = 0.0;
 		Vec3 h;
 		h.setZero();
@@ -1200,30 +1315,28 @@ public:
 		{
 			uint32 v_index = index_of(*p.samples_, v);
 			Scalar weight = value<Scalar>(*p.samples_, p.samples_volume_weight_, v);
-			if(weight <= 0.0)
+			if (weight <= 0.0)
 				std::cout << "Warning: sample with zero volume weight in sphere " << sphere_index << std::endl;
 			q += (*p.samples_quadric_)[v_index] * weight;
 			h += weight * (*p.samples_position_)[v_index];
+			if (p.use_line_quadric_)
+			{
+				lq += (*p.samples_line_quadric_)[v_index] * weight;
+			}
 			area += weight;
 		}
 		Scalar r_sqem = 0.0;
-		//if well conditioned, compute optimal sphere parameters
-		//Solve SQEM for optimal r 
-		// Fix r and solve for c
+		// if well conditioned, compute optimal sphere parameters
+		// Solve SQEM for optimal r
+		//  Fix r and solve for c
 		SQEM_CASE sc = q.well_conditioned(r_sqem);
-		if (sc == SQEM_CASE::Case2_Line || sc == SQEM_CASE::Case3_Plane)
+		if (sc != SQEM_CASE::Case4_Degenerate)
 		{
-			Mat3 As = 2 * Mat3::Identity() * area;
-			Vec3 bs = 2 * h;
-			Mat3 A = q._A.block<3, 3>(0, 0) + p.sqem_update_lambda_ * As;
-			Vec3 b = (q._b.head<3>() + p.sqem_update_lambda_ * bs) - q._A.block<3,1>(0,3) * r_sqem;
-			c = A.ldlt().solve(b);
-			r = r_sqem;
-		}
-		else if (sc == SQEM_CASE::Case1_Full)
-		{
-			Vec4 s;
-			q.optimized(s);
+			Mat4 As = q._A;
+			Vec4 bs = q._b;
+			Mat4 Al = lq.get_quadric().matrix();
+			Mat4 A = As + p.sqem_update_lambda_ * Al;
+			Vec4 s = A.ldlt().solve(bs);
 			c = s.head<3>();
 			r = s[3];
 		}
@@ -1260,9 +1373,11 @@ public:
 				geometry::shrinking_ball_center(closest_point_position, closest_point_dir, p.surface_kdt_);
 			c = center;
 			r = radius;
+			std::cout << "Sphere " << sphere_index << " center is outside after optimization, applying shrinking ball"
+					  << std::endl;
 		}
-		std::cout << "Updated sphere " << sphere_index << " center to (" << c.x() << ", " << c.y() << ", " << c.z()
-				  << "), radius to " << r << std::endl;
+		/*std::cout << "Updated sphere " << sphere_index << " center to (" << c.x() << ", " << c.y() << ", " << c.z()
+				  << "), radius to " << r << std::endl;*/
 		(*p.spheres_position_)[sphere_index] = c;
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
@@ -1895,6 +2010,7 @@ protected:
 				ImGui::Checkbox("Slow down", &p.slow_down_);
 				if (p.slow_down_)
 					ImGui::SliderInt("Update rate", (int*)&p.update_rate_, 1, 100);
+				ImGui::Checkbox("Use line quadric", &p.use_line_quadric_);
 				ImGui::Separator();
 				ImGui::RadioButton("Sphere Eculidean", (int*)&p.distance_mode_, SPHERE_EUCLIDEAN_DISTANCE);
 				ImGui::SameLine();

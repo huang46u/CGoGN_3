@@ -67,7 +67,7 @@ int main(int argc, char** argv)
 {
 	std::string filename;
 	if (argc < 2)
-		filename = std::string(DEFAULT_MESH_PATH) + std::string("off/elephant.off");
+		filename = std::string(DEFAULT_MESH_PATH) + std::string("wavefront_obj/cylinder.obj");
 	else
 		filename = std::string(argv[1]);
 
