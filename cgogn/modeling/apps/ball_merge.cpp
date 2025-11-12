@@ -38,6 +38,7 @@
 #define DEFAULT_MESH_PATH CGOGN_STR(CGOGN_DATA_PATH) "/meshes/"
 
 using Surface = cgogn::CMap2;
+using NonManifold = cgogn::IncidenceGraph;
 
 template <typename T>
 using Attribute = typename cgogn::mesh_traits<Surface>::Attribute<T>;
@@ -60,8 +61,10 @@ int main(int argc, char** argv)
 	app.set_window_size(1000, 800);
 
 	cgogn::ui::MeshProvider<Surface> ms(app);
+	cgogn::ui::MeshProvider<NonManifold> mpnm(app);
 	cgogn::ui::SurfaceRender<Surface> sr(app);
-	cgogn::ui::BallMerge<Surface> bm(app);
+	cgogn::ui::SurfaceRender<NonManifold> sr_nm(app);
+	cgogn::ui::BallMerge<Surface, NonManifold> bm(app);
 
 	app.init_modules();
 
@@ -69,6 +72,8 @@ int main(int argc, char** argv)
 
 	v1->link_module(&ms);
 	v1->link_module(&sr);
+	v1->link_module(&mpnm);
+	v1->link_module(&sr_nm);
 
 	if (filename.length() > 0)
 	{

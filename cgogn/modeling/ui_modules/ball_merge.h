@@ -62,7 +62,7 @@ using geometry::Scalar;
 using geometry::Vec3;
 using geometry::Vec4;
 
-template <typename SURFACE>
+template <typename SURFACE, typename NONMANIFOLD> 
 class BallMerge : public Module
 {
 	using K = CGAL::Exact_predicates_inexact_constructions_kernel;
@@ -99,18 +99,26 @@ class BallMerge : public Module
 
 	template <typename T>
 	using SurfaceAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
+	template <typename T>
+	using NonmanifoldAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
 
 	using SurfaceVertex = typename mesh_traits<SURFACE>::Vertex;
 	using SurfaceEdge = typename mesh_traits<SURFACE>::Edge;
 	using SurfaceFace = typename mesh_traits<SURFACE>::Face;
 
+	using NonmanifoldVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
+
 	struct SurfaceParameters
 	{
 		SURFACE* mesh_;
 		std::shared_ptr<SurfaceAttribute<Vec3>> surface_positions_ = nullptr;
+		
 
-		SURFACE* result_mesh_ = nullptr;
-		std::shared_ptr<SurfaceAttribute<Vec3>> result_mesh_positions_ = nullptr;
+		NONMANIFOLD* result_mesh_ = nullptr;
+		std::shared_ptr<NonmanifoldAttribute<Vec3>> result_mesh_positions_ = nullptr;
+
+		NONMANIFOLD* result_mesh_2 = nullptr;
+		std::shared_ptr<NonmanifoldAttribute<Vec3>> result_mesh_positions_2 = nullptr;
 
 		CGAL_Surface_mesh csm;
 		Delaunay delaunay;
@@ -135,8 +143,12 @@ public:
 		p.mesh_ = s;
 		p.surface_positions_ = get_or_add_attribute<Vec3, SurfaceVertex>(*s, "position");
 		if (!p.result_mesh_)
-			p.result_mesh_ = surface_provider_->add_mesh(surface_provider_->mesh_name(*s) + "_ball_merge");
-		p.result_mesh_positions_ = get_or_add_attribute<Vec3, SurfaceVertex>(*p.result_mesh_, "position");
+			p.result_mesh_ = nonmanifold_provider_->add_mesh(surface_provider_->mesh_name(*s) + "_ball_merge");
+		p.result_mesh_positions_ = get_or_add_attribute<Vec3, NonmanifoldVertex>(*p.result_mesh_, "position");
+
+		if (!p.result_mesh_2)
+			p.result_mesh_2 = nonmanifold_provider_->add_mesh(surface_provider_->mesh_name(*s) + "_ball_merge_2");
+		p.result_mesh_positions_2 = get_or_add_attribute<Vec3, NonmanifoldVertex>(*p.result_mesh_2, "position");
 
 		std::string filename = surface_provider_->mesh_filename(*s);
 		if (!filename.empty())
@@ -154,6 +166,46 @@ public:
 		p.tree.accelerate_distance_queries();
 		p.inside_tester = std::make_unique<Point_inside>(p.tree);
 		compute_delaunay(p);
+	}
+
+	void global_ball_merge(SurfaceParameters& p)
+	{
+
+		for (auto cit = p.delaunay.finite_cells_begin(); cit != p.delaunay.finite_cells_end(); ++cit)
+		{
+			cit->info().group_id = -1;
+		}
+
+		int32 group_id = -1;
+		uint32 max_group_id = 0;
+		uint32 second_group_id = 0;
+		uint32 max_first = 0;
+		uint32 max_second = 0;
+
+		for (auto cit = p.delaunay.finite_cells_begin(); cit != p.delaunay.finite_cells_end(); ++cit)
+		{
+			if (cit->info().group_id == -1)
+			{
+				group_id++;
+				uint32 gcount = Group(cit, group_id, p.ball_merge_threshold_);
+				if (max_first < gcount)
+				{
+					second_group_id = max_group_id;
+					max_second = max_first;
+					max_group_id = group_id;
+					max_first = gcount;
+				}
+				else if (max_second < gcount && gcount != max_first)
+				{
+					second_group_id = group_id;
+					max_second = gcount;
+				}
+			}
+		}
+		std::cout << "Largest group size: " << max_first << std::endl;
+		std::cout << "Second largest group size: " << max_second << std::endl;
+		construct_result_mesh(p, p.result_mesh_, max_group_id);
+		construct_result_mesh(p, p.result_mesh_2, second_group_id);
 	}
 
 private:
@@ -192,7 +244,6 @@ private:
 			return true;
 		});
 
-		uint32 inside_counter_ = 0;
 		for (auto cit = p.delaunay.finite_cells_begin(); cit != p.delaunay.finite_cells_end(); ++cit)
 		{
 			cit->info().centroid = CGAL::circumcenter(p.delaunay.tetrahedron(cit));
@@ -210,140 +261,106 @@ private:
 		double r1 = CGAL::sqrt(c2->info().radius2);
 		double d = CGAL::sqrt(CGAL::squared_distance(c1->info().centroid, c2->info().centroid));
 		if (std::isnan(d))
-			return 0;
+			return false;
 		double ir = std::max((r0 + r1 - d) / r0, (r0 + r1 - d) / r1);
 		return ir >= threshold;
 	}
 
-	void construct_result_mesh(SurfaceParameters& p, std::vector<Delaunay_Cell_handle> largest_group)
+	void construct_result_mesh(SurfaceParameters& p, NONMANIFOLD* s, uint32 group_id)
 	{
-		clear(*p.result_mesh_);
+		clear(*s);
+		uint32 global_count = 0;
+		cgogn::io::IncidenceGraphImportData ball_merge_non_manifold_data;
+		std::unordered_map<std::pair<uint32, uint32>, uint32, edge_hash, edge_equal> edge_indices;
+		auto poisition = get_or_add_attribute<Vec3, NonmanifoldVertex>(*s, "position");
 		for (auto vit = p.delaunay.finite_vertices_begin(); vit != p.delaunay.finite_vertices_end(); ++vit)
 		{
-			vit->info().id = -1;
+			Point point = vit->point();
+			
+			vit->info().id = global_count;
+			ball_merge_non_manifold_data.vertex_position_.push_back(Vec3(point.x(), point.y(), point.z()));
+			global_count++;
 		}
-		uint32 global_count = 0;
-		cgogn::io::SurfaceImportData ball_merge_surface_data;
-		for (const auto& cell : largest_group)
+	
+		for (auto cit = p.delaunay.finite_cells_begin(); cit != p.delaunay.finite_cells_end(); ++cit)
 		{
 			for (int i = 0; i < 4; i++)
 			{
-				Facet f(cell, i);
-				auto g_id = cell->info().group_id;
-				auto neighbour = p.delaunay.mirror_facet(f).first;
-				int neighbour_g_id = -1;
-				if (!p.delaunay.is_infinite(neighbour))
-					neighbour_g_id = neighbour->info().group_id;
-
-				if (g_id != neighbour_g_id)
+				if (cit->info().group_id == group_id &&
+					(cit->neighbor(i)->info().group_id != group_id||
+					p.delaunay.is_infinite(cit->neighbor(i))))
+					
 				{
-					Delaunay_Vertex_handle v[3];
-					std::vector<uint32> indices;
-					uint32 count = 0;
-					for (size_t idx = 0; idx < 4; ++idx)
+					std::vector<int> indices(3);
+					for (size_t idx = 0; idx < 3; ++idx)
 					{
-						if (idx != f.second)
-						{
-							v[count] = f.first->vertex(idx);
-							if (v[count]->info().id == -1)
-							{
-								ball_merge_surface_data.nb_vertices_++;
-								ball_merge_surface_data.vertex_position_.push_back(
-									Vec3(v[count]->point().x(), v[count]->point().y(), v[count]->point().z()));
-								v[count]->info().id = global_count;
-								global_count++;
-							}
-							indices.push_back(v[count]->info().id);
-							count++;
-						}
+						indices[idx] = cit->vertex((i + 1 + idx) % 4)->info().id;
 					}
-					ball_merge_surface_data.nb_faces_++;
-					ball_merge_surface_data.faces_nb_vertices_.push_back(3);
-					ball_merge_surface_data.faces_vertex_indices_.insert(
-						ball_merge_surface_data.faces_vertex_indices_.end(), indices.begin(), indices.end());
+					ball_merge_non_manifold_data.faces_nb_edges_.push_back(3);
+					for (size_t i = 0; i<3; ++i)
+					{
+						if (edge_indices.find({indices[i], indices[(i + 1) % 3]}) == edge_indices.end())
+						{
+							edge_indices[{indices[i], indices[(i + 1) % 3]}] = uint32(edge_indices.size());
+							ball_merge_non_manifold_data.edges_vertex_indices_.push_back(indices[i]);
+							ball_merge_non_manifold_data.edges_vertex_indices_.push_back(indices[(i + 1) % 3]);
+						}
+						
+						ball_merge_non_manifold_data.faces_edge_indices_.push_back(
+							edge_indices[{indices[i], indices[(i + 1) % 3]}]);
+					}
+
+					
 				}
 			}
-
-			// for (int i = 0; i < 4; i++)
-			// {
-			// 	Facet f(cell, i);
-			// 	Delaunay_Vertex_handle v[3];
-			// 	std::vector<uint32> indices;
-			// 	uint32 count = 0;
-			// 	for (size_t idx = 0; idx < 4; ++idx)
-			// 	{
-			// 		if (idx != f.second)
-			// 		{
-			// 			v[count] = f.first->vertex(idx);
-			// 			if (v[count]->info().id == -1)
-			// 			{
-			// 				ball_merge_surface_data.nb_vertices_++;
-			// 				ball_merge_surface_data.vertex_position_.push_back(
-			// 					Vec3(v[count]->point().x(), v[count]->point().y(), v[count]->point().z()));
-			// 				v[count]->info().id = global_count;
-			// 				global_count++;
-			// 			}
-			// 			indices.push_back(v[count]->info().id);
-			// 			count++;
-			// 		}
-			// 	}
-			// 	ball_merge_surface_data.nb_faces_++;
-			// 	ball_merge_surface_data.faces_nb_vertices_.push_back(3);
-			// 	ball_merge_surface_data.faces_vertex_indices_.insert(
-			// 		ball_merge_surface_data.faces_vertex_indices_.end(), indices.begin(), indices.end());
-
-			// }
 		}
-		cgogn::io::import_surface_data(*p.result_mesh_, ball_merge_surface_data);
-		surface_provider_->emit_connectivity_changed(*p.result_mesh_);
-		surface_provider_->emit_attribute_changed(*p.result_mesh_, p.result_mesh_positions_.get());
+		uint32 nb_vertices = ball_merge_non_manifold_data.vertex_position_.size();
+		uint32 nb_edges = ball_merge_non_manifold_data.edges_vertex_indices_.size() / 2;
+		uint32 nb_faces = ball_merge_non_manifold_data.faces_nb_edges_.size();
+		ball_merge_non_manifold_data.reserve(nb_vertices,nb_edges,nb_faces);
+		cgogn::io::import_incidence_graph_data(*s, ball_merge_non_manifold_data);
+		nonmanifold_provider_->emit_connectivity_changed(*s);
+		nonmanifold_provider_->emit_attribute_changed(*s, poisition.get());
 	}
-
-	void global_ball_merge(SurfaceParameters& p)
+	uint32 Group(Delaunay_Cell_handle ch, uint32 group, float threshold)
 	{
-
-		for (auto cit = p.delaunay.finite_cells_begin(); cit != p.delaunay.finite_cells_end(); ++cit)
-		{
-			cit->info().group_id = -1;
-		}
-
-		int32 group_id = -1;
 		std::queue<Delaunay_Cell_handle> cell_queue;
-		std::vector<Delaunay_Cell_handle> largest_group;
-		for (auto cit = p.delaunay.finite_cells_begin(); cit != p.delaunay.finite_cells_end(); ++cit)
+		cell_queue.push(ch);
+		uint32 gcount = 0;
+		while (!cell_queue.empty())
 		{
-
-			if (cit->info().id != -1 && cit->info().group_id == -1)
+			Delaunay_Cell_handle current = cell_queue.front();
+			cell_queue.pop();
+			current->info().group_id = group;
+			gcount++;
+			for (int i = 0; i < 4; i++)
 			{
-				std::vector<Delaunay_Cell_handle> new_group;
-				group_id++;
-				cell_queue.push(cit);
-				while (!cell_queue.empty())
+				Delaunay_Cell_handle neighbor = current->neighbor(i);
+				if (neighbor->info().group_id == -1 && can_merge(current, neighbor, threshold))
 				{
-					Delaunay_Cell_handle current = cell_queue.front();
-					cell_queue.pop();
-					new_group.push_back(current);
-					current->info().group_id = group_id;
-					for (int i = 0; i < 4; i++)
-					{
-						Delaunay_Cell_handle neighbor = current->neighbor(i);
-						if (p.delaunay.is_infinite(neighbor))
-							continue;
-						if (neighbor->info().group_id == -1 && can_merge(current, neighbor, p.ball_merge_threshold_))
-						{
-							neighbor->info().group_id = group_id;
-							cell_queue.push(neighbor);
-						}
-					}
-					// std::cout << "Cell queue size: " << cell_queue.size() << std::endl;
+					neighbor->info().group_id = group;
+					cell_queue.push(neighbor);
 				}
-				if (new_group.size() > largest_group.size())
-					largest_group = new_group;
 			}
 		}
-		std::cout << "Largest group size: " << largest_group.size() << std::endl;
-		construct_result_mesh(p, largest_group);
+		return gcount;
 	}
+	
+	struct edge_hash
+	{
+		std::size_t operator()(const std::pair<uint32, uint32>& edge) const
+		{
+			return std::hash<uint32>()(edge.first) + std::hash<uint32>()(edge.second);
+		}
+	};
+	struct edge_equal
+	{
+		bool operator()(const std::pair<uint32, uint32>& edge1, const std::pair<uint32, uint32>& edge2) const
+		{
+			return ((edge1.first == edge2.first && edge1.second == edge2.second) ||
+					(edge1.first == edge2.second && edge1.second == edge2.first));
+		}
+	};
 
 protected:
 	void init() override
@@ -351,7 +368,8 @@ protected:
 
 		surface_provider_ = static_cast<ui::MeshProvider<SURFACE>*>(
 			app_.module("MeshProvider (" + std::string{mesh_traits<SURFACE>::name} + ")"));
-
+		nonmanifold_provider_ = static_cast<ui::MeshProvider<NONMANIFOLD>*>(
+			app_.module("MeshProvider (" + std::string{mesh_traits<NONMANIFOLD>::name} + ")"));
 		surface_provider_->foreach_mesh([this](SURFACE& m, const std::string&) { init_surface_mesh(&m); });
 	}
 
@@ -378,6 +396,7 @@ protected:
 
 private:
 	MeshProvider<SURFACE>* surface_provider_ = nullptr;
+	MeshProvider<NONMANIFOLD>* nonmanifold_provider_ = nullptr;
 
 	SURFACE* selected_surface_ = nullptr;
 	std::unordered_map<const SURFACE*, SurfaceParameters> surface_parameters_;
