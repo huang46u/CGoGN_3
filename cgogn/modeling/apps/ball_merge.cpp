@@ -85,8 +85,12 @@ int main(int argc, char** argv)
 		}
 
 		std::shared_ptr<Attribute<Vec3>> vertex_position = cgogn::get_attribute<Vec3, Vertex>(*m, "position");
+		std::shared_ptr<Attribute<Vec3>> vertex_normal = cgogn::get_attribute<Vec3, Vertex>(*m, "normal");
+
+
 		bm.init_surface_mesh(m);
 		sr.set_vertex_position(*v1, *m, vertex_position);
+		sr.set_vertex_normal(*v1, *m, vertex_normal);
 		sr.set_render_edges(*v1, *m, true);
 		sr.set_render_vertices(*v1, *m, false);
 	}

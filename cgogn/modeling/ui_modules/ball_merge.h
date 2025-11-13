@@ -42,6 +42,9 @@
 #include <CGAL/Polygon_mesh_processing/distance.h>
 #include <CGAL/Side_of_triangle_mesh.h>
 #include <CGAL/Surface_mesh.h>
+#include <libacc/bvh_tree.h>
+#include <libacc/kd_tree.h>
+#include <cgogn/geometry/algos/medial_axis.h>
 #include <CGAL/Triangulation_cell_base_with_info_3.h>
 #include <CGAL/Triangulation_vertex_base_with_info_3.h>
 #include <CGAL/double.h>
@@ -80,6 +83,7 @@ class BallMerge : public Module
 	struct VertexInfo
 	{
 		int32 id = -1;
+		bool is_medial = false;
 	};
 	using Vb = CGAL::Triangulation_vertex_base_with_info_3<VertexInfo, K>;
 	// Delaunay
@@ -98,27 +102,35 @@ class BallMerge : public Module
 	using Tree = CGAL::AABB_tree<Traits>;
 
 	template <typename T>
-	using SurfaceAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
+	using SAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
 	template <typename T>
-	using NonmanifoldAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
+	using NAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
 
-	using SurfaceVertex = typename mesh_traits<SURFACE>::Vertex;
-	using SurfaceEdge = typename mesh_traits<SURFACE>::Edge;
-	using SurfaceFace = typename mesh_traits<SURFACE>::Face;
+	using SVertex = typename mesh_traits<SURFACE>::Vertex;
+	using SEdge = typename mesh_traits<SURFACE>::Edge;
+	using SFace = typename mesh_traits<SURFACE>::Face;
 
-	using NonmanifoldVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
+	using NVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
 
 	struct SurfaceParameters
 	{
 		SURFACE* mesh_;
-		std::shared_ptr<SurfaceAttribute<Vec3>> surface_positions_ = nullptr;
-		
+		std::shared_ptr<SAttribute<Vec3>> surface_positions_ = nullptr;
+		std::shared_ptr<SAttribute<Vec3>> surface_normals_ = nullptr;
+		std::shared_ptr<SAttribute<Vec3>> medial_axis_position_ = nullptr;
+		std::shared_ptr<SAttribute<Scalar>> medial_axis_radius_ = nullptr;
+		std::shared_ptr<SAttribute<SVertex>> medial_axis_secondary_vertex_ = nullptr;
+
+		acc::BVHTree<uint32, Vec3>* surface_bvh_ = nullptr;
+		std::vector<SFace> surface_bvh_faces_;
+		acc::KDTree<3, uint32>* surface_kdt_ = nullptr;
+		std::vector<SVertex> surface_kdt_vertices_;
 
 		NONMANIFOLD* result_mesh_ = nullptr;
-		std::shared_ptr<NonmanifoldAttribute<Vec3>> result_mesh_positions_ = nullptr;
+		std::shared_ptr<NAttribute<Vec3>> result_mesh_positions_ = nullptr;
 
 		NONMANIFOLD* result_mesh_2 = nullptr;
-		std::shared_ptr<NonmanifoldAttribute<Vec3>> result_mesh_positions_2 = nullptr;
+		std::shared_ptr<NAttribute<Vec3>> result_mesh_positions_2 = nullptr;
 
 		CGAL_Surface_mesh csm;
 		Delaunay delaunay;
@@ -141,14 +153,73 @@ public:
 	{
 		SurfaceParameters& p = surface_parameters_[s];
 		p.mesh_ = s;
-		p.surface_positions_ = get_or_add_attribute<Vec3, SurfaceVertex>(*s, "position");
+		p.surface_positions_ = get_or_add_attribute<Vec3, SVertex>(*s, "position");
+		p.surface_normals_ = get_or_add_attribute<Vec3, SVertex>(*s, "normal");
+		geometry::compute_normal<SVertex>(*s, p.surface_positions_.get(), p.surface_normals_.get());
+
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(*s);
+		uint32 nb_vertices = md.template nb_cells<SVertex>();
+		uint32 nb_faces = md.template nb_cells<SFace>();
+
+		auto bvh_vertex_index = get_or_add_attribute<uint32, SVertex>(*s, "__bvh_vertex_index");
+
+		p.surface_kdt_vertices_.clear();
+		p.surface_kdt_vertices_.reserve(nb_vertices);
+		std::vector<Vec3> vertex_position_vector;
+		vertex_position_vector.reserve(nb_vertices);
+		uint32 idx = 0;
+		foreach_cell(*s, [&](SVertex v) -> bool {
+			p.surface_kdt_vertices_.push_back(v);
+			value<uint32>(*s, bvh_vertex_index, v) = idx++;
+			vertex_position_vector.push_back(value<Vec3>(*s, p.surface_positions_, v));
+			return true;
+		});
+
+		p.surface_bvh_faces_.clear();
+		p.surface_bvh_faces_.reserve(nb_faces);
+		std::vector<uint32> face_vertex_indices;
+		face_vertex_indices.reserve(nb_faces * 3);
+		foreach_cell(*s, [&](SFace f) -> bool {
+			p.surface_bvh_faces_.push_back(f);
+			foreach_incident_vertex(*s, f, [&](SVertex v) -> bool {
+				face_vertex_indices.push_back(value<uint32>(*s, bvh_vertex_index, v));
+				return true;
+			});
+			return true;
+		});
+
+		if (p.surface_bvh_)
+			delete p.surface_bvh_;
+		p.surface_bvh_ = new acc::BVHTree<uint32, Vec3>(face_vertex_indices, vertex_position_vector);
+
+		if (p.surface_kdt_)
+			delete p.surface_kdt_;
+		p.surface_kdt_ = new acc::KDTree<3, uint32>(vertex_position_vector);
+
+		remove_attribute<SVertex>(*s, bvh_vertex_index);
+		p.medial_axis_position_ = get_or_add_attribute<Vec3, SVertex>(*s, "medial_axis_position");
+		p.medial_axis_radius_ = get_or_add_attribute<Scalar, SVertex>(*s, "medial_axis_radius");
+		p.medial_axis_secondary_vertex_ = get_or_add_attribute<SVertex, SVertex>(*s, "medial_axis_secondary_vertex_");
+
+		parallel_foreach_cell(*s, [&](SVertex v) -> bool {
+			uint32 v_index = index_of(*s, v);
+			auto [c, r, q] = cgogn::geometry::shrinking_ball_center(
+				*s, (*p.surface_positions_)[v_index], (*p.surface_normals_)[v_index], p.surface_positions_.get(),
+				p.surface_bvh_, p.surface_bvh_faces_, p.surface_kdt_,
+				p.surface_kdt_vertices_);
+			(*p.medial_axis_position_)[v_index] = c;
+			(*p.medial_axis_radius_)[v_index] = r;
+			(*p.medial_axis_secondary_vertex_)[v_index] = q;
+			return true;
+		});
+
 		if (!p.result_mesh_)
 			p.result_mesh_ = nonmanifold_provider_->add_mesh(surface_provider_->mesh_name(*s) + "_ball_merge");
-		p.result_mesh_positions_ = get_or_add_attribute<Vec3, NonmanifoldVertex>(*p.result_mesh_, "position");
+		p.result_mesh_positions_ = get_or_add_attribute<Vec3, NVertex>(*p.result_mesh_, "position");
 
 		if (!p.result_mesh_2)
 			p.result_mesh_2 = nonmanifold_provider_->add_mesh(surface_provider_->mesh_name(*s) + "_ball_merge_2");
-		p.result_mesh_positions_2 = get_or_add_attribute<Vec3, NonmanifoldVertex>(*p.result_mesh_2, "position");
+		p.result_mesh_positions_2 = get_or_add_attribute<Vec3, NVertex>(*p.result_mesh_2, "position");
 
 		std::string filename = surface_provider_->mesh_filename(*s);
 		if (!filename.empty())
@@ -204,6 +275,7 @@ public:
 		}
 		std::cout << "Largest group size: " << max_first << std::endl;
 		std::cout << "Second largest group size: " << max_second << std::endl;
+		
 		construct_result_mesh(p, p.result_mesh_, max_group_id);
 		construct_result_mesh(p, p.result_mesh_2, second_group_id);
 	}
@@ -237,12 +309,21 @@ private:
 	{
 		p.delaunay.clear();
 		p.cell_count = 0;
-		foreach_cell(*p.mesh_, [&](SurfaceVertex v) {
+		foreach_cell(*p.mesh_, [&](SVertex v) {
 			auto index = index_of(*p.mesh_, v);
 			auto pos = (*p.surface_positions_)[index];
-			p.delaunay.insert(Point(pos[0], pos[1], pos[2]));
+			auto medial_pos = (*p.medial_axis_position_)[index];
+
+			Delaunay_Vertex_handle vh = p.delaunay.insert(Point(pos[0], pos[1], pos[2]));
+			vh->info().is_medial = false;
+
+			Delaunay_Vertex_handle mh = p.delaunay.insert(Point(medial_pos[0], medial_pos[1], medial_pos[2]));
+			mh->info().is_medial = true;
+			
 			return true;
 		});
+		
+		
 
 		for (auto cit = p.delaunay.finite_cells_begin(); cit != p.delaunay.finite_cells_end(); ++cit)
 		{
@@ -269,17 +350,19 @@ private:
 	void construct_result_mesh(SurfaceParameters& p, NONMANIFOLD* s, uint32 group_id)
 	{
 		clear(*s);
-		uint32 global_count = 0;
 		cgogn::io::IncidenceGraphImportData ball_merge_non_manifold_data;
 		std::unordered_map<std::pair<uint32, uint32>, uint32, edge_hash, edge_equal> edge_indices;
-		auto poisition = get_or_add_attribute<Vec3, NonmanifoldVertex>(*s, "position");
+		auto poisition = get_or_add_attribute<Vec3, NVertex>(*s, "position");
+
+		uint32 global_count = 0;
 		for (auto vit = p.delaunay.finite_vertices_begin(); vit != p.delaunay.finite_vertices_end(); ++vit)
 		{
+			if (!vit->info().is_medial)
+				continue;
+
 			Point point = vit->point();
-			
-			vit->info().id = global_count;
+			vit->info().id = global_count++;
 			ball_merge_non_manifold_data.vertex_position_.push_back(Vec3(point.x(), point.y(), point.z()));
-			global_count++;
 		}
 	
 		for (auto cit = p.delaunay.finite_cells_begin(); cit != p.delaunay.finite_cells_end(); ++cit)
@@ -287,17 +370,20 @@ private:
 			for (int i = 0; i < 4; i++)
 			{
 				if (cit->info().group_id == group_id &&
-					(cit->neighbor(i)->info().group_id != group_id||
-					p.delaunay.is_infinite(cit->neighbor(i))))
-					
+					(cit->neighbor(i)->info().group_id != group_id || p.delaunay.is_infinite(cit->neighbor(i))))
 				{
 					std::vector<int> indices(3);
+					bool is_medial = true;
 					for (size_t idx = 0; idx < 3; ++idx)
 					{
-						indices[idx] = cit->vertex((i + 1 + idx) % 4)->info().id;
+						auto v_info = cit->vertex((i + 1 + idx) % 4)->info();
+						is_medial &= v_info.is_medial;
+						indices[idx] = v_info.id;
 					}
+					if (!is_medial)
+						continue;
 					ball_merge_non_manifold_data.faces_nb_edges_.push_back(3);
-					for (size_t i = 0; i<3; ++i)
+					for (size_t i = 0; i < 3; ++i)
 					{
 						if (edge_indices.find({indices[i], indices[(i + 1) % 3]}) == edge_indices.end())
 						{
@@ -305,13 +391,13 @@ private:
 							ball_merge_non_manifold_data.edges_vertex_indices_.push_back(indices[i]);
 							ball_merge_non_manifold_data.edges_vertex_indices_.push_back(indices[(i + 1) % 3]);
 						}
-						
+
 						ball_merge_non_manifold_data.faces_edge_indices_.push_back(
 							edge_indices[{indices[i], indices[(i + 1) % 3]}]);
 					}
-
-					
 				}
+					
+				//}
 			}
 		}
 		uint32 nb_vertices = ball_merge_non_manifold_data.vertex_position_.size();
