@@ -35,8 +35,8 @@
 #include <cgogn/geometry/algos/medial_axis.h>
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
-#include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/line_quadric.h>
+#include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/volume_poisson_disk_sampler.h>
 
 #include <Eigen/Sparse>
@@ -61,11 +61,11 @@ namespace cgogn
 namespace ui
 {
 
+using geometry::Line_Quadric;
 using geometry::Mat3;
 using geometry::Mat4;
 using geometry::Scalar;
 using geometry::Spherical_Quadric;
-using geometry::Line_Quadric;
 using geometry::SQEM_CASE;
 using geometry::Vec3;
 using geometry::Vec4;
@@ -94,12 +94,6 @@ class Volumn_VMAS : public ViewModule
 	using NMEdge = typename mesh_traits<NONMANIFOLD>::Edge;
 	using VolumePoissonDiskSampler = cgogn::geometry::VolumePoissonDiskSampler<POINTS>;
 
-	// enum UpdateMethod : uint32
-	// {
-	// 	FIT,
-	// 	SQEM
-	// };
-
 	enum AutoSplitMode : uint32
 	{
 		MAX_NB_SPHERES,
@@ -108,7 +102,8 @@ class Volumn_VMAS : public ViewModule
 	enum DistanceMode : uint32
 	{
 		SPHERE_EUCLIDEAN_DISTANCE,
-		SPHERE_POWER_DISTANCE
+		SPHERE_POWER_DISTANCE,
+		LINE_QUADRIC_DISTANCE
 	};
 
 	enum CorrectionMode : uint32
@@ -199,7 +194,7 @@ class Volumn_VMAS : public ViewModule
 		bool sphere_correction_ = false;
 		CorrectionMode sphere_correction_mode_ = CORRECT_ALWAYS;
 		bool use_line_quadric_ = false;
-
+		bool line_quadric_combined_ = false;
 		bool auto_stop_ = false;
 		bool auto_split_ = true;
 		AutoSplitMode auto_split_mode_ = ERROR_THRESHOLD;
@@ -225,6 +220,7 @@ class Volumn_VMAS : public ViewModule
 		bool running_ = false;
 		bool stopping_ = false;
 		bool slow_down_ = true;
+		bool local_sampling_ = false;
 		uint32 update_rate_ = 20;
 		// poisson disk sampling
 		Scalar r_ = 0.01;
@@ -312,8 +308,11 @@ public:
 		auto in_volume = [&](const Vec3& pos) -> bool { return is_inside(p, pos); };
 		auto on_accept = [&](const Vec3& pos, PVertex& v, const uint8 depth) {
 			cgogn_message_assert(is_inside(p, pos), "pos is not inside");
-			on_accept_post(p, v, pos, depth); };
+			on_accept_post(p, v, pos, depth);
+		};
 		p.volume_sampler_->sample_fill_at_depth(0, on_accept, in_volume);
+		p.volume_sampler_->sample_fill_at_depth(1, on_accept, in_volume);
+		p.volume_sampler_->sample_fill_at_depth(2, on_accept, in_volume);
 		points_provider_->emit_connectivity_changed(*p.samples_);
 	}
 
@@ -338,7 +337,7 @@ public:
 					std::cout << "Conflict between " << v_index << " and " << iv_index << std::endl;
 					std::cout << "Depth: " << (int)(*p.samples_poisson_depth_)[v_index] << " and "
 							  << (int)(*p.samples_poisson_depth_)[iv_index] << std::endl;
-					//radius
+					// radius
 					std::cout << "Radius: " << R << " and " << R_iv << std::endl;
 				}
 			}
@@ -374,7 +373,7 @@ public:
 			q = Spherical_Quadric(
 				Vec4(closest_surface_position.x(), closest_surface_position.y(), closest_surface_position.z(), 0),
 				Vec4(n.x(), n.y(), n.z(), 1));
-			
+
 			// update sphere assignment
 			(*p.samples_vertex_sphere_)[vid] = sphere;
 			// update color
@@ -440,12 +439,13 @@ public:
 		auto& spheres_clusters_ = (*p.spheres_cluster_)[s_index];
 		auto& center = (*p.spheres_position_)[s_index];
 		auto& radius = (*p.spheres_radius_)[s_index];
-		uint32 added = p.volume_sampler_->sample_cluster(center, radius, spheres_clusters_, on_accept, in_volume, in_cluster, target_count);
+		uint32 added = p.volume_sampler_->sample_cluster(center, radius, spheres_clusters_, on_accept, in_volume,
+														 in_cluster, target_count);
 		// recompute kd_tree
 		if (added < target_count)
 		{
-			std::cout << "Sample cluster failed: target: " << target_count
-					  << ", but only " << added << " samples added." << std::endl;
+			std::cout << "Sample cluster failed: target: " << target_count << ", but only " << added
+					  << " samples added." << std::endl;
 		}
 		points_provider_->emit_connectivity_changed(*p.samples_);
 	}
@@ -504,13 +504,18 @@ public:
 	{
 		parallel_foreach_cell(*p.samples_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.samples_, v);
-			Spherical_Quadric& q = (*p.samples_quadric_)[v_index];
-			Line_Quadric& lq = (*p.samples_line_quadric_)[v_index];
-			q.clear();
+
 			const Vec3& pos = (*p.projected_samples_position_)[v_index];
 			const Vec3& n = (*p.projected_samples_normal_)[v_index];
-			lq = Line_Quadric(pos, n);
+
+			Spherical_Quadric& q = (*p.samples_quadric_)[v_index];
+			q.clear();
 			q = Spherical_Quadric(Vec4(pos.x(), pos.y(), pos.z(), 0), Vec4(n.x(), n.y(), n.z(), 1));
+
+			Line_Quadric& lq = (*p.samples_line_quadric_)[v_index];
+			lq.zero();
+			lq = Line_Quadric(pos, n);
+
 			return true;
 		});
 	}
@@ -860,6 +865,10 @@ public:
 					dist_other = (pos - center).dot(pos - center) - radius * radius;
 				}
 				break;
+				case LINE_QUADRIC_DISTANCE: {
+					dist_other = (*p.samples_line_quadric_)[v_index].eval(center);
+				}
+				break;
 				}
 				dist_other *= a;
 				Scalar dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
@@ -896,7 +905,9 @@ public:
 		// std::cout << "Cluster computation time: " << std::chrono::duration<Scalar>(end - start).count() << "s"
 		// 		  << std::endl;
 
-		// remove small clusters
+		// local sampling
+		if (p.local_sampling_ == false)
+			return;
 		bool changed = false;
 		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			std::vector<PVertex>& cluster = value<std::vector<PVertex>>(*p.spheres_, p.spheres_cluster_, v);
@@ -906,7 +917,7 @@ public:
 				poisson_disk_sampling_local(p, v, 20 - cluster_size);
 				changed = true;
 			}
-			
+
 			return true;
 		});
 
@@ -969,6 +980,10 @@ public:
 					dist_other =
 						((*p.samples_position_)[sv_index] - center).dot((*p.samples_position_)[sv_index] - center) -
 						radius * radius;
+				}
+				break;
+				case LINE_QUADRIC_DISTANCE: {
+					dist_other = (*p.samples_line_quadric_)[sv_index].eval(center);
 				}
 				break;
 				}
@@ -1126,8 +1141,7 @@ public:
 					const Scalar w_dist = w_sqem * p.sqem_update_lambda_;
 					if (l > Scalar(1e-12))
 					{
-						J.row(idx) =
-							Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * w_dist;
+						J.row(idx) = Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * w_dist;
 						b(idx) = -(l - s(3)) * w_dist; // scale the row by the update lambda
 					}
 					else
@@ -1190,109 +1204,99 @@ public:
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
 
-	//void update_sphere_center_distance(SurfaceParameters& p, PVertex sphere)
-	//{
-	//	uint32 sphere_index = index_of(*p.spheres_, sphere);
-
-	//	const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
-	//	if (cluster.size() == 0)
-	//	{
-	//		std::cout << "Warning: empty cluster for sphere " << sphere_index << std::endl;
-	//		return;
-	//	}
-	//	Vec3 c = (*p.spheres_position_)[sphere_index];
-	//	Scalar r = (*p.spheres_radius_)[sphere_index];
-	//	// Verify if the SQEM is well conditioned
-	//	Spherical_Quadric q;
-	//	Line_Quadric lq;
-
-	//	Scalar area = 0.0;
-	//	Vec3 h;
-	//	h.setZero();
-	//	for (PVertex v : cluster)
-	//	{
-	//		uint32 v_index = index_of(*p.samples_, v);
-	//		Scalar weight = value<Scalar>(*p.samples_, p.samples_volume_weight_, v);
-	//		if(weight <= 0.0)
-	//			std::cout << "Warning: sample with zero volume weight in sphere " << sphere_index << std::endl;
-	//		q += (*p.samples_quadric_)[v_index] * weight;
-	//		h += weight * (*p.samples_position_)[v_index];
-	//		if (p.use_line_quadric_)
-	//		{
-	//			lq += (*p.samples_line_quadric_)[v_index] * weight;
-	//		}
-	//		area += weight;
-	//	}
-	//	Scalar r_sqem = 0.0;
-	//	//if well conditioned, compute optimal sphere parameters
-	//	//Solve SQEM for optimal r 
-	//	// Fix r and solve for c
-	//	SQEM_CASE sc = q.well_conditioned(r_sqem);
-	//	if (sc == SQEM_CASE::Case2_Line || sc == SQEM_CASE::Case3_Plane){
-	//		if (p.use_line_quadric_)
-	//		{
-	//			lq.optimized(c);
-	//			//std::cout << "Using line quadric for sphere " << sphere_index << std::endl;
-	//		}
-	//		else
-	//		{
-	//			Mat3 As = 2 * Mat3::Identity() * area;
-	//			Vec3 bs = 2 * h;
-	//			Mat3 A = q._A.block<3, 3>(0, 0) + p.sqem_update_lambda_ * As;
-	//			Vec3 b = (q._b.head<3>() + p.sqem_update_lambda_ * bs) - q._A.block<3, 1>(0, 3) * r_sqem;
-	//			c = A.ldlt().solve(b);
-	//		}
-	//		r = r_sqem;
-	//	}
-	//	else if (sc == SQEM_CASE::Case1_Full)
-	//	{
-	//		Vec4 s;
-	//		q.optimized(s);
-	//		c = s.head<3>();
-	//		r = s[3];
-	//	}
-	//	else
-	//	{
-	//		std::cout << "Sphere " << sphere_index << " is not well conditioned, using shrinking ball" << std::endl;
-	//		// apply shrinking ball
-	//		std::pair<uint32, Vec3> bvh_res;
-	//		p.surface_bvh_->closest_point(c, &bvh_res);
-	//		Vec3 closest_point_position = bvh_res.second;
-	//		Vec3 closest_point_dir = (closest_point_position - c).normalized();
-
-	//		const Vec3& closest_face_normal =
-	//			value<Vec3>(*p.surface_, p.surface_face_normal_, p.surface_bvh_faces_[bvh_res.first]);
-	//		if ((*p.inside_tester_)(Point_3(c.x(), c.y(), c.z())) == CGAL::ON_UNBOUNDED_SIDE)
-	//			closest_point_dir = -closest_point_dir;
-
-	//		auto [center, radius] =
-	//			geometry::shrinking_ball_center(closest_point_position, closest_point_dir, p.surface_kdt_);
-	//		c = center;
-	//		r = radius;
-	//		std::cout << "Case 4 (Degenerate)" << " for sphere " << sphere_index << std::endl;
-	//	}
-	//	if (!is_inside(p, c))
-	//	{
-	//		std::pair<uint32, Vec3> bvh_res;
-	//		p.surface_bvh_->closest_point(c, &bvh_res);
-	//		Vec3 closest_point_position = bvh_res.second;
-	//		Vec3 closest_point_dir = (closest_point_position - c).normalized();
-
-	//		closest_point_dir = -closest_point_dir;
-
-	//		auto [center, radius] =
-	//			geometry::shrinking_ball_center(closest_point_position, closest_point_dir, p.surface_kdt_);
-	//		c = center;
-	//		r = radius;
-	//		std::cout << "Sphere " << sphere_index << " center is outside after optimization, applying shrinking ball"
-	//				  << std::endl;
-	//	}
-	//	/*std::cout << "Updated sphere " << sphere_index << " center to (" << c.x() << ", " << c.y() << ", " << c.z()
-	//			  << "), radius to " << r << std::endl;*/
-	//	(*p.spheres_position_)[sphere_index] = c;
-	//	(*p.spheres_radius_)[sphere_index] = r;
-	//}
 	void update_sphere_center_distance(SurfaceParameters& p, PVertex sphere)
+	{
+		uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+		if (cluster.size() == 0)
+		{
+			std::cout << "Warning: empty cluster for sphere " << sphere_index << std::endl;
+			return;
+		}
+		Vec3 c = (*p.spheres_position_)[sphere_index];
+		Scalar r = (*p.spheres_radius_)[sphere_index];
+		// Verify if the SQEM is well conditioned
+		Spherical_Quadric q;
+		Scalar area = 0.0;
+		Vec3 h;
+		h.setZero();
+		for (PVertex v : cluster)
+		{
+			uint32 v_index = index_of(*p.samples_, v);
+			Scalar weight = value<Scalar>(*p.samples_, p.samples_volume_weight_, v);
+			if (weight <= 0.0)
+				std::cout << "Warning: sample with zero volume weight in sphere " << sphere_index << std::endl;
+			q += (*p.samples_quadric_)[v_index] * weight;
+			h += weight * (*p.samples_position_)[v_index];
+			area += weight;
+		}
+		Scalar r_sqem = 0.0;
+		// if well conditioned, compute optimal sphere parameters
+		// Solve SQEM for optimal r
+		//  Fix r and solve for c
+		SQEM_CASE sc = q.well_conditioned(r_sqem);
+		if (sc == SQEM_CASE::Case2_Line || sc == SQEM_CASE::Case3_Plane)
+		{
+
+			Mat3 As = 2 * Mat3::Identity() * area;
+			Vec3 bs = 2 * h;
+			Mat3 A = q._A.block<3, 3>(0, 0) + p.sqem_update_lambda_ * As;
+			Vec3 b = (q._b.head<3>() + p.sqem_update_lambda_ * bs) - q._A.block<3, 1>(0, 3) * r_sqem;
+			c = A.ldlt().solve(b);
+
+			r = r_sqem;
+		}
+		else if (sc == SQEM_CASE::Case1_Full)
+		{
+			Vec4 s;
+			q.optimized(s);
+			c = s.head<3>();
+			r = s[3];
+		}
+		else
+		{
+			std::cout << "Sphere " << sphere_index << " is not well conditioned, using shrinking ball" << std::endl;
+			// apply shrinking ball
+			std::pair<uint32, Vec3> bvh_res;
+			p.surface_bvh_->closest_point(c, &bvh_res);
+			Vec3 closest_point_position = bvh_res.second;
+			Vec3 closest_point_dir = (closest_point_position - c).normalized();
+
+			const Vec3& closest_face_normal =
+				value<Vec3>(*p.surface_, p.surface_face_normal_, p.surface_bvh_faces_[bvh_res.first]);
+			if ((*p.inside_tester_)(Point_3(c.x(), c.y(), c.z())) == CGAL::ON_UNBOUNDED_SIDE)
+				closest_point_dir = -closest_point_dir;
+
+			auto [center, radius] =
+				geometry::shrinking_ball_center(closest_point_position, closest_point_dir, p.surface_kdt_);
+			c = center;
+			r = radius;
+			std::cout << "Case 4 (Degenerate)" << " for sphere " << sphere_index << std::endl;
+		}
+		if (!is_inside(p, c))
+		{
+			std::pair<uint32, Vec3> bvh_res;
+			p.surface_bvh_->closest_point(c, &bvh_res);
+			Vec3 closest_point_position = bvh_res.second;
+			Vec3 closest_point_dir = (closest_point_position - c).normalized();
+
+			closest_point_dir = -closest_point_dir;
+
+			auto [center, radius] =
+				geometry::shrinking_ball_center(closest_point_position, closest_point_dir, p.surface_kdt_);
+			c = center;
+			r = radius;
+			std::cout << "Sphere " << sphere_index << " center is outside after optimization, applying shrinking ball"
+					  << std::endl;
+		}
+		/*std::cout << "Updated sphere " << sphere_index << " center to (" << c.x() << ", " << c.y() << ", " << c.z()
+				  << "), radius to " << r << std::endl;*/
+		(*p.spheres_position_)[sphere_index] = c;
+		(*p.spheres_radius_)[sphere_index] = r;
+	}
+
+	void update_sphere_line_quadric_distance(SurfaceParameters& p, PVertex sphere)
 	{
 		uint32 sphere_index = index_of(*p.spheres_, sphere);
 
@@ -1319,10 +1323,8 @@ public:
 				std::cout << "Warning: sample with zero volume weight in sphere " << sphere_index << std::endl;
 			q += (*p.samples_quadric_)[v_index] * weight;
 			h += weight * (*p.samples_position_)[v_index];
-			if (p.use_line_quadric_)
-			{
-				lq += (*p.samples_line_quadric_)[v_index] * weight;
-			}
+			lq += (*p.samples_line_quadric_)[v_index] * weight;
+
 			area += weight;
 		}
 		Scalar r_sqem = 0.0;
@@ -1332,13 +1334,43 @@ public:
 		SQEM_CASE sc = q.well_conditioned(r_sqem);
 		if (sc != SQEM_CASE::Case4_Degenerate)
 		{
-			Mat4 As = q._A;
+			/*Mat4 As = q._A;
 			Vec4 bs = q._b;
 			Mat4 Al = lq.get_quadric().matrix();
 			Mat4 A = As + p.sqem_update_lambda_ * Al;
-			Vec4 s = A.ldlt().solve(bs);
-			c = s.head<3>();
-			r = s[3];
+			Vec4 s = A.ldlt().solve(bs);*/
+
+
+
+			Mat4 A = q._A;
+			Vec4 b = q._b;
+
+			Mat4 Ql = lq.get_quadric().matrix();
+			Mat3 Al = Ql.block<3, 3>(0, 0);
+			Vec3 bl = -Ql.block<3, 1>(0, 3);
+			if (p.line_quadric_combined_)
+			{
+				Mat4 Al_ext = Mat4::Zero();
+				Al_ext.block<3, 3>(0, 0) = Al;
+				Vec4 bl_ext = Vec4::Zero();
+				bl_ext.head<3>() = bl;
+				Mat4 A_c = A + p.sqem_update_lambda_ * Al_ext;
+				Vec4 b_c = b + p.sqem_update_lambda_ * bl_ext;
+				Vec4 s = A_c.ldlt().solve(b_c);
+				c = s.head<3>();
+				r = s[3];
+			}
+			else
+			{
+				Mat3 As = A.block<3, 3>(0, 0);
+				Vec3 bs = b.head<3>();
+				Vec3 Asr = q._A.block<3, 1>(0, 3); 
+				Mat3 A = As + p.sqem_update_lambda_ * Al;
+				Vec3 b = (bs + p.sqem_update_lambda_ * bl) - Asr * r_sqem;
+				c = A.ldlt().solve(b);
+
+				r = r_sqem;
+			}
 		}
 		else
 		{
@@ -1415,7 +1447,7 @@ public:
 		// auto start = std::chrono::high_resolution_clock::now();
 
 		compute_clusters(p);
-		//std::cout << "Computed clusters." << std::endl;
+		// std::cout << "Computed clusters." << std::endl;
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			switch (p.distance_mode_)
 			{
@@ -1425,16 +1457,19 @@ public:
 			case SPHERE_POWER_DISTANCE:
 				update_sphere_center_distance(p, v);
 				break;
+			case LINE_QUADRIC_DISTANCE:
+				update_sphere_line_quadric_distance(p, v);
+				break;
 			}
 			if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
 				correct_sphere(p, v);
 			value<bool>(*p.spheres_, p.spheres_do_not_split_, v) = false;
 			return true;
 		});
-		//std::cout << "Updated spheres." << std::endl;
-		// 	break;
-		// }
-		// }
+		// std::cout << "Updated spheres." << std::endl;
+		//  	break;
+		//  }
+		//  }
 
 		compute_spheres_error(p); // compute spheres error
 		std::cout << "Iteration " << p.iteration_count_ << ": min error = " << p.min_error_
@@ -1534,14 +1569,14 @@ public:
 			break;
 			}
 		}
-		//std::cout << "Auto-split spheres." << std::endl;
+		// std::cout << "Auto-split spheres." << std::endl;
 
 		// auto end = std::chrono::high_resolution_clock::now();
 		// std::cout << "Update spheres: " << std::chrono::duration<Scalar>(end - start).count() << "s" << std::endl;
 
 		if (!p.running_)
 			update_render_data(p);
-		std::cout << "-------------------------------------"<< std::endl;
+		std::cout << "-------------------------------------" << std::endl;
 	}
 
 	void split_sphere(SurfaceParameters& p, PVertex v)
@@ -1984,7 +2019,7 @@ protected:
 				{
 					verify_conflicts(p);
 				}
-				
+
 				ImGui::Checkbox("Sphere correction step", &p.sphere_correction_);
 				if (p.sphere_correction_)
 				{
@@ -2010,11 +2045,14 @@ protected:
 				ImGui::Checkbox("Slow down", &p.slow_down_);
 				if (p.slow_down_)
 					ImGui::SliderInt("Update rate", (int*)&p.update_rate_, 1, 100);
-				ImGui::Checkbox("Use line quadric", &p.use_line_quadric_);
-				ImGui::Separator();
 				ImGui::RadioButton("Sphere Eculidean", (int*)&p.distance_mode_, SPHERE_EUCLIDEAN_DISTANCE);
 				ImGui::SameLine();
 				ImGui::RadioButton("Sphere Power", (int*)&p.distance_mode_, SPHERE_POWER_DISTANCE);
+				ImGui::SameLine();
+				ImGui::RadioButton("Line Quadric", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE);
+				if(p.distance_mode_ == LINE_QUADRIC_DISTANCE)
+					ImGui::Checkbox("Line quadric combined", &p.line_quadric_combined_);
+				
 
 				if (!p.running_)
 				{
