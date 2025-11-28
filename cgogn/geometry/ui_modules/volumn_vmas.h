@@ -911,6 +911,7 @@ public:
 		// }
 
 		//visulaize each cluster 
+		update_samples_color(p);
 		MeshData<POINTS>& md = points_provider_->mesh_data(*p.samples_);
 		uint32 last_nb_clusters = p.cluster_sets_.size();
 		p.last_cluster_sets_.clear();
