@@ -20,7 +20,7 @@ set(src_list
 		"${CMAKE_CURRENT_LIST_DIR}/types/slab_quadric.h"
 		"${CMAKE_CURRENT_LIST_DIR}/types/spherical_quadric.h"
 		"${CMAKE_CURRENT_LIST_DIR}/types/volume_poisson_disk_sampler.h"
-		"${CMAKE_CURRENT_LIST_DIR}/types/line_quadric.h"
+		"${CMAKE_CURRENT_LIST_DIR}/types/vmas_delaunay.h"
 
 		"${CMAKE_CURRENT_LIST_DIR}/functions/angle.h"
 		"${CMAKE_CURRENT_LIST_DIR}/functions/area.h"
@@ -55,6 +55,7 @@ set(src_list
 		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/surface_differential_properties.h"
 		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/surface_filtering.h"
 		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/surface_selection.h"
+		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/point_selection.h"
 		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/volume_selection.h"
 		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/volumn_vmas.h"
 )

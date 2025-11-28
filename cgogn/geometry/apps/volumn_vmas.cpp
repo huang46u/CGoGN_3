@@ -34,6 +34,7 @@
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/geometry/ui_modules/volumn_vmas.h>
 #include <cgogn/modeling/ui_modules/surface_modeling.h>
+#include <cgogn/geometry/ui_modules/point_selection.h>
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
 #include <cgogn/rendering/ui_modules/surface_render.h>
 
@@ -84,6 +85,7 @@ int main(int argc, char** argv)
 	cgogn::ui::SurfaceRender<Surface> sr(app);
 	cgogn::ui::SurfaceRender<NonManifold> srnm(app);
 	cgogn::ui::PointCloudRender<Points> pcr(app);
+	cgogn::ui::PointSelection<Points> sp(app);
 
 	cgogn::ui::SurfaceModeling<Surface> sm(app);
 	cgogn::ui::Volumn_VMAS<Surface, Points, NonManifold> sf(app);
@@ -97,6 +99,7 @@ int main(int argc, char** argv)
 	v1->link_module(&srnm);
 	v1->link_module(&pcr);
 	v1->link_module(&sf);
+	v1->link_module(&sp);
 
 	Surface* s = mps.load_surface_from_file(filename);
 	if (!s)
