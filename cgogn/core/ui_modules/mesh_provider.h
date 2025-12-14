@@ -45,6 +45,7 @@
 #include <cgogn/io/volume/mesh.h>
 #include <cgogn/io/volume/meshb.h>
 #include <cgogn/io/volume/tet.h>
+#include <cgogn/io/point/ply.h>
 
 #include <boost/synapse/emit.hpp>
 
@@ -79,6 +80,8 @@ public:
 	{
 		// for (auto& n : new_attribute_name_)
 		// 	n[0] = '\0';
+		if constexpr (mesh_traits<MESH>::dimension == 0)
+			supported_formats_ = &supported_point_formats_;
 		if constexpr (mesh_traits<MESH>::dimension == 1)
 			supported_formats_ = &supported_graph_formats_;
 		if constexpr (mesh_traits<MESH>::dimension == 2)
@@ -363,6 +366,43 @@ public:
 	}
 
 
+	MESH* load_points_from_file(const std::string& filename)
+	{
+		if constexpr (mesh_traits<MESH>::dimension == 0 && std::is_default_constructible_v<MESH>)
+		{
+			std::string name = filename_from_path(filename);
+			if (has_mesh(name))
+				name = remove_extension(name) + "_" + std::to_string(number_of_meshes()) + "." + extension(name);
+			const auto [it, inserted] = meshes_.emplace(name, std::make_unique<MESH>());
+			MESH* m = it->second.get();
+
+			std::string ext = extension(filename);
+			bool imported = false;
+			if (ext.compare("ply") == 0)
+				imported = io::import_PLY(*m, filename);
+
+			if (imported)
+			{
+				MeshData<MESH>& md = mesh_data(*m);
+				md.init(m);
+				mesh_filename_[m] = filename;
+				std::shared_ptr<Attribute<Vec3>> vertex_position = get_attribute<Vec3, Vertex>(*m, "position");
+				if (vertex_position)
+					set_mesh_bb_vertex_position(*m, vertex_position);
+				boost::synapse::emit<mesh_added>(this, m);
+				return m;
+			}
+			else
+			{
+				meshes_.erase(name);
+				return nullptr;
+			}
+		}
+		else
+			return nullptr;
+	}
+
+
 	std::array<MESH*, 3> load_surface_from_OBJ_file(const std::string& filename, bool normalized = true)
 	{
 		if constexpr (mesh_traits<MESH>::dimension == 2 && std::is_default_constructible_v<MESH>)
@@ -556,6 +596,11 @@ protected:
 			auto result = open_file_dialog->result();
 			if (uint32(result.size()) > 0)
 			{
+				if constexpr (mesh_traits<MESH>::dimension == 0)
+				{
+					for (auto file : result)
+						load_points_from_file(file);
+				}
 				if constexpr (mesh_traits<MESH>::dimension == 1)
 				{
 					for (auto file : result)
@@ -584,6 +629,9 @@ protected:
 			ImGui::PushItemFlag(ImGuiItemFlags_Disabled, (bool)open_file_dialog);
 			if (ImGui::MenuItem("Load mesh"))
 			{
+				if constexpr (mesh_traits<MESH>::dimension == 0)
+					open_file_dialog = std::make_shared<pfd::open_file>("Choose file", ".", supported_point_files_,
+																		pfd::opt::multiselect);
 				if constexpr (mesh_traits<MESH>::dimension == 1)
 					open_file_dialog = std::make_shared<pfd::open_file>("Choose file", ".", supported_graph_files_,
 																		pfd::opt::multiselect);
@@ -744,6 +792,9 @@ protected:
 	}
 
 private:
+	std::vector<std::string> supported_point_formats_ = {"ply"};
+	std::vector<std::string> supported_point_files_ = {"Points", "*.ply"};
+
 	std::vector<std::string> supported_graph_formats_ = {"cg", "ig", "cgr", "skel"};
 	std::vector<std::string> supported_graph_files_ = {"Graph", "*.cg *.ig *.cgr *.skel"};
 
