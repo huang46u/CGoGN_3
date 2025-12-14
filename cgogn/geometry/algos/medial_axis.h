@@ -54,6 +54,7 @@ inline Scalar compute_radius(const Vec3& p, const Vec3& n, const Vec3& q)
 	Scalar d = qp.norm();
 	// Scalar cos_theta = n.dot(p - q) / d;
 	Scalar cos_theta = geometry::cos_angle(n, qp);
+	if (std::abs(cos_theta) < 1e-6) cos_theta = (cos_theta >= 0 ? 1.0 : -1.0) * 1e-6;
 	return Scalar(d / (2 * cos_theta));
 }
 
@@ -147,6 +148,54 @@ std::tuple<Vec3, Scalar, typename mesh_traits<MESH>::Vertex> shrinking_ball_cent
 		// Denoising
 		Scalar separation_angle = geometry::angle(p - c_next, q_next - c_next);
 		if (j > 0 && separation_angle < denoise_preserve) // && r_next > // (q_next - p).norm())
+			break;
+
+		c = c_next;
+		r = r_next;
+		q = q_next;
+		q_v = q_next_v;
+
+		j++;
+		if (j > iteration_limit)
+			break;
+	}
+
+	return {c, r, q_v};
+}
+
+template <typename Vertex>
+std::tuple<Vec3, Scalar, Vertex> shrinking_ball_center(
+	const Vec3& p, const Vec3& n,
+	const acc::KDTree<3, uint32>* surface_kdt, const std::vector<Vertex>& kdt_vertices,
+	double initial_radius = 0.5)
+{
+	uint32 j = 0;
+	Scalar r = initial_radius;
+
+	Vec3 c = p - (r * n);
+	Vec3 q = p - (2 * r * n);
+	Vertex q_v;
+
+	while (true)
+	{
+		// Find closest point to c
+		std::pair<uint32, Scalar> k_res;
+		surface_kdt->find_nn(c, &k_res);
+		Vec3 q_next = surface_kdt->vertex(k_res.first);
+		Scalar d = k_res.second;
+		Vertex q_next_v = kdt_vertices[k_res.first];
+
+		// If the closest point is (almost) the same as the previous one, or if the ball no longer shrinks, we stop
+		if (fabs(d - r) <= delta_convergence || (q_next - q).norm() < delta_convergence || (q_next - p).norm() < delta_convergence)
+			break;
+
+		// Compute next ball center
+		Scalar r_next = compute_radius(p, n, q_next);
+		Vec3 c_next = p - (r_next * n);
+
+		// Denoising
+		Scalar separation_angle = geometry::angle(p - c_next, q_next - c_next);
+		if (j > 0 && separation_angle < denoise_preserve)
 			break;
 
 		c = c_next;
