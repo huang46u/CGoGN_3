@@ -39,7 +39,7 @@ namespace io
 {
 
 template <typename MESH>
-bool import_PLY(MESH& m, const std::string& filename)
+typename std::enable_if<mesh_traits<MESH>::dimension == 2, bool>::type import_PLY(MESH& m, const std::string& filename)
 {
 	static_assert(mesh_traits<MESH>::dimension == 2, "MESH dimension should be 2");
 
