@@ -58,8 +58,8 @@ class UDFTraining : public ViewModule
 
 	enum AutoSplitMode : uint32
 	{
-		MAX_NB_SPHERES,
-		ERROR_THRESHOLD
+		ERROR_THRESHOLD,
+		MAX_NB_SPHERES
 	};
 
 	enum CorrectionMode : uint32
@@ -68,7 +68,57 @@ class UDFTraining : public ViewModule
 		CORRECT_ON_SPLIT
 	};
 
+private:
+	struct SpatialGrid {
+		struct GridKey {
+			int x, y, z;
+			bool operator==(const GridKey& o) const { return x == o.x && y == o.y && z == o.z; }
+		};
+		struct GridKeyHash {
+			std::size_t operator()(const GridKey& k) const {
+				return std::hash<int>()(k.x) ^ (std::hash<int>()(k.y) << 1) ^ (std::hash<int>()(k.z) << 2);
+			}
+		};
 
+		Scalar cell_size_;
+		std::unordered_map<GridKey, std::vector<uint32>, GridKeyHash> grid_;
+
+		SpatialGrid(Scalar cell_size) : cell_size_(cell_size) {}
+
+		GridKey get_key(const Vec3& v) const {
+			return {
+				(int)std::floor(v[0] / cell_size_),
+				(int)std::floor(v[1] / cell_size_),
+				(int)std::floor(v[2] / cell_size_)
+			};
+		}
+
+		void insert(const Vec3& pos, uint32 idx) {
+			grid_[get_key(pos)].push_back(idx);
+		}
+
+		template<typename PositionAttribute>
+		bool is_valid_sample(const Vec3& pos, Scalar radius, const PositionAttribute& positions) const {
+			GridKey k = get_key(pos);
+			Scalar r2 = radius * radius;
+			// Check 3x3x3 neighborhood
+			for (int dx = -1; dx <= 1; ++dx) {
+				for (int dy = -1; dy <= 1; ++dy) {
+					for (int dz = -1; dz <= 1; ++dz) {
+						GridKey neighbor_key = { k.x + dx, k.y + dy, k.z + dz };
+						auto it = grid_.find(neighbor_key);
+						if (it != grid_.end()) {
+							for (uint32 idx : it->second) {
+								if ((positions[idx] - pos).squaredNorm() < r2)
+									return false;
+							}
+						}
+					}
+				}
+			}
+			return true;
+		}
+	};
 
 	struct PointsParameters
 	{
@@ -146,10 +196,11 @@ class UDFTraining : public ViewModule
 		float32 radius_tolerance_ = 0.01f;
 
 		// Sampling Parameters
-		int num_samples_ = 1000;
-		float epsilon_ = 0.005f;
+		float epsilon_ = 0.01f;
+		float sample_radius_ = 0.0025f;
+		int sample_iterations_ = 30;  // Max attempts per point
 		int knn_k_ = 10;
-
+		int seed_ = 42;
 		// State
 		Scalar total_error_ = 0.0;
 		Scalar total_error_not_normalized_ = 0.0;
@@ -158,6 +209,7 @@ class UDFTraining : public ViewModule
 		Scalar min_error_ = 0.0;
 		Scalar max_error_ = 0.0;
 		PVertex max_error_sphere_ = PVertex();
+	
 
 		// Threading
 		uint32 iteration_count_ = 0;
@@ -314,23 +366,33 @@ private:
 		p.samples_kdtree_ = new acc::KDTree<3, uint32>(points);
 	}
 
-	Vec3 compute_pca_normal(PointsParameters& p, const std::vector<uint32>& indices, const std::vector<PVertex>& vertices)
+	// Generic PCA normal computation for any point cloud mesh
+	template<typename MESH, typename POS_ATTR>
+	Vec3 compute_pca_normal(const MESH& mesh, const POS_ATTR& position, 
+							const std::vector<uint32>& indices, 
+							const std::vector<typename mesh_traits<MESH>::Vertex>& kdtree_vertices)
 	{
+		using Vertex = typename mesh_traits<MESH>::Vertex;
 		if (indices.size() < 3) return Vec3(0, 0, 1);
+		
 		Vec3 centroid(0, 0, 0);
 		for (uint32 idx : indices) {
-			uint32 v_idx = index_of(*p.points_, vertices[idx]);
-			centroid += (*p.position_)[v_idx];
+			Vertex v = kdtree_vertices[idx];
+			uint32 v_idx = index_of(mesh, v);
+			centroid += position[v_idx];
 		}
 		centroid /= Scalar(indices.size());
+		
 		Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
 		for (uint32 idx : indices) {
-			uint32 v_idx = index_of(*p.points_, vertices[idx]);
-			Vec3 pt = (*p.position_)[v_idx] - centroid;
-			Eigen::Vector3d pe(pt[0], pt[1], pt[2]);
+			Vertex v = kdtree_vertices[idx];
+			uint32 v_idx = index_of(mesh, v);
+			Vec3 diff = position[v_idx] - centroid;
+			Eigen::Vector3d pe(diff[0], diff[1], diff[2]);
 			covariance += pe * pe.transpose();
 		}
 		covariance /= Scalar(indices.size());
+		
 		Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
 		Eigen::Vector3d normal = solver.eigenvectors().col(0);
 		return Vec3(normal[0], normal[1], normal[2]).normalized();
@@ -348,7 +410,7 @@ private:
 			std::vector<uint32> indices;
 			for(auto& res : knn_res) indices.push_back(res.first);
 			
-			(*p.normal_)[v_idx] = compute_pca_normal(p, indices, p.input_kdtree_vertices_);
+			(*p.normal_)[v_idx] = compute_pca_normal(*p.points_, *p.position_, indices, p.input_kdtree_vertices_);
 			return true;
 		});
 	}
@@ -419,6 +481,48 @@ private:
 	}
 
 	// --- Sampling ---
+
+	Vec3 random_sample_around(const Vec3& p, const Scalar radius, std::uniform_real_distribution<Scalar>& uni,
+							  std::mt19937& rng)
+	{
+		Scalar u = uni(rng);
+		Scalar v = uni(rng);
+		Scalar w = uni(rng);
+
+		Scalar R3 = radius * radius * radius;
+		Scalar r = std::cbrt(R3 + u * (8 * R3 - R3)); // r = pow((R^3 + u(8R^3 - R^3)), 1/3)
+
+		Scalar phi = v * 2.0 * M_PI;
+		Scalar theta = std::acos(1.0 - 2.0 * w);
+
+		Scalar x = r * std::sin(theta) * std::cos(phi);
+		Scalar y = r * std::sin(theta) * std::sin(phi);
+		Scalar z = r * std::cos(theta);
+
+		return p + Vec3(x, y, z);
+	}
+
+	std::pair<Vec3, Vec3> project_and_normal(PointsParameters& p, const Vec3& sample_pos)
+	{
+		std::pair<uint32, Scalar> knn_res;
+		p.input_kdtree_->find_nn(sample_pos, &knn_res);
+		PVertex nn = p.input_kdtree_vertices_[knn_res.first];
+		Vec3 nn_pos = (*p.position_)[index_of(*p.points_, nn)];
+		Vec3 n = (sample_pos - nn_pos).normalized();
+		Vec3 query = nn_pos + n * p.epsilon_;
+		PVertex last_nn = PVertex();
+		do {
+			p.input_kdtree_->find_nn(query, &knn_res);
+			nn = p.input_kdtree_vertices_[knn_res.first];
+			Vec3 nn_pos = (*p.position_)[index_of(*p.points_, nn)];
+			Vec3 n = (query - nn_pos).normalized();
+			query = nn_pos + n * p.epsilon_;
+			last_nn = nn;
+		}while(index_of(*p.points_, nn) != index_of(*p.points_, last_nn));
+		
+		return {query, n};
+	}
+
 	void sample_points(PointsParameters& p)
 	{
 		// Build KDTree for input points
@@ -435,36 +539,75 @@ private:
 		});
 		p.input_kdtree_ = new acc::KDTree<3, uint32>(points);
 
-		compute_input_normals(p);
-	
-		uint32 nb_input_points = nb_cells<PVertex>(*p.points_);
-		std::vector<uint32> indices(nb_input_points);
-		std::iota(indices.begin(), indices.end(), 0);
-		std::mt19937 gen(std::random_device{}());
-		std::shuffle(indices.begin(), indices.end(), gen);
+		std::uniform_real_distribution<Scalar> uniform(0.0, 1.0);
+		std::mt19937 gen(p.seed_);
+		
+		// Pick a random point from input as generator seed
+		std::uniform_int_distribution<uint32> uniform_idx(0, uint32(p.input_kdtree_vertices_.size() - 1));
+		uint32 rand_start_idx = uniform_idx(gen);
+		PVertex start_seed_vertex = p.input_kdtree_vertices_[rand_start_idx];
+		Vec3 generator = (*p.position_)[index_of(*p.points_, start_seed_vertex)];
 
-		uint32 count = std::min(uint32(p.num_samples_ / 2), nb_input_points);
-		for (uint32 i = 0; i < count; ++i) {
-			uint32 idx = indices[i];
-			PVertex v = p.input_kdtree_vertices_[idx];
-			uint32 v_idx = index_of(*p.points_, v);
-			const Vec3& pt = (*p.position_)[v_idx];
-			
-			Vec3 n = compute_avg_normal(
-				p, v, *p.input_kdtree_ ,p.input_kdtree_vertices_); // Not using avg normal for now as per user edit
-			//Vec3 n = (*p.normal_)[v_idx];
+		// --- Spatial Grid Optimization ---
+		SpatialGrid grid(p.sample_radius_);
 
-			// Generate two points
-			PVertex s1 = add_vertex(*p.samples_mesh_);
-			uint32 s1_idx = index_of(*p.samples_mesh_, s1);
-			(*p.samples_position_)[s1_idx] = pt + p.epsilon_ * n;
-			(*p.samples_normal_)[s1_idx] = n;
+		PVertex start_vertex = add_vertex(*p.samples_mesh_);
+		uint32 start_idx = index_of(*p.samples_mesh_, start_vertex);
+		auto [pos, normal] = project_and_normal(p, generator);
+		(*p.samples_position_)[start_idx] = pos;
+		(*p.samples_normal_)[start_idx] = normal;
+		
+		grid.insert(pos, start_idx);
 
-			PVertex s2 = add_vertex(*p.samples_mesh_);
-			uint32 s2_idx = index_of(*p.samples_mesh_, s2);
-			(*p.samples_position_)[s2_idx] = pt - p.epsilon_ * n;
-			(*p.samples_normal_)[s2_idx] = -n;
+		std::vector<PVertex> active_list = {start_vertex};
+		
+		uint32 count = 1;
+
+		while (!active_list.empty())
+		{
+			int rand_index = rand() % active_list.size();
+			PVertex current_vertex = active_list[rand_index];
+			uint32 current_idx = index_of(*p.samples_mesh_, current_vertex);
+			Vec3 current_pos = (*p.samples_position_)[current_idx];
+			bool found_new_sample = false;
+			for (uint32 i = 0; i < p.sample_iterations_ && !found_new_sample; i++)
+			{
+				Vec3 sample_pos = random_sample_around(current_pos, p.sample_radius_, uniform, gen);
+				auto [pos, normal] = project_and_normal(p, sample_pos);
+
+				// Check using spatial grid (Poisson disk constraint)
+				if (grid.is_valid_sample(pos, p.sample_radius_, *p.samples_position_))
+				{
+					// Verify distance to input cloud >= epsilon
+					std::pair<uint32, Scalar> input_nn_res;
+					p.input_kdtree_->find_nn(pos, &input_nn_res);
+					if (input_nn_res.second < p.epsilon_)
+						continue; // Reject: too close to input surface
+					
+					PVertex new_vertex = add_vertex(*p.samples_mesh_);
+					uint32 new_idx = index_of(*p.samples_mesh_, new_vertex);
+					
+					(*p.samples_position_)[new_idx] = pos;
+					(*p.samples_normal_)[new_idx] = normal;
+					
+					grid.insert(pos, new_idx);
+					
+					active_list.push_back(new_vertex);
+					count++;
+					found_new_sample = true;
+					if (count % 100 == 0)
+						std::cout << "Sampled point " << count  << "\r" << std::flush;
+				}
+			}
+			if (!found_new_sample)
+			{
+				active_list[rand_index] = active_list.back();
+				active_list.pop_back();
+			}
 		}
+
+		std::cout << "Building Final KDTree..." << std::endl;
+		build_kdtree(p);
 
 		// Compute normal color
 		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
@@ -482,7 +625,6 @@ private:
 
 	void compute_initial_medial_axis(PointsParameters& p)
 	{
-		std::atomic<uint32> count(0);
 		uint32 total = nb_cells<PVertex>(*p.samples_mesh_);
 
 		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
@@ -499,14 +641,81 @@ private:
 			(*p.samples_ma_position_)[v_idx] = c1;
 			(*p.samples_ma_radius_)[v_idx] = r1;
 			(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q1);
+	
+			return true;
+		});
+
+		// Filter points with ball radius >= 1.1 * epsilon (ball may be outside the surface)
+		// First try to fix by re-estimating normal from input cloud
+		std::vector<PVertex> to_remove;
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			Scalar radius = (*p.samples_ma_radius_)[v_idx];
 			
-			uint32 c_val = ++count;
-			if (c_val % 1000 == 0) {
-				std::cout << "Medial Axis: " << c_val << " / " << total << "\r" << std::flush;
+			if (radius >= 1.1 * p.epsilon_)
+			{
+				// Try to fix: re-estimate normal using local PCA on samples
+				Vec3 pt = (*p.samples_position_)[v_idx];
+				
+				// Find K nearest neighbors in samples mesh
+				std::vector<std::pair<uint32, Scalar>> knn_res;
+				p.samples_kdtree_->find_nns(pt, p.knn_k_, &knn_res);
+				
+				// Extract indices for PCA
+				std::vector<uint32> indices;
+				for (auto& res : knn_res)
+					indices.push_back(res.first);
+				
+				// Compute PCA normal from local neighborhood
+				if (indices.size() >= 3)
+				{
+					Vec3 new_normal = compute_pca_normal(*p.samples_mesh_, *p.samples_position_, indices, p.samples_kdtree_vertices_);
+					
+					// Orient normal: should point away from surface (same side as current position relative to input cloud)
+					std::pair<uint32, Scalar> input_nn_res;
+					p.input_kdtree_->find_nn(pt, &input_nn_res);
+					PVertex input_nn = p.input_kdtree_vertices_[input_nn_res.first];
+					Vec3 input_nn_pos = (*p.position_)[index_of(*p.points_, input_nn)];
+					Vec3 to_pt = (pt - input_nn_pos).normalized();
+					if (new_normal.dot(to_pt) < 0)
+						new_normal = -new_normal;
+					
+					(*p.samples_normal_)[v_idx] = new_normal;
+					
+					// Re-compute shrinking ball with new normal
+					auto [c2, r2, q2] = cgogn::geometry::shrinking_ball_center<PVertex>(
+						pt, new_normal,
+						p.samples_kdtree_, p.samples_kdtree_vertices_,
+						true
+					);
+					
+					(*p.samples_ma_position_)[v_idx] = c2;
+					(*p.samples_ma_radius_)[v_idx] = r2;
+					(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q2);
+					
+					// Still bad? Mark for removal
+					if (r2 >= 2 * p.epsilon_)
+						to_remove.push_back(v);
+				}
+				else
+				{
+					// Not enough neighbors for PCA, mark for removal
+					to_remove.push_back(v);
+				}
 			}
 			return true;
 		});
-		std::cout << std::endl;
+		if (!to_remove.empty())
+		{
+			std::cout << "Removed " << to_remove.size() << " points with ball outside surface (after retry)."
+					  << std::endl;
+			
+		}
+		for (PVertex v : to_remove)
+			remove_vertex(*p.samples_mesh_, v);
+		build_kdtree(p); // Rebuild KDTree after removing vertices
+		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		
 	}
 
 
@@ -536,10 +745,6 @@ private:
 			uint32 v_index = index_of(*p.samples_mesh_, v);
 
 			if (p.nb_spheres_ >= max_nb_spheres)
-				break;
-
-			// do not add spheres with radius smaller than filter_radius_threshold_
-			if ((*p.samples_ma_radius_)[v_index] < p.filter_radius_threshold_)
 				break;
 
 			if ((*covered)[v_index])
@@ -1432,8 +1637,9 @@ protected:
 		// Sampling
 		if (ImGui::CollapsingHeader("Sampling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
-			ImGui::SliderInt("Num Samples", &p.num_samples_, 10000, 1000000);
 			ImGui::InputFloat("Epsilon", &p.epsilon_, 0.001f, 0.1f, "%.4f");
+			ImGui::InputFloat("Sample Radius", &p.sample_radius_, 0.0001f, 0.01f, "%.4f");
+			ImGui::SliderInt("Sample Iterations", &p.sample_iterations_, 10, 100);
 			ImGui::SliderInt("KNN for Normal", &p.knn_k_, 3, 50);
 
 			if (ImGui::Button("Sample Points"))
