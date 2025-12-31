@@ -76,12 +76,15 @@ if(APPLE)
 		${CARBON}
 	)
 endif()
-
-add_executable(udf_training udf_training.cpp)
-target_link_libraries(udf_training
-	cgogn::core
-	cgogn::ui
-	cgogn::io
-	cgogn::rendering
-	${CMAKE_DL_LIBS}
-)
+if (CGOGN_USE_CGAL)
+	find_package(CGAL REQUIRED)
+	add_executable(udf_training udf_training.cpp)
+	target_link_libraries(udf_training
+		CGAL::CGAL
+		cgogn::core
+		cgogn::ui
+		cgogn::io
+		cgogn::rendering
+		${CMAKE_DL_LIBS}
+	)
+endif()

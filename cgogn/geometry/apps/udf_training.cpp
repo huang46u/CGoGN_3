@@ -90,7 +90,38 @@ int main(int argc, char** argv)
 	v1->link_module(&srnm);
 	v1->link_module(&udf);
 
-	Points* p = mpp.load_points_from_file(filename);
+	Points* p = nullptr;
+	
+	// Check file extension
+	std::string ext = filename.substr(filename.find_last_of(".") + 1);
+	if (ext != "ply")
+	{
+		std::cout << "Detected non PLY file. Loading as Surface Mesh..." << std::endl;
+		Surface* s = mps.load_surface_from_file(filename);
+		if (!s)
+		{
+			std::cout << "Failed to load surface mesh." << std::endl;
+			return 1;
+		}
+
+		// Setup Surface Render
+		using SVertex = typename cgogn::mesh_traits<Surface>::Vertex;
+		auto s_pos = cgogn::get_attribute<Vec3, SVertex>(*s, "position");
+		mps.set_mesh_bb_vertex_position(*s, s_pos);
+		sr.set_vertex_position(*v1, *s, s_pos);
+		udf.set_selected_surface(*s);
+
+		// Sample Points from Surface
+		std::cout << "Sampling input point cloud from surface..." << std::endl;
+		p = mpp.add_mesh("input_points");
+		udf.sample_surface_to_points(*s, *p, 100000);
+	}
+	else
+	{
+		std::cout << "Loading as Point Cloud..." << std::endl;
+		p = mpp.load_points_from_file(filename);
+	}
+
 	if (!p)
 	{
 		std::cout << "File could not be loaded" << std::endl;

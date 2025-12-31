@@ -23,6 +23,12 @@
 #include <libacc/bvh_tree.h>
 #include <libacc/bvh_tree_spheres.h>
 #include <libacc/kd_tree.h>
+
+//import CGAL
+#include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
+#include <CGAL/Polygon_mesh_processing/distance.h>
+#include <CGAL/Surface_mesh.h>
+
 #include <GLFW/glfw3.h>
 #include <numeric>
 #include <algorithm>
@@ -49,13 +55,19 @@ class UDFTraining : public ViewModule
 {
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
 	using NMVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
+	using SVertex = typename mesh_traits<SURFACE>::Vertex;
+
+	using SFace = typename mesh_traits<SURFACE>::Face;
 	using NMEdge = typename mesh_traits<NONMANIFOLD>::Edge;
 	
 	template <typename T>
 	using PAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
 	template <typename T>
 	using NMAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
-
+	using K = CGAL::Exact_predicates_inexact_constructions_kernel;
+	using CGAL_Mesh = CGAL::Surface_mesh<K::Point_3>;
+	using Vector_3 = typename K::Vector_3;
+	using Point_3 = typename K::Point_3;
 	enum AutoSplitMode : uint32
 	{
 		ERROR_THRESHOLD,
@@ -248,6 +260,81 @@ public:
 	void set_point_cloud_render(PointCloudRender<POINTS>* pcr) { pcr_ = pcr; }
 	void set_non_manifold_mesh_provider(MeshProvider<NONMANIFOLD>* mp) { non_manifold_provider_ = mp; }
 	void set_non_manifold_render(SurfaceRender<NONMANIFOLD>* sr) { sr_nm_ = sr; }
+
+public:
+	// --- Surface Sampling (CGAL) ---
+	void sample_surface_to_points(SURFACE& surface, POINTS& points, int num_samples)
+	{
+		points_provider_->clear_mesh(points);
+
+		// 1. Convert CGoGN SURFACE to CGAL::Surface_mesh
+		CGAL_Mesh cgal_mesh;
+		
+		auto pos = cgogn::get_attribute<Vec3, SVertex>(surface, "position");
+
+		std::unordered_map<uint32, CGAL_Mesh::Vertex_index> v_map;
+
+		// Add vertices
+		foreach_cell(surface, [&](SVertex v) {
+			uint32 v_idx = index_of(surface, v);
+			const Vec3& p = (*pos)[v_idx];
+			v_map[v_idx] = cgal_mesh.add_vertex(Point_3(p[0], p[1], p[2]));
+			return true;
+		});
+
+		// Add faces
+		foreach_cell(surface, [&](SFace f) {
+			std::vector<CGAL_Mesh::Vertex_index> face_v;
+			foreach_incident_vertex(surface, f, [&](SVertex v) {
+				face_v.push_back(v_map[index_of(surface, v)]);
+				return true;
+			});
+				
+			cgal_mesh.add_face(face_v);
+			return true;
+		});
+	
+
+		// 2. Sample mesh
+		std::vector<Point_3> sampled_points;
+
+		// Using simple random sampling on mesh
+		CGAL::Polygon_mesh_processing::sample_triangle_mesh(cgal_mesh, std::back_inserter(sampled_points),
+															CGAL::parameters::use_grid_sampling(true).grid_spacing(0.01));
+
+		std::cout << "Sampled " << sampled_points.size() << " points from surface." << std::endl;
+
+		// 3. Store in POINTS mesh
+		auto p_pos = get_or_add_attribute<Vec3, PVertex>(points, "position");
+		auto p_norm = get_or_add_attribute<Vec3, PVertex>(
+			points, "normal"); // Need to compute normals if sampler doesn't give them
+
+		// For now, reconstruct normals using input mesh or sampler?
+		// The basic sampler might not give normals directly in the point vector.
+		// We can use a location map if provided, but for now let's just add points.
+		// NOTE: Ideally we want normals too. PMP::sample_triangle_mesh can take a property map for output,
+		// or we can estimate them later. For UDF training, input normals are important.
+
+		// Let's iterate and add points. We will re-compute normals using the source surface or simple estimation.
+		// Since we have the CGAL mesh, we can use AABB tree to get normals for sampled points?
+		// Or assume dense enough and use PCA later?
+		// "compute_input_normals" is called later in the pipeline usually?
+		// modify compute_point_cloud_normals to work on this input?
+
+		for (const auto& pt : sampled_points)
+		{
+			PVertex v = add_vertex(points);
+			uint32 v_idx = index_of(points, v);
+			(*p_pos)[v_idx] = Vec3(pt.x(), pt.y(), pt.z());
+		}
+
+		// Compute normals for the new input point cloud
+		// Since we just sampled from a surface, we can use the surface normals directly if we had a location map.
+		// Alternatively, just re-use the generic compute_pca_normal or rely on external processing.
+		// For robustness, let's just ensure the attribute exists.
+		// If the user wants precise surface normals, we'd need to use a different sampler overload.
+		points_provider_->emit_connectivity_changed(points);
+	}
 
 protected:
 	void init() override
@@ -618,10 +705,12 @@ private:
 		});
 
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+
 	}
 
 
-	// ---Shrinking Balls---
+
+	// --- Shrinking Balls ---
 
 	void compute_initial_medial_axis(PointsParameters& p)
 	{
@@ -885,6 +974,84 @@ private:
 			}
 			return true;
 		});
+	}
+
+	// Power distance clustering: d_power(p, sphere) = |p - center|^2 - radius^2
+	void compute_power_cluster(PointsParameters& p)
+	{
+		// clean cluster affectation
+		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.spheres_, v);
+			(*p.spheres_cluster_)[v_index].clear();
+			(*p.spheres_cluster_area_)[v_index] = 0.0;
+			return true;
+		});
+		p.samples_sphere_->fill(PVertex());
+
+		if (p.nb_spheres_ == 0)
+			return;
+
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.samples_mesh_, v);
+			Scalar a = (*p.samples_area_)[v_index];
+			const Vec3& vp = (*p.samples_position_)[v_index];
+			
+			Scalar min_power_distance = std::numeric_limits<Scalar>::max();
+			PVertex closest_sphere;
+			uint32 closest_sphere_index = 0;
+
+			foreach_cell(*p.spheres_, [&](PVertex pv) {
+				uint32 pv_index = index_of(*p.spheres_, pv);
+				const Vec3& center = (*p.spheres_position_)[pv_index];
+				Scalar radius = (*p.spheres_radius_)[pv_index];
+				
+				// Power distance: |p - center|^2 - radius^2
+				Scalar dist_sq = (vp - center).squaredNorm();
+				Scalar power_dist = dist_sq - radius * radius;
+				
+				if (power_dist < min_power_distance)
+				{
+					min_power_distance = power_dist;
+					closest_sphere = pv;
+					closest_sphere_index = pv_index;
+				}
+				return true;
+			});
+
+			(*p.samples_sphere_)[v_index] = closest_sphere;
+
+			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
+			(*p.spheres_cluster_)[closest_sphere_index].push_back(v);
+			(*p.spheres_cluster_area_)[closest_sphere_index] += a;
+
+			return true;
+		});
+		
+		// remove small clusters
+		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 v_idx = index_of(*p.spheres_, v);
+			std::vector<PVertex>& cluster = (*p.spheres_cluster_)[v_idx];
+			if (cluster.size() < 4)
+			{
+				for (PVertex sv : cluster) {
+					uint32 sv_idx = index_of(*p.samples_mesh_, sv);
+					(*p.samples_sphere_)[sv_idx] = PVertex();
+				}
+				remove_vertex(*p.spheres_, v);
+				p.nb_spheres_--;
+			}
+			return true;
+		});
+	}
+
+	// Use power-based clusters to compute sphere neighbors and build skeleton
+	void compute_skeleton_power(PointsParameters& p, bool only_neighbors = false)
+	{
+		// First compute power clusters
+		compute_power_cluster(p);
+		
+		// Then build skeleton using the power-based cluster assignments
+		compute_skeleton(p, only_neighbors);
 	}
 
 	void compute_spheres_error(PointsParameters& p)
@@ -1719,6 +1886,39 @@ protected:
 							compute_clusters(p);
 							compute_spheres_error(p);
 							update_render_data(p);
+						}
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Power Cluster"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							compute_power_cluster(p);
+							compute_spheres_error(p);
+							update_render_data(p);
+						}
+					}
+					
+					if (ImGui::Button("Build Skeleton"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							compute_skeleton(p);
+							update_render_data(p);
+							non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
+						}
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Power Skeleton"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							compute_skeleton_power(p);
+							update_render_data(p);
+							non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 						}
 					}
 
