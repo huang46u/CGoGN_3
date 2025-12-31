@@ -366,7 +366,7 @@ public:
 	}
 
 
-	MESH* load_points_from_file(const std::string& filename)
+	MESH* load_points_from_file(const std::string& filename, bool normalized = true)
 	{
 		if constexpr (mesh_traits<MESH>::dimension == 0 && std::is_default_constructible_v<MESH>)
 		{
@@ -388,7 +388,11 @@ public:
 				mesh_filename_[m] = filename;
 				std::shared_ptr<Attribute<Vec3>> vertex_position = get_attribute<Vec3, Vertex>(*m, "position");
 				if (vertex_position)
+				{
+					if (normalized)
+						geometry::rescale(*vertex_position, 1);
 					set_mesh_bb_vertex_position(*m, vertex_position);
+				}
 				boost::synapse::emit<mesh_added>(this, m);
 				return m;
 			}
