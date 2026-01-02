@@ -85,6 +85,7 @@ endif()
 option(CGOGN_GL43_DEBUG_MODE "GL43 DEBUGGING MODE")
 
 option(CGOGN_USE_CGAL "Add CGAL dependency and compile all that use it" OFF)
+option(CGOGN_USE_TORCH "Add libtorch dependency and compile all that use it" OFF)
 
 
 #### Continuous integration options

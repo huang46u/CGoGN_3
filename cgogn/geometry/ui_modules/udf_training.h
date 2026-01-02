@@ -29,6 +29,10 @@
 #include <CGAL/Polygon_mesh_processing/distance.h>
 #include <CGAL/Surface_mesh.h>
 
+#include <torch/script.h>
+#include <torch/torch.h>
+#include <torch/autograd.h>
+#include <filesystem>
 #include <GLFW/glfw3.h>
 #include <numeric>
 #include <algorithm>
@@ -79,6 +83,14 @@ class UDFTraining : public ViewModule
 		CORRECT_ALWAYS,
 		CORRECT_ON_SPLIT
 	};
+
+	enum InputMode : uint32
+	{
+		INPUT_POINT_CLOUD,
+		INPUT_SURFACE_MESH,
+		INPUT_NEURAL_UDF
+	};
+
 
 private:
 	struct SpatialGrid {
@@ -136,11 +148,17 @@ private:
 	{
 		bool initialized_ = false;
 		bool fitting_data_computed_ = false;
+		InputMode input_mode_ = INPUT_POINT_CLOUD;
 		// Input Points
 		POINTS* points_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> position_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> normal_ = nullptr; // Computed on input for sampling
 		std::shared_ptr<PAttribute<std::vector<PVertex>>> knn_ = nullptr; // For input normals
+
+		// Nueral UDF
+		bool neural_udf_loaded_ = false;
+		torch::jit::Module neural_udf_model_;
+		std::string neural_udf_model_path_ = "";
 
 		// Sampling & Fitting Data
 		POINTS* samples_mesh_ = nullptr;
@@ -161,8 +179,8 @@ private:
 		std::shared_ptr<PAttribute<Vec4>> samples_color_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> samples_normal_color_ = nullptr;
 
-		acc::KDTree<3, uint32>* samples_kdtree_ = nullptr; // KDTree of samples
-		std::vector<PVertex> samples_kdtree_vertices_; // Vertices of samples in KDTree order
+		acc::KDTree<3, uint32>* samples_kdtree_ = nullptr; // KDTree of alpha-expanding samples
+		std::vector<PVertex> samples_kdtree_vertices_; // Vertices of alpha-expanding samples in KDTree order
 
 		acc::KDTree<3, uint32>* input_kdtree_ = nullptr; // KDTree of input points
 		std::vector<PVertex> input_kdtree_vertices_; // Vertices of input points in KDTree order
@@ -208,11 +226,20 @@ private:
 		float32 radius_tolerance_ = 0.01f;
 
 		// Sampling Parameters
-		float epsilon_ = 0.01f;
+		float alpha_ = 0.01f;
 		float sample_radius_ = 0.0025f;
 		int sample_iterations_ = 30;  // Max attempts per point
 		int knn_k_ = 10;
 		int seed_ = 42;
+		// Neural UDF Sampling
+		int num_alpha_samples_ = 2000000;
+		int batch_size_ = 32768;// sample batch
+		float newton_steps_ = 0.7; // stpes of newton's method
+		int max_sample_iter_ = 12; // max iterations for adjusting samples
+		float newton_epsilon_ = 1e-8;
+		float tol_ = 1e-5; // convergence tolerance
+
+
 		// State
 		Scalar total_error_ = 0.0;
 		Scalar total_error_not_normalized_ = 0.0;
@@ -237,6 +264,12 @@ private:
 			if (input_kdtree_) delete input_kdtree_;
 		}
 	};
+	struct BatchUDFResult
+	{
+		std::vector<Scalar> values;	 // size N
+		std::vector<Vec3> gradients; // size N
+		bool ok;
+	};
 
 public:
 	UDFTraining(const App& app)
@@ -260,6 +293,325 @@ public:
 	void set_point_cloud_render(PointCloudRender<POINTS>* pcr) { pcr_ = pcr; }
 	void set_non_manifold_mesh_provider(MeshProvider<NONMANIFOLD>* mp) { non_manifold_provider_ = mp; }
 	void set_non_manifold_render(SurfaceRender<NONMANIFOLD>* sr) { sr_nm_ = sr; }
+
+	void load_neural_udf_model(POINTS& points, const std::string & model_path)
+	{
+		PointsParameters& p = points_parameters_[&points];
+		if (!std::filesystem::exists(model_path))
+		{
+			std::cout << "Neural UDF model file does not exist: " << model_path << std::endl;
+			return;
+		}
+		try
+		{
+			std::cout << "Loading Neural UDF model from: " << model_path << std::endl;
+			p.neural_udf_model_ = torch::jit::load(model_path, device_);
+			p.neural_udf_model_.eval();
+			p.neural_udf_loaded_ = true;
+			p.neural_udf_model_path_ = model_path;
+			p.input_mode_ = INPUT_NEURAL_UDF;
+			std::cout << "Loaded neural UDF model from: " << model_path << std::endl;
+
+			
+			std::cout << "\n=== Auto-sampling alpha level set ===" << std::endl;
+			load_alpha_samples_to_mesh(p, p.num_alpha_samples_); 
+		}
+		catch (const c10::Error& e)
+		{
+			std::cerr << "Error loading Neural UDF model: " << e.what() << std::endl;
+			p.neural_udf_loaded_ = false;
+		}
+	}
+
+	Scalar forward(PointsParameters& p, const Vec3& query_point)
+	{
+		if (!p.neural_udf_loaded_)
+		{
+			std::cerr << "Neural UDF model not loaded." << std::endl;
+			return std::numeric_limits<Scalar>::max();
+		}
+		try
+		{
+			torch::Tensor point =
+				torch::tensor({query_point.x(), query_point.y(), query_point.z()}, torch::kFloat32).unsqueeze(0).to(device_);
+			torch::Tensor output = p.neural_udf_model_.forward({point}).toTensor();
+			float udf_value = output.item<float>();
+			return static_cast<Scalar>(udf_value);
+		}
+		catch(const c10::Error& e)
+		{
+			std::cerr << "Error during Neural UDF forward pass: " << e.what() << std::endl;
+			return std::numeric_limits<Scalar>::max();
+		}
+	}
+
+	BatchUDFResult forward_batch_with_grad(PointsParameters& p, const std::vector<Vec3>& query_points)
+	{
+		BatchUDFResult r;
+		r.ok = false;
+		const size_t N = query_points.size();
+		if (!p.neural_udf_loaded_)
+		{
+			std::cerr << "Neural UDF model not loaded." << std::endl;
+			return r;
+		}
+		if(N == 0)
+		{
+			std::cerr << "No query points provided for batch UDF evaluation." << std::endl;
+			return r;
+		}
+		try
+		{
+			std::cout << "Evaluating Neural UDF for batch of " << N << " points." << std::endl;
+			torch::Tensor points_cpu =
+				torch::empty({static_cast<long>(N), 3}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
+			auto acc = points_cpu.accessor<float, 2>();
+			std::cout << "Preparing input tensor." << std::endl;
+			for (size_t i = 0; i < N; ++i)
+			{
+				acc[i][0] = query_points[i].x();
+				acc[i][1] = query_points[i].y();
+				acc[i][2] = query_points[i].z();
+			}
+			torch::Tensor points = points_cpu.to(device_);
+			points.set_requires_grad(true);
+
+			std::cout << "Performing forward pass." << std::endl;
+			// forward pass
+			torch::Tensor output = p.neural_udf_model_.forward({points}).toTensor();
+
+			// Check output shape
+			if (output.dim() != 2 || output.size(0) != N)
+			{
+				std::cerr << "Unexpected output shape: " << output.sizes() << std::endl;
+				return r;
+			}
+
+			// backward pass to compute gradients
+			output.backward(torch::ones_like(output));
+			
+			torch::Tensor grads = points.grad();
+			// Validate gradient tensor
+			r.values.reserve(N);
+			r.gradients.reserve(N);
+
+			torch::Tensor output_cpu = output.detach().to(torch::kCPU).contiguous();
+			torch::Tensor grads_cpu = grads.detach().to(torch::kCPU).contiguous();
+
+			auto out_acc = output_cpu.accessor<float, 2>(); 
+			auto grad_acc = grads_cpu.accessor<float, 2>(); 
+
+			r.values.resize(N);
+			r.gradients.resize(N);
+
+			for (size_t i = 0; i < N; ++i)
+			{
+				r.values[i] = static_cast<Scalar>(out_acc[(long)i][0]);
+				r.gradients[i] =
+					Vec3(static_cast<Scalar>(grad_acc[(long)i][0]), static_cast<Scalar>(grad_acc[(long)i][1]),
+						 static_cast<Scalar>(grad_acc[(long)i][2]));
+			}
+			r.ok = true;
+			return r;
+		}
+		catch (const c10::Error& e)
+		{
+			std::cerr << "Error during Neural UDF batch forward/grad: " << e.what() << std::endl;
+			return r;
+		}
+	}
+	void load_alpha_samples_to_mesh(PointsParameters& p, size_t num_points)
+	{
+		if (!p.neural_udf_loaded_)
+		{
+			std::cerr << "Neural UDF model not loaded. Cannot sample alpha level set." << std::endl;
+			return;
+		}
+
+		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
+
+		// Sample points on alpha level set
+		std::vector<Vec3> sampled_points = sample_alpha_level_set(p, num_points);
+
+		if (sampled_points.empty())
+		{
+			std::cerr << "Failed to sample points on alpha level set." << std::endl;
+			return;
+		}
+
+		std::cout << "Successfully sampled " << sampled_points.size() << " points." << std::endl;
+
+		// Clear existing samples
+		points_provider_->clear_mesh(*p.samples_mesh_);
+
+		// Add sampled points to samples_mesh_
+		for (const Vec3& pt : sampled_points)
+		{
+			PVertex v = add_vertex(*p.samples_mesh_);
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			//std::cout << pt.transpose() << std::endl;
+			(*p.samples_position_)[v_idx] = pt;
+		}
+
+		// Compute normals using gradient of UDF
+		std::cout << "Computing normals from UDF gradients..." << std::endl;
+		std::vector<Vec3> all_positions;
+		all_positions.reserve(sampled_points.size());
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			all_positions.push_back((*p.samples_position_)[v_idx]);
+			return true;
+		});
+
+		BatchUDFResult grad_result = forward_batch_with_grad(p, all_positions);
+		if (grad_result.ok && grad_result.gradients.size() == all_positions.size())
+		{
+			uint32 idx = 0;
+			foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+				uint32 v_idx = index_of(*p.samples_mesh_, v);
+				Vec3 normal = grad_result.gradients[idx].normalized();
+				(*p.samples_normal_)[v_idx] = normal;
+
+				// Compute normal color for visualization
+				(*p.samples_normal_color_)[v_idx] =
+					Vec4((normal.x() + 1.0) * 0.5, (normal.y() + 1.0) * 0.5, (normal.z() + 1.0) * 0.5, 1.0);
+				idx++;
+				return true;
+			});
+		}
+		else
+		{
+			std::cerr << "Failed to compute normals from UDF gradients." << std::endl;
+		}
+
+		std::cout << "Building KDTree for sampled points..." << std::endl;
+		build_kdtree(p);
+
+		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+
+		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
+	}
+
+	std::vector<Vec3> sample_alpha_level_set(PointsParameters& p, size_t num_points)
+	{
+		std::vector<Vec3> accepted;
+		accepted.reserve(num_points);
+		std::mt19937 gen(p.seed_);
+		std::uniform_real_distribution<Scalar>uni(0.0, 1.0);
+		size_t max_outer_iters = 100;
+		size_t outer_iter = 0;
+		const size_t target_pool = std::max(num_points * 5, (size_t)p.batch_size_);
+		while (accepted.size() < num_points&& outer_iter<max_outer_iters)
+		{
+			++outer_iter;
+			std::vector<Vec3> pool;
+			pool.reserve(num_points);
+			for (size_t i = 0; i < target_pool; ++i)
+			{
+				pool.push_back(Vec3(uni(gen), uni(gen), uni(gen)));
+			}
+			for (size_t iter = 0; iter < p.max_sample_iter_; ++iter)
+			{
+				for (size_t base = 0; base < pool.size(); base += p.batch_size_)
+				{
+					size_t bs = std::min((size_t)p.batch_size_, pool.size() - base);
+					std::vector<Vec3> batch;
+					batch.reserve(bs);
+					for (size_t k = 0; k < bs; ++k)
+						batch.push_back(pool[base + k]);
+					BatchUDFResult br = forward_batch_with_grad(p, batch);
+					if (!br.ok || br.values.size() != bs || br.gradients.size() != bs)
+					{
+						std::cerr << "forward_batch_with_grad failed." << std::endl;
+						return accepted;
+					}
+					for (size_t k = 0; k < bs; ++k)
+					{
+						const Scalar f = br.values[k];
+						const Scalar r = f - p.alpha_; // residual
+						const Vec3& g = br.gradients[k];
+
+						// ||g||^2
+						const Scalar g2 = (Scalar)(g.x() * g.x() + g.y() * g.y() + g.z() * g.z());
+						if (g2 < (Scalar)1e-16)
+							continue; 
+
+						Vec3 x = batch[k];
+						const Scalar s = p.newton_steps_ * r / (g2 + p.newton_epsilon_);
+						x = Vec3(x.x() - s * g.x(), x.y() - s * g.y(), x.z() - s * g.z());
+
+						pool[base + k] = x;
+					}
+				}
+			}
+			for (size_t base = 0; base < pool.size(); base += p.batch_size_)
+			{
+				size_t bs = std::min((size_t)p.batch_size_, (pool.size() - base));
+				std::vector<Vec3> batch;
+				batch.reserve(bs);
+				for (size_t k = 0; k < bs; ++k)
+					batch.push_back(pool[base + k]);
+
+				BatchUDFResult br = forward_batch_with_grad(p, batch);
+				if (!br.ok)
+					continue;
+
+				for (size_t k = 0; k < bs; ++k)
+				{
+					if (accepted.size() >= num_points)
+						break;
+
+					const Scalar err = std::abs(br.values[k] - p.alpha_);
+					if (err < p.tol_)
+					{
+						accepted.push_back(batch[k]);
+					}
+				}
+			}
+		}
+		if (accepted.size() > num_points)
+			accepted.resize(num_points);
+
+		if (accepted.size() < num_points)
+		{
+			std::cerr << "Warning: only sampled " << accepted.size() << " / " << num_points << " points on level set. "
+					  << "Consider increasing oversample_factor / max_iters or relaxing tol." << std::endl;
+		}
+
+		return accepted;
+	}
+	
+
+	void test_batch_forward(PointsParameters& p)
+	{
+		// generate batch of random test points in [0,1]^3
+		const size_t N = 1000;
+		std::vector<Vec3> test_points(N);
+		std::mt19937 gen(42);
+		std::uniform_real_distribution<Scalar> dis(0.0, 1.0);
+		for (size_t i = 0; i < N; ++i)
+		{
+			test_points[i] = Vec3(dis(gen), dis(gen), dis(gen));
+		}
+		// evaluate batch
+		BatchUDFResult result = forward_batch_with_grad(p, test_points);
+		// print some results
+		if (result.ok)
+		{
+			std::cout << "Batch UDF evaluation successful. Sample results:" << std::endl;
+			for (size_t i = 0; i < 5; ++i)
+			{
+				std::cout << "Point: " << test_points[i].transpose()
+						  << " UDF: " << result.values[i]
+						  << " Grad: " << result.gradients[i].transpose() << std::endl;
+			}
+		}
+		else
+		{
+			std::cerr << "Batch UDF evaluation failed." << std::endl;
+		}
+
+	}
 
 public:
 	// --- Surface Sampling (CGAL) ---
@@ -346,6 +698,17 @@ protected:
 				update_render_data(p);
 			}
 		});
+		// Initialize PyTorch device
+		if (torch::cuda::is_available())
+		{
+			std::cout << "CUDA is available! Using GPU device 0." << std::endl;
+			device_ = torch::Device(torch::kCUDA, 0);
+		}
+		else
+		{
+			std::cout << "CUDA is not available! Using the CPU." << std::endl;
+			device_ = torch::kCPU;
+		}
 	}
 
 
@@ -596,14 +959,14 @@ private:
 		PVertex nn = p.input_kdtree_vertices_[knn_res.first];
 		Vec3 nn_pos = (*p.position_)[index_of(*p.points_, nn)];
 		Vec3 n = (sample_pos - nn_pos).normalized();
-		Vec3 query = nn_pos + n * p.epsilon_;
+		Vec3 query = nn_pos + n * p.alpha_;
 		PVertex last_nn = PVertex();
 		do {
 			p.input_kdtree_->find_nn(query, &knn_res);
 			nn = p.input_kdtree_vertices_[knn_res.first];
 			Vec3 nn_pos = (*p.position_)[index_of(*p.points_, nn)];
 			Vec3 n = (query - nn_pos).normalized();
-			query = nn_pos + n * p.epsilon_;
+			query = nn_pos + n * p.alpha_;
 			last_nn = nn;
 		}while(index_of(*p.points_, nn) != index_of(*p.points_, last_nn));
 		
@@ -668,7 +1031,7 @@ private:
 					// Verify distance to input cloud >= epsilon
 					std::pair<uint32, Scalar> input_nn_res;
 					p.input_kdtree_->find_nn(pos, &input_nn_res);
-					if (input_nn_res.second < p.epsilon_)
+					if (input_nn_res.second < p.alpha_)
 						continue; // Reject: too close to input surface
 					
 					PVertex new_vertex = add_vertex(*p.samples_mesh_);
@@ -741,7 +1104,7 @@ private:
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			Scalar radius = (*p.samples_ma_radius_)[v_idx];
 			
-			if (radius >= 1.1 * p.epsilon_)
+			if (radius >= 1.1 * p.alpha_)
 			{
 				// Try to fix: re-estimate normal using local PCA on samples
 				Vec3 pt = (*p.samples_position_)[v_idx];
@@ -783,7 +1146,7 @@ private:
 					(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q2);
 					
 					// Still bad? Mark for removal
-					if (r2 >= 2 * p.epsilon_)
+					if (r2 >= 2 * p.alpha_)
 						to_remove.push_back(v);
 				}
 				else
@@ -1800,22 +2163,56 @@ protected:
 		PointsParameters& p = points_parameters_[selected_points_];
 
 		ImGui::Separator();
+		if (ImGui::CollapsingHeader("Neural UDF", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			if (p.neural_udf_loaded_)
+			{
+				ImGui::TextColored(ImVec4(0, 1, 0, 1), "Model loaded: %s", p.neural_udf_model_path_.c_str());
 
+				ImGui::Separator();
+				ImGui::Text("Alpha Level Set Sampling Settings");
+				ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "(Auto-sampled on model load)");
+
+				ImGui::InputFloat("Alpha Value", &p.alpha_, 0.001f, 0.01f, "%.4f");
+				ImGui::InputInt("Batch Size", &p.batch_size_, 256, 1024);
+				ImGui::InputInt("Max Newton Iters", &p.max_sample_iter_, 1, 15);
+				ImGui::InputFloat("Newton Step Size", &p.newton_steps_, 0.1f, 0.1f, "%.2f");
+				ImGui::InputFloat("Tolerance", &p.tol_, 0.0f, 0.0f, "%.6f");
+
+				ImGui::Separator();
+
+				if (ImGui::Button("Test forward model"))
+				{
+					test_batch_forward(p);
+				}
+				ImGui::SameLine();
+				ImGui::TextColored(ImVec4(1, 1, 0, 1), "Test batch evaluation");
+			}
+		}
 		// Sampling
 		if (ImGui::CollapsingHeader("Sampling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
-			ImGui::InputFloat("Epsilon", &p.epsilon_, 0.001f, 0.1f, "%.4f");
-			ImGui::InputFloat("Sample Radius", &p.sample_radius_, 0.0001f, 0.01f, "%.4f");
-			ImGui::SliderInt("Sample Iterations", &p.sample_iterations_, 10, 100);
-			ImGui::SliderInt("KNN for Normal", &p.knn_k_, 3, 50);
-
-			if (ImGui::Button("Sample Points"))
-				sample_points(p);
-			ImGui::SameLine();
-			if (ImGui::Button("Clear Samples"))
+			if (p.input_mode_ == INPUT_NEURAL_UDF)
 			{
-				if (p.samples_mesh_) points_provider_->clear_mesh(*p.samples_mesh_);
-				p.fitting_data_computed_ = false;
+				ImGui::TextColored(ImVec4(0, 1, 0, 1), "Samples loaded from Neural UDF");
+				ImGui::Text("Number of samples: %zu", nb_cells<PVertex>(*p.samples_mesh_));
+			}
+			else
+			{
+				ImGui::InputFloat("Alpha", &p.alpha_, 0.001f, 0.1f, "%.4f");
+				ImGui::InputFloat("Sample Radius", &p.sample_radius_, 0.0001f, 0.01f, "%.4f");
+				ImGui::SliderInt("Sample Iterations", &p.sample_iterations_, 10, 100);
+				ImGui::SliderInt("KNN for Normal", &p.knn_k_, 3, 50);
+
+				if (ImGui::Button("Sample Points"))
+					sample_points(p);
+				ImGui::SameLine();
+				if (ImGui::Button("Clear Samples"))
+				{
+					if (p.samples_mesh_)
+						points_provider_->clear_mesh(*p.samples_mesh_);
+					p.fitting_data_computed_ = false;
+				}
 			}
 		}
 
@@ -2030,6 +2427,8 @@ private:
 	PVertex picked_sphere_;
 	std::shared_ptr<boost::synapse::connection> timer_connection_;
 	std::array<std::mutex, 43> spheres_mutex_;
+
+	torch::Device device_ = torch::kCPU;
 };
 
 } // namespace ui
