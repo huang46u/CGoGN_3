@@ -29,7 +29,7 @@
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/geometry/types/vector_traits.h>
-
+#include <filesystem>
 #include <torch/script.h>
 #include <torch/torch.h>
 
@@ -133,6 +133,8 @@ public:
 		p.initialized_ = true;
 	}
 
+
+
 	void add_random_sample(SURFACE& s)
 	{
 		Parameters& p = parameters_[&s];
@@ -140,9 +142,23 @@ public:
 		Vec3 rp = Vec3::Random(); // random point in [-1, 1]^3
 		rp /= Scalar(2);		  // contract to [-0.5, 0.5]^3
 
-		at::Tensor point = torch::tensor({rp[0], rp[1], rp[2]}, torch::kFloat32);
-		at::Tensor output = p.model_.forward({point}).toTensor();
-		float radius = output.item<float>();
+		std::cout << "Sampling at point: " << rp.transpose() << std::endl;
+		// 1) point: [1, 3]
+		at::Tensor point = torch::tensor({rp[0], rp[1], rp[2]}, torch::kFloat32).unsqueeze(0).to(device_);
+
+		auto out_iv = p.model_.forward({point});
+
+		auto out_tuple = out_iv.toTuple();
+		auto elements = out_tuple->elements();
+
+		at::Tensor sdf = elements[0].toTensor();
+		at::Tensor grad = elements[1].toTensor();
+		at::Tensor mf = elements[2].toTensor();	  
+
+		
+		float radius = sdf.squeeze().item<float>(); 
+												   
+
 
 		PointsVertex v = cgogn::add_vertex(*p.spheres_);
 		cgogn::value<Vec3>(*p.spheres_, p.spheres_position_, v) = rp;
@@ -172,7 +188,8 @@ public:
 					float y = -0.5f + j * step;
 					float z = -0.5f + k * step;
 
-					at::Tensor point = torch::tensor({x, y, z}, torch::kFloat32);
+					at::Tensor point = torch::tensor({x, y, z}, torch::kFloat32).unsqueeze(0).to(device_);
+					
 					at::Tensor output = p.model_.forward({point}).toTensor();
 					float radius = output.item<float>();
 
@@ -226,12 +243,16 @@ protected:
 			app_.module("MeshProvider (" + std::string{mesh_traits<SURFACE>::name} + ")"));
 
 		if (torch::cuda::is_available())
-		{
+		{ 
 			std::cout << "CUDA is available! Using the GPU." << std::endl;
 			device_ = torch::kCUDA;
 		}
-		std::cout << "CUDA is not available! Using the CPU." << std::endl;
-		device_ = torch::kCPU;
+		else
+		{
+			std::cout << "CUDA is not available! Using the CPU." << std::endl;
+			device_ = torch::kCPU;
+		}
+		
 	}
 
 	void left_panel() override

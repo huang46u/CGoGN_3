@@ -23,6 +23,28 @@ if (Torch_FOUND)
 		${CMAKE_DL_LIBS}
 		${TORCH_LIBRARIES}
 	)
+	if (WIN32)
+	  get_filename_component(_TORCH_PREFIX "${Torch_DIR}/../../.." ABSOLUTE)
+
+	  if (EXISTS "${_TORCH_PREFIX}/lib")
+		add_custom_command(TARGET ndf_skeleton POST_BUILD
+		  COMMAND ${CMAKE_COMMAND} -E copy_directory
+			"${_TORCH_PREFIX}/lib"
+			"$<TARGET_FILE_DIR:ndf_skeleton>"
+		  COMMENT "Copying Torch DLLs from lib/"
+		)
+	  endif()
+
+	  if (EXISTS "${_TORCH_PREFIX}/bin")
+		add_custom_command(TARGET ndf_skeleton POST_BUILD
+		  COMMAND ${CMAKE_COMMAND} -E copy_directory
+			"${_TORCH_PREFIX}/bin"
+			"$<TARGET_FILE_DIR:ndf_skeleton>"
+		  COMMENT "Copying Torch DLLs from bin/"
+		)
+	  endif()
+	endif()
+
 else()
 	message(FATAL_ERROR "Torch not found")
 endif()
