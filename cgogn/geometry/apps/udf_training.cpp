@@ -92,6 +92,7 @@ int main(int argc, char** argv)
 	udf.set_point_cloud_render(&pcr);
 	udf.set_non_manifold_mesh_provider(&mpnm);
 	udf.set_non_manifold_render(&srnm);
+	udf.set_surface_mesh_provider(&mps);
 
 	app.init_modules();
 
@@ -124,33 +125,32 @@ int main(int argc, char** argv)
 		mps.set_mesh_bb_vertex_position(*s, s_pos);
 		sr.set_vertex_position(*v1, *s, s_pos);
 		udf.set_selected_surface(*s);
-
-		// Sample Points from Surface
-		std::cout << "Sampling input point cloud from surface..." << std::endl;
 		p = mpp.add_mesh("input_points");
-		udf.sample_surface_to_points(*s, *p, 100000);
+		if (!use_neural_udf)
+		{
+			// Sample Points from Surface
+			std::cout << "Sampling input point cloud directly from surface..." << std::endl;
+			udf.sample_surface_to_points(*s, *p, 100000);
+		}
 	}
 	else
 	{
 		std::cout << "Loading as Point Cloud..." << std::endl;
 		p = mpp.load_points_from_file(filename);
-		
-			
+		if (!p)
+		{
+			std::cout << "File could not be loaded" << std::endl;
+			return 1;
+		}
+		auto p_vertex_position = cgogn::get_attribute<Vec3, PVertex>(*p, "position");
+		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
+
+		udf.set_selected_points(*p);
+
+		pcr.set_vertex_position(*v1, *p, p_vertex_position);
 
 	}
-
-	if (!p)
-	{
-		std::cout << "File could not be loaded" << std::endl;
-		return 1;
-	}
-
-	auto p_vertex_position = cgogn::get_attribute<Vec3, PVertex>(*p, "position");
-	mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
-
-	udf.set_selected_points(*p);
-
-	pcr.set_vertex_position(*v1, *p, p_vertex_position);
+	
 	if (use_neural_udf)
 	{
 		std::cout << "=== Neural UDF Mode ===" << std::endl;

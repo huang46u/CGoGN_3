@@ -28,6 +28,7 @@
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Polygon_mesh_processing/distance.h>
 #include <CGAL/Surface_mesh.h>
+#include <CGAL/poisson_eliminate.h>
 
 #include <torch/script.h>
 #include <torch/torch.h>
@@ -53,6 +54,7 @@ using geometry::Vec3;
 using geometry::Vec4;
 using geometry::Scalar;
 using geometry::Spherical_Quadric;
+using geometry::SQEM_CASE;
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD>
 class UDFTraining : public ViewModule
@@ -232,8 +234,8 @@ private:
 		int knn_k_ = 10;
 		int seed_ = 42;
 		// Neural UDF Sampling
-		int num_alpha_samples_ = 2000000;
-		int batch_size_ = 32768;// sample batch
+		int num_alpha_samples_ = 30000;
+		int batch_size_ = 131072;  // sample batch
 		float newton_steps_ = 0.7; // stpes of newton's method
 		int max_sample_iter_ = 12; // max iterations for adjusting samples
 		float newton_epsilon_ = 1e-8;
@@ -293,6 +295,10 @@ public:
 	void set_point_cloud_render(PointCloudRender<POINTS>* pcr) { pcr_ = pcr; }
 	void set_non_manifold_mesh_provider(MeshProvider<NONMANIFOLD>* mp) { non_manifold_provider_ = mp; }
 	void set_non_manifold_render(SurfaceRender<NONMANIFOLD>* sr) { sr_nm_ = sr; }
+	void set_surface_mesh_provider(MeshProvider<SURFACE>* mp)
+	{
+		surface_provider_ = mp;
+	}
 
 	void load_neural_udf_model(POINTS& points, const std::string & model_path)
 	{
@@ -431,8 +437,8 @@ public:
 		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
 
 		// Sample points on alpha level set
-		std::vector<Vec3> sampled_points = sample_alpha_level_set(p, num_points);
-
+		std::vector<Vec3> sampled_points = sample_alpha_level_set(p, num_points*10);
+		sampled_points = poisson_eliminate_points(sampled_points, num_points);
 		if (sampled_points.empty())
 		{
 			std::cerr << "Failed to sample points on alpha level set." << std::endl;
@@ -581,6 +587,26 @@ public:
 		return accepted;
 	}
 	
+	std::vector<Vec3> poisson_eliminate_points(const std::vector<Vec3>& points, size_t target_num)
+	{
+		std::vector<Point_3> cgal_in;
+		cgal_in.reserve(points.size());
+		for (const Vec3& p : points)
+		{
+			cgal_in.push_back(Point_3(p.x(), p.y(), p.z()));
+		}
+		target_num = std::min(target_num, points.size());
+		std::vector<Point_3> cgal_out;
+		cgal_out.reserve(target_num);
+		CGAL::poisson_eliminate(cgal_in, target_num, std::back_inserter(cgal_out));
+		std::vector<Vec3> out;
+		out.reserve(cgal_out.size());
+		for (const Point_3& p : cgal_out)
+		{
+			out.push_back(Vec3(p.x(), p.y(), p.z()));
+		}
+		return out;
+	}
 
 	void test_batch_forward(PointsParameters& p)
 	{
@@ -621,38 +647,47 @@ public:
 
 		// 1. Convert CGoGN SURFACE to CGAL::Surface_mesh
 		CGAL_Mesh cgal_mesh;
-		
-		auto pos = cgogn::get_attribute<Vec3, SVertex>(surface, "position");
+		//
+		//auto pos = cgogn::get_attribute<Vec3, SVertex>(surface, "position");
 
-		std::unordered_map<uint32, CGAL_Mesh::Vertex_index> v_map;
+		//std::unordered_map<uint32, CGAL_Mesh::Vertex_index> v_map;
 
-		// Add vertices
-		foreach_cell(surface, [&](SVertex v) {
-			uint32 v_idx = index_of(surface, v);
-			const Vec3& p = (*pos)[v_idx];
-			v_map[v_idx] = cgal_mesh.add_vertex(Point_3(p[0], p[1], p[2]));
-			return true;
-		});
+		//// Add vertices
+		//foreach_cell(surface, [&](SVertex v) {
+		//	uint32 v_idx = index_of(surface, v);
+		//	const Vec3& p = (*pos)[v_idx];
+		//	v_map[v_idx] = cgal_mesh.add_vertex(Point_3(p[0], p[1], p[2]));
+		//	return true;
+		//});
 
-		// Add faces
-		foreach_cell(surface, [&](SFace f) {
-			std::vector<CGAL_Mesh::Vertex_index> face_v;
-			foreach_incident_vertex(surface, f, [&](SVertex v) {
-				face_v.push_back(v_map[index_of(surface, v)]);
-				return true;
-			});
+		//// Add faces
+		//foreach_cell(surface, [&](SFace f) {
+		//	std::vector<CGAL_Mesh::Vertex_index> face_v;
+		//	foreach_incident_vertex(surface, f, [&](SVertex v) {
+		//		face_v.push_back(v_map[index_of(surface, v)]);
+		//		return true;
+		//	});
+		//		
+		//	cgal_mesh.add_face(face_v);
+		//	return true;
+		//});
+		std::string filename = surface_provider_->mesh_filename(surface);
+		if (!filename.empty())
+		{
+			if (!CGAL::IO::read_polygon_mesh(filename, cgal_mesh) || cgal_mesh.is_empty())
+			{
+				std::cout << "Error loading CGAL surface mesh from file: " << filename << std::endl;
 				
-			cgal_mesh.add_face(face_v);
-			return true;
-		});
-	
+			}
+		}
+		normalize_surface_mesh(cgal_mesh);
 
 		// 2. Sample mesh
 		std::vector<Point_3> sampled_points;
 
 		// Using simple random sampling on mesh
 		CGAL::Polygon_mesh_processing::sample_triangle_mesh(cgal_mesh, std::back_inserter(sampled_points),
-															CGAL::parameters::use_grid_sampling(true).grid_spacing(0.01));
+															CGAL::parameters::number_of_points_per_area_unit(num_samples));
 
 		std::cout << "Sampled " << sampled_points.size() << " points from surface." << std::endl;
 
@@ -714,7 +749,29 @@ protected:
 
 private:
 	// --- Initialization ---
+	void normalize_surface_mesh(CGAL_Mesh& mesh)
+	{
+		if (mesh.is_empty())
+			return;
 
+		CGAL::Bbox_3 bbox;
+		for (auto v : mesh.vertices())
+			bbox = bbox + mesh.point(v).bbox();
+
+		double cx = (bbox.xmin() + bbox.xmax()) / 2.0;
+		double cy = (bbox.ymin() + bbox.ymax()) / 2.0;
+		double cz = (bbox.zmin() + bbox.zmax()) / 2.0;
+		double max_dim = std::max({bbox.xmax() - bbox.xmin(), bbox.ymax() - bbox.ymin(), bbox.zmax() - bbox.zmin()});
+
+		for (auto v : mesh.vertices())
+		{
+			Point_3 p = mesh.point(v);
+			double nx = (p.x() - bbox.xmin()) / max_dim;
+			double ny = (p.y() - bbox.ymin()) / max_dim;
+			double nz = (p.z() - bbox.zmin()) / max_dim;
+			mesh.point(v) = Point_3(nx, ny, nz);
+		}
+	}
 	void init_points_data(POINTS& m)
 	{
 		PointsParameters& p = points_parameters_[&m];
@@ -725,7 +782,20 @@ private:
 		p.position_ = get_attribute<Vec3, PVertex>(m, "position");
 		p.normal_ = get_or_add_attribute<Vec3, PVertex>(m, "normal");
 		p.knn_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(m, "knn");
-
+		// Build KDTree for input points
+		if (p.input_kdtree_)
+			delete p.input_kdtree_;
+		std::vector<Vec3> points;
+		p.input_kdtree_vertices_.clear();
+		points.reserve(nb_cells<PVertex>(*p.points_));
+		p.input_kdtree_vertices_.reserve(points.size());
+		foreach_cell(*p.points_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.points_, v);
+			points.push_back((*p.position_)[v_idx]);
+			p.input_kdtree_vertices_.push_back(v);
+			return true;
+		});
+		p.input_kdtree_ = new acc::KDTree<3, uint32>(points);
 		// Init Samples Mesh
 		std::string sample_name = points_provider_->mesh_name(*p.points_) + "_samples";
 		if (!p.samples_mesh_)
@@ -975,20 +1045,6 @@ private:
 
 	void sample_points(PointsParameters& p)
 	{
-		// Build KDTree for input points
-		if (p.input_kdtree_) delete p.input_kdtree_;
-		std::vector<Vec3> points;
-		p.input_kdtree_vertices_.clear();
-		points.reserve(nb_cells<PVertex>(*p.points_));
-		p.input_kdtree_vertices_.reserve(points.size());
-		foreach_cell(*p.points_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.points_, v);
-			points.push_back((*p.position_)[v_idx]);
-			p.input_kdtree_vertices_.push_back(v);
-			return true;
-		});
-		p.input_kdtree_ = new acc::KDTree<3, uint32>(points);
-
 		std::uniform_real_distribution<Scalar> uniform(0.0, 1.0);
 		std::mt19937 gen(p.seed_);
 		
@@ -1086,8 +1142,7 @@ private:
 			
 			auto [c1, r1, q1] = cgogn::geometry::shrinking_ball_center<PVertex>(
 				pt, n,
-				p.samples_kdtree_, p.samples_kdtree_vertices_,
-				true
+				p.samples_kdtree_, p.samples_kdtree_vertices_
 			);
 			
 			(*p.samples_ma_position_)[v_idx] = c1;
@@ -1322,21 +1377,21 @@ private:
 
 			return true;
 		});
-		// remove small clusters
-		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			uint32 v_idx = index_of(*p.spheres_, v);
-			std::vector<PVertex>& cluster = (*p.spheres_cluster_)[v_idx];
-			if (cluster.size() < 4)
-			{
-				for (PVertex sv : cluster) {
-					uint32 sv_idx = index_of(*p.samples_mesh_, sv);
-					(*p.samples_sphere_)[sv_idx] = PVertex();
-				}
-				remove_vertex(*p.spheres_, v);
-				p.nb_spheres_--;
-			}
-			return true;
-		});
+		//// remove small clusters
+		//foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+		//	uint32 v_idx = index_of(*p.spheres_, v);
+		//	std::vector<PVertex>& cluster = (*p.spheres_cluster_)[v_idx];
+		//	if (cluster.size() < 4)
+		//	{
+		//		for (PVertex sv : cluster) {
+		//			uint32 sv_idx = index_of(*p.samples_mesh_, sv);
+		//			(*p.samples_sphere_)[sv_idx] = PVertex();
+		//		}
+		//		remove_vertex(*p.spheres_, v);
+		//		p.nb_spheres_--;
+		//	}
+		//	return true;
+		//});
 	}
 
 	// Power distance clustering: d_power(p, sphere) = |p - center|^2 - radius^2
@@ -1390,21 +1445,21 @@ private:
 			return true;
 		});
 		
-		// remove small clusters
-		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			uint32 v_idx = index_of(*p.spheres_, v);
-			std::vector<PVertex>& cluster = (*p.spheres_cluster_)[v_idx];
-			if (cluster.size() < 4)
-			{
-				for (PVertex sv : cluster) {
-					uint32 sv_idx = index_of(*p.samples_mesh_, sv);
-					(*p.samples_sphere_)[sv_idx] = PVertex();
-				}
-				remove_vertex(*p.spheres_, v);
-				p.nb_spheres_--;
-			}
-			return true;
-		});
+		//// remove small clusters
+		//foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+		//	uint32 v_idx = index_of(*p.spheres_, v);
+		//	std::vector<PVertex>& cluster = (*p.spheres_cluster_)[v_idx];
+		//	if (cluster.size() < 4)
+		//	{
+		//		for (PVertex sv : cluster) {
+		//			uint32 sv_idx = index_of(*p.samples_mesh_, sv);
+		//			(*p.samples_sphere_)[sv_idx] = PVertex();
+		//		}
+		//		remove_vertex(*p.spheres_, v);
+		//		p.nb_spheres_--;
+		//	}
+		//	return true;
+		//});
 	}
 
 	// Use power-based clusters to compute sphere neighbors and build skeleton
@@ -1581,66 +1636,92 @@ private:
 		Vec3 c = (*p.spheres_position_)[sphere_index];
 		Scalar r = (*p.spheres_radius_)[sphere_index];
 
-		Eigen::MatrixXd J(2 * cluster.size(), 4);
-		J.setZero();
-		Eigen::VectorXd b(2 * cluster.size());
-		b.setZero();
-		uint32 idx = 0;
-		Eigen::VectorXd s(4);
-		s << c[0], c[1], c[2], r;
-		
-		for (uint32 i = 0; i < 10; ++i)
+		Spherical_Quadric q;
+		for (PVertex v : cluster)
 		{
-			idx = 0;
-			for (PVertex v : cluster)
-			{
-				uint32 v_index = index_of(*p.samples_mesh_, v);
-				const Vec3& pos = (*p.samples_position_)[v_index];
-
-				// SQEM energy
-				Eigen::Vector4d lhs = Eigen::Vector4d::Zero();
-				Scalar rhs = 0.0;
-				const Vec3& n = (*p.samples_normal_)[v_index];
-				Vec4 n4 = Vec4(n.x(), n.y(), n.z(), 1.0);
-				Scalar a = sqrt((*p.samples_area_)[v_index] / (p.knn_k_ + 1.0));
-				lhs += -n4 * a;
-				rhs += -1.0 * ((pos - Vec3(s(0), s(1), s(2))).dot(n) - s(3)) * a;
-				
-				for (PVertex vn : (*p.samples_knn_)[v_index])
-				{
-					uint32 vn_index = index_of(*p.samples_mesh_, vn);
-					const Vec3& pn = (*p.samples_position_)[vn_index];
-					const Vec3& nn = (*p.samples_normal_)[vn_index];
-					Vec4 nn4 = Vec4(nn.x(), nn.y(), nn.z(), 1.0);
-					Scalar an = sqrt((*p.samples_area_)[vn_index] / (p.knn_k_ + 1.0));
-					lhs += -nn4 * an;
-					rhs += -1.0 * ((pn - Vec3(s(0), s(1), s(2))).dot(nn) - s(3)) * an;
-				}
-				J.row(idx) = lhs;
-				b(idx) = rhs;
-				++idx;
-
-				// distance energy
-				Vec3 d = pos - Vec3(s(0), s(1), s(2));
-				Scalar l = d.norm();
-				
-				Scalar a_dist = sqrt((*p.samples_area_)[v_index]);
-				J.row(idx) =
-					Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * a_dist * p.sqem_update_lambda_;
-				b(idx) = -(l - s(3)) * a_dist * p.sqem_update_lambda_; // scale the row by the update lambda
-				
-				++idx;
-			};
-
-			Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
-			Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
-			s += delta_s;
-			if (delta_s.norm() < 1e-6) // stop early if converged
-				break;
+			uint32 v_index = index_of(*p.samples_mesh_, v);
+			Scalar a = (*p.samples_area_)[v_index];
+			q += (*p.samples_quadric_)[v_index] * a;
 		}
+		Scalar radius = 0.0;
+		SQEM_CASE sc = q.well_conditioned(radius);
+		if (sc != SQEM_CASE::Case4_Degenerate)
+		{
+			Eigen::MatrixXd J(2 * cluster.size(), 4);
+			J.setZero();
+			Eigen::VectorXd b(2 * cluster.size());
+			b.setZero();
+			uint32 idx = 0;
+			Eigen::VectorXd s(4);
+			s << c[0], c[1], c[2], r;
 
-		c = s.head<3>();
-		r = s[3];
+			for (uint32 i = 0; i < 10; ++i)
+			{
+				idx = 0;
+				for (PVertex v : cluster)
+				{
+					uint32 v_index = index_of(*p.samples_mesh_, v);
+					const Vec3& pos = (*p.samples_position_)[v_index];
+
+					// SQEM energy
+					Eigen::Vector4d lhs = Eigen::Vector4d::Zero();
+					Scalar rhs = 0.0;
+					const Vec3& n = (*p.samples_normal_)[v_index];
+					Vec4 n4 = Vec4(n.x(), n.y(), n.z(), 1.0);
+					Scalar a = sqrt((*p.samples_area_)[v_index] / (p.knn_k_ + 1.0));
+					lhs += -n4 * a;
+					rhs += -1.0 * ((pos - Vec3(s(0), s(1), s(2))).dot(n) - s(3)) * a;
+
+					for (PVertex vn : (*p.samples_knn_)[v_index])
+					{
+						uint32 vn_index = index_of(*p.samples_mesh_, vn);
+						const Vec3& pn = (*p.samples_position_)[vn_index];
+						const Vec3& nn = (*p.samples_normal_)[vn_index];
+						Vec4 nn4 = Vec4(nn.x(), nn.y(), nn.z(), 1.0);
+						Scalar an = sqrt((*p.samples_area_)[vn_index] / (p.knn_k_ + 1.0));
+						lhs += -nn4 * an;
+						rhs += -1.0 * ((pn - Vec3(s(0), s(1), s(2))).dot(nn) - s(3)) * an;
+					}
+					J.row(idx) = lhs;
+					b(idx) = rhs;
+					++idx;
+
+					// distance energy
+					Vec3 d = pos - Vec3(s(0), s(1), s(2));
+					Scalar l = d.norm();
+
+					Scalar a_dist = sqrt((*p.samples_area_)[v_index]);
+					J.row(idx) =
+						Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * a_dist * p.sqem_update_lambda_;
+					b(idx) = -(l - s(3)) * a_dist * p.sqem_update_lambda_; // scale the row by the update lambda
+
+					++idx;
+				};
+
+				Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
+				Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
+				s += delta_s;
+				if (delta_s.norm() < 1e-6) // stop early if converged
+					break;
+			}
+			c = s.head<3>();
+			r = s[3];
+		}
+		else
+		{
+			std::cout << "Sphere " << sphere_index << " is not well conditioned, using shrinking ball" << std::endl;
+			// apply shrinking ball
+			std::pair<uint32, Scalar> knn_res;
+			p.samples_kdtree_->find_nn(c, &knn_res);
+			PVertex nn = p.samples_kdtree_vertices_[knn_res.first];
+			Vec3 closest_point_position = (*p.position_)[index_of(*p.points_, nn)];
+			Vec3 closest_point_dir = (closest_point_position - c).normalized();
+			auto [center, radius, q] = geometry::shrinking_ball_center(
+				closest_point_position, closest_point_dir, p.samples_kdtree_, p.samples_kdtree_vertices_);
+			c = center;
+			r = radius;
+		}
+		
 
 		(*p.spheres_position_)[sphere_index] = c;
 		(*p.spheres_radius_)[sphere_index] = r;
@@ -1661,8 +1742,7 @@ private:
 		
 		auto [nc, nr, nq] = cgogn::geometry::shrinking_ball_center<PVertex>(
 			closest_pos, dir,
-			p.samples_kdtree_, p.samples_kdtree_vertices_,
-			true
+			p.samples_kdtree_, p.samples_kdtree_vertices_
 		);
 		c = nc; r = nr;
 	}
@@ -2417,6 +2497,7 @@ protected:
 
 private:
 
+	MeshProvider<SURFACE>* surface_provider_ = nullptr;
 	MeshProvider<POINTS>* points_provider_ = nullptr;
 	PointCloudRender<POINTS>* pcr_ = nullptr;
 	MeshProvider<NONMANIFOLD>* non_manifold_provider_ = nullptr;

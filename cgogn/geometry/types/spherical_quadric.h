@@ -32,8 +32,17 @@ namespace cgogn
 namespace geometry
 {
 
+enum class SQEM_CASE
+{
+	Case1_Full,
+	Case2_Line,
+	Case3_Plane,
+	Case4_Degenerate
+};
+
 struct Spherical_Quadric
 {
+
 	Spherical_Quadric()
 	{
 		this->clear();
@@ -99,6 +108,47 @@ struct Spherical_Quadric
 	Vec4 gradient(const Vec4& p) const
 	{
 		return _A * p - _b;
+	}
+
+	SQEM_CASE well_conditioned(Scalar& r_out) const
+	{
+		Eigen::JacobiSVD<Mat4> svd(_A, Eigen::ComputeFullU | Eigen::ComputeFullV);
+		Mat4 U = svd.matrixU();
+		Vec4 S = svd.singularValues();
+		Mat4 V = svd.matrixV();
+		std::vector<double> sorted_sv{S(0), S(1), S(2), S(3)};
+
+		std::sort(sorted_sv.begin(), sorted_sv.end(), std::greater<>());
+		int rank = 0;
+		for (int i = 0; i < 4; ++i)
+		{
+			if (sorted_sv[i] > 1e-6)
+				rank++;
+		}
+		if (rank > 1)
+		{
+			Mat4 Sp = Mat4::Zero();
+			for (int i = 0; i < 4; ++i)
+			{
+				if (S(i) > 1e-6)
+					Sp(i, i) = 1.0 / S(i);
+				else
+					Sp(i, i) = 0;
+			}
+			Vec4 m = V * Sp * U.transpose() * _b;
+			r_out = m(3);
+		}
+		switch (rank)
+		{
+		case 4:
+			return SQEM_CASE::Case1_Full;
+		case 3:
+			return SQEM_CASE::Case2_Line;
+		case 2:
+			return SQEM_CASE::Case3_Plane;
+		default:
+			return SQEM_CASE::Case4_Degenerate;
+		}
 	}
 
 	bool optimized(Vec4& sphere)
