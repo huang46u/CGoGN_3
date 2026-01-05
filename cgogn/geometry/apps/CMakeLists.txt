@@ -202,6 +202,17 @@ target_link_libraries(constriction
 	${CMAKE_DL_LIBS}
 )
 
+#add_executable(test_fast_winding_number test_fast_winding_number.cpp)
+#target_link_libraries(test_fast_winding_number
+#	cgogn::core
+#	cgogn::geometry
+#	cgogn::io
+#	cgogn::ui
+#	cgogn::rendering
+#	${CMAKE_DL_LIBS}
+#)
+
+
 if(APPLE)
 	find_library(CORE_FOUNDATION CoreFoundation)
 	find_library(CARBON Carbon)
