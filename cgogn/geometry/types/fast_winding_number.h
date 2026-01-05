@@ -36,176 +36,6 @@ namespace cgogn
 namespace geometry
 {
 
-
-template <typename MESH>
-struct Fast_Winding_Number_Triangle_Traits
-{
-	using Face = typename mesh_traits<MESH>::Face;
-	using Vertex = typename mesh_traits<MESH>::Vertex;
-	template <typename T>
-	using Attribute = typename mesh_traits<MESH>::template Attribute<T>;
-	Fast_Winding_Number_Triangle_Traits(const MESH& mesh,
-									    const Attribute<Vec3>* vertex_position, 
-										const Attribute<Vec3>* face_normal, 
-										const Attribute<Scalar>* face_area,
-										const Attribute<Vec3>* face_centroid,
-										const std::vector<Face>& primitives)
-		: mesh_(m), vertex_position_(vertex_position), face_normal_(face_normal), face_area_(face_area),
-		  face_centroid_(face_centroid), primitives_(primitives)
-	{
-	}
-	
-	inline Scalar weight(std::size_t idx) const
-	{
-		return value<Scalar>(mesh_, face_area_, primitives_[idx]);
-	}
-	inline Vec3 centroid(std::size_t idx) const
-	{
-		return value<Vec3>(mesh_, face_centroid_, primitives_[idx]);
-	}
-
-	inline Vec3 normal(std::size_t idx) const
-	{
-		return value<Vec3>(mesh_, face_normal_, primitives_[idx]);
-	}
-
-	inline Scalar leaf_value(const Vec3& q, std::size_t idx) const
-	{
-		const Face& f = primitives_[idx];
-		auto iv = incident_vertices(m_, f);
-		Vec3 v1 = value<Vec3>(m_, vertex_position_, iv[0]) - q;
-		Vec3 v2 = value<Vec3>(m_, vertex_position_, iv[1]) - q;
-		Vec3 v3 = value<Vec3>(m_, vertex_position_, iv[2]) - q;
-		Scalar l1 = v1.norm();
-		Scalar l2 = v2.norm();
-		Scalar l3 = v3.norm();
-
-		if (l1 == 0 || l2 == 0 || l3 == 0)
-			return 0;
-		v1 /= l1;
-		v2 /= l2;
-		v3 /= l3;
-
-		const Scalar numerator = v1.dot((v2 - v1).cross(v3 - v1));
-		if (numerator == 0)
-			return 0;
-		const Scalar denominator = 1 + v1.dot(v2) + v2.dot(v3) + v3.dot(v1);
-		return 2 * std::atan2(numerator, denominator);
-
-	}
-
-	inline Scalar max_extent_from(const Vec3& p_tilde, std::size_t idx) const
-	{
-		const Face& f = primitives_[idx];
-		auto iv = incident_vertices(mesh_, f);
-		Scalar max_dist = 0;
-		for (const Vertex& v : iv)
-		{
-			max_dist = std::max(max_dist, (value<Vec3>(mesh_, vertex_position_, v) - p_tilde).norm());
-		}
-		return max_dist;
-	}
-
-	template <int ORDER>
-	inline void accumulate_order3(Tensor3& T, const Vec3& p_tilde, std::size_t idx, const Vec3& n, Scalar a) const
-	{
-		if constexpr (ORDER >= 3)
-		{
-			const Face& f = primitives_[idx];
-			auto iv = incident_vertices(mesh_, f);
-			Vec3 p1 = value<Vec3>(mesh_, vertex_position_, iv[0]);
-			Vec3 p2 = value<Vec3>(mesh_, vertex_position_, iv[1]);
-			Vec3 p3 = value<Vec3>(mesh_, vertex_position_, iv[2]);
-
-			Vec3 v1 = 0.5 * (p1 + p2) - p_tilde;
-			Vec3 v2 = 0.5 * (p2 + p3) - p_tilde;
-			Vec3 v3 = 0.5 * (p3 + p1) - p_tilde;
-
-			T.add(v1, v2, v3, n, a);
-		}
-	}
-
-private:
-	MESH& mesh_;
-	const Attribute<Vec3>* vertex_position_;
-	const Attribute<Vec3>* face_normal_;
-	const Attribute<Scalar>* face_area_;
-	const Attribute<Vec3>* face_centroid_;
-	const std::vector<Face>& primitives_;
-};
-
-template <typename MESH>
-struct Fast_Winding_Number__PointCloud_Traits
-{
-	using Vertex = typename mesh_traits<MESH>::Vertex;
-	template <typename T>
-	using Attribute = typename mesh_traits<MESH>::template Attribute<T>;
-
-	Fast_Winding_Number__PointCloud_Traits(MESH& m, const Attribute<Vec3>* vertex_pos,
-										   const Attribute<Vec3>* vertex_normal,
-						  const Attribute<Scalar>* vertex_area, const std::vector<Vertex>& primitives)
-		: mesh_(m), vertex_position_(vertex_pos), vertex_normal_(vertex_normal), vertex_area_(vertex_area),
-		  primitives_(primitives)
-	{
-	}
-
-	inline Scalar weight(std::size_t idx) const
-	{
-		return value<Scalar>(mesh_, vertex_area_, primitives_[idx]);
-	}
-
-	inline Vec3 center(std::size_t idx) const
-	{
-		return value<Vec3>(mesh_, vertex_position_, primitives_[idx]);
-	}
-
-	inline Vec3 normal(std::size_t idx) const
-	{
-		Vec3 n = value<Vec3>(mesh_, vertex_normal_, primitives_[idx]);
-		Scalar len = n.norm();
-		return (len > 1e-15) ? (n / len) : Vec3(0, 0, 1); // fallback for degenerate normals
-	}
-
-	// Leaf contribution: dipole kernel
-	inline Scalar leaf_value(const Vec3& q, std::size_t idx) const
-	{
-		Vec3 p = center(idx);
-		Vec3 n = normal(idx);
-		Scalar a = weight(idx);
-
-		Vec3 r = p - q;
-		Scalar dist = r.norm();
-
-		if (dist < 1e-10)
-			return 0;
-
-		Scalar dist3 = dist * dist * dist;
-		return a * r.dot(n) / (4 * M_PI * dist3);
-	}
-
-	inline Scalar max_extent_from(const Vec3& p_tilde, std::size_t idx) const
-	{
-		return (center(idx) - p_tilde).norm();
-	}
-
-	// ORDER=3:simple point-based accumulation
-	template <int ORDER>
-	inline void accumulate_order3(Tensor3& T, const Vec3& r, std::size_t idx, const Vec3& n, Scalar a) const
-	{
-		if constexpr (ORDER >= 3)
-		{	
-			T.add(r, r, r, n, a);
-		}
-	}
-
-private:
-	MESH& mesh_;
-	const Attribute<Vec3>* vertex_position_;
-	const Attribute<Vec3>* vertex_normal_;
-	const Attribute<Scalar>* vertex_area_;
-	const std::vector<Vertex>& primitives_;
-};
-
 inline Scalar frobenius_product(const Mat3& A, const Mat3& B)
 {
 	return A.cwiseProduct(B).sum();
@@ -340,23 +170,37 @@ struct Fast_Winding_Number_Coeff<3, Scalar, VEC3>
 	Tensor3 T;
 };
 
-template <typename Traits, int ORDER = 3>
+template <typename MESH, int ORDER = 3>
 class Fast_Winding_Number
 {
 	template <typename T>
+	using Attribute = typename mesh_traits<MESH>::template Attribute<T>;
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+	using Face = typename mesh_traits<MESH>::Face;
 	using BVH = acc::BVHTree<std::size_t, Vec3>;
 	using Coeff = Fast_Winding_Number_Coeff<ORDER, Scalar, Vec3>;
 	using Mat3 = Eigen::Matrix<Scalar, 3, 3>;
 
 public:
-	Fast_Winding_Number(const Traits& traits, const BVH& bvh_tree, Scalar beta)
-		: traits_(traits), bvh_tree_(&bvh_tree), beta_(beta)
+	Fast_Winding_Number(MESH& m, const BVH& bvh_tree, Attribute<Vec3>* vertex_position, Attribute<Vec3>* face_normal,
+						const std::vector<Face>& bvh_faces, Scalar beta)
+		: m_(m), bvh_tree_(&bvh_tree), vertex_position_(vertex_position), face_normal_(face_normal),
+		  bvh_faces_(bvh_faces), beta_(beta)
 	{
+		face_area_ = get_or_add_attribute<Scalar, Face>(m_, "f_area");
+		face_centroid_ = get_or_add_attribute<Vec3, Face>(m_, "f_centroid");
 		uint32 nb_node = bvh_tree_->node_count();
 		coeffs_.resize(nb_node);
 		p_tilde_.resize(nb_node, Vec3(0, 0, 0));
 		node_radius_.resize(nb_node, 0);
+		compute_area<Face>(m_, vertex_position_, face_area_.get());
+		compute_centroid<Vec3, Face, MESH>(m_, vertex_position_, face_centroid_.get());
 		precompute_coeffs();
+	}
+	~Fast_Winding_Number()
+	{
+		remove_attribute<Face>(m_, face_area_);
+		remove_attribute<Face>(m_, face_centroid_);
 	}
 	
 	Scalar evaluate_fast_winding_number(const Vec3& q) const
@@ -364,12 +208,10 @@ public:
 		Scalar w = 0;
 		std::stack<std::size_t> st;
 		st.push(0);
-
 		while (!st.empty())
 		{
 			std::size_t node_id = st.top();
 			st.pop();
-
 			Vec3 r = p_tilde_[node_id] - q;
 			if (r.norm() > beta_ * node_radius_[node_id])
 			{
@@ -379,7 +221,7 @@ public:
 			{
 				if (bvh_tree_->is_leaf(node_id))
 				{
-					w += leaf_sum(q, node_id);
+					w += solid_angle_leaf(q, node_id);
 				}
 				else
 				{
@@ -397,15 +239,13 @@ public:
 	Scalar exact_winding_number(const Vec3& q) const
 	{
 		Scalar w = 0;
-		auto [first, last] = bvh_tree_->range(0);
-		for (auto i = first; i < last; i++)
+		for (const Face& f : bvh_faces_)
 		{
-			w += traits_.leaf_value(q, bvh_tree_->get_primitive_index(i));
+			w += solid_angle(q, f) / (4 * M_PI);
+
 		}
 		return w;
 	}
-
-
 
 private:
 	void precompute_coeffs()
@@ -415,22 +255,21 @@ private:
 		while (!st.empty())
 		{
 			std::size_t node_id = st.top();
-			st.pop();
 			Coeff& coeff = coeffs_[node_id];
+			st.pop();
 			std::vector<std::size_t> primitives;
 			primitives.reserve(nb_cells<Face>(m_));
 			bvh_tree_->collect_primitives_id(node_id, primitives);
-
 			Scalar sum_area = 0;
 			Vec3 sum_ac(0, 0, 0); // sum of weighted centroid
 			Vec3 sum_an(0, 0, 0); // sum of weighted normal
 			// compute p_tilde
-			for (std::size_t& pid : primitives)
+			for (std::size_t& fid : primitives)
 			{
-				Scalar a = traits_.weight(pid);
-				Vec3 c = traits_.center(pid);
-				Vec3 n = traits_.normal(pid);
-
+				Face f = bvh_faces_[fid];
+				Scalar a = value<Scalar>(m_, face_area_, f);
+				Vec3 c = value<Vec3>(m_, face_centroid_, f);
+				Vec3 n = value<Vec3>(m_, face_normal_, f);
 				sum_area += a;
 				sum_ac += a * c;
 				sum_an += a * n;
@@ -440,24 +279,35 @@ private:
 				p_tilde_[node_id] = sum_ac / sum_area;
 			}
 			Scalar max_norm = 0;
-			for (std::size_t& pid : primitives)
+			for (std::size_t& fid : primitives)
 			{
-				Scalar a = traits_.weight(pid);
-				Vec3 c = traits_.center(pid);
-				Vec3 n = traits_.normal(pid);
+				Face f = bvh_faces_[fid];
+				Scalar a = value<Scalar>(m_, face_area_, f);
+				Vec3 c = value<Vec3>(m_, face_centroid_, f);
+				Vec3 n = value<Vec3>(m_, face_normal_, f);
 				Vec3 r = c - p_tilde_[node_id];
-
-				max_dist = std::max(max_dist, traits_.max_extent_from(p_tilde_[node_id], pid));
-				
+				auto iv = incident_vertices(m_, f);
+				for (Vertex v : iv)
+				{
+					max_norm = std::max(max_norm, (value<Vec3>(m_, vertex_position_, v) - p_tilde_[node_id]).norm());
+				}
 				if constexpr (ORDER < 3)
 					coeff.add(r, n, a);
 				else
 				{
-					traits_.template accumulate_order3<ORDER>(coeff.T, r, pid, n, a);
-					coeff.Q += a * (c * n.transpose());
+					auto iv = incident_vertices(m_, f);
+					Vec3 p1 = value<Vec3>(m_, vertex_position_, iv[0]);
+					Vec3 p2 = value<Vec3>(m_, vertex_position_, iv[1]);
+					Vec3 p3 = value<Vec3>(m_, vertex_position_, iv[2]);
+					Vec3 v1 = 0.5 * (p1 + p2) - p_tilde_[node_id];
+					Vec3 v2 = 0.5 * (p2 + p3) - p_tilde_[node_id];
+					Vec3 v3 = 0.5 * (p3 + p1) - p_tilde_[node_id];
+
+					coeff.add(v1, v2, v3, r, n, a);
 				}
 			}
-			node_radius_[node_id] = max_dist;
+			//node_radius_[node_id] = aabb_radius(node_id);
+			node_radius_[node_id] = max_norm;
 			/*std::cout << "Node computed radius: " << max_norm << ", AABB computed radius: " << aabb_radius(node_id)
 					  << std::endl;*/
 			coeff.sum_area = sum_area;
@@ -496,14 +346,16 @@ private:
 		return K;
 	}
 	
-	Scalar leaf_sum(const Vec3& q, std::size_t node_id) const
+	Scalar solid_angle_leaf(const Vec3& q, const std::size_t node_id) const
 	{
 		Scalar w = 0.0;
 		auto [first, last] = bvh_tree_->range(node_id);
 		for (auto i = first; i < last; i++)
 		{
-			std::size_t prim_id = bvh_tree_->get_primitive_index(i);
-			w += traits_.leaf_value(q, prim_id);
+			std::size_t fid = bvh_tree_->get_primitive_index(i);
+			Face f = bvh_faces_[fid];
+
+			w += solid_angle(q, f) / (4 * M_PI);
 		}
 		return w;
 	}
@@ -576,20 +428,19 @@ private:
 	}
 
 private:
-	const Traits& traits_;
-	const BVH* bvh_tree_;
 	Scalar beta_;
+	const BVH* bvh_tree_;
+	MESH& m_;
+	const Attribute<Vec3>* vertex_position_;
+	const Attribute<Vec3>* face_normal_;
+	std::shared_ptr<Attribute<Scalar>> face_area_;
+	std::shared_ptr<Attribute<Vec3>> face_centroid_;
 
+	const std::vector<Face>& bvh_faces_;
 	std::vector<Coeff> coeffs_;
 	std::vector<Scalar> node_radius_; // radius of the aabb of the node
 	std::vector<Vec3> p_tilde_;
 };
-
-template <typename MESH, int ORDER = 3>
-using Fast_Winding_Number_Mesh = Fast_Winding_Number<Fast_Winding_Number_Triangle_Traits<MESH>, ORDER>;
-
-template <typename MESH, int ORDER = 3>
-using Fast_Winding_Number_PointCloud = Fast_Winding_Number<Fast_Winding_Number__PointCloud_Traits<MESH>, ORDER>;
 
 } // namespace geometry
 
