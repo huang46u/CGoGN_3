@@ -157,13 +157,14 @@ int main(int argc, char** argv)
 		auto p_vertex_position = cgogn::get_or_add_attribute<Vec3, PVertex>(*p, "position");
 		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
 		// print bounding box of point_cloud
+		udf.set_selected_points(*p);
+		udf.load_neural_udf_model(*p, model_path);
+	
+		
+		pcr.set_vertex_position(*v1, *p, p_vertex_position);
 		auto [bb_min, bb_max] = mpp.meshes_bb();
 		std::cout << "Loaded point cloud bounding box: min(" << bb_min.transpose() << "), max(" << bb_max.transpose()
 				  << ")" << std::endl;
-		udf.set_selected_points(*p);
-		udf.load_neural_udf_model(*p, model_path);
-		pcr.set_vertex_position(*v1, *p, p_vertex_position);
-
 		std::cout << "Neural UDF model loaded. Use UI to sample alpha-level set." << std::endl;
 	}
 	app.background_color_ = cgogn::rendering::GLColor(0.5f, 0.5f, 0.5f, 1.0f);
