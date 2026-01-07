@@ -336,13 +336,13 @@ private:
 		float32 radius_tolerance_ = 0.01f;
 
 		// Sampling Parameters
-		float alpha_ = 0.005f;
+		float alpha_ = 0.003f;
 		float sample_radius_ = 0.0025f;
 		int sample_iterations_ = 30;  // Max attempts per point
 		int knn_k_ = 10;
 		int seed_ = 42;
 		// Neural UDF Sampling
-		int num_alpha_samples_ = 100000;
+		int num_alpha_samples_ = 300000;
 		int batch_size_ = 65532;  // sample batch
 		float newton_steps_ = 0.7; // stpes of newton's method
 		int max_sample_iter_ = 12; // max iterations for adjusting samples
@@ -739,13 +739,13 @@ public:
 		RayLevelSetSampler::Config config;
 		config.alpha = p.alpha_;
 		config.bbox_expand = 0.1f;
-		config.rays_per_batch = 65536;
+		config.rays_per_batch = 8192;
 		config.lipschitz = 4.0f;
 		config.delta_enter = 0.003f;
 		config.merge_dist = 1e-4f;
 		config.max_iterations = 1000;
 		config.newton_tol = 1e-5f;
-		config.newton_max_iter = 6;
+		config.newton_max_iter = 3;
 		
 
 		Vec3 bbox_min(0, 0, 0);
@@ -768,13 +768,13 @@ public:
 
 			std::cout << "Iteration " << iter << ": Processing " << R << " rays on GPU..." << std::endl;
 
-			torch::Tensor O_cpu =
-				torch::empty({R, 3}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-			torch::Tensor D_cpu =
-				torch::empty({R, 3}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-			torch::Tensor t_cpu = torch::empty({R}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-			torch::Tensor t_max_cpu =
-				torch::empty({R}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
+			auto cpu_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+			if (device_.is_cuda())
+				cpu_options = cpu_options.pinned_memory(true);
+			torch::Tensor O_cpu = torch::empty({R, 3}, cpu_options);
+			torch::Tensor D_cpu = torch::empty({R, 3}, cpu_options);
+			torch::Tensor t_cpu = torch::empty({R}, cpu_options);
+			torch::Tensor t_max_cpu = torch::empty({R}, cpu_options);
 
 			{
 				auto O_acc = O_cpu.accessor<float, 2>();
@@ -800,13 +800,15 @@ public:
 			torch::Tensor D = D_cpu.to(device_);
 			torch::Tensor t = t_cpu.to(device_);
 			torch::Tensor t_max = t_max_cpu.to(device_);
+			torch::Tensor t_min0 = t.clone();
 
 			torch::Tensor active = torch::ones({R}, torch::TensorOptions().dtype(torch::kBool).device(device_));
 
 	
-			std::vector<int> refine_ray_indices;
-			std::vector<std::pair<Scalar, Scalar>> refine_windows;
-
+			std::vector<torch::Tensor> refine_indices_list;
+			std::vector<torch::Tensor> refine_tstart_list;
+			std::vector<torch::Tensor> refine_tend_list;
+			int64_t refine_task_count = 0;
 
 			torch::Tensor last_udf =
 				torch::full({R}, -1.0f, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
@@ -817,8 +819,10 @@ public:
 				int active_count = torch::sum(active).item<int>();
 				if (active_count == 0)
 					break;
+				
+				torch::Tensor t_eff = torch::min(t, t_max);
 
-				torch::Tensor X = O + t.unsqueeze(1) * D;
+				torch::Tensor X = O + t_eff.unsqueeze(1) * D;
 
 				torch::Tensor udf = forward_values_gpu(p, X);
 				if (!udf.defined())
@@ -841,45 +845,44 @@ public:
 				torch::Tensor refine_indices = torch::nonzero(should_refine).squeeze(1);
 				if (refine_indices.numel() > 0)
 				{
-					auto cpu_indices = refine_indices.to(torch::kCPU);
-					auto cpu_t = t.to(torch::kCPU);
-					auto cpu_residual = residual.to(torch::kCPU);
+					torch::Tensor t_curr = t.index_select(0, refine_indices);
+					torch::Tensor res = residual.index_select(0, refine_indices);
+					torch::Tensor t_min = t_min0.index_select(0, refine_indices);
+					torch::Tensor t_max_local = t_max.index_select(0, refine_indices);
 
-					auto idx_acc = cpu_indices.accessor<int64_t, 1>();
-					auto t_acc = cpu_t.accessor<float, 1>();
-					auto res_acc = cpu_residual.accessor<float, 1>();
+					torch::Tensor min_half = torch::full_like(res, config.delta_enter * 2.0f);
+					torch::Tensor window_half = torch::max(res / config.lipschitz * 2.0f, min_half);
 
-					for (int64_t i = 0; i < cpu_indices.size(0); ++i)
-					{
-						int ray_idx = static_cast<int>(idx_acc[i]);
-						Scalar t_curr = t_acc[ray_idx];
-						Scalar res = res_acc[ray_idx];
+					torch::Tensor t_start = torch::max(t_min, t_curr - window_half);
+					torch::Tensor t_end = torch::min(t_max_local, t_curr + window_half);
 
-						Scalar window_half = std::max(res / config.lipschitz * 2.0f, config.delta_enter * 2.0f);
-
-						refine_ray_indices.push_back(ray_idx);
-						refine_windows.push_back({std::max(rays[ray_idx].t_min, t_curr - window_half),
-												  std::min(rays[ray_idx].t_max, t_curr + window_half)});
-					}
+					refine_indices_list.push_back(refine_indices);
+					refine_tstart_list.push_back(t_start);
+					refine_tend_list.push_back(t_end);
+					refine_task_count += refine_indices.numel();
 				}
 
-				last_udf = udf.clone();
+				last_udf.copy_(udf);
 
 				torch::Tensor safe_step = residual / config.lipschitz * 0.8f;
+				//std::cout << "safe_step: " << safe_step.index({torch::indexing::Slice(0, 5)}) << std::endl;
 				safe_step = torch::clamp_min(safe_step, config.alpha * 0.02f); 
-
+				
 				torch::Tensor window_skip = residual / config.lipschitz * 2.0f;
+				//std::cout << "window_skip:" << window_skip.index({torch::indexing::Slice(0, 5)}) << std::endl;
 				window_skip = torch::clamp_min(window_skip, config.delta_enter * 2.0f);
 
 				torch::Tensor step_size = torch::where(should_refine, window_skip, safe_step);
-
+				
 				t = t + step_size;
 
 				active = active & (t < t_max);
 
+				t = torch::min(t, t_max);
+				
 				if (step % 20 == 0)
 				{
-					std::cout << "    Step " << step << ": " << active_count << " active, " << refine_ray_indices.size()
+					std::cout << "    Step " << step << ": " << active_count << " active, " << refine_task_count
 							  << " refine tasks\r" << std::flush;
 				}
 			}
@@ -888,36 +891,23 @@ public:
 
 			std::vector<Vec3> iter_samples;
 
-			if (!refine_ray_indices.empty())
+			if (!refine_indices_list.empty())
 			{
-				std::cout << "  GPU Refine: " << refine_ray_indices.size() << " tasks..." << std::endl;
+				torch::Tensor refine_indices = torch::cat(refine_indices_list, 0);
+				torch::Tensor t_start = torch::cat(refine_tstart_list, 0);
+				torch::Tensor t_end = torch::cat(refine_tend_list, 0);
+
+				std::cout << "  GPU Refine: " << refine_indices.size(0) << " tasks..." << std::endl;
 
 				const int dense_samples = 32;
-				const int K = static_cast<int>(refine_ray_indices.size());
+				const int K = static_cast<int>(refine_indices.size(0));
 
-				// ??? CPU tensor
-				torch::Tensor dense_t_cpu =
-					torch::empty({K, dense_samples}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-				torch::Tensor ray_ids_cpu =
-					torch::empty({K}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
-
-				{
-					auto dt_acc = dense_t_cpu.accessor<float, 2>();
-					auto rid_acc = ray_ids_cpu.accessor<int64_t, 1>();
-
-					for (int i = 0; i < K; ++i)
-					{
-						rid_acc[i] = refine_ray_indices[i];
-						auto [t_start, t_end] = refine_windows[i];
-						for (int j = 0; j < dense_samples; ++j)
-						{
-							dt_acc[i][j] = static_cast<float>(t_start + (t_end - t_start) * j / (dense_samples - 1.0f));
-						}
-					}
-				}
-
-				torch::Tensor dense_t = dense_t_cpu.to(device_);
-				torch::Tensor ray_ids = ray_ids_cpu.to(device_);
+				torch::Tensor lin = torch::linspace(
+					0.0f, 1.0f, dense_samples,
+					torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+				torch::Tensor dense_t =
+					t_start.unsqueeze(1) + lin.unsqueeze(0) * (t_end - t_start).unsqueeze(1);
+				torch::Tensor ray_ids = refine_indices;
 
 				torch::Tensor task_O = O.index_select(0, ray_ids);
 				torch::Tensor task_D = D.index_select(0, ray_ids);
@@ -993,14 +983,13 @@ public:
 							break;
 
 						torch::Tensor f = f_raw - config.alpha;
-
-						// ???? = grad * direction
+						//std::cout<<" f: "<<f.index({torch::indexing::Slice(0,5)})<< "f_max: "<<f.max().item<float>()<<std::endl;
 						torch::Tensor dfdt = (grad * newton_D).sum(1);
 
-						// Newton ??
-						torch::Tensor delta_t = -f / torch::clamp_min(torch::abs(dfdt), 1e-10f);
-						delta_t = torch::where(dfdt.abs() < 1e-10f, torch::zeros_like(delta_t), delta_t);
-
+						// Newton 
+						torch::Tensor delta_t = torch::zeros_like(dfdt);
+						torch::Tensor ok = dfdt.abs() > 1e-10f;
+						delta_t = torch::where(ok, -f / dfdt, delta_t);
 						newton_t = torch::clamp(newton_t + delta_t, ta, tb);
 					}
 					/*for (int nit = 0; nit < newton_iters; ++nit)
@@ -1063,7 +1052,6 @@ public:
 			std::shuffle(all_samples.begin(), all_samples.end(), gen);
 			all_samples.resize(target_num_points);
 		}
-		c10::cuda::CUDACachingAllocator::emptyCache();
 		return all_samples;
 	}
 	std::vector<Vec3> sample_alpha_level_set(PointsParameters& p, size_t num_points)
@@ -1727,85 +1715,84 @@ private:
 
 		// Filter points with ball radius >= 1.1 * epsilon (ball may be outside the surface)
 		// First try to fix by re-estimating normal from input cloud
-		if (nb_cells<PVertex>(*p.points_) > 0)
-		{
+		
 
-			std::vector<PVertex> to_remove;
-			auto remove = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__to_remove");
-			parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-				uint32 v_idx = index_of(*p.samples_mesh_, v);
-				Scalar radius = (*p.samples_ma_radius_)[v_idx];
+		std::vector<PVertex> to_remove;
+		auto remove = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__to_remove");
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			Scalar radius = (*p.samples_ma_radius_)[v_idx];
 
-				if (radius >= 1.1 * p.alpha_)
+			if (radius >= 1.1 * p.alpha_)
+			{
+				// Try to fix: re-estimate normal using local PCA on samples
+				Vec3 pt = (*p.samples_position_)[v_idx];
+
+				// Find K nearest neighbors in samples mesh
+				std::vector<std::pair<uint32, Scalar>> knn_res;
+				p.samples_kdtree_->find_nns(pt, p.knn_k_, &knn_res);
+
+				// Extract indices for PCA
+				std::vector<uint32> indices;
+				for (auto& res : knn_res)
+					indices.push_back(res.first);
+
+				// Compute PCA normal from local neighborhood
+				if (indices.size() >= 3 && nb_cells<PVertex>(*p.points_)>0)
 				{
-					// Try to fix: re-estimate normal using local PCA on samples
-					Vec3 pt = (*p.samples_position_)[v_idx];
+					Vec3 new_normal = compute_pca_normal(*p.samples_mesh_, *p.samples_position_, indices,
+															p.samples_kdtree_vertices_);
 
-					// Find K nearest neighbors in samples mesh
-					std::vector<std::pair<uint32, Scalar>> knn_res;
-					p.samples_kdtree_->find_nns(pt, p.knn_k_, &knn_res);
+					// Orient normal: should point away from surface (same side as current position relative to
+					// input cloud)
+					std::pair<uint32, Scalar> input_nn_res;
+					p.input_kdtree_->find_nn(pt, &input_nn_res);
+					PVertex input_nn = p.input_kdtree_vertices_[input_nn_res.first];
+					Vec3 input_nn_pos = (*p.position_)[index_of(*p.points_, input_nn)];
+					Vec3 to_pt = (pt - input_nn_pos).normalized();
+					if (new_normal.dot(to_pt) < 0)
+						new_normal = -new_normal;
 
-					// Extract indices for PCA
-					std::vector<uint32> indices;
-					for (auto& res : knn_res)
-						indices.push_back(res.first);
+					(*p.samples_normal_)[v_idx] = new_normal;
 
-					// Compute PCA normal from local neighborhood
-					if (indices.size() >= 3)
-					{
-						Vec3 new_normal = compute_pca_normal(*p.samples_mesh_, *p.samples_position_, indices,
-															 p.samples_kdtree_vertices_);
+					// Re-compute shrinking ball with new normal
+					auto [c2, r2, q2] = cgogn::geometry::shrinking_ball_center<PVertex>(
+						pt, new_normal, p.samples_kdtree_, p.samples_kdtree_vertices_, true);
 
-						// Orient normal: should point away from surface (same side as current position relative to
-						// input cloud)
-						std::pair<uint32, Scalar> input_nn_res;
-						p.input_kdtree_->find_nn(pt, &input_nn_res);
-						PVertex input_nn = p.input_kdtree_vertices_[input_nn_res.first];
-						Vec3 input_nn_pos = (*p.position_)[index_of(*p.points_, input_nn)];
-						Vec3 to_pt = (pt - input_nn_pos).normalized();
-						if (new_normal.dot(to_pt) < 0)
-							new_normal = -new_normal;
+					(*p.samples_ma_position_)[v_idx] = c2;
+					(*p.samples_ma_radius_)[v_idx] = r2;
+					(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q2);
 
-						(*p.samples_normal_)[v_idx] = new_normal;
-
-						// Re-compute shrinking ball with new normal
-						auto [c2, r2, q2] = cgogn::geometry::shrinking_ball_center<PVertex>(
-							pt, new_normal, p.samples_kdtree_, p.samples_kdtree_vertices_, true);
-
-						(*p.samples_ma_position_)[v_idx] = c2;
-						(*p.samples_ma_radius_)[v_idx] = r2;
-						(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q2);
-
-						// Still bad? Mark for removal
-						if (r2 >= 2 * p.alpha_)
-							// to_remove.push_back(v);
-							value<bool>(*p.samples_mesh_, remove, v) = true;
-					}
-					else
-					{
-						// Not enough neighbors for PCA, mark for removal
+					// Still bad? Mark for removal
+					if (r2 >= 2 * p.alpha_)
 						// to_remove.push_back(v);
 						value<bool>(*p.samples_mesh_, remove, v) = true;
-					}
 				}
-				return true;
-			});
-			foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-				if (value<bool>(*p.samples_mesh_, remove, v))
-					to_remove.push_back(v);
-				return true;
-			});
-			if (!to_remove.empty())
-			{
-				std::cout << "Removed " << to_remove.size() << " points with ball outside surface (after retry)."
-						  << std::endl;
+				else
+				{
+					// Not enough neighbors for PCA, mark for removal
+					// to_remove.push_back(v);
+					value<bool>(*p.samples_mesh_, remove, v) = true;
+				}
 			}
-			for (PVertex v : to_remove)
-				remove_vertex(*p.samples_mesh_, v);
-			build_kdtree(p); // Rebuild KDTree after removing vertices
-			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-			remove_attribute<PVertex>(*p.samples_mesh_, remove);
+			return true;
+		});
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			if (value<bool>(*p.samples_mesh_, remove, v))
+				to_remove.push_back(v);
+			return true;
+		});
+		if (!to_remove.empty())
+		{
+			std::cout << "Removed " << to_remove.size() << " points with ball outside surface (after retry)."
+						<< std::endl;
 		}
+		for (PVertex v : to_remove)
+			remove_vertex(*p.samples_mesh_, v);
+		build_kdtree(p); // Rebuild KDTree after removing vertices
+		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		remove_attribute<PVertex>(*p.samples_mesh_, remove);
+		
 	}
 
 
