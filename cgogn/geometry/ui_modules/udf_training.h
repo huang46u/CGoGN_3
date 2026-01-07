@@ -43,7 +43,7 @@
 #include <array>
 #include <set>
 #include <unordered_map>
-#include <cuda_runtime.h>
+
 namespace cgogn
 {
 
@@ -55,15 +55,7 @@ using geometry::Vec4;
 using geometry::Scalar;
 using geometry::Spherical_Quadric;
 using geometry::SQEM_CASE;
-inline void cuda_check(const char* where)
-{
-	cudaError_t err = cudaGetLastError();
-	if (err != cudaSuccess)
-	{
-		std::cerr << "[CUDA ERROR @ " << where << "] " << cudaGetErrorString(err) << std::endl;
-		std::cerr.flush();
-	}
-}
+
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD>
 class UDFTraining : public ViewModule
 {
@@ -161,12 +153,15 @@ private:
 			Scalar alpha = 0.01f;		  // Target level set value
 			Scalar bbox_expand = 0.1f;	  // Expand bbox by this factor
 			int rays_per_batch = 2048;	  // Number of rays per batch
-			int max_samples_per_ray = 64; // Max marching steps per ray
 			Scalar march_step = 0.002f;	  // Initial marching step size
 			Scalar band_width = 0.003f;	  // Width of level set band for candidate detection
 			Scalar newton_tol = 1e-6f;	  // Newton convergence tolerance
 			int newton_max_iter = 10;	  // Max Newton iterations
+			int max_iterations = 1000;	  // Max marching iterations per ray
 			Scalar merge_dist = 0.005f;	  // Merge points closer than this
+			Scalar lipschitz = 4.f;
+			Scalar delta_enter = 0.01f; // Delta for entering band
+
 		};
 
 		struct Ray
@@ -347,7 +342,7 @@ private:
 		int knn_k_ = 10;
 		int seed_ = 42;
 		// Neural UDF Sampling
-		int num_alpha_samples_ = 300000;
+		int num_alpha_samples_ = 100000;
 		int batch_size_ = 65532;  // sample batch
 		float newton_steps_ = 0.7; // stpes of newton's method
 		int max_sample_iter_ = 12; // max iterations for adjusting samples
@@ -700,18 +695,16 @@ public:
 	{
 		if (!p.neural_udf_loaded_)
 			return torch::Tensor();
-
 		try
 		{
-			torch::InferenceMode guard; //  No Grad
+			torch::NoGradGuard no_grad; //  No Grad
 
-			
 			torch::Tensor output = p.neural_udf_model_.forward({points_gpu}).toTensor();
 
 			if (output.dim() == 2 && output.size(1) == 1)
 				output = output.squeeze(1);
 
-			return output; // ??? GPU?
+			return output; 
 		}
 		catch (const c10::Error& e)
 		{
@@ -725,7 +718,6 @@ public:
 													const torch::Tensor& directions_gpu, Scalar h = 1e-5f)
 	{
 		torch::InferenceMode guard;
-
 	
 		torch::Tensor points_plus = points_gpu + h * directions_gpu;
 		torch::Tensor points_minus = points_gpu - h * directions_gpu;
@@ -744,14 +736,17 @@ public:
 			std::cerr << "Neural UDF model not loaded." << std::endl;
 			return {};
 		}
-
-		const Scalar alpha = p.alpha_;
-		const Scalar lipschitz = 4.0f;
-		const Scalar delta_enter = alpha * 0.1f; 
-		const Scalar merge_dist = alpha * 0.001f;
-		const int max_march_iters = 100; 
-		const int newton_iters = 6;
-		const int rays_per_batch = 131072;
+		RayLevelSetSampler::Config config;
+		config.alpha = p.alpha_;
+		config.bbox_expand = 0.1f;
+		config.rays_per_batch = 65536;
+		config.lipschitz = 4.0f;
+		config.delta_enter = 0.003f;
+		config.merge_dist = 1e-4f;
+		config.max_iterations = 1000;
+		config.newton_tol = 1e-5f;
+		config.newton_max_iter = 6;
+		
 
 		Vec3 bbox_min(0, 0, 0);
 		Vec3 bbox_max(1, 1, 1);
@@ -762,12 +757,12 @@ public:
 		std::mt19937 gen(p.seed_);
 		int total_rays = 0;
 
-		SpatialGrid dedup_grid(merge_dist);
+		SpatialGrid dedup_grid(config.merge_dist);
 
 		for (int iter = 0; iter < 500 && all_samples.size() < target_num_points; ++iter)
 		{
-			auto rays = RayLevelSetSampler::generate_rays(bbox_min, bbox_max, rays_per_batch,
-														  RayLevelSetSampler::Config{}, gen);
+			auto rays = RayLevelSetSampler::generate_rays(bbox_min, bbox_max, config.rays_per_batch,
+														  config, gen);
 			total_rays += rays.size();
 			const int R = static_cast<int>(rays.size());
 
@@ -815,8 +810,9 @@ public:
 
 			torch::Tensor last_udf =
 				torch::full({R}, -1.0f, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+			torch::Tensor in_band = torch::zeros({R}, torch::TensorOptions().dtype(torch::kBool).device(device_));
 
-			for (int step = 0; step < max_march_iters; ++step)
+			for (int step = 0; step < config.max_iterations; ++step)
 			{
 				int active_count = torch::sum(active).item<int>();
 				if (active_count == 0)
@@ -828,17 +824,19 @@ public:
 				if (!udf.defined())
 					break;
 
-				torch::Tensor residual = torch::abs(udf - alpha);
+				torch::Tensor residual = torch::abs(udf - config.alpha);
 
 			
-				torch::Tensor f_curr = udf - alpha;
-				torch::Tensor f_last = last_udf - alpha;
+				torch::Tensor f_curr = udf - config.alpha;
+				torch::Tensor f_last = last_udf - config.alpha;
 				
 				torch::Tensor sign_change = (f_curr * f_last < 0) & (last_udf > 0);
 			
-				torch::Tensor near_band = residual < delta_enter;
+				torch::Tensor near_band = residual < config.delta_enter;
 			
-				torch::Tensor should_refine = (sign_change | near_band) & active;
+				torch::Tensor enter_band = near_band & (~in_band);
+
+				torch::Tensor should_refine = (sign_change | enter_band) & active;
 
 				torch::Tensor refine_indices = torch::nonzero(should_refine).squeeze(1);
 				if (refine_indices.numel() > 0)
@@ -857,7 +855,7 @@ public:
 						Scalar t_curr = t_acc[ray_idx];
 						Scalar res = res_acc[ray_idx];
 
-						Scalar window_half = std::max(res / lipschitz * 2.0f, delta_enter * 2.0f);
+						Scalar window_half = std::max(res / config.lipschitz * 2.0f, config.delta_enter * 2.0f);
 
 						refine_ray_indices.push_back(ray_idx);
 						refine_windows.push_back({std::max(rays[ray_idx].t_min, t_curr - window_half),
@@ -867,11 +865,11 @@ public:
 
 				last_udf = udf.clone();
 
-				torch::Tensor safe_step = residual / lipschitz * 0.8f;
-				safe_step = torch::clamp_min(safe_step, alpha * 0.02f); 
+				torch::Tensor safe_step = residual / config.lipschitz * 0.8f;
+				safe_step = torch::clamp_min(safe_step, config.alpha * 0.02f); 
 
-				torch::Tensor window_skip = residual / lipschitz * 2.0f;
-				window_skip = torch::clamp_min(window_skip, delta_enter * 2.0f);
+				torch::Tensor window_skip = residual / config.lipschitz * 2.0f;
+				window_skip = torch::clamp_min(window_skip, config.delta_enter * 2.0f);
 
 				torch::Tensor step_size = torch::where(should_refine, window_skip, safe_step);
 
@@ -929,8 +927,8 @@ public:
 				torch::Tensor dense_udf = forward_values_gpu(p, dense_X);
 				dense_udf = dense_udf.reshape({K, dense_samples});
 
-				torch::Tensor v1 = dense_udf.slice(1, 0, dense_samples - 1) - alpha;
-				torch::Tensor v2 = dense_udf.slice(1, 1, dense_samples) - alpha;
+				torch::Tensor v1 = dense_udf.slice(1, 0, dense_samples - 1) - config.alpha;
+				torch::Tensor v2 = dense_udf.slice(1, 1, dense_samples) - config.alpha;
 				torch::Tensor sign_change = (v1 * v2) < 0;
 
 				torch::Tensor bracket_indices = torch::nonzero(sign_change);
@@ -983,30 +981,29 @@ public:
 					// Netwon iterations
 					// 
 					// Todo: autograd does not work , why?
-					//for (int nit = 0; nit < newton_iters; ++nit)
-					//{
-					//	torch::Tensor newton_O = O.index_select(0, newton_ray_ids);
-					//	torch::Tensor newton_D = D.index_select(0, newton_ray_ids);
-					//	torch::Tensor newton_X = newton_O + newton_t.unsqueeze(1) * newton_D;
+					for (int nit = 0; nit < config.newton_max_iter; ++nit)
+					{
+						torch::Tensor newton_O = O.index_select(0, newton_ray_ids);
+						torch::Tensor newton_D = D.index_select(0, newton_ray_ids);
+						torch::Tensor newton_X = newton_O + newton_t.unsqueeze(1) * newton_D;
 
-					//	// ?? autograd ??????
-					//	auto [f_raw, grad] = forward_values_grad_gpu(p, newton_X);
-					//	torch::cuda::synchronize();
-					//	if (!f_raw.defined() || !grad.defined())
-					//		break;
+						auto [f_raw, grad] = forward_values_grad_gpu(p, newton_X);
+						torch::cuda::synchronize();
+						if (!f_raw.defined() || !grad.defined())
+							break;
 
-					//	torch::Tensor f = f_raw - alpha;
+						torch::Tensor f = f_raw - config.alpha;
 
-					//	// ???? = grad * direction
-					//	torch::Tensor dfdt = (grad * newton_D).sum(1);
+						// ???? = grad * direction
+						torch::Tensor dfdt = (grad * newton_D).sum(1);
 
-					//	// Newton ??
-					//	torch::Tensor delta_t = -f / torch::clamp_min(torch::abs(dfdt), 1e-10f);
-					//	delta_t = torch::where(dfdt.abs() < 1e-10f, torch::zeros_like(delta_t), delta_t);
+						// Newton ??
+						torch::Tensor delta_t = -f / torch::clamp_min(torch::abs(dfdt), 1e-10f);
+						delta_t = torch::where(dfdt.abs() < 1e-10f, torch::zeros_like(delta_t), delta_t);
 
-					//	newton_t = torch::clamp(newton_t + delta_t, ta, tb);
-					//}
-					for (int nit = 0; nit < newton_iters; ++nit)
+						newton_t = torch::clamp(newton_t + delta_t, ta, tb);
+					}
+					/*for (int nit = 0; nit < newton_iters; ++nit)
 					{
 						torch::Tensor newton_O = O.index_select(0, newton_ray_ids);
 						torch::Tensor newton_D = D.index_select(0, newton_ray_ids);
@@ -1019,7 +1016,7 @@ public:
 						delta_t = torch::where(dfdt.abs() < 1e-10f, torch::zeros_like(delta_t), delta_t);
 
 						newton_t = torch::clamp(newton_t + delta_t, ta, tb);
-					}
+					}*/
 
 					// Verify
 					torch::Tensor final_O = O.index_select(0, newton_ray_ids);
@@ -1027,7 +1024,7 @@ public:
 					torch::Tensor final_X = final_O + newton_t.unsqueeze(1) * final_D;
 					torch::Tensor final_udf = forward_values_gpu(p, final_X);
 					
-					torch::Tensor final_err = torch::abs(final_udf - alpha);
+					torch::Tensor final_err = torch::abs(final_udf - config.alpha);
 
 					torch::Tensor valid = final_err < (p.tol_ * 5); 
 					torch::Tensor valid_indices = torch::nonzero(valid).squeeze(1);
@@ -1044,11 +1041,12 @@ public:
 							pt = pt.cwiseMax(0.0).cwiseMin(1.0);
 
 							// Spatial deduplication
-							if (dedup_grid.is_valid_sample(pt, merge_dist, all_samples))
+							if (dedup_grid.is_valid_sample(pt, config.merge_dist, all_samples))
 							{
 								iter_samples.push_back(pt);
+								all_samples.push_back(pt);
 								dedup_grid.insert(pt,
-												  static_cast<uint32>(all_samples.size() + iter_samples.size() - 1));
+												  static_cast<uint32>(all_samples.size() - 1));
 							}
 						}
 					}
@@ -1056,11 +1054,6 @@ public:
 			}
 
 			std::cout << "  Collected " << iter_samples.size() << " unique samples this iteration" << std::endl;
-
-			for (const auto& pt : iter_samples)
-			{
-				all_samples.push_back(pt);
-			}
 
 			std::cout << "  Total: " << all_samples.size() << " / " << target_num_points << std::endl;
 		}
@@ -1070,7 +1063,7 @@ public:
 			std::shuffle(all_samples.begin(), all_samples.end(), gen);
 			all_samples.resize(target_num_points);
 		}
-
+		c10::cuda::CUDACachingAllocator::emptyCache();
 		return all_samples;
 	}
 	std::vector<Vec3> sample_alpha_level_set(PointsParameters& p, size_t num_points)
@@ -1158,7 +1151,7 @@ public:
 			std::cerr << "Warning: only sampled " << accepted.size() << " / " << num_points << " points on level set. "
 					  << "Consider increasing oversample_factor / max_iters or relaxing tol." << std::endl;
 		}
-
+		
 		return accepted;
 	}
 	
@@ -1734,83 +1727,85 @@ private:
 
 		// Filter points with ball radius >= 1.1 * epsilon (ball may be outside the surface)
 		// First try to fix by re-estimating normal from input cloud
-		std::vector<PVertex> to_remove;
-		auto remove = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__to_remove");
-		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			Scalar radius = (*p.samples_ma_radius_)[v_idx];
-			
-			if (radius >= 1.1 * p.alpha_)
-			{
-				// Try to fix: re-estimate normal using local PCA on samples
-				Vec3 pt = (*p.samples_position_)[v_idx];
-				
-				// Find K nearest neighbors in samples mesh
-				std::vector<std::pair<uint32, Scalar>> knn_res;
-				p.samples_kdtree_->find_nns(pt, p.knn_k_, &knn_res);
-				
-				// Extract indices for PCA
-				std::vector<uint32> indices;
-				for (auto& res : knn_res)
-					indices.push_back(res.first);
-				
-				// Compute PCA normal from local neighborhood
-				if (indices.size() >= 3)
-				{
-					Vec3 new_normal = compute_pca_normal(*p.samples_mesh_, *p.samples_position_, indices, p.samples_kdtree_vertices_);
-					
-					// Orient normal: should point away from surface (same side as current position relative to input cloud)
-					std::pair<uint32, Scalar> input_nn_res;
-					p.input_kdtree_->find_nn(pt, &input_nn_res);
-					PVertex input_nn = p.input_kdtree_vertices_[input_nn_res.first];
-					Vec3 input_nn_pos = (*p.position_)[index_of(*p.points_, input_nn)];
-					Vec3 to_pt = (pt - input_nn_pos).normalized();
-					if (new_normal.dot(to_pt) < 0)
-						new_normal = -new_normal;
-					
-					(*p.samples_normal_)[v_idx] = new_normal;
-					
-					// Re-compute shrinking ball with new normal
-					auto [c2, r2, q2] = cgogn::geometry::shrinking_ball_center<PVertex>(
-						pt, new_normal,
-						p.samples_kdtree_, p.samples_kdtree_vertices_,
-						true
-					);
-					
-					(*p.samples_ma_position_)[v_idx] = c2;
-					(*p.samples_ma_radius_)[v_idx] = r2;
-					(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q2);
-					
-					// Still bad? Mark for removal
-					if (r2 >= 2 * p.alpha_)
-						// to_remove.push_back(v);
-						value<bool>(*p.samples_mesh_,remove, v) = true;
-				}
-				else
-				{
-					// Not enough neighbors for PCA, mark for removal
-					//to_remove.push_back(v);
-					value<bool>(*p.samples_mesh_, remove, v) = true;
-				}
-			}
-			return true;
-		});
-		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			if (value<bool>(*p.samples_mesh_,remove, v))
-				to_remove.push_back(v);
-			return true;
-			});
-		if (!to_remove.empty())
+		if (nb_cells<PVertex>(*p.points_) > 0)
 		{
-			std::cout << "Removed " << to_remove.size() << " points with ball outside surface (after retry)."
-					  << std::endl;
-			
+
+			std::vector<PVertex> to_remove;
+			auto remove = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__to_remove");
+			parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+				uint32 v_idx = index_of(*p.samples_mesh_, v);
+				Scalar radius = (*p.samples_ma_radius_)[v_idx];
+
+				if (radius >= 1.1 * p.alpha_)
+				{
+					// Try to fix: re-estimate normal using local PCA on samples
+					Vec3 pt = (*p.samples_position_)[v_idx];
+
+					// Find K nearest neighbors in samples mesh
+					std::vector<std::pair<uint32, Scalar>> knn_res;
+					p.samples_kdtree_->find_nns(pt, p.knn_k_, &knn_res);
+
+					// Extract indices for PCA
+					std::vector<uint32> indices;
+					for (auto& res : knn_res)
+						indices.push_back(res.first);
+
+					// Compute PCA normal from local neighborhood
+					if (indices.size() >= 3)
+					{
+						Vec3 new_normal = compute_pca_normal(*p.samples_mesh_, *p.samples_position_, indices,
+															 p.samples_kdtree_vertices_);
+
+						// Orient normal: should point away from surface (same side as current position relative to
+						// input cloud)
+						std::pair<uint32, Scalar> input_nn_res;
+						p.input_kdtree_->find_nn(pt, &input_nn_res);
+						PVertex input_nn = p.input_kdtree_vertices_[input_nn_res.first];
+						Vec3 input_nn_pos = (*p.position_)[index_of(*p.points_, input_nn)];
+						Vec3 to_pt = (pt - input_nn_pos).normalized();
+						if (new_normal.dot(to_pt) < 0)
+							new_normal = -new_normal;
+
+						(*p.samples_normal_)[v_idx] = new_normal;
+
+						// Re-compute shrinking ball with new normal
+						auto [c2, r2, q2] = cgogn::geometry::shrinking_ball_center<PVertex>(
+							pt, new_normal, p.samples_kdtree_, p.samples_kdtree_vertices_, true);
+
+						(*p.samples_ma_position_)[v_idx] = c2;
+						(*p.samples_ma_radius_)[v_idx] = r2;
+						(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q2);
+
+						// Still bad? Mark for removal
+						if (r2 >= 2 * p.alpha_)
+							// to_remove.push_back(v);
+							value<bool>(*p.samples_mesh_, remove, v) = true;
+					}
+					else
+					{
+						// Not enough neighbors for PCA, mark for removal
+						// to_remove.push_back(v);
+						value<bool>(*p.samples_mesh_, remove, v) = true;
+					}
+				}
+				return true;
+			});
+			foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+				if (value<bool>(*p.samples_mesh_, remove, v))
+					to_remove.push_back(v);
+				return true;
+			});
+			if (!to_remove.empty())
+			{
+				std::cout << "Removed " << to_remove.size() << " points with ball outside surface (after retry)."
+						  << std::endl;
+			}
+			for (PVertex v : to_remove)
+				remove_vertex(*p.samples_mesh_, v);
+			build_kdtree(p); // Rebuild KDTree after removing vertices
+			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+			remove_attribute<PVertex>(*p.samples_mesh_, remove);
 		}
-		for (PVertex v : to_remove)
-			remove_vertex(*p.samples_mesh_, v);
-		build_kdtree(p); // Rebuild KDTree after removing vertices
-		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		remove_attribute<PVertex>(*p.samples_mesh_, remove);
 	}
 
 
