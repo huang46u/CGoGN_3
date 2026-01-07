@@ -26,6 +26,7 @@
 
 #include <cgogn/geometry/functions/distance.h>
 #include <cgogn/geometry/functions/intersection.h>
+#include <cassert>
 
 // #include <cgogn/geometry/types/vector_traits.h>
 

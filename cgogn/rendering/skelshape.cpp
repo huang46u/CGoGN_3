@@ -22,6 +22,7 @@
  *******************************************************************************/
 
 #include <cgogn/rendering/skelshape.h>
+#include <cassert>
 
 namespace cgogn
 {
