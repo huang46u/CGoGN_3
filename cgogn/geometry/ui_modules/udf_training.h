@@ -12,6 +12,7 @@
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
+#include <cgogn/geometry/types/line_quadric.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
@@ -20,6 +21,7 @@
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 #include <Eigen/Sparse>
+
 #include <libacc/bvh_tree.h>
 #include <libacc/bvh_tree_spheres.h>
 #include <libacc/kd_tree.h>
@@ -52,8 +54,11 @@ namespace ui
 
 using geometry::Vec3;
 using geometry::Vec4;
+using geometry::Mat3;
+using geometry::Mat4;
 using geometry::Scalar;
 using geometry::Spherical_Quadric;
+using geometry::Line_Quadric;
 using geometry::SQEM_CASE;
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD>
@@ -64,6 +69,7 @@ class UDFTraining : public ViewModule
 	using SVertex = typename mesh_traits<SURFACE>::Vertex;
 
 	using SFace = typename mesh_traits<SURFACE>::Face;
+	using NMFace = typename mesh_traits<NONMANIFOLD>::Face;
 	using NMEdge = typename mesh_traits<NONMANIFOLD>::Edge;
 	
 	template <typename T>
@@ -74,6 +80,8 @@ class UDFTraining : public ViewModule
 	using CGAL_Mesh = CGAL::Surface_mesh<K::Point_3>;
 	using Vector_3 = typename K::Vector_3;
 	using Point_3 = typename K::Point_3;
+	using NMFaceKey = std::array<uint32, 3>;
+
 	enum AutoSplitMode : uint32
 	{
 		ERROR_THRESHOLD,
@@ -85,7 +93,12 @@ class UDFTraining : public ViewModule
 		CORRECT_ALWAYS,
 		CORRECT_ON_SPLIT
 	};
-
+	enum DistanceMode : uint32
+	{
+		SPHERE_EUCLIDEAN_DISTANCE,
+		LINE_QUADRIC_DISTANCE,
+		PURE_EUCLIDEAN_DISTANCE
+	};
 	enum InputMode : uint32
 	{
 		INPUT_POINT_CLOUD,
@@ -93,15 +106,21 @@ class UDFTraining : public ViewModule
 		INPUT_NEURAL_UDF
 	};
 
-
 private:
-	struct SpatialGrid {
-		struct GridKey {
+	struct SpatialGrid
+	{
+		struct GridKey
+		{
 			int x, y, z;
-			bool operator==(const GridKey& o) const { return x == o.x && y == o.y && z == o.z; }
+			bool operator==(const GridKey& o) const
+			{
+				return x == o.x && y == o.y && z == o.z;
+			}
 		};
-		struct GridKeyHash {
-			std::size_t operator()(const GridKey& k) const {
+		struct GridKeyHash
+		{
+			std::size_t operator()(const GridKey& k) const
+			{
 				return std::hash<int>()(k.x) ^ (std::hash<int>()(k.y) << 1) ^ (std::hash<int>()(k.z) << 2);
 			}
 		};
@@ -109,32 +128,39 @@ private:
 		Scalar cell_size_;
 		std::unordered_map<GridKey, std::vector<uint32>, GridKeyHash> grid_;
 
-		SpatialGrid(Scalar cell_size) : cell_size_(cell_size) {}
-
-		GridKey get_key(const Vec3& v) const {
-			return {
-				(int)std::floor(v[0] / cell_size_),
-				(int)std::floor(v[1] / cell_size_),
-				(int)std::floor(v[2] / cell_size_)
-			};
+		SpatialGrid(Scalar cell_size) : cell_size_(cell_size)
+		{
 		}
 
-		void insert(const Vec3& pos, uint32 idx) {
+		GridKey get_key(const Vec3& v) const
+		{
+			return {(int)std::floor(v[0] / cell_size_), (int)std::floor(v[1] / cell_size_),
+					(int)std::floor(v[2] / cell_size_)};
+		}
+
+		void insert(const Vec3& pos, uint32 idx)
+		{
 			grid_[get_key(pos)].push_back(idx);
 		}
 
-		template<typename PositionAttribute>
-		bool is_valid_sample(const Vec3& pos, Scalar radius, const PositionAttribute& positions) const {
+		template <typename PositionAttribute>
+		bool is_valid_sample(const Vec3& pos, Scalar radius, const PositionAttribute& positions) const
+		{
 			GridKey k = get_key(pos);
 			Scalar r2 = radius * radius;
 			// Check 3x3x3 neighborhood
-			for (int dx = -1; dx <= 1; ++dx) {
-				for (int dy = -1; dy <= 1; ++dy) {
-					for (int dz = -1; dz <= 1; ++dz) {
-						GridKey neighbor_key = { k.x + dx, k.y + dy, k.z + dz };
+			for (int dx = -1; dx <= 1; ++dx)
+			{
+				for (int dy = -1; dy <= 1; ++dy)
+				{
+					for (int dz = -1; dz <= 1; ++dz)
+					{
+						GridKey neighbor_key = {k.x + dx, k.y + dy, k.z + dz};
 						auto it = grid_.find(neighbor_key);
-						if (it != grid_.end()) {
-							for (uint32 idx : it->second) {
+						if (it != grid_.end())
+						{
+							for (uint32 idx : it->second)
+							{
 								if ((positions[idx] - pos).squaredNorm() < r2)
 									return false;
 							}
@@ -145,23 +171,23 @@ private:
 			return true;
 		}
 	};
+
+
 	struct RayLevelSetSampler
 	{
-		struct Config	
+		struct Config
 
 		{
-			Scalar alpha = 0.01f;		  // Target level set value
-			Scalar bbox_expand = 0.1f;	  // Expand bbox by this factor
-			int rays_per_batch = 2048;	  // Number of rays per batch
-			Scalar march_step = 0.002f;	  // Initial marching step size
-			Scalar band_width = 0.003f;	  // Width of level set band for candidate detection
-			Scalar newton_tol = 1e-6f;	  // Newton convergence tolerance
-			int newton_max_iter = 10;	  // Max Newton iterations
-			int max_iterations = 1000;	  // Max marching iterations per ray
-			Scalar merge_dist = 0.005f;	  // Merge points closer than this
+			Scalar alpha = 0.01f;		// Target level set value
+			Scalar bbox_expand = 0.1f;	// Expand bbox by this factor
+			int rays_per_batch = 2048;	// Number of rays per batch
+			Scalar march_step = 0.002f; // Initial marching step size
+			Scalar band_width = 0.003f; // Width of level set band for candidate detection
+			Scalar newton_tol = 1e-6f;	// Newton convergence tolerance
+			int newton_max_iter = 10;	// Max Newton iterations
+			int max_iterations = 1000;	// Max marching iterations per ray
 			Scalar lipschitz = 4.f;
 			Scalar delta_enter = 0.01f; // Delta for entering band
-
 		};
 
 		struct Ray
@@ -232,28 +258,50 @@ private:
 			return rays;
 		}
 
-		// Ray-AABB intersection
 		static std::pair<Scalar, Scalar> intersect_bbox(const Ray& ray, const Vec3& bbox_min, const Vec3& bbox_max)
 		{
 			Scalar t_min = 0.0;
 			Scalar t_max = std::numeric_limits<Scalar>::max();
+			const Scalar eps = 1e-8;
 
 			for (int i = 0; i < 3; ++i)
 			{
-				if (std::abs(ray.direction[i]) > 1e-8)
+				Scalar o = ray.origin[i];
+				Scalar d = ray.direction[i];
+
+				if (std::abs(d) < eps)
 				{
-					Scalar t1 = (bbox_min[i] - ray.origin[i]) / ray.direction[i];
-					Scalar t2 = (bbox_max[i] - ray.origin[i]) / ray.direction[i];
-					if (t1 > t2)
-						std::swap(t1, t2);
-					t_min = std::max(t_min, t1);
-					t_max = std::min(t_max, t2);
+					// Ray parallel to slab
+					if (o < bbox_min[i] || o > bbox_max[i])
+						return {Scalar(1), Scalar(0)}; // no intersection
+					continue;
 				}
+
+				Scalar t1 = (bbox_min[i] - o) / d;
+				Scalar t2 = (bbox_max[i] - o) / d;
+				if (t1 > t2)
+					std::swap(t1, t2);
+
+				t_min = std::max(t_min, t1);
+				t_max = std::min(t_max, t2);
+
+				if (t_max < t_min)
+					return {Scalar(1), Scalar(0)};
 			}
 
 			return {t_min, t_max};
 		}
 	};
+
+	struct BatchUDFResult
+	{
+		std::vector<Scalar> values;	 // size N
+		std::vector<Vec3> gradients; // size N
+		bool ok;
+	};
+	
+	struct Tet;
+
 	struct PointsParameters
 	{
 		bool initialized_ = false;
@@ -262,7 +310,7 @@ private:
 		// Input Points
 		POINTS* points_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> position_ = nullptr;
-		std::shared_ptr<PAttribute<Vec3>> normal_ = nullptr; // Computed on input for sampling
+		std::shared_ptr<PAttribute<Vec3>> normal_ = nullptr;			  // Computed on input for sampling
 		std::shared_ptr<PAttribute<std::vector<PVertex>>> knn_ = nullptr; // For input normals
 
 		// Nueral UDF
@@ -277,6 +325,7 @@ private:
 		std::shared_ptr<PAttribute<Scalar>> samples_area_ = nullptr;
 		std::shared_ptr<PAttribute<std::vector<PVertex>>> samples_knn_ = nullptr;
 		std::shared_ptr<PAttribute<Spherical_Quadric>> samples_quadric_ = nullptr;
+		std::shared_ptr<PAttribute<Line_Quadric>> samples_line_quadric_ = nullptr;
 
 		// Medial Axis (on samples)
 		std::shared_ptr<PAttribute<Vec3>> samples_ma_position_ = nullptr;
@@ -290,11 +339,12 @@ private:
 		std::shared_ptr<PAttribute<Vec4>> samples_normal_color_ = nullptr;
 
 		acc::KDTree<3, uint32>* samples_kdtree_ = nullptr; // KDTree of alpha-expanding samples
-		std::vector<PVertex> samples_kdtree_vertices_; // Vertices of alpha-expanding samples in KDTree order
+		std::vector<PVertex> samples_kdtree_vertices_;	   // Vertices of alpha-expanding samples in KDTree order
 
 		acc::KDTree<3, uint32>* input_kdtree_ = nullptr; // KDTree of input points
-		std::vector<PVertex> input_kdtree_vertices_; // Vertices of input points in KDTree order
+		std::vector<PVertex> input_kdtree_vertices_;	 // Vertices of input points in KDTree order
 
+		std::unique_ptr<SpatialGrid> samples_spatial_grid_ = nullptr;
 		// Spheres (Fitted)
 		POINTS* spheres_ = nullptr;
 		uint32 nb_spheres_ = 0;
@@ -314,12 +364,23 @@ private:
 		NONMANIFOLD* skeleton_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_position_ = nullptr;
 		std::shared_ptr<NMAttribute<Scalar>> skeleton_radius_ = nullptr;
+		std::shared_ptr<NMAttribute<std::set<std::size_t>>> incident_tets_ = nullptr;
+		
+		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_color_ = nullptr;
+		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_color_ = nullptr;
+		std::shared_ptr<NMAttribute<uint32>> edge_degree_ = nullptr;
+ 		
+		std::map<NMFaceKey, NMFace> skeleton_faces_map_;
+		
+		std::unordered_map<std::size_t, Tet> skeleton_tets_;
+
 
 		float32 filter_radius_threshold_ = 0.0f;
 		float32 init_dilation_factor_ = 3.0f;
-		bool use_sqem_term_ = true;
-		bool sphere_correction_ = true;
+
+		bool sphere_correction_ = false;
 		CorrectionMode sphere_correction_mode_ = CORRECT_ALWAYS;
+		DistanceMode distance_mode_ = SPHERE_EUCLIDEAN_DISTANCE;
 		bool auto_stop_ = false;
 		bool auto_split_ = false;
 		AutoSplitMode auto_split_mode_ = ERROR_THRESHOLD;
@@ -327,28 +388,28 @@ private:
 		uint32 auto_split_max_nb_spheres_ = 50;
 		bool error_as_spheres_color_ = false;
 		float32 spheres_transparency_ = 0.5f;
-		float32 sqem_update_lambda_ = 0.02f;
-		float32 sqem_clustering_lambda_ = 0.02f;
-		
-		
+		float32 sqem_update_lambda_ = 0.20f;
+		float32 sqem_clustering_lambda_ = 0.20f;
+
 		// Filtering
 		float32 target_radius_ = 0.1f;
 		float32 radius_tolerance_ = 0.01f;
 
 		// Sampling Parameters
-		float alpha_ = 0.003f;
+		float alpha_ = 0.005f;
 		float sample_radius_ = 0.0025f;
-		int sample_iterations_ = 30;  // Max attempts per point
+		int sample_iterations_ = 30; // Max attempts per point
 		int knn_k_ = 10;
 		int seed_ = 42;
+		int cluster_min_points_ = 20;
+		Scalar grid_cell_size_ = 0.0025f;
 		// Neural UDF Sampling
-		int num_alpha_samples_ = 300000;
-		int batch_size_ = 65532;  // sample batch
+		int num_alpha_samples_ = 200000;
+		int batch_size_ = 65532;   // sample batch
 		float newton_steps_ = 0.7; // stpes of newton's method
 		int max_sample_iter_ = 12; // max iterations for adjusting samples
 		float newton_epsilon_ = 1e-8;
 		float tol_ = 1e-5; // convergence tolerance
-
 
 		// State
 		Scalar total_error_ = 0.0;
@@ -358,7 +419,6 @@ private:
 		Scalar min_error_ = 0.0;
 		Scalar max_error_ = 0.0;
 		PVertex max_error_sphere_ = PVertex();
-	
 
 		// Threading
 		uint32 iteration_count_ = 0;
@@ -370,15 +430,42 @@ private:
 
 		~PointsParameters()
 		{
-			if (samples_kdtree_) delete samples_kdtree_;
-			if (input_kdtree_) delete input_kdtree_;
+			if (samples_kdtree_)
+				delete samples_kdtree_;
+			if (input_kdtree_)
+				delete input_kdtree_;
 		}
 	};
-	struct BatchUDFResult
+
+	struct Tet
 	{
-		std::vector<Scalar> values;	 // size N
-		std::vector<Vec3> gradients; // size N
-		bool ok;
+		std::size_t tet_id;
+		NMFace faces[4];
+
+		void print_tet_info(PointsParameters& p) const
+		{
+			std::cout << "Tet ID: " << tet_id << "\n";
+			for (int i = 0; i < 4; ++i)
+			{
+				// print incidented edge incident faces
+				NMFace f = faces[i];
+				if (!f.is_valid())
+					continue;
+				uint32 idf = index_of(*p.skeleton_, f);
+				uint32 nb_tets = (*p.incident_tets_)[idf].size();
+				auto in_edges = incident_edges(*p.skeleton_, f);
+				std::cout << " Face " << i << " incident to " << nb_tets << " tets. \n";
+				for (const auto& edge : in_edges)
+				{
+					auto in_faces = incident_faces(*p.skeleton_, edge);
+					uint32 nb_faces = in_faces.size();
+					std::cout << "  Incident Edge (" << index_of(*p.skeleton_, edge) << ") with" << nb_faces
+							  << " faces ";
+				}
+				
+					std::cout << "\n";
+			}
+		}
 	};
 
 public:
@@ -397,15 +484,6 @@ public:
 	{
 		selected_points_ = &p;
 		init_points_data(p);
-	}
-
-	void set_point_mesh_provider(MeshProvider<POINTS>* mp) { points_provider_ = mp; }
-	void set_point_cloud_render(PointCloudRender<POINTS>* pcr) { pcr_ = pcr; }
-	void set_non_manifold_mesh_provider(MeshProvider<NONMANIFOLD>* mp) { non_manifold_provider_ = mp; }
-	void set_non_manifold_render(SurfaceRender<NONMANIFOLD>* sr) { sr_nm_ = sr; }
-	void set_surface_mesh_provider(MeshProvider<SURFACE>* mp)
-	{
-		surface_provider_ = mp;
 	}
 
 	void load_neural_udf_model(POINTS& points, const std::string & model_path)
@@ -703,7 +781,7 @@ public:
 
 			if (output.dim() == 2 && output.size(1) == 1)
 				output = output.squeeze(1);
-
+			output = output.detach();
 			return output; 
 		}
 		catch (const c10::Error& e)
@@ -742,7 +820,6 @@ public:
 		config.rays_per_batch = 8192;
 		config.lipschitz = 4.0f;
 		config.delta_enter = 0.003f;
-		config.merge_dist = 1e-4f;
 		config.max_iterations = 1000;
 		config.newton_tol = 1e-5f;
 		config.newton_max_iter = 3;
@@ -756,8 +833,6 @@ public:
 
 		std::mt19937 gen(p.seed_);
 		int total_rays = 0;
-
-		SpatialGrid dedup_grid(config.merge_dist);
 
 		for (int iter = 0; iter < 500 && all_samples.size() < target_num_points; ++iter)
 		{
@@ -816,10 +891,13 @@ public:
 
 			for (int step = 0; step < config.max_iterations; ++step)
 			{
-				int active_count = torch::sum(active).item<int>();
-				if (active_count == 0)
-					break;
-				
+				int active_count = 0;
+				if (step % 50 == 0)
+				{
+					active_count = torch::sum(active).item<int>();
+					if (active_count == 0)
+						break;
+				}
 				torch::Tensor t_eff = torch::min(t, t_max);
 
 				torch::Tensor X = O + t_eff.unsqueeze(1) * D;
@@ -864,11 +942,11 @@ public:
 
 				last_udf.copy_(udf);
 
-				torch::Tensor safe_step = residual / config.lipschitz * 0.8f;
+				torch::Tensor safe_step = residual /*/ config.lipschitz*/ * 0.8f;
 				//std::cout << "safe_step: " << safe_step.index({torch::indexing::Slice(0, 5)}) << std::endl;
 				safe_step = torch::clamp_min(safe_step, config.alpha * 0.02f); 
 				
-				torch::Tensor window_skip = residual / config.lipschitz * 2.0f;
+				torch::Tensor window_skip = residual /*/ config.lipschitz*/ * 2.0f;
 				//std::cout << "window_skip:" << window_skip.index({torch::indexing::Slice(0, 5)}) << std::endl;
 				window_skip = torch::clamp_min(window_skip, config.delta_enter * 2.0f);
 
@@ -880,7 +958,7 @@ public:
 
 				t = torch::min(t, t_max);
 				
-				if (step % 20 == 0)
+				if (step % 50 == 0)
 				{
 					std::cout << "    Step " << step << ": " << active_count << " active, " << refine_task_count
 							  << " refine tasks\r" << std::flush;
@@ -969,7 +1047,7 @@ public:
 					torch::Tensor ta = ta_cpu.to(device_);
 					torch::Tensor tb = tb_cpu.to(device_);
 					// Netwon iterations
-					// 
+					 
 					// Todo: autograd does not work , why?
 					for (int nit = 0; nit < config.newton_max_iter; ++nit)
 					{
@@ -978,7 +1056,7 @@ public:
 						torch::Tensor newton_X = newton_O + newton_t.unsqueeze(1) * newton_D;
 
 						auto [f_raw, grad] = forward_values_grad_gpu(p, newton_X);
-						torch::cuda::synchronize();
+						//torch::cuda::synchronize();
 						if (!f_raw.defined() || !grad.defined())
 							break;
 
@@ -1030,11 +1108,11 @@ public:
 							pt = pt.cwiseMax(0.0).cwiseMin(1.0);
 
 							// Spatial deduplication
-							if (dedup_grid.is_valid_sample(pt, config.merge_dist, all_samples))
+							if (p.samples_spatial_grid_->is_valid_sample(pt, p.grid_cell_size_, all_samples))
 							{
 								iter_samples.push_back(pt);
 								all_samples.push_back(pt);
-								dedup_grid.insert(pt,
+								p.samples_spatial_grid_->insert(pt,
 												  static_cast<uint32>(all_samples.size() - 1));
 							}
 						}
@@ -1054,94 +1132,7 @@ public:
 		}
 		return all_samples;
 	}
-	std::vector<Vec3> sample_alpha_level_set(PointsParameters& p, size_t num_points)
-	{
-		std::vector<Vec3> accepted;
-		accepted.reserve(num_points);
-		std::mt19937 gen(p.seed_);
-		std::uniform_real_distribution<Scalar>uni(0.0, 1.0);
-		size_t max_outer_iters = 100;
-		size_t outer_iter = 0;
-		const size_t target_pool = std::max(num_points * 5, (size_t)p.batch_size_);
-		while (accepted.size() < num_points&& outer_iter<max_outer_iters)
-		{
-			++outer_iter;
-			std::vector<Vec3> pool;
-			pool.reserve(num_points);
-			for (size_t i = 0; i < target_pool; ++i)
-			{
-				pool.push_back(Vec3(uni(gen), uni(gen), uni(gen)));
-			}
-			for (size_t iter = 0; iter < p.max_sample_iter_; ++iter)
-			{
-				for (size_t base = 0; base < pool.size(); base += p.batch_size_)
-				{
-					size_t bs = std::min((size_t)p.batch_size_, pool.size() - base);
-					std::vector<Vec3> batch;
-					batch.reserve(bs);
-					for (size_t k = 0; k < bs; ++k)
-						batch.push_back(pool[base + k]);
-					BatchUDFResult br = forward_batch_with_grad(p, batch);
-					if (!br.ok || br.values.size() != bs || br.gradients.size() != bs)
-					{
-						std::cerr << "forward_batch_with_grad failed." << std::endl;
-						return accepted;
-					}
-					for (size_t k = 0; k < bs; ++k)
-					{
-						const Scalar f = br.values[k];
-						const Scalar r = f - p.alpha_; // residual
-						const Vec3& g = br.gradients[k];
-
-						// ||g||^2
-						const Scalar g2 = (Scalar)(g.x() * g.x() + g.y() * g.y() + g.z() * g.z());
-						if (g2 < (Scalar)1e-16)
-							continue; 
-
-						Vec3 x = batch[k];
-						const Scalar s = p.newton_steps_ * r / (g2 + p.newton_epsilon_);
-						x = Vec3(x.x() - s * g.x(), x.y() - s * g.y(), x.z() - s * g.z());
-
-						pool[base + k] = x;
-					}
-				}
-			}
-			for (size_t base = 0; base < pool.size(); base += p.batch_size_)
-			{
-				size_t bs = std::min((size_t)p.batch_size_, (pool.size() - base));
-				std::vector<Vec3> batch;
-				batch.reserve(bs);
-				for (size_t k = 0; k < bs; ++k)
-					batch.push_back(pool[base + k]);
-
-				BatchUDFResult br = forward_batch_with_grad(p, batch);
-				if (!br.ok)
-					continue;
-
-				for (size_t k = 0; k < bs; ++k)
-				{
-					if (accepted.size() >= num_points)
-						break;
-
-					const Scalar err = std::abs(br.values[k] - p.alpha_);
-					if (err < p.tol_)
-					{
-						accepted.push_back(batch[k]);
-					}
-				}
-			}
-		}
-		if (accepted.size() > num_points)
-			accepted.resize(num_points);
-
-		if (accepted.size() < num_points)
-		{
-			std::cerr << "Warning: only sampled " << accepted.size() << " / " << num_points << " points on level set. "
-					  << "Consider increasing oversample_factor / max_iters or relaxing tol." << std::endl;
-		}
-		
-		return accepted;
-	}
+	
 	
 	std::vector<Vec3> poisson_eliminate_points(const std::vector<Vec3>& points, size_t target_num)
 	{
@@ -1163,6 +1154,88 @@ public:
 		}
 		return out;
 	}
+
+	std::pair<std::vector<Vec3>,std::vector<Vec3>> project_points_to_alpha_gpu(PointsParameters& p, const std::vector<Vec3>& points)
+	{
+		const size_t nb_points = points.size();
+		const int max_iters = 30;
+		const Scalar tol = 1e-6f;
+
+		try
+		{
+			torch::Tensor X_cpu = torch::empty({static_cast<int64_t>(nb_points), 3},
+											   torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true));
+			torch::Tensor active_cpu = torch::ones({static_cast<int64_t>(nb_points)},
+											   torch::TensorOptions().dtype(torch::kBool).device(device_));
+			auto x_acc = X_cpu.accessor<float, 2>();
+			auto active_acc = active_cpu.accessor<bool, 1>();
+			for (size_t i = 0; i < nb_points; ++i)
+			{
+				x_acc[i][0] = static_cast<float>(points[i].x());
+				x_acc[i][1] = static_cast<float>(points[i].y());
+				x_acc[i][2] = static_cast<float>(points[i].z());
+			}
+			torch::Tensor X = X_cpu.to(device_);
+			torch::Tensor active = active_cpu.to(device_);
+
+			for (int iter = 0; iter < max_iters; ++iter)
+			{
+
+				auto [f, grad] = forward_values_grad_gpu(p, X);
+				if (!f.defined() || !grad.defined())
+					break;
+				torch::Tensor residual = f - p.alpha_;
+
+				torch::Tensor abs_residual = torch::abs(residual);
+
+				//// DEBUG
+				//float max_residual = abs_residual.max().item<float>();
+				//float mean_residual = abs_residual.mean().item<float>();
+				//int active_count = torch::sum(active).item<int>();
+
+				//std::cout << "Iter " << iter << ": active=" << active_count << ", max_res=" << max_residual
+				//		  << ", mean_res=" << mean_residual << std::endl;
+				//// END DEBUG
+				// Decide which points are still active
+				
+				active = active & (abs_residual > tol);
+
+				torch::Tensor grad_norm2 = (grad * grad).sum(1, true);
+				torch::Tensor step = residual.unsqueeze(1) / (grad_norm2 + 1e-12f);
+				step = torch::where(active.unsqueeze(1), step, torch::zeros_like(step));
+
+				X = X - step * grad;
+
+				X = torch::clamp(X, 0.0f, 1.0f);
+			}
+			auto [f, grad] = forward_values_grad_gpu(p, X);
+
+			
+			torch::Tensor final_X_cpu = X.to(torch::kCPU);
+			torch::Tensor final_grad_cpu = grad.to(torch::kCPU);
+
+			auto final_X_acc = final_X_cpu.accessor<float, 2>();
+			auto final_grad_acc = final_grad_cpu.accessor<float, 2>();
+			
+			std::vector<Vec3> projected_points;
+			std::vector<Vec3> normals;
+			projected_points.reserve(nb_points);
+			normals.reserve(nb_points);
+			for (size_t i = 0; i < nb_points; ++i)
+			{
+				projected_points.push_back(
+					Vec3(final_X_acc[i][0], final_X_acc[i][1], final_X_acc[i][2]));
+				normals.push_back(Vec3(final_grad_acc[i][0], final_grad_acc[i][1], final_grad_acc[i][2]).normalized());
+			}
+			return {projected_points, normals};
+		}
+		catch (const c10::Error& e)
+		{
+			std::cerr << "GPU projection to alpha level set failed: " << e.what() << std::endl;
+			return {};
+		}
+	}
+
 
 	void test_batch_forward(PointsParameters& p)
 	{
@@ -1282,6 +1355,15 @@ public:
 protected:
 	void init() override
 	{
+		surface_provider_ = static_cast<ui::MeshProvider<SURFACE>*>(
+			app_.module("MeshProvider (" + std::string{mesh_traits<SURFACE>::name} + ")"));
+
+		points_provider_ = static_cast<ui::MeshProvider<POINTS>*>(
+			app_.module("MeshProvider (" + std::string{mesh_traits<POINTS>::name} + ")"));
+
+		non_manifold_provider_ = static_cast<ui::MeshProvider<NONMANIFOLD>*>(
+			app_.module("MeshProvider (" + std::string{mesh_traits<NONMANIFOLD>::name} + ")"));
+
 		timer_connection_ = boost::synapse::connect<App::timer_tick>(&app_, [this]() {
 			if (selected_points_)
 			{
@@ -1334,7 +1416,6 @@ private:
 		PointsParameters& p = points_parameters_[&m];
 		if (p.initialized_) return;
 		
-		
 		// Init Input Points 
 		
 		p.points_ = &m;
@@ -1370,6 +1451,7 @@ private:
 		p.samples_area_ = get_or_add_attribute<Scalar, PVertex>(*p.samples_mesh_, "area");
 		p.samples_knn_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.samples_mesh_, "knn");
 		p.samples_quadric_ = get_or_add_attribute<Spherical_Quadric, PVertex>(*p.samples_mesh_, "quadric");
+		p.samples_line_quadric_ = get_or_add_attribute<Line_Quadric, PVertex>(*p.samples_mesh_, "line_quadric");
 		p.samples_ma_position_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_mesh_, "ma_position");
 		p.samples_ma_radius_ = get_or_add_attribute<Scalar, PVertex>(*p.samples_mesh_, "ma_radius");
 		p.samples_ma_secondary_vertex_ = get_or_add_attribute<PVertex, PVertex>(*p.samples_mesh_, "ma_secondary_vertex");
@@ -1402,6 +1484,12 @@ private:
 			p.skeleton_ = non_manifold_provider_->has_mesh(skel_name) ? non_manifold_provider_->mesh(skel_name) : non_manifold_provider_->add_mesh(skel_name);
 		p.skeleton_position_ = get_or_add_attribute<Vec3, NMVertex>(*p.skeleton_, "position");
 		p.skeleton_radius_ = get_or_add_attribute<Scalar, NMVertex>(*p.skeleton_, "radius");
+		p.incident_tets_ = get_or_add_attribute<std::set<std::size_t>, NMFace>(*p.skeleton_, "incident_tets");
+		p.edge_degree_ = get_or_add_attribute<uint32, NMEdge>(*p.skeleton_, "degree");//edge face degree
+		p.skeleton_face_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "color");
+		p.skeleton_edge_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "color");
+		p.samples_spatial_grid_ =
+			std::make_unique<SpatialGrid>(p.grid_cell_size_); 
 
 		p.initialized_ = true;
 	}
@@ -1545,17 +1633,21 @@ private:
 		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			Spherical_Quadric& q = (*p.samples_quadric_)[v_idx];
+			Line_Quadric& lq = (*p.samples_line_quadric_)[v_idx];
 			q.clear();
+			lq.clear();
 			const Vec3& pos = (*p.samples_position_)[v_idx];
 			const Vec3& n = (*p.samples_normal_)[v_idx];
 			Scalar a = (*p.samples_area_)[v_idx] / (p.knn_k_ + 1.0);
 			q += Spherical_Quadric(Vec4(pos.x(), pos.y(), pos.z(), 0), Vec4(n.x(), n.y(), n.z(), 1)) * a;
+			lq += Line_Quadric(pos, n) * a;
 			for (PVertex vn : (*p.samples_knn_)[v_idx]) {
 				uint32 vn_idx = index_of(*p.samples_mesh_, vn);
 				const Vec3& pn = (*p.samples_position_)[vn_idx];
 				const Vec3& nn = (*p.samples_normal_)[vn_idx];
 				Scalar an = (*p.samples_area_)[vn_idx] / (p.knn_k_ + 1.0);
 				q += Spherical_Quadric(Vec4(pn.x(), pn.y(), pn.z(), 0), Vec4(nn.x(), nn.y(), nn.z(), 1)) * an;
+				lq += Line_Quadric(pn, nn) * an;
 			}
 			return true;
 		});
@@ -1688,8 +1780,6 @@ private:
 
 	}
 
-
-
 	// --- Shrinking Balls ---
 
 	void compute_initial_medial_axis(PointsParameters& p)
@@ -1701,97 +1791,102 @@ private:
 			const Vec3& pt = (*p.samples_position_)[v_idx];
 			const Vec3& n = (*p.samples_normal_)[v_idx];
 			
-			auto [c1, r1, q1] = cgogn::geometry::shrinking_ball_center<PVertex>(
-				pt, n,
-				p.samples_kdtree_, p.samples_kdtree_vertices_
-			);
+			/*auto [c1, r1, q1] = cgogn::geometry::shrinking_ball_center<PVertex>(
+				pt, n, p.samples_kdtree_, p.samples_kdtree_vertices_, p.alpha_ * 1.5
+			);*/
 			
-			(*p.samples_ma_position_)[v_idx] = c1;
-			(*p.samples_ma_radius_)[v_idx] = r1;
+			auto c = pt - n * p.alpha_;
+			Scalar r = p.alpha_;
+			auto q = c - n * r;
+			std::pair<uint32, Scalar> knn_res;
+			p.samples_kdtree_->find_nn(q, &knn_res);
+			PVertex q1 = p.samples_kdtree_vertices_[knn_res.first];
+
+			(*p.samples_ma_position_)[v_idx] = c;
+			(*p.samples_ma_radius_)[v_idx] = r;
 			(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q1);
 	
 			return true;
 		});
 
-		// Filter points with ball radius >= 1.1 * epsilon (ball may be outside the surface)
-		// First try to fix by re-estimating normal from input cloud
-		
+		//// Filter points with ball radius >= 1.1 * epsilon (ball may be outside the surface)
+		//// First try to fix by re-estimating normal from input cloud
+		//
 
-		std::vector<PVertex> to_remove;
-		auto remove = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__to_remove");
-		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			Scalar radius = (*p.samples_ma_radius_)[v_idx];
+		//std::vector<PVertex> to_remove;
+		//auto remove = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__to_remove");
+		//parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+		//	uint32 v_idx = index_of(*p.samples_mesh_, v);
+		//	Scalar radius = (*p.samples_ma_radius_)[v_idx];
+		//	if (radius >= 1.1 * p.alpha_)
+		//	{
+		//		// Try to fix: re-estimate normal using local PCA on samples
+		//		Vec3 pt = (*p.samples_position_)[v_idx];
 
-			if (radius >= 1.1 * p.alpha_)
-			{
-				// Try to fix: re-estimate normal using local PCA on samples
-				Vec3 pt = (*p.samples_position_)[v_idx];
+		//		// Find K nearest neighbors in samples mesh
+		//		std::vector<std::pair<uint32, Scalar>> knn_res;
+		//		p.samples_kdtree_->find_nns(pt, p.knn_k_, &knn_res);
 
-				// Find K nearest neighbors in samples mesh
-				std::vector<std::pair<uint32, Scalar>> knn_res;
-				p.samples_kdtree_->find_nns(pt, p.knn_k_, &knn_res);
+		//		// Extract indices for PCA
+		//		std::vector<uint32> indices;
+		//		for (auto& res : knn_res)
+		//			indices.push_back(res.first);
 
-				// Extract indices for PCA
-				std::vector<uint32> indices;
-				for (auto& res : knn_res)
-					indices.push_back(res.first);
+		//		// Compute PCA normal from local neighborhood
+		//		if (indices.size() >= 3 && nb_cells<PVertex>(*p.points_)>0)
+		//		{
+		//			Vec3 new_normal = compute_pca_normal(*p.samples_mesh_, *p.samples_position_, indices,
+		//													p.samples_kdtree_vertices_);
 
-				// Compute PCA normal from local neighborhood
-				if (indices.size() >= 3 && nb_cells<PVertex>(*p.points_)>0)
-				{
-					Vec3 new_normal = compute_pca_normal(*p.samples_mesh_, *p.samples_position_, indices,
-															p.samples_kdtree_vertices_);
+		//			// Orient normal: should point away from surface (same side as current position relative to
+		//			// input cloud)
+		//			std::pair<uint32, Scalar> input_nn_res;
+		//			p.input_kdtree_->find_nn(pt, &input_nn_res);
+		//			PVertex input_nn = p.input_kdtree_vertices_[input_nn_res.first];
+		//			Vec3 input_nn_pos = (*p.position_)[index_of(*p.points_, input_nn)];
+		//			Vec3 to_pt = (pt - input_nn_pos).normalized();
+		//			if (new_normal.dot(to_pt) < 0)
+		//				new_normal = -new_normal;
 
-					// Orient normal: should point away from surface (same side as current position relative to
-					// input cloud)
-					std::pair<uint32, Scalar> input_nn_res;
-					p.input_kdtree_->find_nn(pt, &input_nn_res);
-					PVertex input_nn = p.input_kdtree_vertices_[input_nn_res.first];
-					Vec3 input_nn_pos = (*p.position_)[index_of(*p.points_, input_nn)];
-					Vec3 to_pt = (pt - input_nn_pos).normalized();
-					if (new_normal.dot(to_pt) < 0)
-						new_normal = -new_normal;
+		//			(*p.samples_normal_)[v_idx] = new_normal;
 
-					(*p.samples_normal_)[v_idx] = new_normal;
+		//			// Re-compute shrinking ball with new normal
+		//			auto [c2, r2, q2] = cgogn::geometry::shrinking_ball_center<PVertex>(
+		//				pt, new_normal, p.samples_kdtree_, p.samples_kdtree_vertices_, p.alpha_*1.5);
 
-					// Re-compute shrinking ball with new normal
-					auto [c2, r2, q2] = cgogn::geometry::shrinking_ball_center<PVertex>(
-						pt, new_normal, p.samples_kdtree_, p.samples_kdtree_vertices_, true);
+		//			(*p.samples_ma_position_)[v_idx] = c2;
+		//			(*p.samples_ma_radius_)[v_idx] = r2;
+		//			(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q2);
 
-					(*p.samples_ma_position_)[v_idx] = c2;
-					(*p.samples_ma_radius_)[v_idx] = r2;
-					(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q2);
-
-					// Still bad? Mark for removal
-					if (r2 >= 2 * p.alpha_)
-						// to_remove.push_back(v);
-						value<bool>(*p.samples_mesh_, remove, v) = true;
-				}
-				else
-				{
-					// Not enough neighbors for PCA, mark for removal
-					// to_remove.push_back(v);
-					value<bool>(*p.samples_mesh_, remove, v) = true;
-				}
-			}
-			return true;
-		});
-		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			if (value<bool>(*p.samples_mesh_, remove, v))
-				to_remove.push_back(v);
-			return true;
-		});
-		if (!to_remove.empty())
-		{
-			std::cout << "Removed " << to_remove.size() << " points with ball outside surface (after retry)."
-						<< std::endl;
-		}
-		for (PVertex v : to_remove)
-			remove_vertex(*p.samples_mesh_, v);
-		build_kdtree(p); // Rebuild KDTree after removing vertices
-		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		remove_attribute<PVertex>(*p.samples_mesh_, remove);
+		//			// Still bad? Mark for removal
+		//			if (r2 >= 2 * p.alpha_)
+		//				// to_remove.push_back(v);
+		//				value<bool>(*p.samples_mesh_, remove, v) = true;
+		//		}
+		//		else
+		//		{
+		//			// Not enough neighbors for PCA, mark for removal
+		//			// to_remove.push_back(v);
+		//			value<bool>(*p.samples_mesh_, remove, v) = true;
+		//		}
+		//	}
+		//	return true;
+		//});
+		//foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+		//	if (value<bool>(*p.samples_mesh_, remove, v))
+		//		to_remove.push_back(v);
+		//	return true;
+		//});
+		//if (!to_remove.empty())
+		//{
+		//	std::cout << "Removed " << to_remove.size() << " points with ball outside surface (after retry)."
+		//				<< std::endl;
+		//}
+		//for (PVertex v : to_remove)
+		//	remove_vertex(*p.samples_mesh_, v);
+		//build_kdtree(p); // Rebuild KDTree after removing vertices
+		//points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		//remove_attribute<PVertex>(*p.samples_mesh_, remove);
 		
 	}
 
@@ -1918,18 +2013,39 @@ private:
 
 				const Vec3& center = (*p.spheres_position_)[pv_index];
 				Scalar radius = (*p.spheres_radius_)[pv_index];
-				Scalar dist_eucl = ((vp - center).norm() - radius);
-				dist_eucl *= dist_eucl;
-				dist_eucl *= a;
-				Scalar dist;
-				if (p.use_sqem_term_)
+				
+				Scalar dist = 0.0;
+				Scalar dist_other = 0.0;
+				switch (p.distance_mode_)
+				{
+				case SPHERE_EUCLIDEAN_DISTANCE:
 				{
 					Scalar dist_sqem =
 						(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
-					dist = dist_sqem + p.sqem_clustering_lambda_ * dist_eucl;
+					dist_other = ((vp - center).norm() - radius);
+					dist_other *= dist_other;
+					dist_other *= a;
+					dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
 				}
-				else
-					dist = dist_eucl;
+				break;
+
+				case LINE_QUADRIC_DISTANCE: 
+				{
+					Scalar dist_sqem =
+						(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
+					dist_other = (*p.samples_line_quadric_)[v_index].eval(center);
+					dist_other *= a;
+					dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
+				}
+				break;
+
+				case PURE_EUCLIDEAN_DISTANCE: {
+					dist_other = ((vp - center).norm() - radius);
+					dist_other *= dist_other;
+					dist = dist_other * a;
+				}
+				break;
+				}
 				if (dist < min_distance)
 				{
 					min_distance = dist;
@@ -1947,23 +2063,116 @@ private:
 
 			return true;
 		});
-		//// remove small clusters
-		//foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-		//	uint32 v_idx = index_of(*p.spheres_, v);
-		//	std::vector<PVertex>& cluster = (*p.spheres_cluster_)[v_idx];
-		//	if (cluster.size() < 4)
-		//	{
-		//		for (PVertex sv : cluster) {
-		//			uint32 sv_idx = index_of(*p.samples_mesh_, sv);
-		//			(*p.samples_sphere_)[sv_idx] = PVertex();
-		//		}
-		//		remove_vertex(*p.spheres_, v);
-		//		p.nb_spheres_--;
-		//	}
-		//	return true;
-		//});
+		//augment_insufficient_clusters(p);
 	}
 
+	void augment_insufficient_clusters(PointsParameters& p)
+	{
+		std::cout << "Augmenting insufficient clusters..." << std::endl;
+
+		std::vector<PVertex> to_process;
+		std::vector<uint32> to_process_indices;
+		std::vector<uint32> needed;
+		std::vector<uint32> samples_start;
+		std::vector<uint32> samples_count;
+
+		std::vector<Vec3> all_raw_samples;
+		
+		// Add points to insufficient clusters
+		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.spheres_, v);
+			uint32 cluster_size = (*p.spheres_cluster_)[v_index].size();
+			if (cluster_size < p.cluster_min_points_)
+			{
+				const Vec3& center = (*p.spheres_position_)[v_index];
+				Scalar radius = (*p.spheres_radius_)[v_index];
+				uint32 needed_samples = p.cluster_min_points_ - cluster_size;
+
+				std::mt19937 gen(p.seed_ + v_index);
+				std::vector<Vec3> samples = sample_in_sphere_volume(center, radius, needed_samples * 3, gen);
+
+				to_process.push_back(v);
+				to_process_indices.push_back(v_index);
+				needed.push_back(needed_samples);
+				samples_start.push_back(uint32(all_raw_samples.size()));
+				samples_count.push_back(uint32(samples.size()));
+
+				all_raw_samples.insert(all_raw_samples.end(), samples.begin(), samples.end());
+			}
+			return true;
+		});
+			
+		std::cout << "  Found " << to_process.size() << " clusters to augment" << std::endl;
+		std::cout << "  Projecting " << all_raw_samples.size() << " samples..." << std::endl;
+		
+		auto [all_projected, all_normals] = project_points_to_alpha_gpu(p, all_raw_samples);
+
+		std::cout << "  Projected: " << all_raw_samples.size() << " -> " << all_projected.size() << " points"
+				  << std::endl;
+		int total_added = 0;
+		for (size_t i = 0; i < to_process.size(); ++i)
+		{
+			PVertex sphere = to_process[i];
+			uint32 sphere_index = to_process_indices[i];
+			uint32 needed_samples = needed[i];
+			uint32 start_idx = samples_start[i];
+			uint32 count = samples_count[i];
+
+			std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+			int added = 0;
+			
+			for (int i = start_idx; i < start_idx + count && added < needed_samples; ++i)
+			{
+				const Vec3& pos = all_projected[i];
+				const Vec3& normal = all_normals[i];
+				// Check if valid sample
+				if (p.samples_spatial_grid_->is_valid_sample(pos, p.grid_cell_size_, *p.samples_position_))
+				{
+					PVertex new_vertex = add_vertex(*p.samples_mesh_);
+					uint32 new_idx = index_of(*p.samples_mesh_, new_vertex);
+					(*p.samples_position_)[new_idx] = pos;
+					(*p.samples_normal_)[new_idx] = normal;
+					(*p.samples_normal_color_)[new_idx] =
+						Vec4((normal.x() + 1.0) * 0.5, (normal.y() + 1.0) * 0.5, (normal.z() + 1.0) * 0.5, 1.0);
+					cluster.push_back(new_vertex);
+					(*p.samples_sphere_)[new_idx] = sphere;
+					p.samples_spatial_grid_->insert(pos, new_idx);
+					added++;
+					total_added++;
+				}
+			}
+			
+		}
+		std::cout << "  Added a total of " << total_added << " samples to clusters." << std::endl;
+		std::cout << "  Rebuilding KDTree..." << std::endl;
+		build_kdtree(p);
+
+		std::cout << "  Recomputing KNN and area..." << std::endl;
+		compute_samples_area(p);
+
+		std::cout << "  Recomputing quadrics..." << std::endl;
+		compute_quadrics(p);
+
+		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		std::cout << "  Cluster augmentation complete." << std::endl;
+
+	}
+
+	std::vector<Vec3> sample_in_sphere_volume(const Vec3& center, Scalar radius, int num_samples, std::mt19937& gen)
+	{
+		std::vector<Vec3> samples;
+		samples.reserve(num_samples);
+
+		std::uniform_real_distribution<Scalar> uni(-1.0, 1.0);
+
+		for (int i = 0; i < num_samples; ++i)
+		{
+			Vec3 offset(uni(gen) * radius, uni(gen) * radius, uni(gen) * radius);
+			samples.push_back(center + offset);
+		}
+
+		return samples;
+	}
 	// Power distance clustering: d_power(p, sphere) = |p - center|^2 - radius^2
 	void compute_power_cluster(PointsParameters& p)
 	{
@@ -2055,21 +2264,40 @@ private:
 			for (PVertex sv : cluster)
 			{
 				uint32 sv_index = index_of(*p.samples_mesh_, sv);
-
+				Vec3 vp = (*p.samples_position_)[sv_index];
 				Scalar a = (*p.samples_area_)[sv_index];
 
-				Scalar dist_eucl = ((*p.samples_position_)[sv_index] - center).norm() - radius;
-				dist_eucl *= dist_eucl;
-				dist_eucl *= a;
-				Scalar dist;
-				if (p.use_sqem_term_)
+				
+				Scalar dist = 0.0;
+				Scalar dist_other = 0.0;
+				switch (p.distance_mode_)
 				{
+				case SPHERE_EUCLIDEAN_DISTANCE: {
 					Scalar dist_sqem =
-						(*p.samples_quadric_)[sv_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
-					dist = dist_sqem + p.sqem_clustering_lambda_ * dist_eucl;
+						(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
+					dist_other = ((vp - center).norm() - radius);
+					dist_other *= dist_other;
+					dist_other *= a;
+					dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
 				}
-				else
-					dist = dist_eucl;
+				break;
+
+				case LINE_QUADRIC_DISTANCE: {
+					Scalar dist_sqem =
+						(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
+					dist_other = (*p.samples_line_quadric_)[v_index].eval(center);
+					dist_other *= a;
+					dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
+				}
+				break;
+
+				case PURE_EUCLIDEAN_DISTANCE: {
+					dist_other = ((vp - center).norm() - radius);
+					dist_other *= dist_other;
+					dist = dist_other * a;
+				}
+				break;
+				}
 				(*p.samples_error_)[sv_index] = dist;
 				cluster_error += dist;
 			}
@@ -2193,7 +2421,7 @@ private:
 		r = s[3];
 
 		(*p.spheres_position_)[sphere_index] = c;
-		(*p.spheres_radius_)[sphere_index] = r;
+		(*p.spheres_radius_)[sphere_index] = p.alpha_;
 	}
 
 	void update_sphere_sqem(PointsParameters& p, PVertex sphere)
@@ -2206,7 +2434,7 @@ private:
 		Vec3 c = (*p.spheres_position_)[sphere_index];
 		Scalar r = (*p.spheres_radius_)[sphere_index];
 
-		Spherical_Quadric q;
+		/*Spherical_Quadric q;
 		for (PVertex v : cluster)
 		{
 			uint32 v_index = index_of(*p.samples_mesh_, v);
@@ -2214,87 +2442,142 @@ private:
 			q += (*p.samples_quadric_)[v_index] * a;
 		}
 		Scalar radius = 0.0;
-		SQEM_CASE sc = q.well_conditioned(radius);
-		if (sc != SQEM_CASE::Case4_Degenerate)
-		{
-			Eigen::MatrixXd J(2 * cluster.size(), 4);
-			J.setZero();
-			Eigen::VectorXd b(2 * cluster.size());
-			b.setZero();
-			uint32 idx = 0;
-			Eigen::VectorXd s(4);
-			s << c[0], c[1], c[2], r;
+		SQEM_CASE sc = q.well_conditioned(radius);*/
+		/*if (sc != SQEM_CASE::Case4_Degenerate)
+		{*/
+		Eigen::MatrixXd J(2 * cluster.size(), 4);
+		J.setZero();
+		Eigen::VectorXd b(2 * cluster.size());
+		b.setZero();
+		uint32 idx = 0;
+		Eigen::VectorXd s(4);
+		s << c[0], c[1], c[2], r;
 
-			for (uint32 i = 0; i < 10; ++i)
+		for (uint32 i = 0; i < 10; ++i)
+		{
+			idx = 0;
+			for (PVertex v : cluster)
 			{
-				idx = 0;
-				for (PVertex v : cluster)
+				uint32 v_index = index_of(*p.samples_mesh_, v);
+				const Vec3& pos = (*p.samples_position_)[v_index];
+
+				// SQEM energy
+				Eigen::Vector4d lhs = Eigen::Vector4d::Zero();
+				Scalar rhs = 0.0;
+				const Vec3& n = (*p.samples_normal_)[v_index];
+				Vec4 n4 = Vec4(n.x(), n.y(), n.z(), 1.0);
+				Scalar a = sqrt((*p.samples_area_)[v_index] / (p.knn_k_ + 1.0));
+				lhs += -n4 * a;
+				rhs += -1.0 * ((pos - Vec3(s(0), s(1), s(2))).dot(n) - s(3)) * a;
+
+				for (PVertex vn : (*p.samples_knn_)[v_index])
 				{
-					uint32 v_index = index_of(*p.samples_mesh_, v);
-					const Vec3& pos = (*p.samples_position_)[v_index];
+					uint32 vn_index = index_of(*p.samples_mesh_, vn);
+					const Vec3& pn = (*p.samples_position_)[vn_index];
+					const Vec3& nn = (*p.samples_normal_)[vn_index];
+					Vec4 nn4 = Vec4(nn.x(), nn.y(), nn.z(), 1.0);
+					Scalar an = sqrt((*p.samples_area_)[vn_index] / (p.knn_k_ + 1.0));
+					lhs += -nn4 * an;
+					rhs += -1.0 * ((pn - Vec3(s(0), s(1), s(2))).dot(nn) - s(3)) * an;
+				}
+				J.row(idx) = lhs;
+				b(idx) = rhs;
+				++idx;
 
-					// SQEM energy
-					Eigen::Vector4d lhs = Eigen::Vector4d::Zero();
-					Scalar rhs = 0.0;
-					const Vec3& n = (*p.samples_normal_)[v_index];
-					Vec4 n4 = Vec4(n.x(), n.y(), n.z(), 1.0);
-					Scalar a = sqrt((*p.samples_area_)[v_index] / (p.knn_k_ + 1.0));
-					lhs += -n4 * a;
-					rhs += -1.0 * ((pos - Vec3(s(0), s(1), s(2))).dot(n) - s(3)) * a;
+				// distance energy
+				Vec3 d = pos - Vec3(s(0), s(1), s(2));
+				Scalar l = d.norm();
 
-					for (PVertex vn : (*p.samples_knn_)[v_index])
-					{
-						uint32 vn_index = index_of(*p.samples_mesh_, vn);
-						const Vec3& pn = (*p.samples_position_)[vn_index];
-						const Vec3& nn = (*p.samples_normal_)[vn_index];
-						Vec4 nn4 = Vec4(nn.x(), nn.y(), nn.z(), 1.0);
-						Scalar an = sqrt((*p.samples_area_)[vn_index] / (p.knn_k_ + 1.0));
-						lhs += -nn4 * an;
-						rhs += -1.0 * ((pn - Vec3(s(0), s(1), s(2))).dot(nn) - s(3)) * an;
-					}
-					J.row(idx) = lhs;
-					b(idx) = rhs;
-					++idx;
+				Scalar a_dist = sqrt((*p.samples_area_)[v_index]);
+				J.row(idx) =
+					Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * a_dist * p.sqem_update_lambda_;
+				b(idx) = -(l - s(3)) * a_dist * p.sqem_update_lambda_; // scale the row by the update lambda
 
-					// distance energy
-					Vec3 d = pos - Vec3(s(0), s(1), s(2));
-					Scalar l = d.norm();
+				++idx;
+			};
 
-					Scalar a_dist = sqrt((*p.samples_area_)[v_index]);
-					J.row(idx) =
-						Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * a_dist * p.sqem_update_lambda_;
-					b(idx) = -(l - s(3)) * a_dist * p.sqem_update_lambda_; // scale the row by the update lambda
-
-					++idx;
-				};
-
-				Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
-				Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
-				s += delta_s;
-				if (delta_s.norm() < 1e-6) // stop early if converged
-					break;
-			}
-			c = s.head<3>();
-			r = s[3];
+			Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
+			Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
+			s += delta_s;
+			if (delta_s.norm() < 1e-6) // stop early if converged
+				break;
 		}
-		else
-		{
-			std::cout << "Sphere " << sphere_index << " is not well conditioned, using shrinking ball" << std::endl;
-			// apply shrinking ball
-			std::pair<uint32, Scalar> knn_res;
-			p.samples_kdtree_->find_nn(c, &knn_res);
-			PVertex nn = p.samples_kdtree_vertices_[knn_res.first];
-			Vec3 closest_point_position = (*p.position_)[index_of(*p.points_, nn)];
-			Vec3 closest_point_dir = (closest_point_position - c).normalized();
-			auto [center, radius, q] = geometry::shrinking_ball_center(
-				closest_point_position, closest_point_dir, p.samples_kdtree_, p.samples_kdtree_vertices_);
-			c = center;
-			r = radius;
-		}
+		c = s.head<3>();
+		r = s[3];
+		//}
+		//else
+		//{
+		//	std::cout << "Sphere " << sphere_index << " is not well conditioned, using shrinking ball" << std::endl;
+		//	// apply shrinking ball
+		//	std::pair<uint32, Scalar> knn_res;
+		//	p.samples_kdtree_->find_nn(c, &knn_res);
+		//	PVertex nn = p.samples_kdtree_vertices_[knn_res.first];
+		//	Vec3 closest_point_position = (*p.position_)[index_of(*p.points_, nn)];
+		//	Vec3 closest_point_dir = (closest_point_position - c).normalized();
+		//	auto [center, radius, q] = geometry::shrinking_ball_center(
+		//		closest_point_position, closest_point_dir, p.samples_kdtree_, p.samples_kdtree_vertices_, p.alpha_*1.5);
+		//	c = center;
+		//	r = radius;
+		//}
 		
 
 		(*p.spheres_position_)[sphere_index] = c;
 		(*p.spheres_radius_)[sphere_index] = r;
+	}
+
+	void update_sphere_line_quadric_distance(PointsParameters& p, PVertex sphere)
+	{
+		uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+		Vec3 c = (*p.spheres_position_)[sphere_index];
+		Scalar r = (*p.spheres_radius_)[sphere_index];
+		Spherical_Quadric q;
+		Line_Quadric lq;
+		Scalar area = 0.0;
+		Vec3 h;
+		h.setZero();
+		for (PVertex v : cluster)
+		{
+			uint32 v_index = index_of(*p.samples_mesh_, v);
+			Scalar weight = value<Scalar>(*p.samples_mesh_, p.samples_area_, v);
+			if (weight <= 0.0)
+				std::cout << "Warning: sample with zero volume weight in sphere " << sphere_index << std::endl;
+			q += (*p.samples_quadric_)[v_index] * weight;
+			h += weight * (*p.samples_position_)[v_index];
+			lq += (*p.samples_line_quadric_)[v_index] * weight;
+
+			area += weight;
+		}
+
+		/*Mat4 A = q._A;
+		Vec4 b = q._b;*/
+
+		Mat4 Ql = lq.get_quadric().matrix();
+		Mat3 Al = Ql.block<3, 3>(0, 0);
+		Vec3 bl = -Ql.block<3, 1>(0, 3);
+	
+		/*Mat4 Al_ext = Mat4::Zero();
+		Al_ext.block<3, 3>(0, 0) = Al;
+		Vec4 bl_ext = Vec4::Zero();
+		bl_ext.head<3>() = bl;
+		Mat4 A_c = A + p.sqem_update_lambda_ * Al_ext;
+		Vec4 b_c = b + p.sqem_update_lambda_ * bl_ext;
+		Vec4 s = A_c.ldlt().solve(b_c);
+		c = s.head<3>();
+		r = s[3];*/
+		Mat3 As = q._A.block<3, 3>(0, 0);
+		Vec3 bs = q._b.head<3>();
+		Vec3 Asr = q._A.block<3, 1>(0, 3);
+
+		Mat3 A = As + p.sqem_update_lambda_ * Al;
+		Vec3 b = (bs + p.sqem_update_lambda_ * bl) - Asr * p.alpha_;
+
+		c = A.ldlt().solve(b);
+		r = p.alpha_;
+		(*p.spheres_position_)[sphere_index] = c;
+		(*p.spheres_radius_)[sphere_index] = r;
+
 	}
 
 	void correct_sphere(PointsParameters& p, PVertex v)
@@ -2310,29 +2593,219 @@ private:
 		Vec3 closest_pos = (*p.samples_position_)[k_idx];
 		Vec3 dir = (closest_pos - c).normalized();
 		
-		auto [nc, nr, nq] = cgogn::geometry::shrinking_ball_center<PVertex>(
-			closest_pos, dir,
-			p.samples_kdtree_, p.samples_kdtree_vertices_
-		);
-		c = nc; r = nr;
+		c = closest_pos - dir * p.alpha_;
+		r = p.alpha_;
+		
+		(*p.spheres_position_)[v_index] = c;
+		(*p.spheres_radius_)[v_index] = r;
+	
 	}
+	void update_spheres_batch_with_projection(PointsParameters& p)
+	{
+		compute_clusters(p);
 
+		std::vector<PVertex> all_spheres;
+		std::vector<uint32> sphere_sample_start;
+		std::vector<uint32> sphere_sample_count;
+		std::vector<Vec3> all_raw_samples;		 
+
+		const int num_projection_samples = 30;
+
+		foreach_cell(*p.spheres_, [&](PVertex sphere) -> bool {
+			uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+			Vec3 c = (*p.spheres_position_)[sphere_index];
+			Scalar r = (*p.spheres_radius_)[sphere_index];
+
+			// ??
+			std::mt19937 gen(p.seed_ + sphere_index);
+			std::vector<Vec3> sphere_samples = sample_in_sphere_volume(c, r, num_projection_samples, gen);
+
+			// ????
+			all_spheres.push_back(sphere);
+			sphere_sample_start.push_back(static_cast<uint32>(all_raw_samples.size()));
+			sphere_sample_count.push_back(static_cast<uint32>(sphere_samples.size()));
+
+			// ?????
+			all_raw_samples.insert(all_raw_samples.end(), sphere_samples.begin(), sphere_samples.end());
+
+			return true;
+		});
+
+		std::cout << "Collected " << all_raw_samples.size() << " samples from " << all_spheres.size() << " spheres"
+				  << std::endl;
+
+		// === 2. ????????? ===
+		auto [all_projected, all_normals] = project_points_to_alpha_gpu(p, all_raw_samples);
+
+		if (all_projected.empty())
+		{
+			std::cerr << "Projection failed, falling back to standard update" << std::endl;
+
+			// ???????
+			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+				if (p.use_sqem_term_)
+					update_sphere_sqem(p, v);
+				else
+					update_sphere_euclidean(p, v);
+				return true;
+			});
+			return;
+		}
+
+		// === 3. ??????UDF??????? ===
+		std::cout << "Verifying projected points..." << std::endl;
+		BatchUDFResult udf_result = forward_batch(p, all_projected);
+
+		std::vector<bool> is_valid(all_projected.size(), false);
+		int valid_count = 0;
+
+		if (udf_result.ok)
+		{
+			for (size_t i = 0; i < all_projected.size(); ++i)
+			{
+				Scalar error = std::abs(udf_result.values[i] - p.alpha_);
+				is_valid[i] = (error < p.tol_);
+				if (is_valid[i])
+					valid_count++;
+			}
+		}
+
+		std::cout << "Valid projected points: " << valid_count << " / " << all_projected.size() << std::endl;
+
+	
+		parallel_foreach_cell(*p.spheres_, [&](PVertex sphere) -> bool {
+			uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+			auto it = std::find(all_spheres.begin(), all_spheres.end(), sphere);
+			if (it == all_spheres.end())
+				return true;
+
+			size_t sphere_idx = std::distance(all_spheres.begin(), it);
+			uint32 start = sphere_sample_start[sphere_idx];
+			uint32 count = sphere_sample_count[sphere_idx];
+
+			std::vector<Vec3> valid_projected;
+			std::vector<Vec3> valid_normals;
+
+			for (uint32 i = start; i < start + count; ++i)
+			{
+				if (i < is_valid.size() && is_valid[i])
+				{
+					valid_projected.push_back(all_projected[i]);
+					valid_normals.push_back(all_normals[i]);
+				}
+			}
+
+			if (valid_projected.empty())
+				return true;
+
+
+			Vec3 c = (*p.spheres_position_)[sphere_index];
+			const Scalar r = p.alpha_; 
+
+			const int num_valid_proj = static_cast<int>(valid_projected.size());
+
+			Eigen::MatrixXd J(num_valid_proj, 3);
+			J.setZero();
+			Eigen::VectorXd b(num_valid_proj);
+			b.setZero();
+
+			Eigen::Vector3d center(c[0], c[1], c[2]);
+
+			for (uint32 iter = 0; iter < 10; ++iter)
+			{
+				int row = 0;
+
+				// ??????|pos - center| = alpha
+				for (size_t i = 0; i < valid_projected.size(); ++i)
+				{
+					const Vec3& pos = valid_projected[i];
+
+					Vec3 d = pos - Vec3(center[0], center[1], center[2]);
+					Scalar l = d.norm();
+
+					if (l < 1e-10) // ????
+						continue;
+
+					Scalar weight = 1.0;
+
+					// **??????? - ????alpha**
+					Scalar residual = l - r;
+
+					// **Jacobian?d(residual)/d(center) = -d/|d|**
+					J.row(row) = Eigen::Vector3d(-(d[0] / l), -(d[1] / l), -(d[2] / l)) * weight;
+					b(row) = -residual * weight;
+					++row;
+				}
+
+				// ???????????
+				if (row < 3)
+					break;
+
+				// ??????
+				J.conservativeResize(row, 3);
+				b.conservativeResize(row);
+
+				// Solve: (J^T * J) * delta_center = J^T * b
+				Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
+				Eigen::Vector3d delta_center = solver.solve(J.transpose() * b);
+
+				center += delta_center;
+
+				// ????
+				if (delta_center.norm() < 1e-6)
+					break;
+			}
+
+			// Update sphere center (radius remains alpha)
+			(*p.spheres_position_)[sphere_index] = Vec3(center[0], center[1], center[2]);
+			(*p.spheres_radius_)[sphere_index] = p.alpha_; // **???????alpha**
+
+			return true;
+		});
+
+		// Sphere correction
+		if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
+		{
+			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+				correct_sphere(p, v);
+				return true;
+			});
+		}
+
+		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			(*p.spheres_do_not_split_)[index_of(*p.spheres_, v)] = false;
+			return true;
+		});
+	}
 	void update_spheres(PointsParameters& p)
 	{
 		compute_clusters(p);
 
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			if (p.use_sqem_term_)
+			switch (p.distance_mode_)
+			{
+			case SPHERE_EUCLIDEAN_DISTANCE: {
 				update_sphere_sqem(p, v);
-			else
+			}
+			break;
+			case LINE_QUADRIC_DISTANCE: {
+				update_sphere_line_quadric_distance(p, v);
+			}
+			break;
+			case PURE_EUCLIDEAN_DISTANCE: {
 				update_sphere_euclidean(p, v);
-			
+			}
+			break;
+			}
 			if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
 				correct_sphere(p, v);
 			
 			(*p.spheres_do_not_split_)[index_of(*p.spheres_, v)] = false;
 			return true;
 		});
+		//update_spheres_batch_with_projection(p);
 
 		compute_spheres_error(p);
 
@@ -2407,7 +2880,7 @@ private:
 							   (*p.spheres_error_)[index_of(*p.spheres_, b)];
 					});
 					
-					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * 0.2)), 10u);
+					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * 0.2)), 100u);
 					for (PVertex sphere : sorted_spheres)
 					{
 						uint32 s_index = index_of(*p.spheres_, sphere);
@@ -2469,6 +2942,8 @@ private:
 			(*p.spheres_neighbor_clusters_)[v_index].clear();
 			return true;
 		});
+
+
 		foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
 				uint32 v_index = index_of(*p.samples_mesh_, v);
 				PVertex v_sphere = (*p.samples_sphere_)[v_index];
@@ -2490,10 +2965,15 @@ private:
 			return;
 
 		clear(*p.skeleton_);
-
+		p.skeleton_faces_map_.clear();
+		auto get_face_key = [](uint32 i1, uint32 i2, uint32 i3) -> NMFaceKey {
+			std::array<uint32, 3> key = {i1, i2, i3};
+			std::sort(key.begin(), key.end());
+			return key;
+		};
 		auto spheres_skeleton_vertex_map =
 			add_attribute<NMVertex, PVertex>(*p.spheres_, "__spheres_skeleton_vertex_map");
-
+		std::vector<std::array<uint32, 4>> raw_tets;
 		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
 			uint32 pv_index = index_of(*p.spheres_, pv);
 			NMVertex nmv = add_vertex(*p.skeleton_);
@@ -2523,29 +3003,47 @@ private:
 		});
 
 		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
-			uint32 pv_index = index_of(*p.spheres_, pv);
-			NMVertex nmv1 = (*spheres_skeleton_vertex_map)[pv_index];
-			const std::set<PVertex>& n_pv = (*p.spheres_neighbor_clusters_)[pv_index];
+			uint32 idx1 = index_of(*p.spheres_, pv);
+			NMVertex nmv1 = (*spheres_skeleton_vertex_map)[idx1];
+			const std::set<PVertex>& n_pv = (*p.spheres_neighbor_clusters_)[idx1];
 			for (const PVertex& ne1 : n_pv)
 			{
-				uint32 ne1_index = index_of(*p.spheres_, ne1);
-				NMVertex nmv2 = (*spheres_skeleton_vertex_map)[ne1_index];
-				const std::set<PVertex>& ne_ne1 = (*p.spheres_neighbor_clusters_)[ne1_index];
+				uint32 idx2 = index_of(*p.spheres_, ne1);
+				if (idx1 >= idx2)
+					continue;
+				NMVertex nmv2 = (*spheres_skeleton_vertex_map)[idx2];
+				const std::set<PVertex>& ne_ne1 = (*p.spheres_neighbor_clusters_)[idx2];
 				for (const PVertex& ne2 : ne_ne1)
 				{
-					if (std::find(n_pv.begin(), n_pv.end(), ne2) != n_pv.end())
+					if (n_pv.find(ne2) == n_pv.end())
+						continue;
+					uint32 idx3 = index_of(*p.spheres_, ne2);
+					if (idx2 >= idx3)
+						continue;
+				
+					NMVertex nmv3 = (*spheres_skeleton_vertex_map)[idx3];
+					
+					std::vector<NMEdge> edges;
+					edges.reserve(3);
+					edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv2)}]);
+					edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv2), index_of(*p.skeleton_, nmv3)}]);
+					edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv3)}]);
+					NMFace new_face = add_face(*p.skeleton_, edges);
+
+					p.skeleton_faces_map_[get_face_key(idx1, idx2, idx3)] = new_face;
+
+					const std::set<PVertex>& ne_ne2 = (*p.spheres_neighbor_clusters_)[idx3];
+
+					for (const PVertex& ne3 : ne_ne2)
 					{
-						uint32 ne2_index = index_of(*p.spheres_, ne2);
-						NMVertex nmv3 = (*spheres_skeleton_vertex_map)[ne2_index];
-						if (index_of(*p.skeleton_, nmv1) < index_of(*p.skeleton_, nmv2) &&
-							index_of(*p.skeleton_, nmv2) < index_of(*p.skeleton_, nmv3))
+						uint32 idx4 = index_of(*p.spheres_, ne3);
+						if (idx3 >= idx4)
+							continue;
+						bool connected_v1 = (n_pv.find(ne3) != n_pv.end());
+						bool connected_v2 = (ne_ne1.find(ne3) != ne_ne1.end());
+						if (connected_v1 && connected_v2)
 						{
-							std::vector<NMEdge> edges;
-							edges.reserve(3);
-							edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv2)}]);
-							edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv2), index_of(*p.skeleton_, nmv3)}]);
-							edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv3)}]);
-							add_face(*p.skeleton_, edges);
+							raw_tets.push_back({idx1, idx2, idx3, idx4});
 						}
 					}
 				}
@@ -2553,7 +3051,58 @@ private:
 			return true;
 		});
 
+		//Resolve Tets
+		p.skeleton_tets_.clear();
+		p.skeleton_tets_.reserve(raw_tets.size());
+		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			value<std::set<std::size_t>>(*p.skeleton_, p.incident_tets_, f).clear();
+			value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.0, 0.0, 0.0);
+			return true;
+		});
+		std::size_t tet_index = 0;
+		for (const auto& rt: raw_tets)
+		{
+			Tet new_tet;
+			uint32 v[4] = {rt[0], rt[1], rt[2], rt[3]};
+
+			NMFaceKey keys[4] = {get_face_key(v[1], v[2], v[3]), get_face_key(v[0], v[2], v[3]),
+								 get_face_key(v[0], v[1], v[3]), get_face_key(v[0], v[1], v[2])};
+			
+	
+			for (uint32 i = 0; i < 4; ++i)
+			{
+				auto it = p.skeleton_faces_map_.find(keys[i]);
+				if (it!= p.skeleton_faces_map_.end())
+				{
+					NMFace f = it->second;
+					new_tet.faces[i] = f;
+					
+					value<std::set<size_t>>(*p.skeleton_, p.incident_tets_, f).insert(tet_index);
+
+					value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.8, 0.5, 0.5);
+					
+					
+				}
+			}
+			new_tet.tet_id = tet_index;
+			p.skeleton_tets_.insert({tet_index, new_tet});
+			tet_index++;
+		}
+		parallel_foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			if (value<std::set<size_t>>(*p.skeleton_, p.incident_tets_, f).size() == 1)
+			{
+				//std::cout << "Find simple face" << std::endl;
+				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(1.0, 0.0, 0.0);
+			}
+			return true;
+		});
+
+		compute_edge_degree(p);
+		std::cout << "Found " << p.skeleton_tets_.size() << " tets in the skeleton." << std::endl;
 		remove_attribute<PVertex>(*p.spheres_, spheres_skeleton_vertex_map);
+
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
 	}
 
 protected:
@@ -2597,6 +3146,238 @@ protected:
 
 		p.nb_spheres_++;
 	}
+
+	//------------------------------//
+	//-----Topology correction------//
+	//------------------------------//
+
+	void compute_edge_degree(PointsParameters& p)
+	{
+		parallel_foreach_cell(*p.skeleton_, [&](NMEdge e) {
+			auto in_face = incident_faces(*p.skeleton_, e);
+			value<uint32>(*p.skeleton_, p.edge_degree_, e) = static_cast<uint32>(in_face.size());
+			if (value<uint32>(*p.skeleton_, p.edge_degree_, e) ==2)
+				value<Vec3>(*p.skeleton_, p.skeleton_edge_color_, e) = Vec3(0.0, 1.0, 0.0);
+
+			return true;
+		});
+	}
+
+	bool is_simple_face_3d(PointsParameters& p, NMFace& f)
+	{
+		uint32 idf = index_of(*p.skeleton_, f);
+		if ((*p.incident_tets_)[idf].size()!=1)
+			return false;
+		auto edges = incident_edges(*p.skeleton_, f);
+		
+		for (NMEdge e : edges)
+		{
+			uint32 ide = index_of(*p.skeleton_, e);
+			if ((*p.edge_degree_)[ide] <= 2)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool is_simple_face_2d(PointsParameters& p, NMFace& f)
+	{
+		uint32 idf = index_of(*p.skeleton_, f);
+		auto edges = incident_edges(*p.skeleton_, f);
+		for (NMEdge e : edges)
+		{
+			uint32 ide = index_of(*p.skeleton_, e);
+			if ((*p.edge_degree_)[ide] == 1)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+
+	bool is_simple_tet(PointsParameters& p, Tet& t)
+	{
+		for (uint32 i = 0; i < 4; ++i)
+		{
+			NMFace f = t.faces[i];
+			if(!f.is_valid())
+			{
+				continue;
+			}
+			uint32 idf = index_of(*p.skeleton_, f);
+			if(is_simple_face_3d(p,f))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+
+	// find a face of tet t that has at least one edge with degree 2
+	NMFace find_simple_tet_face(PointsParameters& p, Tet& t)
+	{
+		
+		NMEdge e;
+		for (uint32 i = 0; i < 4; ++i)
+		{
+			NMFace f = t.faces[i];
+			if (!f.is_valid())
+				continue;
+			if (is_simple_face_3d(p, f))
+			{
+				return f;
+			}
+		}
+		return NMFace();
+	}
+
+	void skeleton_post_pocessing(PointsParameters& p)
+	{
+		//compute_edge_degree(p);
+		std::queue<std::size_t> Q_tet;
+		std::queue<NMFace> Q_face;
+		std::vector<bool> visited_tet(p.skeleton_tets_.size(), false);
+		std::unordered_set<uint32> face_in_queue;
+
+		// Remove simple tet/face then remove simple face/edge iteratively
+		
+		// push all simple tets in queue
+		for (auto& [id, tet] : p.skeleton_tets_)
+		{
+			if (is_simple_tet(p, tet))
+			{
+				auto tet_id = tet.tet_id;
+				visited_tet[tet_id] = true;
+
+				Q_tet.push(tet_id);
+			}
+		}
+		uint32 removed_face = 0;
+		uint32 removed_edge = 0;
+		while (!Q_tet.empty() || !Q_face.empty())
+		{
+			if (!Q_tet.empty())
+			{
+				std::size_t current_tet_id = Q_tet.front();
+
+				Q_tet.pop();
+
+				auto it = p.skeleton_tets_.find(current_tet_id);
+				if (it == p.skeleton_tets_.end())
+					continue;
+				Tet& current_tet = it->second;
+
+				// current_tet.print_tet_info(p);
+
+				NMFace face_to_delete = find_simple_tet_face(p, current_tet);
+				std::size_t tet_id = current_tet.tet_id;
+
+				if (!face_to_delete.is_valid()) // should not happen
+				{
+					std::cout << "Error: It is not a simple tet" << std::endl;
+					current_tet.print_tet_info(p);
+					continue;
+				}
+
+				// update incident tet faces
+				for (uint32 i = 0; i < 4; ++i)
+				{
+					NMFace f = current_tet.faces[i];
+					if (f == face_to_delete)
+						continue;
+					uint32 idf = index_of(*p.skeleton_, f);
+					(*p.incident_tets_)[idf].erase(tet_id);
+					if ((*p.incident_tets_)[idf].size() == 1)
+					{
+						// push the other tet to the queue, now it is a simple tet
+						size_t other_tet_id = *(*p.incident_tets_)[idf].begin();
+						if (is_simple_tet(p, p.skeleton_tets_[other_tet_id]) && visited_tet[other_tet_id] == false)
+						{
+							visited_tet[other_tet_id] = true;
+							Q_tet.push(other_tet_id);
+						}
+					}
+				}
+
+				// update edge degrees
+				auto in_edges = incident_edges(*p.skeleton_, face_to_delete);
+				for (NMEdge e : in_edges)
+				{
+					uint32 ide = index_of(*p.skeleton_, e);
+					uint32 deg = (*p.edge_degree_)[ide];
+					if (deg == 0) // should not happen
+					{
+						std::cout << "Error: edge degree is already zero" << std::endl;
+						remove_edge(*p.skeleton_, e);
+						continue;
+					}
+					(*p.edge_degree_)[ide]--;
+
+					auto in_faces = incident_faces(*p.skeleton_, e);
+					for (NMFace f : in_faces)
+					{
+						if (f== face_to_delete)
+							continue;
+						if (is_simple_face_2d(p, f))
+							Q_face.push(f);
+					}
+					
+				}
+				p.skeleton_tets_.erase(tet_id);
+				remove_face(*p.skeleton_, face_to_delete);
+				removed_face++;
+			}
+			else
+			{
+				NMFace current_face = Q_face.front();
+				Q_face.pop();
+				if (!current_face.is_valid() || !is_simple_face_2d(p, current_face))
+				{
+					std::cout << "Warning: face to delete is not simple. This should not happen" << std::endl;
+					continue;
+				}
+				auto in_edges = incident_edges(*p.skeleton_, current_face);
+				auto in_tets = (*p.incident_tets_)[index_of(*p.skeleton_, current_face)];
+				
+				for (NMEdge e : in_edges)
+				{
+					 uint32 ide = index_of(*p.skeleton_, e);
+					(*p.edge_degree_)[ide]--;
+					 /* auto in_faces = incident_faces(*p.skeleton_, e);
+					for (NMFace f : in_faces)
+					{
+						if (is_simple_face_2d(p, f) &&f != current_face)
+							Q_face.push(f);
+					}*/
+					
+					if ((*p.edge_degree_)[ide] == 0)
+					{
+						remove_edge(*p.skeleton_, e);
+						removed_edge++;
+					}
+				}
+				remove_face(*p.skeleton_, current_face);
+				removed_face++;
+			}
+		}
+		std::cout << "Removed " << removed_face << " faces in skeleton post-processing." << std::endl;
+		std::cout << p.skeleton_tets_.size() << " tets remain after post-processing." << std::endl;
+		
+		foreach_cell (*p.skeleton_, [&](NMEdge e) {
+			auto in_face = incident_faces(*p.skeleton_, e);
+			value<uint32>(*p.skeleton_, p.edge_degree_, e) = static_cast<uint32>(in_face.size());
+			if (value<uint32>(*p.skeleton_, p.edge_degree_, e) == 1)
+				value<Vec3>(*p.skeleton_, p.skeleton_edge_color_, e) = Vec3(0.0, 0.0, 1.0);
+			return true;
+		});
+		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
+
+	}
+
 
 protected:
 
@@ -2899,7 +3680,7 @@ protected:
 						update_render_data(p);
 					}
 
-					static bool sync_lambda = false;
+					static bool sync_lambda = true;
 					ImGui::Checkbox("Sync lambda", &sync_lambda);
 					if (ImGui::SliderFloat("update lambda", &p.sqem_update_lambda_, 0.0f, 2.0f, "%.6f"))
 					{
@@ -2912,7 +3693,11 @@ protected:
 							p.sqem_update_lambda_ = p.sqem_clustering_lambda_;
 					}
 
-					ImGui::Checkbox("Use SQEM term", &p.use_sqem_term_);
+					ImGui::RadioButton("Sphere Euclidean", (int*)&p.distance_mode_, SPHERE_EUCLIDEAN_DISTANCE);
+					ImGui::SameLine();
+					ImGui::RadioButton("Pure Euclidean", (int*)&p.distance_mode_, PURE_EUCLIDEAN_DISTANCE);
+					ImGui::SameLine();
+					ImGui::RadioButton("Line Quadric", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE);
 
 					if (ImGui::Button("Update spheres"))
 					{
@@ -2967,6 +3752,10 @@ protected:
 							update_render_data(p);
 							non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 						}
+					}
+					if (ImGui::Button("Topology fix"))
+					{
+						skeleton_post_pocessing(p);
 					}
 
 					ImGui::Checkbox("Sphere correction step", &p.sphere_correction_);
@@ -3071,7 +3860,6 @@ private:
 	MeshProvider<POINTS>* points_provider_ = nullptr;
 	PointCloudRender<POINTS>* pcr_ = nullptr;
 	MeshProvider<NONMANIFOLD>* non_manifold_provider_ = nullptr;
-	SurfaceRender<NONMANIFOLD>* sr_nm_ = nullptr;
 	
 	POINTS* selected_points_ = nullptr;
 	std::map<POINTS*, PointsParameters> points_parameters_;

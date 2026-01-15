@@ -88,11 +88,6 @@ int main(int argc, char** argv)
 	cgogn::ui::SurfaceRender<NonManifold> srnm(app);
 
 	cgogn::ui::UDFTraining<Surface, Points, NonManifold> udf(app);
-	udf.set_point_mesh_provider(&mpp);
-	udf.set_point_cloud_render(&pcr);
-	udf.set_non_manifold_mesh_provider(&mpnm);
-	udf.set_non_manifold_render(&srnm);
-	udf.set_surface_mesh_provider(&mps);
 
 	app.init_modules();
 

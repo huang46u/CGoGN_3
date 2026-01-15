@@ -20,6 +20,7 @@ set(src_list
 		"${CMAKE_CURRENT_LIST_DIR}/types/slab_quadric.h"
 		"${CMAKE_CURRENT_LIST_DIR}/types/spherical_quadric.h"
 		"${CMAKE_CURRENT_LIST_DIR}/types/fast_winding_number.h"
+		"${CMAKE_CURRENT_LIST_DIR}/types/line_quadric.h"
 
 		"${CMAKE_CURRENT_LIST_DIR}/functions/angle.h"
 		"${CMAKE_CURRENT_LIST_DIR}/functions/area.h"

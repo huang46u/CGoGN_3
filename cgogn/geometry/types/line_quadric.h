@@ -21,10 +21,11 @@
  *                                                                              *
  *******************************************************************************/
 
-#ifndef CGOGN_GEOMETRY_TYPES_QUADRIC_H_
-#define CGOGN_GEOMETRY_TYPES_QUADRIC_H_
+#ifndef CGOGN_GEOMETRY_TYPES_LINE_Quadric_H_
+#define CGOGN_GEOMETRY_TYPES_LINE_Quadric_H_
 
 #include <cgogn/core/utils/numerics.h>
+#include <cgogn/geometry/types/quadric.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 namespace cgogn
@@ -33,62 +34,62 @@ namespace cgogn
 namespace geometry
 {
 
-class Quadric
+class Line_Quadric
 {
 public:
-	inline Quadric()
+	inline Line_Quadric()
 	{
-		matrix_.setZero();
+		q_.zero();
 	}
 
-	inline Quadric(const Vec3& p, const Vec3& normal)
+	inline Line_Quadric(const Vec3& p, const Vec3& normal)
 	{
-		Vec3 n = normal;
-		n.normalize();
-		Scalar d = -(p.dot(n));
-		Vec4 pl = Vec4(n[0], n[1], n[2], d);
-		matrix_ = pl * pl.transpose();
+		auto [e2, e3] = gram_schimdt(normal);
+		Quadric q1 = Quadric(p, e2);
+		Quadric q2 = Quadric(p, e3);
+
+		q_ += q1 ;
+		q_ += q2 ;
 	}
 
-	inline Quadric(const Vec3& p1, const Vec3& p2, const Vec3& p3)
+	Line_Quadric(const Line_Quadric& q)
 	{
-		Vec3 u = p2 - p1;
-		Vec3 v = p3 - p1;
-		Vec3 n = u.cross(v);
-		n.normalize();
-		Scalar d = -(p1.dot(n));
-		Vec4 p = Vec4(n[0], n[1], n[2], d);
-		matrix_ = p * p.transpose();
+		q_ = q.q_;
 	}
 
-	Quadric(const Quadric& q)
+	inline void clear()
 	{
-		matrix_ = q.matrix_;
+		q_.zero();
 	}
 
-	inline void zero()
+	Line_Quadric& operator=(const Line_Quadric& q)
 	{
-		matrix_.setZero();
-	}
-
-	Quadric& operator=(const Quadric& q)
-	{
-		matrix_ = q.matrix_;
+		q_ = q.q_;
 		return *this;
 	}
 
-	Quadric& operator+=(const Quadric& q)
+	Line_Quadric& operator+=(const Line_Quadric& q)
 	{
-		matrix_ += q.matrix_;
+		q_ += q.q_;
 		return *this;
 	}
-
-	Quadric& operator*=(Scalar s)
+	Line_Quadric operator+(const Line_Quadric& q)
 	{
-		matrix_ *= s;
+		Line_Quadric res(*this);
+		res += q;
+		return res;
+	}
+	Line_Quadric& operator*=(Scalar s)
+	{
+		q_ *= s;
 		return *this;
 	}
-
+	Line_Quadric operator*(Scalar s)
+	{
+		Line_Quadric res(*this);
+		res *= s;
+		return res;
+	}
 	Scalar eval(const Vec3& v)
 	{
 		return eval(Vec4{v[0], v[1], v[2], 1.});
@@ -96,47 +97,36 @@ public:
 
 	inline Scalar eval(const Vec4& v)
 	{
-		return v.transpose() * matrix_ * v;
+		return q_.eval(v);
 	}
 
 	bool optimized(Vec3& v)
 	{
-		Vec4 hv;
-		bool b = optimized(hv);
-		if (b)
-		{
-			v[0] = hv[0];
-			v[1] = hv[1];
-			v[2] = hv[2];
-		}
-		return b;
+		return q_.optimized(v);
 	}
 
-	bool optimized(Vec4& v)
+	Quadric get_quadric() const
 	{
-		Mat4 m(matrix_);
-		for (uint32 i = 0; i < 3; ++i)
-			m(3, i) = 0.;
-		m(3, 3) = 1.;
-		Mat4 inverse;
-		Scalar determinant;
-		bool invertible;
-		m.computeInverseAndDetWithCheck(inverse, determinant, invertible, 0.01);
-		if (invertible)
-			v = inverse * Vec4(0., 0., 0., 1.);
-		return invertible;
-	}
-	Mat4 matrix() const
-	{
-		return matrix_;
+		return q_;
 	}
 
 private:
-	Mat4 matrix_;
+	std::pair<Vec3, Vec3> gram_schimdt(const Vec3& n)
+	{
+		Vec3 e1 = n.normalized();
+		Vec3 v2 = (std::abs(e1.x()) < std::abs(e1.y())) ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
+		Vec3 e2 = (v2 - v2.dot(e1) * e1).normalized();
+		Vec3 e3 = e1.cross(e2);
+		return {e2, e3};
+	}
+
+private:
+	Quadric q_;
+	
 };
 
 } // namespace geometry
 
 } // namespace cgogn
 
-#endif // CGOGN_GEOMETRY_TYPES_QUADRIC_H_
+#endif // CGOGN_GEOMETRY_TYPES_Line_Quadric_H_
