@@ -3155,8 +3155,8 @@ protected:
 	{
 		parallel_foreach_cell(*p.skeleton_, [&](NMEdge e) {
 			auto in_face = incident_faces(*p.skeleton_, e);
-			value<uint32>(*p.skeleton_, p.edge_degree_, e) = static_cast<uint32>(in_face.size());
-			if (value<uint32>(*p.skeleton_, p.edge_degree_, e) ==2)
+		
+			if (in_face.size()==2)
 				value<Vec3>(*p.skeleton_, p.skeleton_edge_color_, e) = Vec3(0.0, 1.0, 0.0);
 
 			return true;
@@ -3165,6 +3165,8 @@ protected:
 
 	bool is_simple_face_3d(PointsParameters& p, NMFace& f)
 	{
+		if (!f.is_valid())
+			return false;
 		uint32 idf = index_of(*p.skeleton_, f);
 		if ((*p.incident_tets_)[idf].size()!=1)
 			return false;
@@ -3172,26 +3174,23 @@ protected:
 		
 		for (NMEdge e : edges)
 		{
-			uint32 ide = index_of(*p.skeleton_, e);
-			if ((*p.edge_degree_)[ide] <= 2)
-			{
-				return true;
-			}
+			auto in_faces = incident_faces(*p.skeleton_, e);
+			return in_faces.size() <= 2;
 		}
 		return false;
 	}
 
 	bool is_simple_face_2d(PointsParameters& p, NMFace& f)
 	{
+		if (!f.is_valid())
+			return false;
 		uint32 idf = index_of(*p.skeleton_, f);
 		auto edges = incident_edges(*p.skeleton_, f);
 		for (NMEdge e : edges)
 		{
-			uint32 ide = index_of(*p.skeleton_, e);
-			if ((*p.edge_degree_)[ide] == 1)
-			{
+			auto in_faces = incident_faces(*p.skeleton_, e);
+			if (in_faces.size() == 1) 
 				return true;
-			}
 		}
 		return false;
 	}
@@ -3269,7 +3268,8 @@ protected:
 				if (it == p.skeleton_tets_.end())
 					continue;
 				Tet& current_tet = it->second;
-
+				auto faces = current_tet.faces;
+				
 				// current_tet.print_tet_info(p);
 
 				NMFace face_to_delete = find_simple_tet_face(p, current_tet);
@@ -3281,12 +3281,15 @@ protected:
 					current_tet.print_tet_info(p);
 					continue;
 				}
-
+				auto in_edges = incident_edges(*p.skeleton_, face_to_delete);
+				remove_face(*p.skeleton_, face_to_delete);
+				removed_face++;
+				p.skeleton_tets_.erase(tet_id);
 				// update incident tet faces
-				for (uint32 i = 0; i < 4; ++i)
+				for (uint32 i= 0; i< 4; ++i)
 				{
-					NMFace f = current_tet.faces[i];
-					if (f == face_to_delete)
+					NMFace f = faces[i];
+					if (!f.is_valid())
 						continue;
 					uint32 idf = index_of(*p.skeleton_, f);
 					(*p.incident_tets_)[idf].erase(tet_id);
@@ -3303,64 +3306,62 @@ protected:
 				}
 
 				// update edge degrees
-				auto in_edges = incident_edges(*p.skeleton_, face_to_delete);
 				for (NMEdge e : in_edges)
 				{
 					uint32 ide = index_of(*p.skeleton_, e);
-					uint32 deg = (*p.edge_degree_)[ide];
-					if (deg == 0) // should not happen
+					auto in_faces = incident_faces(*p.skeleton_, e);
+					auto degree = in_faces.size();
+					if (degree ==  0) // should not happen
 					{
 						std::cout << "Error: edge degree is already zero" << std::endl;
 						remove_edge(*p.skeleton_, e);
 						continue;
 					}
-					(*p.edge_degree_)[ide]--;
-
-					auto in_faces = incident_faces(*p.skeleton_, e);
+				
 					for (NMFace f : in_faces)
 					{
-						if (f== face_to_delete)
-							continue;
 						if (is_simple_face_2d(p, f))
 							Q_face.push(f);
 					}
 					
 				}
-				p.skeleton_tets_.erase(tet_id);
-				remove_face(*p.skeleton_, face_to_delete);
-				removed_face++;
 			}
 			else
 			{
 				NMFace current_face = Q_face.front();
 				Q_face.pop();
-				if (!current_face.is_valid() || !is_simple_face_2d(p, current_face))
+				if (!current_face.is_valid())
+				{
+					std::cout << "Warning: face to delete is not valid. This should not happen" << std::endl;	
+				}
+				if (!is_simple_face_2d(p, current_face))
 				{
 					std::cout << "Warning: face to delete is not simple. This should not happen" << std::endl;
 					continue;
 				}
 				auto in_edges = incident_edges(*p.skeleton_, current_face);
 				auto in_tets = (*p.incident_tets_)[index_of(*p.skeleton_, current_face)];
-				
+				remove_face(*p.skeleton_, current_face);
+				removed_face++;
 				for (NMEdge e : in_edges)
 				{
 					 uint32 ide = index_of(*p.skeleton_, e);
-					(*p.edge_degree_)[ide]--;
+					 auto in_faces = incident_faces(*p.skeleton_, e);
+					 auto degre = in_faces.size();
 					 /* auto in_faces = incident_faces(*p.skeleton_, e);
 					for (NMFace f : in_faces)
 					{
 						if (is_simple_face_2d(p, f) &&f != current_face)
 							Q_face.push(f);
 					}*/
-					
-					if ((*p.edge_degree_)[ide] == 0)
+					if (degre == 0)
 					{
 						remove_edge(*p.skeleton_, e);
 						removed_edge++;
 					}
 				}
-				remove_face(*p.skeleton_, current_face);
-				removed_face++;
+				
+				
 			}
 		}
 		std::cout << "Removed " << removed_face << " faces in skeleton post-processing." << std::endl;
@@ -3368,14 +3369,30 @@ protected:
 		
 		foreach_cell (*p.skeleton_, [&](NMEdge e) {
 			auto in_face = incident_faces(*p.skeleton_, e);
-			value<uint32>(*p.skeleton_, p.edge_degree_, e) = static_cast<uint32>(in_face.size());
-			if (value<uint32>(*p.skeleton_, p.edge_degree_, e) == 1)
+			if (in_face.size()==1)
 				value<Vec3>(*p.skeleton_, p.skeleton_edge_color_, e) = Vec3(0.0, 0.0, 1.0);
+			return true;
+		});
+		parallel_foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			auto in_tets = (*p.incident_tets_)[index_of(*p.skeleton_, f)];
+			if (in_tets.size() == 1)
+			{
+				// std::cout << "Find simple face" << std::endl;
+				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(1.0, 0.0, 0.0);
+			}
+			else if (in_tets.size() >1)
+			{
+				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.8, 0.5, 0.5);
+			}
+			else
+			{
+				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.0, 0.0, 0.0);
+			}
 			return true;
 		});
 		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
-
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
 	}
 
 
