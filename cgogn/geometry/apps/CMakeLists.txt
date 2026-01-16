@@ -172,6 +172,15 @@ target_link_libraries(heat_method
 	${CMAKE_DL_LIBS}
 )
 
+add_executable(fast_winding_number_test fast_winding_number_test.cpp)
+target_link_libraries(fast_winding_number_test
+	cgogn::core
+	cgogn::ui
+	cgogn::io
+	cgogn::rendering
+	${CMAKE_DL_LIBS}
+)
+
 add_executable(sphere_fitting sphere_fitting.cpp)
 target_link_libraries(sphere_fitting
 	cgogn::core

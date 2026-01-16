@@ -20,7 +20,9 @@ set(src_list
 		"${CMAKE_CURRENT_LIST_DIR}/types/slab_quadric.h"
 		"${CMAKE_CURRENT_LIST_DIR}/types/spherical_quadric.h"
 		"${CMAKE_CURRENT_LIST_DIR}/types/fast_winding_number.h"
+		"${CMAKE_CURRENT_LIST_DIR}/types/fast_winding_number_traits.h"
 		"${CMAKE_CURRENT_LIST_DIR}/types/line_quadric.h"
+
 
 		"${CMAKE_CURRENT_LIST_DIR}/functions/angle.h"
 		"${CMAKE_CURRENT_LIST_DIR}/functions/area.h"
@@ -52,6 +54,7 @@ set(src_list
 		"${CMAKE_CURRENT_LIST_DIR}/algos/invertion.h"
 
 		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/registration.h"
+		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/fast_winding_number_test.h"
 		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/surface_differential_properties.h"
 		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/surface_filtering.h"
 		"${CMAKE_CURRENT_LIST_DIR}/ui_modules/surface_selection.h"
