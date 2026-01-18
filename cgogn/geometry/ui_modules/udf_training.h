@@ -11,8 +11,8 @@
 #include <cgogn/geometry/algos/medial_axis.h>
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
-#include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/line_quadric.h>
+#include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
@@ -26,24 +26,24 @@
 #include <libacc/bvh_tree_spheres.h>
 #include <libacc/kd_tree.h>
 
-//import CGAL
+// import CGAL
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Polygon_mesh_processing/distance.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/poisson_eliminate.h>
 
+#include <GLFW/glfw3.h>
+#include <algorithm>
+#include <array>
+#include <filesystem>
+#include <mutex>
+#include <numeric>
+#include <random>
+#include <set>
+#include <thread>
+#include <torch/autograd.h>
 #include <torch/script.h>
 #include <torch/torch.h>
-#include <torch/autograd.h>
-#include <filesystem>
-#include <GLFW/glfw3.h>
-#include <numeric>
-#include <algorithm>
-#include <random>
-#include <thread>
-#include <mutex>
-#include <array>
-#include <set>
 #include <unordered_map>
 
 namespace cgogn
@@ -52,14 +52,14 @@ namespace cgogn
 namespace ui
 {
 
-using geometry::Vec3;
-using geometry::Vec4;
+using geometry::Line_Quadric;
 using geometry::Mat3;
 using geometry::Mat4;
 using geometry::Scalar;
 using geometry::Spherical_Quadric;
-using geometry::Line_Quadric;
 using geometry::SQEM_CASE;
+using geometry::Vec3;
+using geometry::Vec4;
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD>
 class UDFTraining : public ViewModule
@@ -71,7 +71,7 @@ class UDFTraining : public ViewModule
 	using SFace = typename mesh_traits<SURFACE>::Face;
 	using NMFace = typename mesh_traits<NONMANIFOLD>::Face;
 	using NMEdge = typename mesh_traits<NONMANIFOLD>::Edge;
-	
+
 	template <typename T>
 	using PAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
 	template <typename T>
@@ -192,7 +192,7 @@ private:
 			rays.reserve(num_rays);
 
 			// Expand bbox
-			
+
 			Vec3 center = (bbox_min + bbox_max) * 0.5;
 			Vec3 half_size = (bbox_max - bbox_min) * 0.5 * (1.0 + p.udf_bbox_expand_);
 			Vec3 expanded_min = center - half_size;
@@ -305,9 +305,9 @@ private:
 		std::vector<Vec3> gradients; // size N
 		bool ok;
 	};
-	
-	struct Tet;
 
+	struct Tet;
+	using Ray = typename RayLevelSetSampler::Ray;
 	struct PointsParameters
 	{
 		bool initialized_ = false;
@@ -323,6 +323,41 @@ private:
 		bool neural_udf_loaded_ = false;
 		torch::jit::Module neural_udf_model_;
 		std::string neural_udf_model_path_ = "";
+
+		// Ray Sampling
+		int ray_capacity_ = 0;
+		torch::Device ray_device_ = torch::kCPU;
+
+		torch::Tensor ray_origins_cpu_;
+		torch::Tensor ray_directions_cpu_;
+		torch::Tensor ray_t_cpu_;
+		torch::Tensor ray_tmax_cpu_;
+
+		torch::Tensor ray_origins_;
+		torch::Tensor ray_directions_;
+		torch::Tensor ray_t_;
+		torch::Tensor ray_tmax_;
+		torch::Tensor ray_tmin0_;
+		torch::Tensor ray_active_;
+		torch::Tensor ray_last_udf_;
+		torch::Tensor ray_in_band_;
+
+		int refine_capacity_ = 0;
+		int refine_count_ = 0;
+
+		torch::Tensor refine_ray_ids_;
+		torch::Tensor refine_tstart_;
+		torch::Tensor refine_tend_;
+
+		int refine_work_capacity_ = 0;
+		int refine_dense_samples_nb_ = 32;
+
+		torch::Tensor refine_task_O_;
+		torch::Tensor refine_task_D_;
+		torch::Tensor refine_dense_t_;
+		torch::Tensor refine_dense_X_;
+		torch::Tensor refine_tspan_;
+		torch::Tensor refine_lin_;
 
 		// Sampling & Fitting Data
 		POINTS* samples_mesh_ = nullptr;
@@ -351,7 +386,7 @@ private:
 		std::vector<PVertex> input_kdtree_vertices_;	 // Vertices of input points in KDTree order
 
 		std::unique_ptr<SpatialGrid> samples_spatial_grid_ = nullptr;
-		// Spheres (Fitted)
+		// Spheres
 		POINTS* spheres_ = nullptr;
 		uint32 nb_spheres_ = 0;
 		std::shared_ptr<PAttribute<Vec3>> spheres_position_ = nullptr;
@@ -371,15 +406,14 @@ private:
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_position_ = nullptr;
 		std::shared_ptr<NMAttribute<Scalar>> skeleton_radius_ = nullptr;
 		std::shared_ptr<NMAttribute<std::set<std::size_t>>> incident_tets_ = nullptr;
-		
+
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_color_ = nullptr;
 		std::shared_ptr<NMAttribute<uint32>> edge_degree_ = nullptr;
- 		
-		std::map<NMFaceKey, NMFace> skeleton_faces_map_;
-		
-		std::unordered_map<std::size_t, Tet> skeleton_tets_;
 
+		std::map<NMFaceKey, NMFace> skeleton_faces_map_;
+
+		std::unordered_map<std::size_t, Tet> skeleton_tets_;
 
 		float32 filter_radius_threshold_ = 0.0f;
 		float32 init_dilation_factor_ = 3.0f;
@@ -411,9 +445,9 @@ private:
 		float grid_cell_size_ = 0.0025f;
 		// Neural UDF Sampling
 		int num_alpha_samples_ = 60000;
-		int batch_size_ = 8192;   // sample batch
+		int batch_size_ = 8192;	   // sample batch
 		float newton_steps_ = 0.7; // stpes of newton's method
-		int max_sample_iter_ = 12; // max iterations for adjusting samples
+		int max_sample_iter_ = 6; // max iterations for adjusting samples
 		float newton_epsilon_ = 1e-8;
 		float tol_ = 1e-5; // convergence tolerance
 
@@ -449,6 +483,18 @@ private:
 		}
 	};
 
+	struct RayBatchBuffers
+	{
+		torch::Tensor O;
+		torch::Tensor D;
+		torch::Tensor t;
+		torch::Tensor t_max;
+		torch::Tensor t_min0;
+		torch::Tensor active;
+		torch::Tensor last_udf;
+		torch::Tensor in_band;
+	};
+
 	struct Tet
 	{
 		std::size_t tet_id;
@@ -474,15 +520,14 @@ private:
 					std::cout << "  Incident Edge (" << index_of(*p.skeleton_, edge) << ") with" << nb_faces
 							  << " faces ";
 				}
-				
-					std::cout << "\n";
+
+				std::cout << "\n";
 			}
 		}
 	};
 
 public:
-	UDFTraining(const App& app)
-		: ViewModule(app, "UDFTraining")
+	UDFTraining(const App& app) : ViewModule(app, "UDFTraining")
 	{
 	}
 
@@ -490,7 +535,9 @@ public:
 	{
 	}
 
-	void set_selected_surface(SURFACE& s) {} // Compatibility
+	void set_selected_surface(SURFACE& s)
+	{
+	} // Compatibility
 
 	void set_selected_points(POINTS& p)
 	{
@@ -498,7 +545,7 @@ public:
 		init_points_data(p);
 	}
 
-	void load_neural_udf_model(POINTS& points, const std::string & model_path)
+	void load_neural_udf_model(POINTS& points, const std::string& model_path)
 	{
 		PointsParameters& p = points_parameters_[&points];
 		if (!std::filesystem::exists(model_path))
@@ -532,13 +579,14 @@ public:
 		}
 		try
 		{
-			torch::Tensor point =
-				torch::tensor({query_point.x(), query_point.y(), query_point.z()}, torch::kFloat32).unsqueeze(0).to(device_);
+			torch::Tensor point = torch::tensor({query_point.x(), query_point.y(), query_point.z()}, torch::kFloat32)
+									  .unsqueeze(0)
+									  .to(device_);
 			torch::Tensor output = p.neural_udf_model_.forward({point}).toTensor();
 			float udf_value = output.item<float>();
 			return static_cast<Scalar>(udf_value);
 		}
-		catch(const c10::Error& e)
+		catch (const c10::Error& e)
 		{
 			std::cerr << "Error during Neural UDF forward pass: " << e.what() << std::endl;
 			return std::numeric_limits<Scalar>::max();
@@ -578,7 +626,7 @@ public:
 			auto out_acc = output_cpu.accessor<float, 2>();
 
 			r.values.resize(N);
-			r.gradients.clear(); 
+			r.gradients.clear();
 
 			for (size_t i = 0; i < N; ++i)
 				r.values[i] = static_cast<Scalar>(out_acc[(long)i][0]);
@@ -603,18 +651,18 @@ public:
 			std::cerr << "Neural UDF model not loaded." << std::endl;
 			return r;
 		}
-		if(N == 0)
+		if (N == 0)
 		{
 			std::cerr << "No query points provided for batch UDF evaluation." << std::endl;
 			return r;
 		}
 		try
 		{
-			//std::cout << "Evaluating Neural UDF for batch of " << N << " points." << std::endl;
-			torch::Tensor points_cpu =
-				torch::empty({static_cast<long>(N), 3}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
+			// std::cout << "Evaluating Neural UDF for batch of " << N << " points." << std::endl;
+			torch::Tensor points_cpu = torch::empty({static_cast<long>(N), 3},
+													torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
 			auto acc = points_cpu.accessor<float, 2>();
-			//std::cout << "Preparing input tensor." << std::endl;
+			// std::cout << "Preparing input tensor." << std::endl;
 			for (size_t i = 0; i < N; ++i)
 			{
 				acc[i][0] = query_points[i].x();
@@ -624,8 +672,8 @@ public:
 			torch::Tensor points = points_cpu.to(device_);
 			points.set_requires_grad(true);
 
-			//std::cout << "Performing forward pass." << std::endl;
-			// forward pass
+			// std::cout << "Performing forward pass." << std::endl;
+			//  forward pass
 			torch::Tensor output = p.neural_udf_model_.forward({points}).toTensor();
 
 			// Check output shape
@@ -637,7 +685,7 @@ public:
 
 			// backward pass to compute gradients
 			output.backward(torch::ones_like(output));
-			
+
 			torch::Tensor grads = points.grad();
 			// Validate gradient tensor
 			r.values.reserve(N);
@@ -646,8 +694,8 @@ public:
 			torch::Tensor output_cpu = output.detach().to(torch::kCPU).contiguous();
 			torch::Tensor grads_cpu = grads.detach().to(torch::kCPU).contiguous();
 
-			auto out_acc = output_cpu.accessor<float, 2>(); 
-			auto grad_acc = grads_cpu.accessor<float, 2>(); 
+			auto out_acc = output_cpu.accessor<float, 2>();
+			auto grad_acc = grads_cpu.accessor<float, 2>();
 
 			r.values.resize(N);
 			r.gradients.resize(N);
@@ -681,9 +729,9 @@ public:
 		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
 
 		// Sample points on alpha level set
-		//std::vector<Vec3> sampled_points = sample_alpha_level_set(p, num_points*10);
+		// std::vector<Vec3> sampled_points = sample_alpha_level_set(p, num_points*10);
 		std::vector<Vec3> sampled_points = sample_alpha_level_set_rays(p, num_points);
-		//sampled_points = poisson_eliminate_points(sampled_points, num_points);
+		// sampled_points = poisson_eliminate_points(sampled_points, num_points);
 		if (sampled_points.empty())
 		{
 			std::cerr << "Failed to sample points on alpha level set." << std::endl;
@@ -701,7 +749,7 @@ public:
 		{
 			PVertex v = add_vertex(*p.samples_mesh_);
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			//std::cout << pt.transpose() << std::endl;
+			// std::cout << pt.transpose() << std::endl;
 			(*p.samples_position_)[v_idx] = pt;
 		}
 
@@ -792,7 +840,7 @@ public:
 			if (output.dim() == 2 && output.size(1) == 1)
 				output = output.squeeze(1);
 			output = output.detach();
-			return output; 
+			return output;
 		}
 		catch (const c10::Error& e)
 		{
@@ -801,19 +849,17 @@ public:
 		}
 	}
 
-	
 	torch::Tensor compute_directional_derivative_fd(PointsParameters& p, const torch::Tensor& points_gpu,
 													const torch::Tensor& directions_gpu, Scalar h = 1e-5f)
 	{
 		torch::InferenceMode guard;
-	
+
 		torch::Tensor points_plus = points_gpu + h * directions_gpu;
 		torch::Tensor points_minus = points_gpu - h * directions_gpu;
 
 		torch::Tensor f_plus = forward_values_gpu(p, points_plus);
 		torch::Tensor f_minus = forward_values_gpu(p, points_minus);
 
-	
 		return (f_plus - f_minus) / (2.0f * h);
 	}
 
@@ -824,7 +870,6 @@ public:
 			std::cerr << "Neural UDF model not loaded." << std::endl;
 			return {};
 		}
-		
 
 		Vec3 bbox_min(0, 0, 0);
 		Vec3 bbox_max(1, 1, 1);
@@ -834,7 +879,6 @@ public:
 
 		std::mt19937 gen(p.seed_);
 		int total_rays = 0;
-
 		for (int iter = 0; iter < 500 && all_samples.size() < target_num_points; ++iter)
 		{
 			auto rays = RayLevelSetSampler::generate_rays(bbox_min, bbox_max, p.batch_size_, p, gen);
@@ -843,51 +887,19 @@ public:
 
 			std::cout << "Iteration " << iter << ": Processing " << R << " rays on GPU..." << std::endl;
 
-			auto cpu_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-			if (device_.is_cuda())
-				cpu_options = cpu_options.pinned_memory(true);
-			torch::Tensor O_cpu = torch::empty({R, 3}, cpu_options);
-			torch::Tensor D_cpu = torch::empty({R, 3}, cpu_options);
-			torch::Tensor t_cpu = torch::empty({R}, cpu_options);
-			torch::Tensor t_max_cpu = torch::empty({R}, cpu_options);
+			auto buffers = prepare_ray_batch_buffers(p, rays);
 
-			{
-				auto O_acc = O_cpu.accessor<float, 2>();
-				auto D_acc = D_cpu.accessor<float, 2>();
-				auto t_acc = t_cpu.accessor<float, 1>();
-				auto tmax_acc = t_max_cpu.accessor<float, 1>();
+			auto& O = buffers.O;
+			auto& D = buffers.D;
+			auto& t = buffers.t;
+			auto& t_max = buffers.t_max;
+			auto& t_min0 = buffers.t_min0;
+			auto& active = buffers.active;
+			auto& last_udf = buffers.last_udf;
+			auto& in_band = buffers.in_band;
 
-				for (int i = 0; i < R; ++i)
-				{
-					O_acc[i][0] = static_cast<float>(rays[i].origin.x());
-					O_acc[i][1] = static_cast<float>(rays[i].origin.y());
-					O_acc[i][2] = static_cast<float>(rays[i].origin.z());
-					D_acc[i][0] = static_cast<float>(rays[i].direction.x());
-					D_acc[i][1] = static_cast<float>(rays[i].direction.y());
-					D_acc[i][2] = static_cast<float>(rays[i].direction.z());
-					t_acc[i] = static_cast<float>(rays[i].t_min);
-					tmax_acc[i] = static_cast<float>(rays[i].t_max);
-				}
-			}
-
-	
-			torch::Tensor O = O_cpu.to(device_);
-			torch::Tensor D = D_cpu.to(device_);
-			torch::Tensor t = t_cpu.to(device_);
-			torch::Tensor t_max = t_max_cpu.to(device_);
-			torch::Tensor t_min0 = t.clone();
-
-			torch::Tensor active = torch::ones({R}, torch::TensorOptions().dtype(torch::kBool).device(device_));
-
-	
-			std::vector<torch::Tensor> refine_indices_list;
-			std::vector<torch::Tensor> refine_tstart_list;
-			std::vector<torch::Tensor> refine_tend_list;
+			std::vector<Vec3> iter_samples;
 			int64_t refine_task_count = 0;
-
-			torch::Tensor last_udf =
-				torch::full({R}, -1.0f, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-			torch::Tensor in_band = torch::zeros({R}, torch::TensorOptions().dtype(torch::kBool).device(device_));
 
 			for (int step = 0; step < p.udf_max_iterations_; ++step)
 			{
@@ -908,14 +920,13 @@ public:
 
 				torch::Tensor residual = torch::abs(udf - p.alpha_);
 
-			
 				torch::Tensor f_curr = udf - p.alpha_;
 				torch::Tensor f_last = last_udf - p.alpha_;
-				
+
 				torch::Tensor sign_change = (f_curr * f_last < 0) & (last_udf > 0);
-			
+
 				torch::Tensor near_band = residual < p.udf_delta_enter_;
-			
+
 				torch::Tensor enter_band = near_band & (~in_band);
 
 				torch::Tensor should_refine = (sign_change | enter_band) & active;
@@ -923,6 +934,8 @@ public:
 				torch::Tensor refine_indices = torch::nonzero(should_refine).squeeze(1);
 				if (refine_indices.numel() > 0)
 				{
+					refine_task_count += refine_indices.numel();
+					
 					torch::Tensor t_curr = t.index_select(0, refine_indices);
 					torch::Tensor res = residual.index_select(0, refine_indices);
 					torch::Tensor t_min = t_min0.index_select(0, refine_indices);
@@ -934,30 +947,34 @@ public:
 					torch::Tensor t_start = torch::max(t_min, t_curr - window_half);
 					torch::Tensor t_end = torch::min(t_max_local, t_curr + window_half);
 
-					refine_indices_list.push_back(refine_indices);
-					refine_tstart_list.push_back(t_start);
-					refine_tend_list.push_back(t_end);
-					refine_task_count += refine_indices.numel();
+					append_refine_tasks(p, refine_indices, t_start, t_end, O, D, iter_samples, all_samples);
 				}
+
+				in_band = near_band;
 
 				last_udf.copy_(udf);
 
 				torch::Tensor safe_step = residual /*/ p.udf_lipschitz_*/ * 0.8f;
-				//std::cout << "safe_step: " << safe_step.index({torch::indexing::Slice(0, 5)}) << std::endl;
-				safe_step = torch::clamp_min(safe_step, p.alpha_ * 0.02f); 
-				
+				// std::cout << "safe_step: " << safe_step.index({torch::indexing::Slice(0, 5)}) << std::endl;
+				safe_step = torch::clamp_min(safe_step, p.alpha_ * 0.02f);
+
 				torch::Tensor window_skip = residual /*/ p.udf_lipschitz_*/ * 2.0f;
-				//std::cout << "window_skip:" << window_skip.index({torch::indexing::Slice(0, 5)}) << std::endl;
+				// std::cout << "window_skip:" << window_skip.index({torch::indexing::Slice(0, 5)}) << std::endl;
 				window_skip = torch::clamp_min(window_skip, p.udf_delta_enter_ * 2.0f);
 
 				torch::Tensor step_size = torch::where(should_refine, window_skip, safe_step);
-				
-				t = t + step_size;
 
-				active = active & (t < t_max);
+				t.add_(step_size);
 
-				t = torch::min(t, t_max);
-				
+				active.logical_and_(t < t_max);
+
+				t.clamp_max_(t_max);
+				// t = t + step_size;
+
+				// active = active & (t < t_max);
+
+				// t = torch::min(t, t_max);
+
 				if (step % 50 == 0)
 				{
 					std::cout << "    Step " << step << ": " << active_count << " active, " << refine_task_count
@@ -967,159 +984,8 @@ public:
 
 			std::cout << std::endl;
 
-			std::vector<Vec3> iter_samples;
 
-			if (!refine_indices_list.empty())
-			{
-				torch::Tensor refine_indices = torch::cat(refine_indices_list, 0);
-				torch::Tensor t_start = torch::cat(refine_tstart_list, 0);
-				torch::Tensor t_end = torch::cat(refine_tend_list, 0);
-
-				std::cout << "  GPU Refine: " << refine_indices.size(0) << " tasks..." << std::endl;
-
-				const int dense_samples = 32;
-				const int K = static_cast<int>(refine_indices.size(0));
-
-				torch::Tensor lin = torch::linspace(
-					0.0f, 1.0f, dense_samples,
-					torch::TensorOptions().dtype(torch::kFloat32).device(device_));
-				torch::Tensor dense_t =
-					t_start.unsqueeze(1) + lin.unsqueeze(0) * (t_end - t_start).unsqueeze(1);
-				torch::Tensor ray_ids = refine_indices;
-
-				torch::Tensor task_O = O.index_select(0, ray_ids);
-				torch::Tensor task_D = D.index_select(0, ray_ids);
-				torch::Tensor dense_X = task_O.unsqueeze(1) + dense_t.unsqueeze(2) * task_D.unsqueeze(1);
-				dense_X = dense_X.reshape({K * dense_samples, 3});
-
-				torch::Tensor dense_udf = forward_values_gpu(p, dense_X);
-				dense_udf = dense_udf.reshape({K, dense_samples});
-
-				torch::Tensor v1 = dense_udf.slice(1, 0, dense_samples - 1) - p.alpha_;
-				torch::Tensor v2 = dense_udf.slice(1, 1, dense_samples) - p.alpha_;
-				torch::Tensor sign_change = (v1 * v2) < 0;
-
-				torch::Tensor bracket_indices = torch::nonzero(sign_change);
-
-				if (bracket_indices.numel() > 0)
-				{
-					int N = static_cast<int>(bracket_indices.size(0));
-					torch::Tensor bi_cpu = bracket_indices.to(torch::kCPU);
-					torch::Tensor dt_cpu_tensor = dense_t.to(torch::kCPU);
-					torch::Tensor rid_cpu_tensor = ray_ids.to(torch::kCPU);
-
-					auto bi_acc = bi_cpu.accessor<int64_t, 2>();
-					auto dt_cpu = dt_cpu_tensor.accessor<float, 2>();
-					auto rid_cpu = rid_cpu_tensor.accessor<int64_t, 1>();
-
-					// Newton
-					torch::Tensor newton_t_cpu =
-						torch::empty({N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-					torch::Tensor newton_ray_ids_cpu =
-						torch::empty({N}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
-					torch::Tensor ta_cpu =
-						torch::empty({N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-					torch::Tensor tb_cpu =
-						torch::empty({N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-
-					{
-						auto nt_acc = newton_t_cpu.accessor<float, 1>();
-						auto nrid_acc = newton_ray_ids_cpu.accessor<int64_t, 1>();
-						auto ta_acc = ta_cpu.accessor<float, 1>();
-						auto tb_acc = tb_cpu.accessor<float, 1>();
-
-						for (int i = 0; i < N; ++i)
-						{
-							int task_idx = static_cast<int>(bi_acc[i][0]);
-							int j = static_cast<int>(bi_acc[i][1]);
-
-							nrid_acc[i] = rid_cpu[task_idx];
-							float t_a = dt_cpu[task_idx][j];
-							float t_b = dt_cpu[task_idx][j + 1];
-							nt_acc[i] = (t_a + t_b) * 0.5f;
-							ta_acc[i] = t_a;
-							tb_acc[i] = t_b;
-						}
-					}
-
-					torch::Tensor newton_t = newton_t_cpu.to(device_);
-					torch::Tensor newton_ray_ids = newton_ray_ids_cpu.to(device_);
-					torch::Tensor ta = ta_cpu.to(device_);
-					torch::Tensor tb = tb_cpu.to(device_);
-					// Netwon iterations
-					 
-					// Todo: autograd does not work , why?
-					for (int nit = 0; nit < p.max_sample_iter_; ++nit)
-					{
-						torch::Tensor newton_O = O.index_select(0, newton_ray_ids);
-						torch::Tensor newton_D = D.index_select(0, newton_ray_ids);
-						torch::Tensor newton_X = newton_O + newton_t.unsqueeze(1) * newton_D;
-
-						auto [f_raw, grad] = forward_values_grad_gpu(p, newton_X);
-						//torch::cuda::synchronize();
-						if (!f_raw.defined() || !grad.defined())
-							break;
-
-						torch::Tensor f = f_raw - p.alpha_;
-						//std::cout<<" f: "<<f.index({torch::indexing::Slice(0,5)})<< "f_max: "<<f.max().item<float>()<<std::endl;
-						torch::Tensor dfdt = (grad * newton_D).sum(1);
-
-						// Newton 
-						torch::Tensor delta_t = torch::zeros_like(dfdt);
-						torch::Tensor ok = dfdt.abs() > 1e-10f;
-						delta_t = torch::where(ok, -f / dfdt, delta_t);
-						newton_t = torch::clamp(newton_t + delta_t, ta, tb);
-					}
-					/*for (int nit = 0; nit < newton_iters; ++nit)
-					{
-						torch::Tensor newton_O = O.index_select(0, newton_ray_ids);
-						torch::Tensor newton_D = D.index_select(0, newton_ray_ids);
-						torch::Tensor newton_X = newton_O + newton_t.unsqueeze(1) * newton_D;
-
-						torch::Tensor dfdt = compute_directional_derivative_fd(p, newton_X, newton_D);
-						torch::Tensor f = forward_values_gpu(p, newton_X) - alpha;
-
-						torch::Tensor delta_t = -f / torch::clamp_min(torch::abs(dfdt), 1e-10f);
-						delta_t = torch::where(dfdt.abs() < 1e-10f, torch::zeros_like(delta_t), delta_t);
-
-						newton_t = torch::clamp(newton_t + delta_t, ta, tb);
-					}*/
-
-					// Verify
-					torch::Tensor final_O = O.index_select(0, newton_ray_ids);
-					torch::Tensor final_D = D.index_select(0, newton_ray_ids);
-					torch::Tensor final_X = final_O + newton_t.unsqueeze(1) * final_D;
-					torch::Tensor final_udf = forward_values_gpu(p, final_X);
-					
-					torch::Tensor final_err = torch::abs(final_udf - p.alpha_);
-
-					torch::Tensor valid = final_err < (p.tol_ * 5); 
-					torch::Tensor valid_indices = torch::nonzero(valid).squeeze(1);
-
-					if (valid_indices.numel() > 0)
-					{
-						torch::Tensor valid_X = final_X.index_select(0, valid_indices);
-						torch::Tensor valid_X_cpu = valid_X.to(torch::kCPU);
-						auto vx_acc = valid_X_cpu.accessor<float, 2>();
-
-						for (int64_t i = 0; i < valid_indices.size(0); ++i)
-						{
-							Vec3 pt(vx_acc[i][0], vx_acc[i][1], vx_acc[i][2]);
-							pt = pt.cwiseMax(0.0).cwiseMin(1.0);
-
-							// Spatial deduplication
-							if (p.samples_spatial_grid_->is_valid_sample(pt, p.grid_cell_size_, all_samples))
-							{
-								iter_samples.push_back(pt);
-								all_samples.push_back(pt);
-								p.samples_spatial_grid_->insert(pt,
-												  static_cast<uint32>(all_samples.size() - 1));
-							}
-						}
-					}
-				}
-			}
-
+			flush_refine_tasks(p,O ,D ,iter_samples, all_samples);
 			std::cout << "  Collected " << iter_samples.size() << " unique samples this iteration" << std::endl;
 
 			std::cout << "  Total: " << all_samples.size() << " / " << target_num_points << std::endl;
@@ -1132,8 +998,7 @@ public:
 		}
 		return all_samples;
 	}
-	
-	
+
 	std::vector<Vec3> poisson_eliminate_points(const std::vector<Vec3>& points, size_t target_num)
 	{
 		std::vector<Point_3> cgal_in;
@@ -1155,7 +1020,8 @@ public:
 		return out;
 	}
 
-	std::pair<std::vector<Vec3>,std::vector<Vec3>> project_points_to_alpha_gpu(PointsParameters& p, const std::vector<Vec3>& points)
+	std::pair<std::vector<Vec3>, std::vector<Vec3>> project_points_to_alpha_gpu(PointsParameters& p,
+																				const std::vector<Vec3>& points)
 	{
 		const size_t nb_points = points.size();
 		const int max_iters = 30;
@@ -1163,10 +1029,11 @@ public:
 
 		try
 		{
-			torch::Tensor X_cpu = torch::empty({static_cast<int64_t>(nb_points), 3},
-											   torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true));
+			torch::Tensor X_cpu =
+				torch::empty({static_cast<int64_t>(nb_points), 3},
+							 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true));
 			torch::Tensor active_cpu = torch::ones({static_cast<int64_t>(nb_points)},
-											   torch::TensorOptions().dtype(torch::kBool).device(device_));
+												   torch::TensorOptions().dtype(torch::kBool).device(device_));
 			auto x_acc = X_cpu.accessor<float, 2>();
 			auto active_acc = active_cpu.accessor<bool, 1>();
 			for (size_t i = 0; i < nb_points; ++i)
@@ -1189,15 +1056,15 @@ public:
 				torch::Tensor abs_residual = torch::abs(residual);
 
 				//// DEBUG
-				//float max_residual = abs_residual.max().item<float>();
-				//float mean_residual = abs_residual.mean().item<float>();
-				//int active_count = torch::sum(active).item<int>();
+				// float max_residual = abs_residual.max().item<float>();
+				// float mean_residual = abs_residual.mean().item<float>();
+				// int active_count = torch::sum(active).item<int>();
 
-				//std::cout << "Iter " << iter << ": active=" << active_count << ", max_res=" << max_residual
+				// std::cout << "Iter " << iter << ": active=" << active_count << ", max_res=" << max_residual
 				//		  << ", mean_res=" << mean_residual << std::endl;
 				//// END DEBUG
 				// Decide which points are still active
-				
+
 				active = active & (abs_residual > tol);
 
 				torch::Tensor grad_norm2 = (grad * grad).sum(1, true);
@@ -1210,21 +1077,19 @@ public:
 			}
 			auto [f, grad] = forward_values_grad_gpu(p, X);
 
-			
 			torch::Tensor final_X_cpu = X.to(torch::kCPU);
 			torch::Tensor final_grad_cpu = grad.to(torch::kCPU);
 
 			auto final_X_acc = final_X_cpu.accessor<float, 2>();
 			auto final_grad_acc = final_grad_cpu.accessor<float, 2>();
-			
+
 			std::vector<Vec3> projected_points;
 			std::vector<Vec3> normals;
 			projected_points.reserve(nb_points);
 			normals.reserve(nb_points);
 			for (size_t i = 0; i < nb_points; ++i)
 			{
-				projected_points.push_back(
-					Vec3(final_X_acc[i][0], final_X_acc[i][1], final_X_acc[i][2]));
+				projected_points.push_back(Vec3(final_X_acc[i][0], final_X_acc[i][1], final_X_acc[i][2]));
 				normals.push_back(Vec3(final_grad_acc[i][0], final_grad_acc[i][1], final_grad_acc[i][2]).normalized());
 			}
 			return {projected_points, normals};
@@ -1235,7 +1100,6 @@ public:
 			return {};
 		}
 	}
-
 
 	void test_batch_forward(PointsParameters& p)
 	{
@@ -1256,8 +1120,7 @@ public:
 			std::cout << "Batch UDF evaluation successful. Sample results:" << std::endl;
 			for (size_t i = 0; i < 5; ++i)
 			{
-				std::cout << "Point: " << test_points[i].transpose()
-						  << " UDF: " << result.values[i]
+				std::cout << "Point: " << test_points[i].transpose() << " UDF: " << result.values[i]
 						  << " Grad: " << result.gradients[i].transpose() << std::endl;
 			}
 		}
@@ -1265,7 +1128,6 @@ public:
 		{
 			std::cerr << "Batch UDF evaluation failed." << std::endl;
 		}
-
 	}
 
 public:
@@ -1277,36 +1139,35 @@ public:
 		// 1. Convert CGoGN SURFACE to CGAL::Surface_mesh
 		CGAL_Mesh cgal_mesh;
 		//
-		//auto pos = cgogn::get_attribute<Vec3, SVertex>(surface, "position");
+		// auto pos = cgogn::get_attribute<Vec3, SVertex>(surface, "position");
 
-		//std::unordered_map<uint32, CGAL_Mesh::Vertex_index> v_map;
+		// std::unordered_map<uint32, CGAL_Mesh::Vertex_index> v_map;
 
 		//// Add vertices
-		//foreach_cell(surface, [&](SVertex v) {
+		// foreach_cell(surface, [&](SVertex v) {
 		//	uint32 v_idx = index_of(surface, v);
 		//	const Vec3& p = (*pos)[v_idx];
 		//	v_map[v_idx] = cgal_mesh.add_vertex(Point_3(p[0], p[1], p[2]));
 		//	return true;
-		//});
+		// });
 
 		//// Add faces
-		//foreach_cell(surface, [&](SFace f) {
+		// foreach_cell(surface, [&](SFace f) {
 		//	std::vector<CGAL_Mesh::Vertex_index> face_v;
 		//	foreach_incident_vertex(surface, f, [&](SVertex v) {
 		//		face_v.push_back(v_map[index_of(surface, v)]);
 		//		return true;
 		//	});
-		//		
+		//
 		//	cgal_mesh.add_face(face_v);
 		//	return true;
-		//});
+		// });
 		std::string filename = surface_provider_->mesh_filename(surface);
 		if (!filename.empty())
 		{
 			if (!CGAL::IO::read_polygon_mesh(filename, cgal_mesh) || cgal_mesh.is_empty())
 			{
 				std::cout << "Error loading CGAL surface mesh from file: " << filename << std::endl;
-				
 			}
 		}
 		normalize_surface_mesh(cgal_mesh);
@@ -1315,8 +1176,9 @@ public:
 		std::vector<Point_3> sampled_points;
 
 		// Using simple random sampling on mesh
-		CGAL::Polygon_mesh_processing::sample_triangle_mesh(cgal_mesh, std::back_inserter(sampled_points),
-															CGAL::parameters::number_of_points_per_area_unit(num_samples));
+		CGAL::Polygon_mesh_processing::sample_triangle_mesh(
+			cgal_mesh, std::back_inserter(sampled_points),
+			CGAL::parameters::number_of_points_per_area_unit(num_samples));
 
 		std::cout << "Sampled " << sampled_points.size() << " points from surface." << std::endl;
 
@@ -1384,8 +1246,357 @@ protected:
 		}
 	}
 
-
 private:
+	// Ray sampling helpers
+	void init_ray_buffers(PointsParameters& p, int R)
+	{
+		if (R <= 0)
+			return;
+
+		const bool need_realloc = (p.ray_capacity_ < R) || (!p.ray_origins_.defined()) || (p.ray_device_ != device_);
+
+		if (!need_realloc)
+			return;
+
+		p.ray_capacity_ = R;
+		p.ray_device_ = device_;
+
+		auto cput_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+		if (device_.is_cuda())
+			cput_opts = cput_opts.pinned_memory(true);
+
+		p.ray_origins_cpu_ = torch::empty({p.ray_capacity_, 3}, cput_opts);
+		p.ray_directions_cpu_ = torch::empty({p.ray_capacity_, 3}, cput_opts);
+		p.ray_t_cpu_ = torch::empty({p.ray_capacity_}, cput_opts);
+		p.ray_tmax_cpu_ = torch::empty({p.ray_capacity_}, cput_opts);
+
+		auto gput_opts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+		auto bool_opts = torch::TensorOptions().dtype(torch::kBool).device(device_);
+
+		p.ray_origins_ = torch::empty({p.ray_capacity_, 3}, gput_opts);
+		p.ray_directions_ = torch::empty({p.ray_capacity_, 3}, gput_opts);
+		p.ray_t_ = torch::empty({p.ray_capacity_}, gput_opts);
+		p.ray_tmax_ = torch::empty({p.ray_capacity_}, gput_opts);
+		p.ray_tmin0_ = torch::empty({p.ray_capacity_}, gput_opts);
+		p.ray_last_udf_ = torch::empty({p.ray_capacity_}, gput_opts);
+		p.ray_active_ = torch::empty({p.ray_capacity_}, bool_opts);
+		p.ray_in_band_ = torch::empty({p.ray_capacity_}, bool_opts);
+	}
+
+	void init_refine_buffers(PointsParameters& p, int refine_capacity)
+	{
+		if (refine_capacity <= 0)
+			return;
+
+		const bool need_realloc =
+			(p.refine_capacity_ < refine_capacity) || (!p.refine_ray_ids_.defined()) || (p.ray_device_ != device_);
+
+		if (!need_realloc)
+			return;
+
+		p.refine_capacity_ = refine_capacity;
+		p.refine_count_ = 0;
+
+		auto i64_opts = torch::TensorOptions().dtype(torch::kInt64).device(device_);
+		auto f32_opts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+
+		p.refine_ray_ids_ = torch::empty({p.refine_capacity_}, i64_opts);
+		p.refine_tstart_ = torch::empty({p.refine_capacity_}, f32_opts);
+		p.refine_tend_ = torch::empty({p.refine_capacity_}, f32_opts);
+	}
+
+	RayBatchBuffers prepare_ray_batch_buffers(PointsParameters& p, const std::vector<Ray>& rays)
+	{
+		const int R = static_cast<int>(rays.size());
+		init_ray_buffers(p, R);
+
+		auto O_cpu = p.ray_origins_cpu_.narrow(0, 0, R);
+		auto D_cpu = p.ray_directions_cpu_.narrow(0, 0, R);
+		auto t_cpu = p.ray_t_cpu_.narrow(0, 0, R);
+		auto tmax_cpu = p.ray_tmax_cpu_.narrow(0, 0, R);
+
+		auto O_acc = O_cpu.accessor<float, 2>();
+		auto D_acc = D_cpu.accessor<float, 2>();
+		auto t_acc = t_cpu.accessor<float, 1>();
+		auto tmax_acc = tmax_cpu.accessor<float, 1>();
+
+		for (int i = 0; i < R; ++i)
+		{
+			O_acc[i][0] = static_cast<float>(rays[i].origin.x());
+			O_acc[i][1] = static_cast<float>(rays[i].origin.y());
+			O_acc[i][2] = static_cast<float>(rays[i].origin.z());
+			D_acc[i][0] = static_cast<float>(rays[i].direction.x());
+			D_acc[i][1] = static_cast<float>(rays[i].direction.y());
+			D_acc[i][2] = static_cast<float>(rays[i].direction.z());
+			t_acc[i] = static_cast<float>(rays[i].t_min);
+			tmax_acc[i] = static_cast<float>(rays[i].t_max);
+		}
+
+		RayBatchBuffers buffers;
+
+		buffers.O = p.ray_origins_.narrow(0, 0, R);
+		buffers.D = p.ray_directions_.narrow(0, 0, R);
+		buffers.t = p.ray_t_.narrow(0, 0, R);
+		buffers.t_max = p.ray_tmax_.narrow(0, 0, R);
+		buffers.t_min0 = p.ray_tmin0_.narrow(0, 0, R);
+		buffers.active = p.ray_active_.narrow(0, 0, R);
+		buffers.last_udf = p.ray_last_udf_.narrow(0, 0, R);
+		buffers.in_band = p.ray_in_band_.narrow(0, 0, R);
+
+		const bool nonblocking = device_.is_cuda();
+		buffers.O.copy_(O_cpu, nonblocking);
+		buffers.D.copy_(D_cpu, nonblocking);
+		buffers.t.copy_(t_cpu, nonblocking);
+		buffers.t_max.copy_(tmax_cpu, nonblocking);
+		buffers.t_min0.copy_(t_cpu, nonblocking);
+		buffers.active.fill_(true);
+		buffers.last_udf.fill_(-1.0f);
+		buffers.in_band.fill_(false);
+
+		return buffers;
+	}
+
+	void init_renfine_buffers(PointsParameters& p, int refine_capacity)
+	{
+		if (refine_capacity <= 0)
+			return;
+
+		const bool need_realloc =
+			(p.refine_capacity_ < refine_capacity) || (!p.refine_ray_ids_.defined()) || (p.ray_active_ != device_);
+
+		if (!need_realloc)
+			return;
+
+		p.refine_capacity_ = refine_capacity;
+		p.refine_count_ = 0;
+
+		auto i64_opts = torch::TensorOptions().dtype(torch::kInt64).device(device_);
+		auto f32_opts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+
+		p.refine_ray_ids_ = torch::empty({p.refine_capacity_}, i64_opts);
+		p.refine_tstart_ = torch::empty({p.refine_capacity_}, f32_opts);
+		p.refine_tend_ = torch::empty({p.refine_capacity_}, f32_opts);
+	}
+
+	void init_renfine_work_buffers(PointsParameters& p, int work_capacity, int dense_sample_nb)
+	{
+		if (dense_sample_nb <= 0)
+			return;
+
+		const bool need_realloc = (p.refine_work_capacity_ < work_capacity) || (!p.refine_task_O_.defined()) ||
+								  (p.ray_device_ != device_) || (p.refine_dense_samples_nb_ != dense_sample_nb);
+
+		if (!need_realloc)
+			return;
+
+		p.refine_work_capacity_ = work_capacity;
+		p.refine_dense_samples_nb_ = dense_sample_nb;
+
+		auto f32_opts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+
+		p.refine_task_O_ = torch::empty({p.refine_work_capacity_, 3}, f32_opts);
+		p.refine_task_D_ = torch::empty({p.refine_work_capacity_, 3}, f32_opts);
+		p.refine_dense_t_ = torch::empty({p.refine_work_capacity_, dense_sample_nb}, f32_opts);
+		p.refine_dense_X_ = torch::empty({p.refine_work_capacity_, dense_sample_nb, 3}, f32_opts);
+		p.refine_tspan_ = torch::empty({p.refine_work_capacity_}, f32_opts);
+		p.refine_lin_ = torch::linspace(0.0f, 1.0f, dense_sample_nb, f32_opts);
+	}
+
+	void run_refine_chunk(PointsParameters& p, torch::Tensor& ray_ids, torch::Tensor& t_start, torch::Tensor& t_end,
+						  const torch::Tensor& O, const torch::Tensor& D, std::vector<Vec3>& iter_samples,
+						  std::vector<Vec3>& all_samples)
+	{
+		const int dense_samples = p.refine_dense_samples_nb_;
+		const int K = static_cast<int>(ray_ids.size(0));
+		if (K <= 0)
+			return;
+
+		init_renfine_work_buffers(p, K, dense_samples);
+
+		auto task_O = p.refine_task_O_.narrow(0, 0, K);
+		auto task_D = p.refine_task_D_.narrow(0, 0, K);
+		auto dense_t = p.refine_dense_t_.narrow(0, 0, K);
+		auto dense_X = p.refine_dense_X_.narrow(0, 0, K);
+		auto t_span = p.refine_tspan_.narrow(0, 0, K);
+		auto lin = p.refine_lin_;
+
+		torch::index_select_out(task_O, O, 0, ray_ids);
+		torch::index_select_out(task_D, D, 0, ray_ids);
+
+		t_span.copy_(t_end);
+		t_span.sub_(t_start);
+
+		dense_t.copy_(t_start.unsqueeze(1));
+		dense_t.addcmul_(t_span.unsqueeze(1).expand({K, dense_samples}), lin.unsqueeze(0).expand({K, dense_samples}));
+		auto dump = [](const torch::Tensor& t, const char* name) {
+			std::cout << name << " sizes=" << t.sizes() << " device=" << t.device() << " dtype=" << t.dtype()
+					  << " defined=" << t.defined() << std::endl;
+		};
+		
+		dense_X.copy_(task_O.unsqueeze(1).expand({K, dense_samples, 3}));
+		dense_X.addcmul_(dense_t.unsqueeze(2), task_D.unsqueeze(1));
+
+		auto dense_X_flat = dense_X.reshape({K * dense_samples, 3});
+		torch::Tensor dense_udf = forward_values_gpu(p, dense_X_flat);
+		dense_udf = dense_udf.reshape({K, dense_samples});
+
+		torch::Tensor v1 = dense_udf.slice(1, 0, dense_samples - 1) - p.alpha_;
+		torch::Tensor v2 = dense_udf.slice(1, 1, dense_samples) - p.alpha_;
+		torch::Tensor sign_change = (v1 * v2) < 0;
+
+		torch::Tensor bracket_indices = torch::nonzero(sign_change);
+		if (bracket_indices.numel() == 0)
+			return;
+
+		// int N = static_cast<int>(bracket_indices.size(0));
+		// torch::Tensor bi_cpu = bracket_indices.to(torch::kCPU);
+		// torch::Tensor dt_cpu_tensor = dense_t.to(torch::kCPU);
+		// torch::Tensor rid_cpu_tensor = ray_ids.to(torch::kCPU);
+
+		// auto bi_acc = bi_cpu.accessor<int64_t, 2>();
+		// auto dt_cpu = dt_cpu_tensor.accessor<float, 2>();
+		// auto rid_cpu = rid_cpu_tensor.accessor<int64_t, 1>();
+
+		// // Newton
+		// torch::Tensor newton_t_cpu =
+		// 	torch::empty({N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
+		// torch::Tensor newton_ray_ids_cpu =
+		// 	torch::empty({N}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
+		// torch::Tensor ta_cpu = torch::empty({N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
+		// torch::Tensor tb_cpu = torch::empty({N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
+
+		// auto nt_acc = newton_t_cpu.accessor<float, 1>();
+		// auto nrid_acc = newton_ray_ids_cpu.accessor<int64_t, 1>();
+		// auto ta_acc = ta_cpu.accessor<float, 1>();
+		// auto tb_acc = tb_cpu.accessor<float, 1>();
+
+		// for (int i = 0; i < N; ++i)
+		// {
+		// 	int task_idx = static_cast<int>(bi_acc[i][0]);
+		// 	int j = static_cast<int>(bi_acc[i][1]);
+
+		// 	nrid_acc[i] = rid_cpu[task_idx];
+		// 	float t_a = dt_cpu[task_idx][j];
+		// 	float t_b = dt_cpu[task_idx][j + 1];
+		// 	nt_acc[i] = (t_a + t_b) * 0.5f;
+		// 	ta_acc[i] = t_a;
+		// 	tb_acc[i] = t_b;
+		// }
+		// torch::Tensor newton_t = newton_t_cpu.to(device_);
+		// torch::Tensor newton_ray_ids = newton_ray_ids_cpu.to(device_);
+		// torch::Tensor ta = ta_cpu.to(device_);
+		// torch::Tensor tb = tb_cpu.to(device_);
+
+		// bracket_indices: [N,2], columns = {task_idx, j}
+		torch::Tensor task_ids = bracket_indices.select(1, 0); //[N]
+		torch::Tensor j = bracket_indices.select(1, 1); //[N]
+
+		torch::Tensor dense_t_task = dense_t.index_select(0, task_ids); //[N, dense_samples]
+
+		// t_a = dense_t[task, j], t_b = dense_t[task, j+1]
+		torch::Tensor j1 = torch::clamp(j + 1, 0, dense_samples - 1);
+		torch::Tensor t_a = dense_t_task.gather(1, j.unsqueeze(1)).squeeze(1);
+		torch::Tensor t_b = dense_t_task.gather(1, j1.unsqueeze(1)).squeeze(1);
+
+		// Newton init
+		torch::Tensor newton_t = 0.5f * (t_a + t_b);
+		torch::Tensor newton_ray_ids = ray_ids.index_select(0, task_ids);
+
+		// bounds
+		torch::Tensor ta = t_a;
+		torch::Tensor tb = t_b;
+
+		for (int nit = 0; nit < p.max_sample_iter_; ++nit)
+		{
+			torch::Tensor newton_O = O.index_select(0, newton_ray_ids);
+			torch::Tensor newton_D = D.index_select(0, newton_ray_ids);
+			torch::Tensor newton_X = newton_O + newton_t.unsqueeze(1) * newton_D;
+
+			auto [f_raw, grad] = forward_values_grad_gpu(p, newton_X);
+			if (!f_raw.defined() || !grad.defined())
+				break;
+
+			torch::Tensor f = f_raw - p.alpha_;
+			torch::Tensor dfdt = (grad * newton_D).sum(1);
+
+			torch::Tensor delta_t = torch::zeros_like(dfdt);
+			torch::Tensor ok = dfdt.abs() > 1e-10f;
+			delta_t = torch::where(ok, -f / dfdt, delta_t);
+			newton_t = torch::clamp(newton_t + delta_t, ta, tb);
+		}
+
+		torch::Tensor final_O = O.index_select(0, newton_ray_ids);
+		torch::Tensor final_D = D.index_select(0, newton_ray_ids);
+		torch::Tensor final_X = final_O + newton_t.unsqueeze(1) * final_D;
+		torch::cuda::synchronize();
+
+		torch::Tensor final_udf = forward_values_gpu(p, final_X);
+
+		torch::Tensor final_err = torch::abs(final_udf - p.alpha_);
+		torch::Tensor valid = final_err < (p.tol_ * 5);
+		torch::Tensor valid_indices = torch::nonzero(valid).squeeze(1);
+		std::cout<< "bracket=" << bracket_indices.numel()
+          << " valid=" << valid_indices.numel() << std::endl;
+
+		if (valid_indices.numel() > 0)
+		{
+			torch::Tensor valid_X = final_X.index_select(0, valid_indices);
+			torch::Tensor valid_X_cpu = valid_X.to(torch::kCPU);
+			auto vx_acc = valid_X_cpu.accessor<float, 2>();
+
+			for (int64_t i = 0; i < valid_indices.size(0); ++i)
+			{
+				Vec3 pt(vx_acc[i][0], vx_acc[i][1], vx_acc[i][2]);
+				pt = pt.cwiseMax(0.0).cwiseMin(1.0);
+
+				if (p.samples_spatial_grid_->is_valid_sample(pt, p.grid_cell_size_, all_samples))
+				{
+					iter_samples.push_back(pt);
+					all_samples.push_back(pt);
+					p.samples_spatial_grid_->insert(pt, static_cast<uint32>(all_samples.size() - 1));
+				}
+			}
+		}
+	}
+
+	void append_refine_tasks(PointsParameters& p, const torch::Tensor& refine_indices, const torch::Tensor& t_start,
+							 const torch::Tensor& t_end, const torch::Tensor& O, const torch::Tensor& D,
+							 std::vector<Vec3>& iter_samples, std::vector<Vec3>& all_samples)
+	{
+		const int n = static_cast<int>(refine_indices.size(0));
+		if (n == 0)
+			return;
+
+		init_refine_buffers(p, p.batch_size_);
+
+		if (p.refine_count_ + n > p.refine_capacity_)
+		{
+			auto ids = p.refine_ray_ids_.narrow(0, 0, p.refine_count_);
+			auto ts = p.refine_tstart_.narrow(0, 0, p.refine_count_);
+			auto te = p.refine_tend_.narrow(0, 0, p.refine_count_);
+			run_refine_chunk(p, ids, ts, te, O, D, iter_samples, all_samples);
+			p.refine_count_ = 0;
+		}
+
+		p.refine_ray_ids_.narrow(0, p.refine_count_, n).copy_(refine_indices);
+		p.refine_tstart_.narrow(0, p.refine_count_, n).copy_(t_start);
+		p.refine_tend_.narrow(0, p.refine_count_, n).copy_(t_end);
+		p.refine_count_ += n;
+	}
+
+	void flush_refine_tasks(PointsParameters& p, const torch::Tensor& O, const torch::Tensor& D,
+							std::vector<Vec3>& iter_samples, std::vector<Vec3>& all_samples)
+	{
+		if (p.refine_count_ == 0)
+			return;
+
+		auto ids = p.refine_ray_ids_.narrow(0, 0, p.refine_count_);
+		auto ts = p.refine_tstart_.narrow(0, 0, p.refine_count_);
+		auto te = p.refine_tend_.narrow(0, 0, p.refine_count_);
+		run_refine_chunk(p, ids, ts, te, O, D, iter_samples, all_samples);
+		p.refine_count_ = 0;
+	}
+
 	// --- Initialization ---
 	void normalize_surface_mesh(CGAL_Mesh& mesh)
 	{
@@ -1412,12 +1623,13 @@ private:
 	}
 	void init_points_data(POINTS& m)
 	{
-		
+
 		PointsParameters& p = points_parameters_[&m];
-		if (p.initialized_) return;
-		
-		// Init Input Points 
-		
+		if (p.initialized_)
+			return;
+
+		// Init Input Points
+
 		p.points_ = &m;
 		p.position_ = get_attribute<Vec3, PVertex>(m, "position");
 		p.normal_ = get_or_add_attribute<Vec3, PVertex>(m, "normal");
@@ -1441,9 +1653,10 @@ private:
 		// Init Samples Mesh
 		std::string sample_name = points_provider_->mesh_name(*p.points_) + "_samples";
 		if (!p.samples_mesh_)
-			p.samples_mesh_ =
-				points_provider_->has_mesh(sample_name) ? points_provider_->mesh(sample_name) : points_provider_->add_mesh(sample_name);
-		else points_provider_->clear_mesh(*p.samples_mesh_);
+			p.samples_mesh_ = points_provider_->has_mesh(sample_name) ? points_provider_->mesh(sample_name)
+																	  : points_provider_->add_mesh(sample_name);
+		else
+			points_provider_->clear_mesh(*p.samples_mesh_);
 
 		// Initialize attributes for samples
 		p.samples_position_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_mesh_, "position");
@@ -1454,7 +1667,8 @@ private:
 		p.samples_line_quadric_ = get_or_add_attribute<Line_Quadric, PVertex>(*p.samples_mesh_, "line_quadric");
 		p.samples_ma_position_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_mesh_, "ma_position");
 		p.samples_ma_radius_ = get_or_add_attribute<Scalar, PVertex>(*p.samples_mesh_, "ma_radius");
-		p.samples_ma_secondary_vertex_ = get_or_add_attribute<PVertex, PVertex>(*p.samples_mesh_, "ma_secondary_vertex");
+		p.samples_ma_secondary_vertex_ =
+			get_or_add_attribute<PVertex, PVertex>(*p.samples_mesh_, "ma_secondary_vertex");
 		p.samples_sphere_ = get_or_add_attribute<PVertex, PVertex>(*p.samples_mesh_, "sphere");
 		p.samples_error_ = get_or_add_attribute<Scalar, PVertex>(*p.samples_mesh_, "error");
 		p.samples_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_mesh_, "color");
@@ -1463,16 +1677,17 @@ private:
 		// Init Spheres Mesh
 		std::string sphere_name = points_provider_->mesh_name(m) + "_spheres";
 		if (!p.spheres_)
-			p.spheres_ =
-				points_provider_->has_mesh(sphere_name) ? points_provider_->mesh(sphere_name) : points_provider_->add_mesh(sphere_name);
-		
+			p.spheres_ = points_provider_->has_mesh(sphere_name) ? points_provider_->mesh(sphere_name)
+																 : points_provider_->add_mesh(sphere_name);
+
 		p.spheres_position_ = get_or_add_attribute<Vec3, PVertex>(*p.spheres_, "position");
 		p.spheres_radius_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "radius");
 		p.spheres_color_ = get_or_add_attribute<Vec4, PVertex>(*p.spheres_, "color");
 		p.spheres_cluster_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.spheres_, "cluster");
 		p.spheres_cluster_color_ = get_or_add_attribute<Vec4, PVertex>(*p.spheres_, "cluster_color");
 		p.spheres_cluster_area_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "cluster_area");
-		p.spheres_neighbor_clusters_ = get_or_add_attribute<std::set<PVertex>, PVertex>(*p.spheres_, "neighbor_clusters");
+		p.spheres_neighbor_clusters_ =
+			get_or_add_attribute<std::set<PVertex>, PVertex>(*p.spheres_, "neighbor_clusters");
 		p.spheres_parent_ = get_or_add_attribute<PVertex, PVertex>(*p.spheres_, "parent");
 		p.spheres_do_not_split_ = get_or_add_attribute<bool, PVertex>(*p.spheres_, "do_not_split");
 		p.spheres_error_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "error");
@@ -1481,23 +1696,25 @@ private:
 		// Init Skeleton Mesh
 		std::string skel_name = points_provider_->mesh_name(m) + "_skeleton";
 		if (!p.skeleton_)
-			p.skeleton_ = non_manifold_provider_->has_mesh(skel_name) ? non_manifold_provider_->mesh(skel_name) : non_manifold_provider_->add_mesh(skel_name);
+			p.skeleton_ = non_manifold_provider_->has_mesh(skel_name) ? non_manifold_provider_->mesh(skel_name)
+																	  : non_manifold_provider_->add_mesh(skel_name);
 		p.skeleton_position_ = get_or_add_attribute<Vec3, NMVertex>(*p.skeleton_, "position");
 		p.skeleton_radius_ = get_or_add_attribute<Scalar, NMVertex>(*p.skeleton_, "radius");
 		p.incident_tets_ = get_or_add_attribute<std::set<std::size_t>, NMFace>(*p.skeleton_, "incident_tets");
-		p.edge_degree_ = get_or_add_attribute<uint32, NMEdge>(*p.skeleton_, "degree");//edge face degree
+		p.edge_degree_ = get_or_add_attribute<uint32, NMEdge>(*p.skeleton_, "degree"); // edge face degree
 		p.skeleton_face_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "color");
 		p.skeleton_edge_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "color");
-		p.samples_spatial_grid_ =
-			std::make_unique<SpatialGrid>(p.grid_cell_size_); 
+		p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
 
 		p.initialized_ = true;
 	}
 
 	void compute_fitting_data(PointsParameters& p)
 	{
-		if (p.fitting_data_computed_) return;
-		if (!p.samples_mesh_) {
+		if (p.fitting_data_computed_)
+			return;
+		if (!p.samples_mesh_)
+		{
 			std::cerr << "Error: No sampled points found. Please sample points first." << std::endl;
 			return;
 		}
@@ -1518,7 +1735,8 @@ private:
 
 	void build_kdtree(PointsParameters& p)
 	{
-		if (p.samples_kdtree_) delete p.samples_kdtree_;
+		if (p.samples_kdtree_)
+			delete p.samples_kdtree_;
 
 		std::vector<Vec3> points;
 		p.samples_kdtree_vertices_.clear();
@@ -1536,24 +1754,26 @@ private:
 	}
 
 	// Generic PCA normal computation for any point cloud mesh
-	template<typename MESH, typename POS_ATTR>
-	Vec3 compute_pca_normal(const MESH& mesh, const POS_ATTR& position, 
-							const std::vector<uint32>& indices, 
+	template <typename MESH, typename POS_ATTR>
+	Vec3 compute_pca_normal(const MESH& mesh, const POS_ATTR& position, const std::vector<uint32>& indices,
 							const std::vector<typename mesh_traits<MESH>::Vertex>& kdtree_vertices)
 	{
 		using Vertex = typename mesh_traits<MESH>::Vertex;
-		if (indices.size() < 3) return Vec3(0, 0, 1);
-		
+		if (indices.size() < 3)
+			return Vec3(0, 0, 1);
+
 		Vec3 centroid(0, 0, 0);
-		for (uint32 idx : indices) {
+		for (uint32 idx : indices)
+		{
 			Vertex v = kdtree_vertices[idx];
 			uint32 v_idx = index_of(mesh, v);
 			centroid += position[v_idx];
 		}
 		centroid /= Scalar(indices.size());
-		
+
 		Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
-		for (uint32 idx : indices) {
+		for (uint32 idx : indices)
+		{
 			Vertex v = kdtree_vertices[idx];
 			uint32 v_idx = index_of(mesh, v);
 			Vec3 diff = position[v_idx] - centroid;
@@ -1561,44 +1781,48 @@ private:
 			covariance += pe * pe.transpose();
 		}
 		covariance /= Scalar(indices.size());
-		
+
 		Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
 		Eigen::Vector3d normal = solver.eigenvectors().col(0);
 		return Vec3(normal[0], normal[1], normal[2]).normalized();
 	}
 
 	void compute_input_normals(PointsParameters& p)
-	{	
+	{
 		// Compute normals
 		parallel_foreach_cell(*p.points_, [&](PVertex v) {
 			uint32 v_idx = index_of(*p.points_, v);
 			const Vec3& pt = (*p.position_)[v_idx];
 			std::vector<std::pair<uint32, Scalar>> knn_res;
 			p.input_kdtree_->find_nns(pt, p.knn_k_, &knn_res);
-			
+
 			std::vector<uint32> indices;
-			for(auto& res : knn_res) indices.push_back(res.first);
-			
+			for (auto& res : knn_res)
+				indices.push_back(res.first);
+
 			(*p.normal_)[v_idx] = compute_pca_normal(*p.points_, *p.position_, indices, p.input_kdtree_vertices_);
 			return true;
 		});
 	}
 
-	Vec3 compute_avg_normal(PointsParameters& p, PVertex v, acc::KDTree<3, uint32>& kdtree, const std::vector<PVertex>& vertices)
+	Vec3 compute_avg_normal(PointsParameters& p, PVertex v, acc::KDTree<3, uint32>& kdtree,
+							const std::vector<PVertex>& vertices)
 	{
 		uint32 v_idx = index_of(*p.points_, v);
 		const Vec3& pt = (*p.position_)[v_idx];
 		const Vec3& n = (*p.normal_)[v_idx];
-		
+
 		std::vector<std::pair<uint32, Scalar>> knn_res;
 		kdtree.find_nns(pt, p.knn_k_, &knn_res);
 
-		Vec3 avg_n(0,0,0);
-		for(auto& res : knn_res) {
+		Vec3 avg_n(0, 0, 0);
+		for (auto& res : knn_res)
+		{
 			PVertex neighbor = vertices[res.first];
 			uint32 n_idx = index_of(*p.points_, neighbor);
 			Vec3 nn = (*p.normal_)[n_idx];
-			if (nn.dot(n) < 0) nn = -nn;
+			if (nn.dot(n) < 0)
+				nn = -nn;
 			avg_n += nn;
 		}
 		return avg_n.normalized();
@@ -1606,18 +1830,21 @@ private:
 	void compute_samples_area(PointsParameters& p)
 	{
 		// Compute KNN and Area on samples_mesh_
-		if (!p.samples_mesh_ || !p.samples_kdtree_) return;
+		if (!p.samples_mesh_ || !p.samples_kdtree_)
+			return;
 
 		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			const Vec3& pt = (*p.samples_position_)[v_idx];
 			std::vector<std::pair<uint32, Scalar>> knn_res;
 			p.samples_kdtree_->find_nns(pt, p.knn_k_, &knn_res);
-			
+
 			(*p.samples_knn_)[v_idx].clear();
 			Scalar sum_dist = 0.0;
-			for(auto& res : knn_res) {
-				if (p.samples_kdtree_vertices_[res.first] != v) {
+			for (auto& res : knn_res)
+			{
+				if (p.samples_kdtree_vertices_[res.first] != v)
+				{
 					(*p.samples_knn_)[v_idx].push_back(p.samples_kdtree_vertices_[res.first]);
 					sum_dist += res.second;
 				}
@@ -1629,7 +1856,7 @@ private:
 	}
 
 	void compute_quadrics(PointsParameters& p)
-	{	
+	{
 		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			Spherical_Quadric& q = (*p.samples_quadric_)[v_idx];
@@ -1641,7 +1868,8 @@ private:
 			Scalar a = (*p.samples_area_)[v_idx] / (p.knn_k_ + 1.0);
 			q += Spherical_Quadric(Vec4(pos.x(), pos.y(), pos.z(), 0), Vec4(n.x(), n.y(), n.z(), 1)) * a;
 			lq += Line_Quadric(pos, n) * a;
-			for (PVertex vn : (*p.samples_knn_)[v_idx]) {
+			for (PVertex vn : (*p.samples_knn_)[v_idx])
+			{
 				uint32 vn_idx = index_of(*p.samples_mesh_, vn);
 				const Vec3& pn = (*p.samples_position_)[vn_idx];
 				const Vec3& nn = (*p.samples_normal_)[vn_idx];
@@ -1684,15 +1912,16 @@ private:
 		Vec3 n = (sample_pos - nn_pos).normalized();
 		Vec3 query = nn_pos + n * p.alpha_;
 		PVertex last_nn = PVertex();
-		do {
+		do
+		{
 			p.input_kdtree_->find_nn(query, &knn_res);
 			nn = p.input_kdtree_vertices_[knn_res.first];
 			Vec3 nn_pos = (*p.position_)[index_of(*p.points_, nn)];
 			Vec3 n = (query - nn_pos).normalized();
 			query = nn_pos + n * p.alpha_;
 			last_nn = nn;
-		}while(index_of(*p.points_, nn) != index_of(*p.points_, last_nn));
-		
+		} while (index_of(*p.points_, nn) != index_of(*p.points_, last_nn));
+
 		return {query, n};
 	}
 
@@ -1700,7 +1929,7 @@ private:
 	{
 		std::uniform_real_distribution<Scalar> uniform(0.0, 1.0);
 		std::mt19937 gen(p.seed_);
-		
+
 		// Pick a random point from input as generator seed
 		std::uniform_int_distribution<uint32> uniform_idx(0, uint32(p.input_kdtree_vertices_.size() - 1));
 		uint32 rand_start_idx = uniform_idx(gen);
@@ -1715,11 +1944,11 @@ private:
 		auto [pos, normal] = project_and_normal(p, generator);
 		(*p.samples_position_)[start_idx] = pos;
 		(*p.samples_normal_)[start_idx] = normal;
-		
+
 		grid.insert(pos, start_idx);
 
 		std::vector<PVertex> active_list = {start_vertex};
-		
+
 		uint32 count = 1;
 
 		while (!active_list.empty())
@@ -1742,20 +1971,20 @@ private:
 					p.input_kdtree_->find_nn(pos, &input_nn_res);
 					if (input_nn_res.second < p.alpha_)
 						continue; // Reject: too close to input surface
-					
+
 					PVertex new_vertex = add_vertex(*p.samples_mesh_);
 					uint32 new_idx = index_of(*p.samples_mesh_, new_vertex);
-					
+
 					(*p.samples_position_)[new_idx] = pos;
 					(*p.samples_normal_)[new_idx] = normal;
-					
+
 					grid.insert(pos, new_idx);
-					
+
 					active_list.push_back(new_vertex);
 					count++;
 					found_new_sample = true;
 					if (count % 100 == 0)
-						std::cout << "Sampled point " << count  << "\r" << std::flush;
+						std::cout << "Sampled point " << count << "\r" << std::flush;
 				}
 			}
 			if (!found_new_sample)
@@ -1772,12 +2001,12 @@ private:
 		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			const Vec3& n = (*p.samples_normal_)[v_idx];
-			(*p.samples_normal_color_)[v_idx] = Vec4((n.x() + 1.0) * 0.5, (n.y() + 1.0) * 0.5, (n.z() + 1.0) * 0.5, 1.0);
+			(*p.samples_normal_color_)[v_idx] =
+				Vec4((n.x() + 1.0) * 0.5, (n.y() + 1.0) * 0.5, (n.z() + 1.0) * 0.5, 1.0);
 			return true;
 		});
 
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-
 	}
 
 	// --- Shrinking Balls ---
@@ -1790,11 +2019,11 @@ private:
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			const Vec3& pt = (*p.samples_position_)[v_idx];
 			const Vec3& n = (*p.samples_normal_)[v_idx];
-			
+
 			/*auto [c1, r1, q1] = cgogn::geometry::shrinking_ball_center<PVertex>(
 				pt, n, p.samples_kdtree_, p.samples_kdtree_vertices_, p.alpha_ * 1.5
 			);*/
-			
+
 			auto c = pt - n * p.alpha_;
 			Scalar r = p.alpha_;
 			auto q = c - n * r;
@@ -1805,7 +2034,7 @@ private:
 			(*p.samples_ma_position_)[v_idx] = c;
 			(*p.samples_ma_radius_)[v_idx] = r;
 			(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q1);
-	
+
 			return true;
 		});
 
@@ -1813,9 +2042,9 @@ private:
 		//// First try to fix by re-estimating normal from input cloud
 		//
 
-		//std::vector<PVertex> to_remove;
-		//auto remove = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__to_remove");
-		//parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+		// std::vector<PVertex> to_remove;
+		// auto remove = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__to_remove");
+		// parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 		//	uint32 v_idx = index_of(*p.samples_mesh_, v);
 		//	Scalar radius = (*p.samples_ma_radius_)[v_idx];
 		//	if (radius >= 1.1 * p.alpha_)
@@ -1872,24 +2101,22 @@ private:
 		//	}
 		//	return true;
 		//});
-		//foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+		// foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 		//	if (value<bool>(*p.samples_mesh_, remove, v))
 		//		to_remove.push_back(v);
 		//	return true;
 		//});
-		//if (!to_remove.empty())
+		// if (!to_remove.empty())
 		//{
 		//	std::cout << "Removed " << to_remove.size() << " points with ball outside surface (after retry)."
 		//				<< std::endl;
 		//}
-		//for (PVertex v : to_remove)
+		// for (PVertex v : to_remove)
 		//	remove_vertex(*p.samples_mesh_, v);
-		//build_kdtree(p); // Rebuild KDTree after removing vertices
-		//points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		//remove_attribute<PVertex>(*p.samples_mesh_, remove);
-		
+		// build_kdtree(p); // Rebuild KDTree after removing vertices
+		// points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		// remove_attribute<PVertex>(*p.samples_mesh_, remove);
 	}
-
 
 	void init_spheres(PointsParameters& p, uint32 max_nb_spheres)
 	{
@@ -1943,19 +2170,21 @@ private:
 				stack.pop_back();
 				uint32 w_idx = index_of(*p.samples_mesh_, w);
 				(*covered)[w_idx] = true;
-				
+
 				// Use KNN for propagation on point cloud
-				for(PVertex u : (*p.samples_knn_)[w_idx]) {
+				for (PVertex u : (*p.samples_knn_)[w_idx])
+				{
 					uint32 u_idx = index_of(*p.samples_mesh_, u);
 					if (!(*covered)[u_idx] &&
 						((*p.samples_position_)[u_idx] - vp).norm() < p.init_dilation_factor_ * vr)
 						stack.push_back(u);
 				}
 			}
-			
+
 			// Also check secondary vertex logic if needed, but for now stick to KNN propagation
 			PVertex secondary = (*p.samples_ma_secondary_vertex_)[v_index];
-			if (secondary.is_valid()) {
+			if (secondary.is_valid())
+			{
 				stack.push_back(secondary);
 				while (!stack.empty())
 				{
@@ -1963,8 +2192,9 @@ private:
 					stack.pop_back();
 					uint32 w_idx = index_of(*p.samples_mesh_, w);
 					(*covered)[w_idx] = true;
-					
-					for(PVertex u : (*p.samples_knn_)[w_idx]) {
+
+					for (PVertex u : (*p.samples_knn_)[w_idx])
+					{
 						uint32 u_idx = index_of(*p.samples_mesh_, u);
 						if (!(*covered)[u_idx] &&
 							((*p.samples_position_)[u_idx] - vp).norm() < p.init_dilation_factor_ * vr)
@@ -2013,13 +2243,12 @@ private:
 
 				const Vec3& center = (*p.spheres_position_)[pv_index];
 				Scalar radius = (*p.spheres_radius_)[pv_index];
-				
+
 				Scalar dist = 0.0;
 				Scalar dist_other = 0.0;
 				switch (p.distance_mode_)
 				{
-				case SPHERE_EUCLIDEAN_DISTANCE:
-				{
+				case SPHERE_EUCLIDEAN_DISTANCE: {
 					Scalar dist_sqem =
 						(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 					dist_other = ((vp - center).norm() - radius);
@@ -2029,8 +2258,7 @@ private:
 				}
 				break;
 
-				case LINE_QUADRIC_DISTANCE: 
-				{
+				case LINE_QUADRIC_DISTANCE: {
 					Scalar dist_sqem =
 						(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 					dist_other = (*p.samples_line_quadric_)[v_index].eval(center);
@@ -2062,7 +2290,7 @@ private:
 
 			return true;
 		});
-		//augment_insufficient_clusters(p);
+		// augment_insufficient_clusters(p);
 	}
 
 	void augment_insufficient_clusters(PointsParameters& p)
@@ -2076,7 +2304,7 @@ private:
 		std::vector<uint32> samples_count;
 
 		std::vector<Vec3> all_raw_samples;
-		
+
 		// Add points to insufficient clusters
 		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.spheres_, v);
@@ -2100,10 +2328,10 @@ private:
 			}
 			return true;
 		});
-			
+
 		std::cout << "  Found " << to_process.size() << " clusters to augment" << std::endl;
 		std::cout << "  Projecting " << all_raw_samples.size() << " samples..." << std::endl;
-		
+
 		auto [all_projected, all_normals] = project_points_to_alpha_gpu(p, all_raw_samples);
 
 		std::cout << "  Projected: " << all_raw_samples.size() << " -> " << all_projected.size() << " points"
@@ -2119,7 +2347,7 @@ private:
 
 			std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
 			int added = 0;
-			
+
 			for (int i = start_idx; i < start_idx + count && added < needed_samples; ++i)
 			{
 				const Vec3& pos = all_projected[i];
@@ -2140,7 +2368,6 @@ private:
 					total_added++;
 				}
 			}
-			
 		}
 		std::cout << "  Added a total of " << total_added << " samples to clusters." << std::endl;
 		std::cout << "  Rebuilding KDTree..." << std::endl;
@@ -2154,7 +2381,6 @@ private:
 
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
 		std::cout << "  Cluster augmentation complete." << std::endl;
-
 	}
 
 	std::vector<Vec3> sample_in_sphere_volume(const Vec3& center, Scalar radius, int num_samples, std::mt19937& gen)
@@ -2191,7 +2417,7 @@ private:
 			uint32 v_index = index_of(*p.samples_mesh_, v);
 			Scalar a = (*p.samples_area_)[v_index];
 			const Vec3& vp = (*p.samples_position_)[v_index];
-			
+
 			Scalar min_power_distance = std::numeric_limits<Scalar>::max();
 			PVertex closest_sphere;
 			uint32 closest_sphere_index = 0;
@@ -2200,11 +2426,11 @@ private:
 				uint32 pv_index = index_of(*p.spheres_, pv);
 				const Vec3& center = (*p.spheres_position_)[pv_index];
 				Scalar radius = (*p.spheres_radius_)[pv_index];
-				
+
 				// Power distance: |p - center|^2 - radius^2
 				Scalar dist_sq = (vp - center).squaredNorm();
 				Scalar power_dist = dist_sq - radius * radius;
-				
+
 				if (power_dist < min_power_distance)
 				{
 					min_power_distance = power_dist;
@@ -2222,9 +2448,9 @@ private:
 
 			return true;
 		});
-		
+
 		//// remove small clusters
-		//foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+		// foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 		//	uint32 v_idx = index_of(*p.spheres_, v);
 		//	std::vector<PVertex>& cluster = (*p.spheres_cluster_)[v_idx];
 		//	if (cluster.size() < 4)
@@ -2237,7 +2463,7 @@ private:
 		//		p.nb_spheres_--;
 		//	}
 		//	return true;
-		//});
+		// });
 	}
 
 	// Use power-based clusters to compute sphere neighbors and build skeleton
@@ -2245,7 +2471,7 @@ private:
 	{
 		// First compute power clusters
 		compute_power_cluster(p);
-		
+
 		// Then build skeleton using the power-based cluster assignments
 		compute_skeleton(p, only_neighbors);
 	}
@@ -2266,7 +2492,6 @@ private:
 				Vec3 vp = (*p.samples_position_)[sv_index];
 				Scalar a = (*p.samples_area_)[sv_index];
 
-				
 				Scalar dist = 0.0;
 				Scalar dist_other = 0.0;
 				switch (p.distance_mode_)
@@ -2284,7 +2509,7 @@ private:
 				case LINE_QUADRIC_DISTANCE: {
 					Scalar dist_sqem =
 						(*p.samples_quadric_)[sv_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
-					//Don't multiply by area here since line quadric already incorporates it
+					// Don't multiply by area here since line quadric already incorporates it
 					dist_other = (*p.samples_line_quadric_)[sv_index].eval(center);
 					dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
 				}
@@ -2305,7 +2530,7 @@ private:
 				(*p.spheres_error_)[v_index] = cluster_error / (*p.spheres_cluster_area_)[v_index];
 			else
 				(*p.spheres_error_)[v_index] = 0.0;
-			
+
 			(*p.spheres_error_not_normalized_)[v_index] = cluster_error;
 
 			return true;
@@ -2321,8 +2546,9 @@ private:
 			uint32 v_idx = index_of(*p.spheres_, v);
 			Scalar error = (*p.spheres_error_)[v_idx];
 			Scalar error_not_normalized = (*p.spheres_error_not_normalized_)[v_idx];
-			
-			if (error < p.min_error_) p.min_error_ = error;
+
+			if (error < p.min_error_)
+				p.min_error_ = error;
 			if (error > p.max_error_)
 			{
 				p.max_error_ = error;
@@ -2335,11 +2561,9 @@ private:
 
 		p.total_error_diff_ = std::abs(p.total_error_ - p.last_total_error_);
 		p.last_total_error_ = p.total_error_;
-		 std::cout << "compute_spheres_error end" << std::endl;
+		std::cout << "compute_spheres_error end" << std::endl;
 	}
 
-
-	
 	void update_spheres_color(PointsParameters& p)
 	{
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
@@ -2379,7 +2603,8 @@ private:
 		uint32 sphere_index = index_of(*p.spheres_, sphere);
 
 		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
-		if (cluster.empty()) return;
+		if (cluster.empty())
+			return;
 
 		Vec3 c = (*p.spheres_position_)[sphere_index];
 
@@ -2389,7 +2614,7 @@ private:
 		b.setZero();
 		uint32 idx = 0;
 		Eigen::VectorXd s(3);
-		Scalar r_fixed = p.alpha_;// we only want optimize center, the radius should be fixed as alpha
+		Scalar r_fixed = p.alpha_; // we only want optimize center, the radius should be fixed as alpha
 		s << c[0], c[1], c[2];
 		for (uint32 i = 0; i < 10; ++i)
 		{
@@ -2401,11 +2626,11 @@ private:
 
 				Vec3 d = pos - Vec3(s(0), s(1), s(2));
 				Scalar l = d.norm();
-				
+
 				Scalar a = std::sqrt((*p.samples_area_)[v_index]);
 				J.row(idx) = (-d / l) * a;
 				b(idx) = -(l - r_fixed) * a;
-				
+
 				++idx;
 			};
 
@@ -2428,7 +2653,8 @@ private:
 		uint32 sphere_index = index_of(*p.spheres_, sphere);
 
 		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
-		if (cluster.empty()) return;
+		if (cluster.empty())
+			return;
 
 		Vec3 c = (*p.spheres_position_)[sphere_index];
 		Scalar r = (*p.spheres_radius_)[sphere_index];
@@ -2504,7 +2730,7 @@ private:
 		c = s.head<3>();
 		r = s[3];
 		//}
-		//else
+		// else
 		//{
 		//	std::cout << "Sphere " << sphere_index << " is not well conditioned, using shrinking ball" << std::endl;
 		//	// apply shrinking ball
@@ -2518,7 +2744,6 @@ private:
 		//	c = center;
 		//	r = radius;
 		//}
-		
 
 		(*p.spheres_position_)[sphere_index] = c;
 		(*p.spheres_radius_)[sphere_index] = r;
@@ -2555,7 +2780,7 @@ private:
 		Mat4 Ql = lq.get_quadric().matrix();
 		Mat3 Al = Ql.block<3, 3>(0, 0);
 		Vec3 bl = -Ql.block<3, 1>(0, 3);
-	
+
 		/*Mat4 Al_ext = Mat4::Zero();
 		Al_ext.block<3, 3>(0, 0) = Al;
 		Vec4 bl_ext = Vec4::Zero();
@@ -2576,7 +2801,6 @@ private:
 		r = p.alpha_;
 		(*p.spheres_position_)[sphere_index] = c;
 		(*p.spheres_radius_)[sphere_index] = r;
-
 	}
 
 	void correct_sphere(PointsParameters& p, PVertex v)
@@ -2591,13 +2815,12 @@ private:
 		uint32 k_idx = index_of(*p.samples_mesh_, p.samples_kdtree_vertices_[k_res.first]);
 		Vec3 closest_pos = (*p.samples_position_)[k_idx];
 		Vec3 dir = (closest_pos - c).normalized();
-		
+
 		c = closest_pos - dir * p.alpha_;
 		r = p.alpha_;
-		
+
 		(*p.spheres_position_)[v_index] = c;
 		(*p.spheres_radius_)[v_index] = r;
-	
 	}
 	void update_spheres_batch_with_projection(PointsParameters& p)
 	{
@@ -2606,7 +2829,7 @@ private:
 		std::vector<PVertex> all_spheres;
 		std::vector<uint32> sphere_sample_start;
 		std::vector<uint32> sphere_sample_count;
-		std::vector<Vec3> all_raw_samples;		 
+		std::vector<Vec3> all_raw_samples;
 
 		const int num_projection_samples = 30;
 
@@ -2672,7 +2895,6 @@ private:
 
 		std::cout << "Valid projected points: " << valid_count << " / " << all_projected.size() << std::endl;
 
-	
 		parallel_foreach_cell(*p.spheres_, [&](PVertex sphere) -> bool {
 			uint32 sphere_index = index_of(*p.spheres_, sphere);
 
@@ -2699,9 +2921,8 @@ private:
 			if (valid_projected.empty())
 				return true;
 
-
 			Vec3 c = (*p.spheres_position_)[sphere_index];
-			const Scalar r = p.alpha_; 
+			const Scalar r = p.alpha_;
 
 			const int num_valid_proj = static_cast<int>(valid_projected.size());
 
@@ -2800,16 +3021,15 @@ private:
 			}
 			if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
 				correct_sphere(p, v);
-			
+
 			(*p.spheres_do_not_split_)[index_of(*p.spheres_, v)] = false;
 			return true;
 		});
-		//update_spheres_batch_with_projection(p);
+		// update_spheres_batch_with_projection(p);
 
 		compute_spheres_error(p);
 
-		if (p.auto_split_ &&
-			(p.total_error_diff_ < 1e-5 || p.iteration_count_ % 10 == 0))
+		if (p.auto_split_ && (p.total_error_diff_ < 1e-5 || p.iteration_count_ % 10 == 0))
 		{
 			switch (p.auto_split_mode_)
 			{
@@ -2836,7 +3056,7 @@ private:
 						return (*p.spheres_error_)[index_of(*p.spheres_, a)] >
 							   (*p.spheres_error_)[index_of(*p.spheres_, b)];
 					});
-					
+
 					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * 0.2)), 10u);
 					for (PVertex sphere : sorted_spheres)
 					{
@@ -2878,8 +3098,8 @@ private:
 						return (*p.spheres_error_)[index_of(*p.spheres_, a)] >
 							   (*p.spheres_error_)[index_of(*p.spheres_, b)];
 					});
-					
-					//uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * 0.2)), 100u);
+
+					// uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * 0.2)), 100u);
 					uint32 to_split_max = std::max(0.5 * p.nb_spheres_, 1.0);
 					for (PVertex sphere : sorted_spheres)
 					{
@@ -2903,7 +3123,6 @@ private:
 		if (!p.running_)
 			update_render_data(p);
 	}
-
 
 	void remove_sphere(PointsParameters& p, PVertex v)
 	{
@@ -2943,23 +3162,22 @@ private:
 			return true;
 		});
 
-
 		foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
-				uint32 v_index = index_of(*p.samples_mesh_, v);
-				PVertex v_sphere = (*p.samples_sphere_)[v_index];
-				for (PVertex w : (*p.samples_knn_)[v_index])
+			uint32 v_index = index_of(*p.samples_mesh_, v);
+			PVertex v_sphere = (*p.samples_sphere_)[v_index];
+			for (PVertex w : (*p.samples_knn_)[v_index])
+			{
+				PVertex w_sphere = (*p.samples_sphere_)[index_of(*p.samples_mesh_, w)];
+				if (v_sphere.is_valid() && w_sphere.is_valid() && v_sphere != w_sphere)
 				{
-					PVertex w_sphere = (*p.samples_sphere_)[index_of(*p.samples_mesh_, w)];
-					if (v_sphere.is_valid() && w_sphere.is_valid() && v_sphere != w_sphere)	
-					{
-						uint32 v_index = index_of(*p.spheres_, v_sphere);
-						uint32 w_index = index_of(*p.spheres_, w_sphere);
-						(*p.spheres_neighbor_clusters_)[v_index].insert(w_sphere);
-						(*p.spheres_neighbor_clusters_)[w_index].insert(v_sphere);
-					}
+					uint32 v_index = index_of(*p.spheres_, v_sphere);
+					uint32 w_index = index_of(*p.spheres_, w_sphere);
+					(*p.spheres_neighbor_clusters_)[v_index].insert(w_sphere);
+					(*p.spheres_neighbor_clusters_)[w_index].insert(v_sphere);
 				}
-				return true;
-			});
+			}
+			return true;
+		});
 
 		if (only_neighbors)
 			return;
@@ -3020,9 +3238,9 @@ private:
 					uint32 idx3 = index_of(*p.spheres_, ne2);
 					if (idx2 >= idx3)
 						continue;
-				
+
 					NMVertex nmv3 = (*spheres_skeleton_vertex_map)[idx3];
-					
+
 					std::vector<NMEdge> edges;
 					edges.reserve(3);
 					edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv2)}]);
@@ -3051,7 +3269,7 @@ private:
 			return true;
 		});
 
-		//Resolve Tets
+		// Resolve Tets
 		p.skeleton_tets_.clear();
 		p.skeleton_tets_.reserve(raw_tets.size());
 		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
@@ -3060,28 +3278,25 @@ private:
 			return true;
 		});
 		std::size_t tet_index = 0;
-		for (const auto& rt: raw_tets)
+		for (const auto& rt : raw_tets)
 		{
 			Tet new_tet;
 			uint32 v[4] = {rt[0], rt[1], rt[2], rt[3]};
 
 			NMFaceKey keys[4] = {get_face_key(v[1], v[2], v[3]), get_face_key(v[0], v[2], v[3]),
 								 get_face_key(v[0], v[1], v[3]), get_face_key(v[0], v[1], v[2])};
-			
-	
+
 			for (uint32 i = 0; i < 4; ++i)
 			{
 				auto it = p.skeleton_faces_map_.find(keys[i]);
-				if (it!= p.skeleton_faces_map_.end())
+				if (it != p.skeleton_faces_map_.end())
 				{
 					NMFace f = it->second;
 					new_tet.faces[i] = f;
-					
+
 					value<std::set<size_t>>(*p.skeleton_, p.incident_tets_, f).insert(tet_index);
 
 					value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.8, 0.5, 0.5);
-					
-					
 				}
 			}
 			new_tet.tet_id = tet_index;
@@ -3091,14 +3306,14 @@ private:
 		parallel_foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
 			if (value<std::set<size_t>>(*p.skeleton_, p.incident_tets_, f).size() == 1)
 			{
-				//std::cout << "Find simple face" << std::endl;
+				// std::cout << "Find simple face" << std::endl;
 				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(1.0, 0.0, 0.0);
 			}
 			return true;
 		});
 
 		compute_edge_degree(p);
-		//std::cout << "Found " << p.skeleton_tets_.size() << " tets in the skeleton." << std::endl;
+		// std::cout << "Found " << p.skeleton_tets_.size() << " tets in the skeleton." << std::endl;
 		remove_attribute<PVertex>(*p.spheres_, spheres_skeleton_vertex_map);
 
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
@@ -3108,14 +3323,16 @@ private:
 protected:
 	void split_sphere(PointsParameters& p, PVertex sphere)
 	{
-		if (!sphere.is_valid()) return;
+		if (!sphere.is_valid())
+			return;
 		uint32 s_index = index_of(*p.spheres_, sphere);
 		Vec3 c = (*p.spheres_position_)[s_index];
 		Scalar r = (*p.spheres_radius_)[s_index];
 
 		// find the point in the cluster with the max error
 		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[s_index];
-		if (cluster.empty()) return;
+		if (cluster.empty())
+			return;
 
 		Scalar max_err = -1.0;
 		PVertex max_err_v;
@@ -3130,10 +3347,11 @@ protected:
 			}
 		}
 
-		if (!max_err_v.is_valid()) return;
+		if (!max_err_v.is_valid())
+			return;
 
 		uint32 max_err_v_idx = index_of(*p.samples_mesh_, max_err_v);
-		
+
 		PVertex new_sphere = add_vertex(*p.spheres_);
 		uint32 new_s_index = index_of(*p.spheres_, new_sphere);
 
@@ -3155,8 +3373,8 @@ protected:
 	{
 		parallel_foreach_cell(*p.skeleton_, [&](NMEdge e) {
 			auto in_face = incident_faces(*p.skeleton_, e);
-		
-			if (in_face.size()==2)
+
+			if (in_face.size() == 2)
 				value<Vec3>(*p.skeleton_, p.skeleton_edge_color_, e) = Vec3(0.0, 1.0, 0.0);
 
 			return true;
@@ -3168,10 +3386,10 @@ protected:
 		if (!f.is_valid())
 			return false;
 		uint32 idf = index_of(*p.skeleton_, f);
-		if ((*p.incident_tets_)[idf].size()!=1)
+		if ((*p.incident_tets_)[idf].size() != 1)
 			return false;
 		auto edges = incident_edges(*p.skeleton_, f);
-		
+
 		for (NMEdge e : edges)
 		{
 			auto in_faces = incident_faces(*p.skeleton_, e);
@@ -3189,24 +3407,23 @@ protected:
 		for (NMEdge e : edges)
 		{
 			auto in_faces = incident_faces(*p.skeleton_, e);
-			if (in_faces.size() == 1) 
+			if (in_faces.size() == 1)
 				return true;
 		}
 		return false;
 	}
-
 
 	bool is_simple_tet(PointsParameters& p, Tet& t)
 	{
 		for (uint32 i = 0; i < 4; ++i)
 		{
 			NMFace f = t.faces[i];
-			if(!f.is_valid())
+			if (!f.is_valid())
 			{
 				continue;
 			}
 			uint32 idf = index_of(*p.skeleton_, f);
-			if(is_simple_face_3d(p,f))
+			if (is_simple_face_3d(p, f))
 			{
 				return true;
 			}
@@ -3214,11 +3431,10 @@ protected:
 		return false;
 	}
 
-
 	// find a face of tet t that has at least one edge with degree 2
 	NMFace find_simple_tet_face(PointsParameters& p, Tet& t)
 	{
-		
+
 		NMEdge e;
 		for (uint32 i = 0; i < 4; ++i)
 		{
@@ -3235,7 +3451,7 @@ protected:
 
 	void skeleton_post_pocessing(PointsParameters& p)
 	{
-		//compute_edge_degree(p);
+		// compute_edge_degree(p);
 		std::queue<std::size_t> Q_tet;
 		std::queue<NMFace> Q_face;
 		std::vector<bool> visited_tet(p.skeleton_tets_.size(), false);
@@ -3252,7 +3468,7 @@ protected:
 		std::vector<bool> visited_face(face_count, false);
 
 		// Remove simple tet/face then remove simple face/edge iteratively
-		
+
 		// push all simple tets in queue
 		for (auto& [id, tet] : p.skeleton_tets_)
 		{
@@ -3279,7 +3495,7 @@ protected:
 					continue;
 				Tet& current_tet = it->second;
 				auto faces = current_tet.faces;
-				
+
 				// current_tet.print_tet_info(p);
 
 				NMFace face_to_delete = find_simple_tet_face(p, current_tet);
@@ -3296,7 +3512,7 @@ protected:
 				removed_face++;
 				p.skeleton_tets_.erase(tet_id);
 				// update incident tet faces
-				for (uint32 i= 0; i< 4; ++i)
+				for (uint32 i = 0; i < 4; ++i)
 				{
 					NMFace f = faces[i];
 					if (!f.is_valid())
@@ -3321,23 +3537,23 @@ protected:
 					uint32 ide = index_of(*p.skeleton_, e);
 					auto in_faces = incident_faces(*p.skeleton_, e);
 					auto degree = in_faces.size();
-					if (degree ==  0) // should not happen
+					if (degree == 0) // should not happen
 					{
 						std::cout << "Error: edge degree is already zero" << std::endl;
 						remove_edge(*p.skeleton_, e);
 						continue;
 					}
-				
+
 					for (NMFace f : in_faces)
 					{
 						uint32 idf = index_of(*p.skeleton_, f);
 						std::size_t id_vector = get_face_id(f);
-						if (is_simple_face_2d(p, f) && visited_face[idf] == false){
+						if (is_simple_face_2d(p, f) && visited_face[idf] == false)
+						{
 							visited_face[idf] = true;
 							Q_face.push(f);
 						}
 					}
-					
 				}
 			}
 			else
@@ -3346,7 +3562,7 @@ protected:
 				Q_face.pop();
 				if (!current_face.is_valid())
 				{
-					std::cout << "Warning: face to delete is not valid. This should not happen" << std::endl;	
+					std::cout << "Warning: face to delete is not valid. This should not happen" << std::endl;
 				}
 				if (!is_simple_face_2d(p, current_face))
 				{
@@ -3359,31 +3575,29 @@ protected:
 				removed_face++;
 				for (NMEdge e : in_edges)
 				{
-					 uint32 ide = index_of(*p.skeleton_, e);
-					 auto in_faces = incident_faces(*p.skeleton_, e);
-					 auto degre = in_faces.size();
-					 /* auto in_faces = incident_faces(*p.skeleton_, e);
-					for (NMFace f : in_faces)
-					{
-						if (is_simple_face_2d(p, f) &&f != current_face)
-							Q_face.push(f);
-					}*/
+					uint32 ide = index_of(*p.skeleton_, e);
+					auto in_faces = incident_faces(*p.skeleton_, e);
+					auto degre = in_faces.size();
+					/* auto in_faces = incident_faces(*p.skeleton_, e);
+				   for (NMFace f : in_faces)
+				   {
+					   if (is_simple_face_2d(p, f) &&f != current_face)
+						   Q_face.push(f);
+				   }*/
 					if (degre == 0)
 					{
 						remove_edge(*p.skeleton_, e);
 						removed_edge++;
 					}
 				}
-				
-				
 			}
 		}
 		std::cout << "Removed " << removed_face << " faces in skeleton post-processing." << std::endl;
 		std::cout << p.skeleton_tets_.size() << " tets remain after post-processing." << std::endl;
-		
-		foreach_cell (*p.skeleton_, [&](NMEdge e) {
+
+		foreach_cell(*p.skeleton_, [&](NMEdge e) {
 			auto in_face = incident_faces(*p.skeleton_, e);
-			if (in_face.size()==1)
+			if (in_face.size() == 1)
 				value<Vec3>(*p.skeleton_, p.skeleton_edge_color_, e) = Vec3(0.0, 0.0, 1.0);
 			return true;
 		});
@@ -3394,7 +3608,7 @@ protected:
 				// std::cout << "Find simple face" << std::endl;
 				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(1.0, 0.0, 0.0);
 			}
-			else if (in_tets.size() >1)
+			else if (in_tets.size() > 1)
 			{
 				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.8, 0.5, 0.5);
 			}
@@ -3409,9 +3623,7 @@ protected:
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
 	}
 
-
 protected:
-
 	void update_render_data(PointsParameters& p)
 	{
 		if (p.running_)
@@ -3535,7 +3747,8 @@ protected:
 
 	void key_press_event(View* view, int32 key_code) override
 	{
-		if (!selected_points_) return;
+		if (!selected_points_)
+			return;
 		PointsParameters& p = points_parameters_[selected_points_];
 
 		if (key_code == GLFW_KEY_G && view->control_pressed())
@@ -3613,7 +3826,8 @@ protected:
 		}
 
 		// Input Point Cloud Selection
-		if (ImGui::BeginCombo("Input Point Cloud", selected_points_ ? points_provider_->mesh_name(*selected_points_).c_str() : "None"))
+		if (ImGui::BeginCombo("Input Point Cloud",
+							  selected_points_ ? points_provider_->mesh_name(*selected_points_).c_str() : "None"))
 		{
 			points_provider_->foreach_mesh([&](POINTS& m, const std::string& name) {
 				bool is_selected = (&m == selected_points_);
@@ -3628,7 +3842,8 @@ protected:
 			ImGui::EndCombo();
 		}
 
-		if (!selected_points_) return;
+		if (!selected_points_)
+			return;
 		PointsParameters& p = points_parameters_[selected_points_];
 
 		ImGui::Separator();
@@ -3781,7 +3996,7 @@ protected:
 							update_render_data(p);
 						}
 					}
-					
+
 					if (ImGui::Button("Build Skeleton"))
 					{
 						if (!p.running_)
@@ -3885,7 +4100,7 @@ protected:
 
 					ImGui::Separator();
 
-					ImGui::Text("Total error: %f", p.total_error_/p.nb_spheres_ );
+					ImGui::Text("Total error: %f", p.total_error_ / p.nb_spheres_);
 					ImGui::Text("Min error: %f", p.min_error_);
 					ImGui::Text("Max error: %f", p.max_error_);
 
@@ -3905,12 +4120,11 @@ protected:
 	}
 
 private:
-
 	MeshProvider<SURFACE>* surface_provider_ = nullptr;
 	MeshProvider<POINTS>* points_provider_ = nullptr;
 	PointCloudRender<POINTS>* pcr_ = nullptr;
 	MeshProvider<NONMANIFOLD>* non_manifold_provider_ = nullptr;
-	
+
 	POINTS* selected_points_ = nullptr;
 	std::map<POINTS*, PointsParameters> points_parameters_;
 	PVertex picked_sphere_;
