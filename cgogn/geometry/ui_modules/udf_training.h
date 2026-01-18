@@ -172,24 +172,10 @@ private:
 		}
 	};
 
+	struct PointsParameters;
 
 	struct RayLevelSetSampler
 	{
-		struct Config
-
-		{
-			Scalar alpha = 0.01f;		// Target level set value
-			Scalar bbox_expand = 0.1f;	// Expand bbox by this factor
-			int rays_per_batch = 2048;	// Number of rays per batch
-			Scalar march_step = 0.002f; // Initial marching step size
-			Scalar band_width = 0.003f; // Width of level set band for candidate detection
-			Scalar newton_tol = 1e-6f;	// Newton convergence tolerance
-			int newton_max_iter = 10;	// Max Newton iterations
-			int max_iterations = 1000;	// Max marching iterations per ray
-			Scalar lipschitz = 4.f;
-			Scalar delta_enter = 0.01f; // Delta for entering band
-		};
-
 		struct Ray
 		{
 			Vec3 origin;
@@ -200,19 +186,23 @@ private:
 
 		// Generate rays with uniform direction distribution
 		static std::vector<Ray> generate_rays(const Vec3& bbox_min, const Vec3& bbox_max, int num_rays,
-											  const Config& cfg, std::mt19937& gen)
+											  const PointsParameters& p, std::mt19937& gen)
 		{
 			std::vector<Ray> rays;
 			rays.reserve(num_rays);
 
 			// Expand bbox
+			
 			Vec3 center = (bbox_min + bbox_max) * 0.5;
-			Vec3 half_size = (bbox_max - bbox_min) * 0.5 * (1.0 + cfg.bbox_expand);
+			Vec3 half_size = (bbox_max - bbox_min) * 0.5 * (1.0 + p.udf_bbox_expand_);
 			Vec3 expanded_min = center - half_size;
 			Vec3 expanded_max = center + half_size;
+			const Scalar diag = (expanded_max - expanded_min).norm();
 
 			std::uniform_real_distribution<Scalar> uniform(0.0, 1.0);
-
+			auto uniform_signed = [&](Scalar a) {
+				return (uniform(gen) * 2.0 - 1.0) * a; // [-a, a]
+			};
 			for (int i = 0; i < num_rays; ++i)
 			{
 				Ray ray;
@@ -227,32 +217,48 @@ private:
 				} while (s >= 1.0);
 
 				Scalar factor = 2.0 * std::sqrt(1.0 - s);
-				ray.direction = Vec3(u1 * factor, u2 * factor, 1.0 - 2.0 * s).normalized();
+				ray.direction = Vec3(u1 * factor, u2 * factor, 1.0 - 2.0 * s);
 
-				// Random origin on bbox face perpendicular to direction
-				Vec3 abs_dir = ray.direction.cwiseAbs();
-				int max_axis = 0;
-				if (abs_dir[1] > abs_dir[max_axis])
-					max_axis = 1;
-				if (abs_dir[2] > abs_dir[max_axis])
-					max_axis = 2;
+				// Generate orthogonal basis
+				Vec3 l = ray.direction;
+
+				// Chose a vector not aligned with l
+				Vec3 a, n, b;
+				Vec3 ad = l.cwiseAbs();
+				if (ad.x() <= ad.y() && ad.x() <= ad.z())
+					a = Vec3(1, 0, 0);
+				else if (ad.y() <= ad.x() && ad.y() <= ad.z())
+					a = Vec3(0, 1, 0);
+				else
+					a = Vec3(0, 0, 1);
+
+				n = l.cross(a).normalized();
+				b = l.cross(n);
 
 				// Sample on plane perpendicular to major axis
 				Vec3 origin;
-				for (int axis = 0; axis < 3; ++axis)
+				while (true)
 				{
-					if (axis == max_axis)
-						origin[axis] = ray.direction[axis] > 0 ? expanded_min[axis] : expanded_max[axis];
-					else
-						origin[axis] = expanded_min[axis] + uniform(gen) * (expanded_max[axis] - expanded_min[axis]);
+					Scalar u = uniform_signed(diag * 0.5);
+					Scalar v = uniform_signed(diag * 0.5);
+
+					Vec3 q = center + n * u + b * v; // candidate point on plane
+
+					Ray tmp;
+					tmp.origin = q;
+					tmp.direction = l;
+
+					auto [t_enter, t_exit] = intersect_bbox(tmp, expanded_min, expanded_max);
+					if (!(t_exit > t_enter))
+						continue;
+
+					// Unique ray: start at entry point
+					ray.origin = q + t_enter * l;
+					ray.t_min = 0.0;
+					ray.t_max = t_exit - t_enter;
+					break;
 				}
-				ray.origin = origin;
-
-				// Compute t_min, t_max by intersecting with bbox
-				std::tie(ray.t_min, ray.t_max) = intersect_bbox(ray, expanded_min, expanded_max);
-
-				if (ray.t_max > ray.t_min)
-					rays.push_back(ray);
+				rays.push_back(ray);
 			}
 
 			return rays;
@@ -402,14 +408,20 @@ private:
 		int knn_k_ = 10;
 		int seed_ = 42;
 		int cluster_min_points_ = 20;
-		Scalar grid_cell_size_ = 0.0025f;
+		float grid_cell_size_ = 0.0025f;
 		// Neural UDF Sampling
-		int num_alpha_samples_ = 200000;
-		int batch_size_ = 65532;   // sample batch
+		int num_alpha_samples_ = 60000;
+		int batch_size_ = 8192;   // sample batch
 		float newton_steps_ = 0.7; // stpes of newton's method
 		int max_sample_iter_ = 12; // max iterations for adjusting samples
 		float newton_epsilon_ = 1e-8;
 		float tol_ = 1e-5; // convergence tolerance
+
+		// Neural UDF ray sampling parameters
+		float udf_bbox_expand_ = 0.1f;
+		float udf_lipschitz_ = 4.0f;
+		float udf_delta_enter_ = 0.003f;
+		int udf_max_iterations_ = 1000;
 
 		// State
 		Scalar total_error_ = 0.0;
@@ -503,10 +515,6 @@ public:
 			p.neural_udf_model_path_ = model_path;
 			p.input_mode_ = INPUT_NEURAL_UDF;
 			std::cout << "Loaded neural UDF model from: " << model_path << std::endl;
-
-			
-			std::cout << "\n=== Auto-sampling alpha level set ===" << std::endl;
-			load_alpha_samples_to_mesh(p, p.num_alpha_samples_); 
 		}
 		catch (const c10::Error& e)
 		{
@@ -668,6 +676,8 @@ public:
 			return;
 		}
 
+		p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+
 		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
 
 		// Sample points on alpha level set
@@ -814,15 +824,6 @@ public:
 			std::cerr << "Neural UDF model not loaded." << std::endl;
 			return {};
 		}
-		RayLevelSetSampler::Config config;
-		config.alpha = p.alpha_;
-		config.bbox_expand = 0.1f;
-		config.rays_per_batch = 8192;
-		config.lipschitz = 4.0f;
-		config.delta_enter = 0.003f;
-		config.max_iterations = 1000;
-		config.newton_tol = 1e-5f;
-		config.newton_max_iter = 3;
 		
 
 		Vec3 bbox_min(0, 0, 0);
@@ -836,8 +837,7 @@ public:
 
 		for (int iter = 0; iter < 500 && all_samples.size() < target_num_points; ++iter)
 		{
-			auto rays = RayLevelSetSampler::generate_rays(bbox_min, bbox_max, config.rays_per_batch,
-														  config, gen);
+			auto rays = RayLevelSetSampler::generate_rays(bbox_min, bbox_max, p.batch_size_, p, gen);
 			total_rays += rays.size();
 			const int R = static_cast<int>(rays.size());
 
@@ -889,7 +889,7 @@ public:
 				torch::full({R}, -1.0f, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
 			torch::Tensor in_band = torch::zeros({R}, torch::TensorOptions().dtype(torch::kBool).device(device_));
 
-			for (int step = 0; step < config.max_iterations; ++step)
+			for (int step = 0; step < p.udf_max_iterations_; ++step)
 			{
 				int active_count = 0;
 				if (step % 50 == 0)
@@ -906,15 +906,15 @@ public:
 				if (!udf.defined())
 					break;
 
-				torch::Tensor residual = torch::abs(udf - config.alpha);
+				torch::Tensor residual = torch::abs(udf - p.alpha_);
 
 			
-				torch::Tensor f_curr = udf - config.alpha;
-				torch::Tensor f_last = last_udf - config.alpha;
+				torch::Tensor f_curr = udf - p.alpha_;
+				torch::Tensor f_last = last_udf - p.alpha_;
 				
 				torch::Tensor sign_change = (f_curr * f_last < 0) & (last_udf > 0);
 			
-				torch::Tensor near_band = residual < config.delta_enter;
+				torch::Tensor near_band = residual < p.udf_delta_enter_;
 			
 				torch::Tensor enter_band = near_band & (~in_band);
 
@@ -928,8 +928,8 @@ public:
 					torch::Tensor t_min = t_min0.index_select(0, refine_indices);
 					torch::Tensor t_max_local = t_max.index_select(0, refine_indices);
 
-					torch::Tensor min_half = torch::full_like(res, config.delta_enter * 2.0f);
-					torch::Tensor window_half = torch::max(res / config.lipschitz * 2.0f, min_half);
+					torch::Tensor min_half = torch::full_like(res, p.udf_delta_enter_ * 2.0f);
+					torch::Tensor window_half = torch::max(res / p.udf_lipschitz_ * 2.0f, min_half);
 
 					torch::Tensor t_start = torch::max(t_min, t_curr - window_half);
 					torch::Tensor t_end = torch::min(t_max_local, t_curr + window_half);
@@ -942,13 +942,13 @@ public:
 
 				last_udf.copy_(udf);
 
-				torch::Tensor safe_step = residual /*/ config.lipschitz*/ * 0.8f;
+				torch::Tensor safe_step = residual /*/ p.udf_lipschitz_*/ * 0.8f;
 				//std::cout << "safe_step: " << safe_step.index({torch::indexing::Slice(0, 5)}) << std::endl;
-				safe_step = torch::clamp_min(safe_step, config.alpha * 0.02f); 
+				safe_step = torch::clamp_min(safe_step, p.alpha_ * 0.02f); 
 				
-				torch::Tensor window_skip = residual /*/ config.lipschitz*/ * 2.0f;
+				torch::Tensor window_skip = residual /*/ p.udf_lipschitz_*/ * 2.0f;
 				//std::cout << "window_skip:" << window_skip.index({torch::indexing::Slice(0, 5)}) << std::endl;
-				window_skip = torch::clamp_min(window_skip, config.delta_enter * 2.0f);
+				window_skip = torch::clamp_min(window_skip, p.udf_delta_enter_ * 2.0f);
 
 				torch::Tensor step_size = torch::where(should_refine, window_skip, safe_step);
 				
@@ -995,8 +995,8 @@ public:
 				torch::Tensor dense_udf = forward_values_gpu(p, dense_X);
 				dense_udf = dense_udf.reshape({K, dense_samples});
 
-				torch::Tensor v1 = dense_udf.slice(1, 0, dense_samples - 1) - config.alpha;
-				torch::Tensor v2 = dense_udf.slice(1, 1, dense_samples) - config.alpha;
+				torch::Tensor v1 = dense_udf.slice(1, 0, dense_samples - 1) - p.alpha_;
+				torch::Tensor v2 = dense_udf.slice(1, 1, dense_samples) - p.alpha_;
 				torch::Tensor sign_change = (v1 * v2) < 0;
 
 				torch::Tensor bracket_indices = torch::nonzero(sign_change);
@@ -1049,7 +1049,7 @@ public:
 					// Netwon iterations
 					 
 					// Todo: autograd does not work , why?
-					for (int nit = 0; nit < config.newton_max_iter; ++nit)
+					for (int nit = 0; nit < p.max_sample_iter_; ++nit)
 					{
 						torch::Tensor newton_O = O.index_select(0, newton_ray_ids);
 						torch::Tensor newton_D = D.index_select(0, newton_ray_ids);
@@ -1060,7 +1060,7 @@ public:
 						if (!f_raw.defined() || !grad.defined())
 							break;
 
-						torch::Tensor f = f_raw - config.alpha;
+						torch::Tensor f = f_raw - p.alpha_;
 						//std::cout<<" f: "<<f.index({torch::indexing::Slice(0,5)})<< "f_max: "<<f.max().item<float>()<<std::endl;
 						torch::Tensor dfdt = (grad * newton_D).sum(1);
 
@@ -1091,7 +1091,7 @@ public:
 					torch::Tensor final_X = final_O + newton_t.unsqueeze(1) * final_D;
 					torch::Tensor final_udf = forward_values_gpu(p, final_X);
 					
-					torch::Tensor final_err = torch::abs(final_udf - config.alpha);
+					torch::Tensor final_err = torch::abs(final_udf - p.alpha_);
 
 					torch::Tensor valid = final_err < (p.tol_ * 5); 
 					torch::Tensor valid_indices = torch::nonzero(valid).squeeze(1);
@@ -2034,7 +2034,6 @@ private:
 					Scalar dist_sqem =
 						(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 					dist_other = (*p.samples_line_quadric_)[v_index].eval(center);
-					dist_other *= a;
 					dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
 				}
 				break;
@@ -2274,7 +2273,7 @@ private:
 				{
 				case SPHERE_EUCLIDEAN_DISTANCE: {
 					Scalar dist_sqem =
-						(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
+						(*p.samples_quadric_)[sv_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 					dist_other = ((vp - center).norm() - radius);
 					dist_other *= dist_other;
 					dist_other *= a;
@@ -2284,9 +2283,9 @@ private:
 
 				case LINE_QUADRIC_DISTANCE: {
 					Scalar dist_sqem =
-						(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
-					dist_other = (*p.samples_line_quadric_)[v_index].eval(center);
-					dist_other *= a;
+						(*p.samples_quadric_)[sv_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
+					//Don't multiply by area here since line quadric already incorporates it
+					dist_other = (*p.samples_line_quadric_)[sv_index].eval(center);
 					dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
 				}
 				break;
@@ -2383,15 +2382,15 @@ private:
 		if (cluster.empty()) return;
 
 		Vec3 c = (*p.spheres_position_)[sphere_index];
-		Scalar r = (*p.spheres_radius_)[sphere_index];
 
-		Eigen::MatrixXd J(cluster.size(), 4);
+		Eigen::MatrixXd J(cluster.size(), 3);
 		J.setZero();
 		Eigen::VectorXd b(cluster.size());
 		b.setZero();
 		uint32 idx = 0;
-		Eigen::VectorXd s(4);
-		s << c[0], c[1], c[2], r;
+		Eigen::VectorXd s(3);
+		Scalar r_fixed = p.alpha_;// we only want optimize center, the radius should be fixed as alpha
+		s << c[0], c[1], c[2];
 		for (uint32 i = 0; i < 10; ++i)
 		{
 			idx = 0;
@@ -2403,25 +2402,25 @@ private:
 				Vec3 d = pos - Vec3(s(0), s(1), s(2));
 				Scalar l = d.norm();
 				
-				Scalar a = sqrt((*p.samples_area_)[v_index]);
-				J.row(idx) = Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * a;
-				b(idx) = -(l - s(3)) * a;
+				Scalar a = std::sqrt((*p.samples_area_)[v_index]);
+				J.row(idx) = (-d / l) * a;
+				b(idx) = -(l - r_fixed) * a;
 				
 				++idx;
 			};
 
-			Eigen::LDLT<Eigen::MatrixXd> solver(J.transpose() * J);
-			Eigen::VectorXd delta_s = solver.solve(J.transpose() * b);
+			Eigen::Matrix3d H = J.transpose() * J;
+			Eigen::Vector3d g = J.transpose() * b;
+			Eigen::VectorXd delta_s = H.ldlt().solve(b);
 			s += delta_s;
 			if (delta_s.norm() < 1e-6) // stop early if converged
 				break;
 		}
 
-		c = s.head<3>();
-		r = s[3];
+		c = s;
 
 		(*p.spheres_position_)[sphere_index] = c;
-		(*p.spheres_radius_)[sphere_index] = p.alpha_;
+		(*p.spheres_radius_)[sphere_index] = r_fixed;
 	}
 
 	void update_sphere_sqem(PointsParameters& p, PVertex sphere)
@@ -2880,7 +2879,8 @@ private:
 							   (*p.spheres_error_)[index_of(*p.spheres_, b)];
 					});
 					
-					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * 0.2)), 100u);
+					//uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * 0.2)), 100u);
+					uint32 to_split_max = std::max(0.5 * p.nb_spheres_, 1.0);
 					for (PVertex sphere : sorted_spheres)
 					{
 						uint32 s_index = index_of(*p.spheres_, sphere);
@@ -3098,7 +3098,7 @@ private:
 		});
 
 		compute_edge_degree(p);
-		std::cout << "Found " << p.skeleton_tets_.size() << " tets in the skeleton." << std::endl;
+		//std::cout << "Found " << p.skeleton_tets_.size() << " tets in the skeleton." << std::endl;
 		remove_attribute<PVertex>(*p.spheres_, spheres_skeleton_vertex_map);
 
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
@@ -3239,7 +3239,17 @@ protected:
 		std::queue<std::size_t> Q_tet;
 		std::queue<NMFace> Q_face;
 		std::vector<bool> visited_tet(p.skeleton_tets_.size(), false);
-		std::unordered_set<uint32> face_in_queue;
+		std::unordered_map<uint32, std::size_t> face_id_map;
+		std::size_t face_count = 0;
+		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			face_id_map[index_of(*p.skeleton_, f)] = face_count++;
+			return true;
+		});
+		auto get_face_id = [&](NMFace f) -> uint32 {
+			uint32 idf = index_of(*p.skeleton_, f);
+			return face_id_map[idf];
+		};
+		std::vector<bool> visited_face(face_count, false);
 
 		// Remove simple tet/face then remove simple face/edge iteratively
 		
@@ -3320,8 +3330,12 @@ protected:
 				
 					for (NMFace f : in_faces)
 					{
-						if (is_simple_face_2d(p, f))
+						uint32 idf = index_of(*p.skeleton_, f);
+						std::size_t id_vector = get_face_id(f);
+						if (is_simple_face_2d(p, f) && visited_face[idf] == false){
+							visited_face[idf] = true;
 							Q_face.push(f);
+						}
 					}
 					
 				}
@@ -3524,6 +3538,13 @@ protected:
 		if (!selected_points_) return;
 		PointsParameters& p = points_parameters_[selected_points_];
 
+		if (key_code == GLFW_KEY_G && view->control_pressed())
+		{
+			if (p.running_)
+				stop_spheres_update(p);
+			return;
+		}
+
 		if (key_code == GLFW_KEY_U)
 		{
 			if (!p.running_)
@@ -3619,15 +3640,6 @@ protected:
 
 				ImGui::Separator();
 				ImGui::Text("Alpha Level Set Sampling Settings");
-				ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "(Auto-sampled on model load)");
-
-				ImGui::InputFloat("Alpha Value", &p.alpha_, 0.001f, 0.01f, "%.4f");
-				ImGui::InputInt("Batch Size", &p.batch_size_, 256, 1024);
-				ImGui::InputInt("Max Newton Iters", &p.max_sample_iter_, 1, 15);
-				ImGui::InputFloat("Newton Step Size", &p.newton_steps_, 0.1f, 0.1f, "%.2f");
-				ImGui::InputFloat("Tolerance", &p.tol_, 0.0f, 0.0f, "%.6f");
-
-				ImGui::Separator();
 
 				if (ImGui::Button("Test forward model"))
 				{
@@ -3642,8 +3654,29 @@ protected:
 		{
 			if (p.input_mode_ == INPUT_NEURAL_UDF)
 			{
-				ImGui::TextColored(ImVec4(0, 1, 0, 1), "Samples loaded from Neural UDF");
-				ImGui::Text("Number of samples: %zu", nb_cells<PVertex>(*p.samples_mesh_));
+				ImGui::InputFloat("Alpha", &p.alpha_, 0.001f, 0.1f, "%.4f");
+				ImGui::InputInt("Num Samples", &p.num_alpha_samples_, 1000, 10000);
+				ImGui::InputFloat("Grid Cell Size", &p.grid_cell_size_, 0.001f, 0.01f, "%.4f");
+				ImGui::InputInt("Batch Size", &p.batch_size_, 256, 1024);
+				ImGui::InputInt("Max Newton Iters", &p.max_sample_iter_, 1, 15);
+				ImGui::InputFloat("Newton Step Size", &p.newton_steps_, 0.1f, 0.1f, "%.2f");
+				ImGui::InputFloat("Tolerance", &p.tol_, 0.0f, 0.0f, "%.6f");
+
+				if (ImGui::Button("Sample UDF"))
+				{
+					load_alpha_samples_to_mesh(p, static_cast<size_t>(p.num_alpha_samples_));
+					p.fitting_data_computed_ = false;
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Clear Samples"))
+				{
+					if (p.samples_mesh_)
+						points_provider_->clear_mesh(*p.samples_mesh_);
+					p.fitting_data_computed_ = false;
+				}
+
+				if (p.samples_mesh_)
+					ImGui::Text("Number of samples: %zu", nb_cells<PVertex>(*p.samples_mesh_));
 			}
 			else
 			{
@@ -3852,7 +3885,7 @@ protected:
 
 					ImGui::Separator();
 
-					ImGui::Text("Total error: %f", p.total_error_);
+					ImGui::Text("Total error: %f", p.total_error_/p.nb_spheres_ );
 					ImGui::Text("Min error: %f", p.min_error_);
 					ImGui::Text("Max error: %f", p.max_error_);
 
