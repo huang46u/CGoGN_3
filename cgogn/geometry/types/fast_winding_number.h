@@ -272,6 +272,12 @@ public:
 		return w;
 	}
 
+	bool is_inside(const Vec3& q) const
+	{
+		Scalar wn = evaluate_fast_winding_number(q);
+		return std::abs(wn) >= 0.5;
+	}
+
 private:
 	void precompute_coeffs()
 	{

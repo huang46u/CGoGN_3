@@ -15,6 +15,8 @@
 #include <cgogn/geometry/types/quadric.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/vector_traits.h>
+#include <cgogn/geometry/types/fast_winding_number_traits.h>
+#include <cgogn/geometry/types/fast_winding_number.h>
 
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
 #include <cgogn/rendering/ui_modules/surface_render.h>
@@ -74,6 +76,9 @@ class UDFTraining : public ViewModule
 	using NMFace = typename mesh_traits<NONMANIFOLD>::Face;
 	using NMEdge = typename mesh_traits<NONMANIFOLD>::Edge;
 
+	using PointTraits = geometry::FWN_Point_Traits<POINTS>;
+	template <int ORDER>
+	using PointFWN = geometry::Fast_Winding_Number<PointTraits, ORDER>;
 	template <typename T>
 	using PAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
 	template <typename T>
@@ -380,6 +385,13 @@ private:
 		std::shared_ptr<PAttribute<Scalar>> samples_error_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> samples_color_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> samples_normal_color_ = nullptr;
+
+		std::unique_ptr<acc::BVHTreeSpheres<uint32, Vec3>> samples_wn_bvh_;
+		std::vector<Vec3> samples_wn_bvh_centers_;
+		std::vector<Scalar> samples_wn_bvh_radii_;
+		std::unique_ptr<PointFWN<3>> samples_winding_number_;
+		std::vector<PVertex> samples_wn_vertices_;
+		Scalar beta_ = Scalar(2.0);
 
 		acc::KDTree<3, uint32>* samples_kdtree_ = nullptr; // KDTree of alpha-expanding samples
 		std::vector<PVertex> samples_kdtree_vertices_;	   // Vertices of alpha-expanding samples in KDTree order
@@ -1742,6 +1754,8 @@ private:
 		build_kdtree(p);
 		std::cout << "Computing KNN and Area..." << std::endl;
 		compute_samples_area(p); // Compute KNN and Area for samples
+		std::cout << "Computing Winding Numbers..." << std::endl;
+		compute_winding_numbers(p);
 		std::cout << "Computing Quadrics..." << std::endl;
 		compute_quadrics(p);
 		std::cout << "Computing Initial Medial Axis..." << std::endl;
@@ -1872,6 +1886,34 @@ private:
 			(*p.samples_area_)[v_idx] = (sum_dist * sum_dist) / (2.0 * p.knn_k_); // Rough area estimate
 			return true;
 		});
+	}
+
+	void compute_winding_numbers(PointsParameters& p)
+	{
+		uint32 nb_samples = nb_cells<PVertex>(*p.samples_mesh_);
+		p.samples_wn_bvh_centers_.clear();
+		p.samples_wn_bvh_radii_.clear();
+		p.samples_wn_vertices_.clear();
+		p.samples_wn_bvh_centers_.reserve(nb_samples);
+		p.samples_wn_bvh_radii_.reserve(nb_samples);
+		p.samples_wn_vertices_.reserve(nb_samples);
+
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			p.samples_wn_vertices_.push_back(v);
+			p.samples_wn_bvh_centers_.push_back((*p.samples_position_)[v_idx]);
+			Scalar area = (*p.samples_area_)[v_idx];
+			Scalar radius = std::sqrt(area / M_PI);
+			p.samples_wn_bvh_radii_.push_back(radius);
+			return true;
+		});
+
+		p.samples_wn_bvh_ = std::make_unique<acc::BVHTreeSpheres<uint32, Vec3>>(p.samples_wn_bvh_centers_, p.samples_wn_bvh_radii_);
+
+		PointTraits samples_wn_traits(*p.samples_mesh_, p.samples_wn_bvh_.get(), p.samples_wn_vertices_,
+								 p.samples_position_.get(), p.samples_normal_.get(),
+								 p.samples_area_.get());
+		p.samples_winding_number_ = std::make_unique<PointFWN<3>>(*p.samples_wn_bvh_, samples_wn_traits, p.beta_);
 	}
 
 	void compute_quadrics(PointsParameters& p)
@@ -3001,11 +3043,15 @@ private:
 		Vec3& c = (*p.spheres_position_)[v_index];
 		Scalar& r = (*p.spheres_radius_)[v_index];
 
+		bool inside = p.samples_winding_number_->is_inside(c);
+
 		std::pair<uint32, Scalar> k_res;
 		p.samples_kdtree_->find_nn(c, &k_res);
 		uint32 k_idx = index_of(*p.samples_mesh_, p.samples_kdtree_vertices_[k_res.first]);
 		Vec3 closest_pos = (*p.samples_position_)[k_idx];
 		Vec3 dir = (closest_pos - c).normalized();
+		if (!inside)
+			dir = -dir;
 
 		c = closest_pos - dir * p.alpha_;
 		r = p.alpha_;
@@ -3192,9 +3238,9 @@ private:
 	}
 	void update_spheres(PointsParameters& p)
 	{
-		//compute_clusters(p);
+		compute_clusters(p);
 
-		compute_clusters_gpu(p);
+		//compute_clusters_gpu(p);
 
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			switch (p.distance_mode_)
