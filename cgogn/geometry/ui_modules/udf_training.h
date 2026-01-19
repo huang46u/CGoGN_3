@@ -12,6 +12,7 @@
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
 #include <cgogn/geometry/types/line_quadric.h>
+#include <cgogn/geometry/types/quadric.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
@@ -57,6 +58,7 @@ using geometry::Mat3;
 using geometry::Mat4;
 using geometry::Scalar;
 using geometry::Spherical_Quadric;
+using geometry::Quadric;
 using geometry::SQEM_CASE;
 using geometry::Vec3;
 using geometry::Vec4;
@@ -401,6 +403,25 @@ private:
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_not_normalized_ = nullptr;
 
+		// GPU cluster cache
+		bool cluster_gpu_dirty_ = true;
+		int64_t cluster_gpu_samples_ = 0;
+		int64_t cluster_gpu_spheres_ = 0;
+		torch::Device cluster_gpu_device_ = torch::kCPU;
+
+		torch::Tensor samples_pos_gpu_;
+		torch::Tensor samples_area_gpu_;
+		torch::Tensor spheres_center_gpu_;
+		torch::Tensor spheres_radius_gpu_;
+		torch::Tensor samples_sqem_A_gpu_;
+		torch::Tensor samples_sqem_b_gpu_;
+		torch::Tensor samples_sqem_c_gpu_;
+
+		torch::Tensor samples_line_Q_gpu_;
+
+		std::vector<PVertex> samples_gpu_order_;
+		std::vector<PVertex> spheres_gpu_order_;
+
 		// Skeleton
 		NONMANIFOLD* skeleton_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_position_ = nullptr;
@@ -447,7 +468,7 @@ private:
 		int num_alpha_samples_ = 60000;
 		int batch_size_ = 8192;	   // sample batch
 		float newton_steps_ = 0.7; // stpes of newton's method
-		int max_sample_iter_ = 6; // max iterations for adjusting samples
+		int max_sample_iter_ = 6;  // max iterations for adjusting samples
 		float newton_epsilon_ = 1e-8;
 		float tol_ = 1e-5; // convergence tolerance
 
@@ -935,7 +956,7 @@ public:
 				if (refine_indices.numel() > 0)
 				{
 					refine_task_count += refine_indices.numel();
-					
+
 					torch::Tensor t_curr = t.index_select(0, refine_indices);
 					torch::Tensor res = residual.index_select(0, refine_indices);
 					torch::Tensor t_min = t_min0.index_select(0, refine_indices);
@@ -984,8 +1005,7 @@ public:
 
 			std::cout << std::endl;
 
-
-			flush_refine_tasks(p,O ,D ,iter_samples, all_samples);
+			flush_refine_tasks(p, O, D, iter_samples, all_samples);
 			std::cout << "  Collected " << iter_samples.size() << " unique samples this iteration" << std::endl;
 
 			std::cout << "  Total: " << all_samples.size() << " / " << target_num_points << std::endl;
@@ -1432,7 +1452,7 @@ private:
 			std::cout << name << " sizes=" << t.sizes() << " device=" << t.device() << " dtype=" << t.dtype()
 					  << " defined=" << t.defined() << std::endl;
 		};
-		
+
 		dense_X.copy_(task_O.unsqueeze(1).expand({K, dense_samples, 3}));
 		dense_X.addcmul_(dense_t.unsqueeze(2), task_D.unsqueeze(1));
 
@@ -1489,7 +1509,7 @@ private:
 
 		// bracket_indices: [N,2], columns = {task_idx, j}
 		torch::Tensor task_ids = bracket_indices.select(1, 0); //[N]
-		torch::Tensor j = bracket_indices.select(1, 1); //[N]
+		torch::Tensor j = bracket_indices.select(1, 1);		   //[N]
 
 		torch::Tensor dense_t_task = dense_t.index_select(0, task_ids); //[N, dense_samples]
 
@@ -1535,8 +1555,7 @@ private:
 		torch::Tensor final_err = torch::abs(final_udf - p.alpha_);
 		torch::Tensor valid = final_err < (p.tol_ * 5);
 		torch::Tensor valid_indices = torch::nonzero(valid).squeeze(1);
-		std::cout<< "bracket=" << bracket_indices.numel()
-          << " valid=" << valid_indices.numel() << std::endl;
+		std::cout << "bracket=" << bracket_indices.numel() << " valid=" << valid_indices.numel() << std::endl;
 
 		if (valid_indices.numel() > 0)
 		{
@@ -2037,85 +2056,6 @@ private:
 
 			return true;
 		});
-
-		//// Filter points with ball radius >= 1.1 * epsilon (ball may be outside the surface)
-		//// First try to fix by re-estimating normal from input cloud
-		//
-
-		// std::vector<PVertex> to_remove;
-		// auto remove = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__to_remove");
-		// parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-		//	uint32 v_idx = index_of(*p.samples_mesh_, v);
-		//	Scalar radius = (*p.samples_ma_radius_)[v_idx];
-		//	if (radius >= 1.1 * p.alpha_)
-		//	{
-		//		// Try to fix: re-estimate normal using local PCA on samples
-		//		Vec3 pt = (*p.samples_position_)[v_idx];
-
-		//		// Find K nearest neighbors in samples mesh
-		//		std::vector<std::pair<uint32, Scalar>> knn_res;
-		//		p.samples_kdtree_->find_nns(pt, p.knn_k_, &knn_res);
-
-		//		// Extract indices for PCA
-		//		std::vector<uint32> indices;
-		//		for (auto& res : knn_res)
-		//			indices.push_back(res.first);
-
-		//		// Compute PCA normal from local neighborhood
-		//		if (indices.size() >= 3 && nb_cells<PVertex>(*p.points_)>0)
-		//		{
-		//			Vec3 new_normal = compute_pca_normal(*p.samples_mesh_, *p.samples_position_, indices,
-		//													p.samples_kdtree_vertices_);
-
-		//			// Orient normal: should point away from surface (same side as current position relative to
-		//			// input cloud)
-		//			std::pair<uint32, Scalar> input_nn_res;
-		//			p.input_kdtree_->find_nn(pt, &input_nn_res);
-		//			PVertex input_nn = p.input_kdtree_vertices_[input_nn_res.first];
-		//			Vec3 input_nn_pos = (*p.position_)[index_of(*p.points_, input_nn)];
-		//			Vec3 to_pt = (pt - input_nn_pos).normalized();
-		//			if (new_normal.dot(to_pt) < 0)
-		//				new_normal = -new_normal;
-
-		//			(*p.samples_normal_)[v_idx] = new_normal;
-
-		//			// Re-compute shrinking ball with new normal
-		//			auto [c2, r2, q2] = cgogn::geometry::shrinking_ball_center<PVertex>(
-		//				pt, new_normal, p.samples_kdtree_, p.samples_kdtree_vertices_, p.alpha_*1.5);
-
-		//			(*p.samples_ma_position_)[v_idx] = c2;
-		//			(*p.samples_ma_radius_)[v_idx] = r2;
-		//			(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q2);
-
-		//			// Still bad? Mark for removal
-		//			if (r2 >= 2 * p.alpha_)
-		//				// to_remove.push_back(v);
-		//				value<bool>(*p.samples_mesh_, remove, v) = true;
-		//		}
-		//		else
-		//		{
-		//			// Not enough neighbors for PCA, mark for removal
-		//			// to_remove.push_back(v);
-		//			value<bool>(*p.samples_mesh_, remove, v) = true;
-		//		}
-		//	}
-		//	return true;
-		//});
-		// foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-		//	if (value<bool>(*p.samples_mesh_, remove, v))
-		//		to_remove.push_back(v);
-		//	return true;
-		//});
-		// if (!to_remove.empty())
-		//{
-		//	std::cout << "Removed " << to_remove.size() << " points with ball outside surface (after retry)."
-		//				<< std::endl;
-		//}
-		// for (PVertex v : to_remove)
-		//	remove_vertex(*p.samples_mesh_, v);
-		// build_kdtree(p); // Rebuild KDTree after removing vertices
-		// points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		// remove_attribute<PVertex>(*p.samples_mesh_, remove);
 	}
 
 	void init_spheres(PointsParameters& p, uint32 max_nb_spheres)
@@ -2212,6 +2152,148 @@ private:
 			update_render_data(p);
 	}
 
+	void build_cluster_gpu_cache(PointsParameters& p)
+	{
+		const int64_t N = static_cast<int64_t>(nb_cells<PVertex>(*p.samples_mesh_));
+		const int64_t M = static_cast<int64_t>(nb_cells<PVertex>(*p.spheres_));
+		if (N == 0 || M == 0)
+			return;
+
+		const bool need_rebuild = p.cluster_gpu_dirty_ || !p.samples_pos_gpu_.defined() ||
+								  !p.spheres_center_gpu_.defined() || p.cluster_gpu_samples_ != N ||
+								  p.cluster_gpu_spheres_ != M || p.cluster_gpu_device_ != device_;
+
+		if (!need_rebuild)
+			return;
+
+		p.cluster_gpu_samples_ = N;
+		p.cluster_gpu_spheres_ = M;
+		p.cluster_gpu_device_ = device_;
+		p.cluster_gpu_dirty_ = false;
+
+		auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+		if (device_.is_cuda())
+			cpu_opts = cpu_opts.pinned_memory(true);
+
+		// samples
+		p.samples_gpu_order_.clear();
+		p.samples_gpu_order_.reserve(N);
+
+		torch::Tensor samples_pos_cpu = torch::empty({N, 3}, cpu_opts);
+		torch::Tensor samples_area_cpu = torch::empty({N}, cpu_opts);
+		torch::Tensor A_cpu = torch::empty({N, 4, 4}, cpu_opts);
+		torch::Tensor b_cpu = torch::empty({N, 4}, cpu_opts);
+		torch::Tensor c_cpu = torch::empty({N}, cpu_opts);
+		torch::Tensor Q_cpu = torch::empty({N, 4, 4}, cpu_opts);
+
+		auto pos_acc = samples_pos_cpu.accessor<float, 2>();
+		auto area_acc = samples_area_cpu.accessor<float, 1>();
+		auto A_acc = A_cpu.accessor<float, 3>();
+		auto b_acc = b_cpu.accessor<float, 2>();
+		auto c_acc = c_cpu.accessor<float, 1>();
+		auto Q_acc = Q_cpu.accessor<float, 3>();
+
+		int64_t i = 0;
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			const Vec3& pt = (*p.samples_position_)[v_idx];
+
+			// copy position
+			pos_acc[i][0] = static_cast<float>(pt.x());
+			pos_acc[i][1] = static_cast<float>(pt.y());
+			pos_acc[i][2] = static_cast<float>(pt.z());
+			// copy area
+			area_acc[i] = static_cast<float>((*p.samples_area_)[v_idx]);
+			// copy quadric
+
+			const Spherical_Quadric& sq = (*p.samples_quadric_)[v_idx];
+			const Quadric& lq = (*p.samples_line_quadric_)[v_idx].get_quadric();
+
+			// Spherical quadric
+			for (int r = 0; r < 4; ++r)
+			{
+				for (int c = 0; c < 4; ++c)
+					A_acc[i][r][c] = static_cast<float>(sq._A(r, c));
+				b_acc[i][r] = static_cast<float>(sq._b(r));
+			}
+
+			// Line quadric
+			Mat4 q_mat = lq.matrix();
+			for (int r = 0; r < 4; ++r)
+				for (int c = 0; c < 4; ++c)
+					Q_acc[i][r][c] = static_cast<float>(q_mat(r, c));
+
+			p.samples_gpu_order_.push_back(v);
+			++i;
+			return true;
+		});
+
+		// spheres
+		p.spheres_gpu_order_.clear();
+		p.spheres_gpu_order_.reserve(M);
+
+		torch::Tensor spheres_center_cpu = torch::empty({M, 3}, cpu_opts);
+		torch::Tensor spheres_radius_cpu = torch::empty({M}, cpu_opts);
+
+		auto cen_acc = spheres_center_cpu.accessor<float, 2>();
+		auto rad_acc = spheres_radius_cpu.accessor<float, 1>();
+
+		int64_t s = 0;
+		foreach_cell(*p.spheres_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.spheres_, v);
+			const Vec3& c = (*p.spheres_position_)[v_idx];
+			Scalar r = (*p.spheres_radius_)[v_idx];
+
+			cen_acc[s][0] = static_cast<float>(c.x());
+			cen_acc[s][1] = static_cast<float>(c.y());
+			cen_acc[s][2] = static_cast<float>(c.z());
+			rad_acc[s] = static_cast<float>(r);
+
+			p.spheres_gpu_order_.push_back(v);
+			++s;
+			return true;
+		});
+
+		const bool nonblocking = device_.is_cuda();
+		p.samples_pos_gpu_ = samples_pos_cpu.to(device_, nonblocking);
+		p.samples_area_gpu_ = samples_area_cpu.to(device_, nonblocking);
+		p.spheres_center_gpu_ = spheres_center_cpu.to(device_, nonblocking);
+		p.spheres_radius_gpu_ = spheres_radius_cpu.to(device_, nonblocking);
+		p.samples_sqem_A_gpu_ = A_cpu.to(device_, nonblocking);
+		p.samples_sqem_b_gpu_ = b_cpu.to(device_, nonblocking);
+		p.samples_sqem_c_gpu_ = c_cpu.to(device_, nonblocking);
+		p.samples_line_Q_gpu_ = Q_cpu.to(device_, nonblocking);
+	}
+
+	torch::Tensor eval_sqem_batch(const torch::Tensor& A, // [N,4,4]
+								  const torch::Tensor& b, // [N,4]
+								  const torch::Tensor& c, // [N]
+								  const torch::Tensor& v  // [B,3]
+	)
+	{
+		torch::Tensor v_exp = v.unsqueeze(0).expand({A.size(0), v.size(0), 4}); // [N,B,4]
+		torch::Tensor A_exp = A.unsqueeze(1);									// [N,1,4,4]
+
+		torch::Tensor Av = torch::matmul(A_exp, v_exp.unsqueeze(-1)).squeeze(-1); // [N,B,4]
+
+		torch::Tensor vTAv = (v_exp * Av).sum(-1);									 // [N,B]
+		torch::Tensor b_exp = b.unsqueeze(1);										 // [N,1,4]
+		torch::Tensor dist = 0.5f * vTAv - (b_exp * v_exp).sum(-1) + c.unsqueeze(1); // [N,B]
+		return dist;
+	}
+
+	torch::Tensor eval_line_quadric_batch(const torch::Tensor& Q, // [N,4,4]
+										  const torch::Tensor& v) // [B,4], v = [cx,cy,cz,1]
+	{
+		torch::Tensor v_exp = v.unsqueeze(0).expand({Q.size(0), v.size(0), 4});
+		torch::Tensor Q_exp = Q.unsqueeze(1);
+		//						 	  [N,1,4,4]	[N,B,4,1] -> [N,B,4,1] -> [N,B,4] 		
+		torch::Tensor Qv = torch::matmul(Q_exp, v_exp.unsqueeze(-1)).squeeze(-1);
+		torch::Tensor vTQv = (v_exp * Qv).sum(-1); // [N, B, 4] *[N,B, 4] -> [N,B]
+
+		return vTQv;
+	}
+
 	void compute_clusters(PointsParameters& p)
 	{
 		// clean cluster affectation
@@ -2291,6 +2373,115 @@ private:
 			return true;
 		});
 		// augment_insufficient_clusters(p);
+	}
+
+	void compute_clusters_gpu(PointsParameters& p)
+	{
+		if (!device_.is_cuda())
+			return;
+
+		if (!p.samples_mesh_ || !p.spheres_)
+			return;
+
+		const int64_t N = static_cast<int64_t>(nb_cells<PVertex>(*p.samples_mesh_));
+		const int64_t M = static_cast<int64_t>(nb_cells<PVertex>(*p.spheres_));
+		if (N == 0 || M == 0)
+			return;
+
+		build_cluster_gpu_cache(p);
+
+		auto samples_pos = p.samples_pos_gpu_;	 // [N,3]
+		auto samples_area = p.samples_area_gpu_; // [N]
+		auto centers = p.spheres_center_gpu_;	 // [M,3]
+		auto radius = p.spheres_radius_gpu_;	 // [M]
+
+		auto fopts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+		auto iopts = torch::TensorOptions().dtype(torch::kInt64).device(device_);
+
+		torch::Tensor min_dist = torch::full({N}, std::numeric_limits<float>::infinity(), fopts);
+		torch::Tensor argmin = torch::full({N}, -1, iopts);
+
+		const int64_t chunk = 128;
+		for (int64_t k = 0; k < M; k += chunk)
+		{
+			const int64_t B = std::min(chunk, M - k);
+			auto centers_c = centers.narrow(0, k, B); // [B,3]
+			auto radius_c = radius.narrow(0, k, B);	  // [B]
+
+			torch::Tensor dist;
+
+			if(p.distance_mode_ == PURE_EUCLIDEAN_DISTANCE){
+				
+				torch::Tensor diff = samples_pos.unsqueeze(1) - centers_c.unsqueeze(0); // [N,B,3]
+				torch::Tensor d = torch::sqrt(torch::sum(diff * diff, 2));				// [N,B]
+
+				dist = d - radius_c.unsqueeze(0);
+				dist = dist * dist;
+				dist = dist * samples_area.unsqueeze(1);  
+
+			}
+			else{
+				torch::Tensor v_sphere = torch::cat({centers_c, radius_c.unsqueeze(1)}, 1); // [B,4]
+				torch::Tensor dist_sqem = eval_sqem_batch(
+					p.samples_sqem_A_gpu_, p.samples_sqem_b_gpu_, p.samples_sqem_c_gpu_, v_sphere); // [N,B]
+				torch::Tensor dist_other;
+				if(p.distance_mode_ == SPHERE_EUCLIDEAN_DISTANCE){
+					// euclidean part
+					torch::Tensor diff = samples_pos.unsqueeze(1) - centers_c.unsqueeze(0); // [N,B,3]
+					torch::Tensor d = torch::sqrt(torch::sum(diff * diff, 2));				// [N,B]
+
+					dist_other = d - radius_c.unsqueeze(0);
+					dist_other = dist_other * dist_other; // [N,B]
+				}
+				else{
+					// line quadric part
+					torch::Tensor v_sphere_line = torch::cat({centers_c, torch::ones({B,1}, fopts)}, 1); // [B,4]
+					dist_other = eval_line_quadric_batch(
+						p.samples_line_Q_gpu_, v_sphere_line); // [N,B]
+				}
+				dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
+			}
+
+			auto min_pair = dist.min(1);
+			torch::Tensor dist_min = std::get<0>(min_pair); // [N]
+			torch::Tensor dist_idx = std::get<1>(min_pair); // [N] in [0,B)
+
+			torch::Tensor global_idx = dist_idx + k;
+			torch::Tensor mask = dist_min < min_dist;
+
+			min_dist = torch::where(mask, dist_min, min_dist);
+			argmin = torch::where(mask, global_idx, argmin);
+		}
+
+		// back to CPU, map results to PVertex
+		torch::Tensor argmin_cpu = argmin.to(torch::kCPU, true);
+		auto arg_acc = argmin_cpu.accessor<int64_t, 1>();
+
+		// clear cluster
+		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.spheres_, v);
+			(*p.spheres_cluster_)[v_index].clear();
+			(*p.spheres_cluster_area_)[v_index] = 0.0;
+			return true;
+		});
+		p.samples_sphere_->fill(PVertex());
+
+		for (int64_t i = 0; i < N; ++i)
+		{
+			const int64_t sid = arg_acc[i];
+			if (sid < 0 || sid >= static_cast<int64_t>(p.spheres_gpu_order_.size()))
+				continue;
+
+			PVertex sv = p.samples_gpu_order_[i];
+			PVertex sp = p.spheres_gpu_order_[sid];
+
+			uint32 sv_idx = index_of(*p.samples_mesh_, sv);
+			uint32 sp_idx = index_of(*p.spheres_, sp);
+
+			(*p.samples_sphere_)[sv_idx] = sp;
+			(*p.spheres_cluster_)[sp_idx].push_back(sv);
+			(*p.spheres_cluster_area_)[sp_idx] += (*p.samples_area_)[sv_idx];
+		}
 	}
 
 	void augment_insufficient_clusters(PointsParameters& p)
@@ -3001,7 +3192,9 @@ private:
 	}
 	void update_spheres(PointsParameters& p)
 	{
-		compute_clusters(p);
+		//compute_clusters(p);
+
+		compute_clusters_gpu(p);
 
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			switch (p.distance_mode_)
