@@ -58,7 +58,7 @@ std::pair<VEC, VEC> bounding_box(const CONTAINER<VEC>& container)
 }
 
 template <template <typename VEC> typename CONTAINER, typename VEC>
-void rescale(CONTAINER<VEC>& container, typename vector_traits<VEC>::Scalar s)
+void rescale_centered(CONTAINER<VEC>& container, typename vector_traits<VEC>::Scalar s = 1.0)
 {
 	using Scalar = typename vector_traits<VEC>::Scalar;
 	const std::size_t dimension = vector_traits<VEC>::SIZE;
@@ -71,11 +71,15 @@ void rescale(CONTAINER<VEC>& container, typename vector_traits<VEC>::Scalar s)
 		if (range[i] > max)
 			max = range[i];
 	}
-	VEC scale = (range / max) * s;
+	const Scalar k = s / max;
+	Scalar offset[dimension];
+	for (std::size_t i = 0; i < dimension; ++i)
+		offset[i] = (s - range[i] * k) * 0.5;
+
 	for (VEC& v : container)
 	{
 		for (std::size_t i = 0; i < dimension; ++i)
-			v[i] = (v[i] - bb_min[i]) / range[i] * scale[i];
+			v[i] = (v[i] - bb_min[i]) * k + offset[i];
 	}
 }
 
