@@ -325,6 +325,10 @@ private:
 		std::shared_ptr<PAttribute<Vec3>> position_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> normal_ = nullptr;			  // Computed on input for sampling
 		std::shared_ptr<PAttribute<std::vector<PVertex>>> knn_ = nullptr; // For input normals
+		std::vector<Vec3> input_position_backup_;
+		std::vector<Vec3> input_normal_backup_;
+		bool input_jitter_backup_valid_ = false;
+		float32 input_jitter_pos_pct_ = 0.5f;
 
 		// Nueral UDF
 		bool neural_udf_loaded_ = false;
@@ -385,6 +389,11 @@ private:
 		std::shared_ptr<PAttribute<Scalar>> samples_error_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> samples_color_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> samples_normal_color_ = nullptr;
+		std::vector<Vec3> samples_position_backup_;
+		std::vector<Vec3> samples_normal_backup_;
+		bool samples_jitter_backup_valid_ = false;
+		float32 samples_jitter_pos_pct_ = 0.5f;
+		float32 samples_jitter_normal_sigma_ = 0.02f;
 
 		std::unique_ptr<acc::BVHTreeSpheres<uint32, Vec3>> samples_wn_bvh_;
 		std::vector<Vec3> samples_wn_bvh_centers_;
@@ -776,6 +785,9 @@ public:
 		// Clear existing samples
 		if (p.samples_mesh_)
 			points_provider_->clear_mesh(*p.samples_mesh_);
+		p.samples_jitter_backup_valid_ = false;
+		p.samples_position_backup_.clear();
+		p.samples_normal_backup_.clear();
 
 		// Add sampled points to samples_mesh_
 		for (const Vec3& pt : sampled_points)
@@ -1964,22 +1976,328 @@ private:
 		return p + Vec3(x, y, z);
 	}
 
+	void backup_samples_state(PointsParameters& p)
+	{
+		const uint32 count = nb_cells<PVertex>(*p.samples_mesh_);
+		p.samples_position_backup_.assign(count, Vec3(0, 0, 0));
+		p.samples_normal_backup_.assign(count, Vec3(0, 0, 1));
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			if (v_idx < count)
+			{
+				p.samples_position_backup_[v_idx] = (*p.samples_position_)[v_idx];
+				p.samples_normal_backup_[v_idx] = (*p.samples_normal_)[v_idx];
+			}
+			return true;
+		});
+		p.samples_jitter_backup_valid_ = true;
+	}
+
+	void refresh_sample_normals_color(PointsParameters& p)
+	{
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			const Vec3& n = (*p.samples_normal_)[v_idx];
+			(*p.samples_normal_color_)[v_idx] =
+				Vec4((n.x() + 1.0) * 0.5, (n.y() + 1.0) * 0.5, (n.z() + 1.0) * 0.5, 1.0);
+			return true;
+		});
+	}
+
+	Scalar input_bbox_diagonal(PointsParameters& p)
+	{
+		if (!p.points_ || !p.position_)
+			return Scalar(0);
+		bool has_point = false;
+		Vec3 min_v(0, 0, 0);
+		Vec3 max_v(0, 0, 0);
+		foreach_cell(*p.points_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.points_, v);
+			const Vec3& pos = (*p.position_)[v_idx];
+			if (!has_point)
+			{
+				min_v = pos;
+				max_v = pos;
+				has_point = true;
+			}
+			else
+			{
+				min_v = min_v.cwiseMin(pos);
+				max_v = max_v.cwiseMax(pos);
+			}
+			return true;
+		});
+		if (!has_point)
+			return Scalar(0);
+		return (max_v - min_v).norm();
+	}
+
+	Scalar samples_bbox_diagonal(PointsParameters& p)
+	{
+		if (!p.samples_mesh_)
+			return Scalar(0);
+		bool has_sample = false;
+		Vec3 min_v(0, 0, 0);
+		Vec3 max_v(0, 0, 0);
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			const Vec3& pos = (*p.samples_position_)[v_idx];
+			if (!has_sample)
+			{
+				min_v = pos;
+				max_v = pos;
+				has_sample = true;
+			}
+			else
+			{
+				min_v = min_v.cwiseMin(pos);
+				max_v = max_v.cwiseMax(pos);
+			}
+			return true;
+		});
+		if (!has_sample)
+			return Scalar(0);
+		return (max_v - min_v).norm();
+	}
+
+	void rebuild_input_kdtree(PointsParameters& p)
+	{
+		if (p.input_kdtree_)
+			delete p.input_kdtree_;
+		p.input_kdtree_ = nullptr;
+		p.input_kdtree_vertices_.clear();
+
+		const uint32 nb_vertices = nb_cells<PVertex>(*p.points_);
+		if (nb_vertices == 0)
+			return;
+
+		std::vector<Vec3> points;
+		points.reserve(nb_vertices);
+		p.input_kdtree_vertices_.reserve(nb_vertices);
+		foreach_cell(*p.points_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.points_, v);
+			points.push_back((*p.position_)[v_idx]);
+			p.input_kdtree_vertices_.push_back(v);
+			return true;
+		});
+		p.input_kdtree_ = new acc::KDTree<3, uint32>(points);
+	}
+
+	void invalidate_samples_after_input_change(PointsParameters& p)
+	{
+		p.fitting_data_computed_ = false;
+		p.samples_winding_number_.reset();
+		p.samples_wn_bvh_.reset();
+		p.cluster_gpu_dirty_ = true;
+		p.samples_jitter_backup_valid_ = false;
+		p.samples_position_backup_.clear();
+		p.samples_normal_backup_.clear();
+		if (p.samples_mesh_)
+			points_provider_->clear_mesh(*p.samples_mesh_);
+	}
+
+	void backup_input_state(PointsParameters& p)
+	{
+		const uint32 count = nb_cells<PVertex>(*p.points_);
+		p.input_position_backup_.assign(count, Vec3(0, 0, 0));
+		p.input_normal_backup_.assign(count, Vec3(0, 0, 1));
+		foreach_cell(*p.points_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.points_, v);
+			if (v_idx < count)
+			{
+				p.input_position_backup_[v_idx] = (*p.position_)[v_idx];
+				p.input_normal_backup_[v_idx] = (*p.normal_)[v_idx];
+			}
+			return true;
+		});
+		p.input_jitter_backup_valid_ = true;
+	}
+
+	void apply_input_position_jitter(PointsParameters& p)
+	{
+		if (!p.points_ || !p.position_)
+			return;
+		const uint32 count = nb_cells<PVertex>(*p.points_);
+		if (count == 0)
+			return;
+		const Scalar diag = input_bbox_diagonal(p);
+		const Scalar pct = static_cast<Scalar>(p.input_jitter_pos_pct_) * Scalar(0.01);
+		if (diag <= Scalar(0) || pct <= Scalar(0))
+			return;
+		if (!p.input_jitter_backup_valid_)
+			backup_input_state(p);
+
+		const Scalar sigma = diag * pct;
+		std::mt19937 gen(p.seed_ + 4242);
+		std::normal_distribution<Scalar> normal(Scalar(0), sigma);
+		foreach_cell(*p.points_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.points_, v);
+			Vec3 pos = (*p.position_)[v_idx];
+			pos += Vec3(normal(gen), normal(gen), normal(gen));
+			(*p.position_)[v_idx] = pos;
+			return true;
+		});
+
+		rebuild_input_kdtree(p);
+		compute_input_normals(p);
+		points_provider_->emit_attribute_changed(*p.points_, p.position_.get());
+		points_provider_->emit_attribute_changed(*p.points_, p.normal_.get());
+		invalidate_samples_after_input_change(p);
+	}
+
+	void restore_input_state(PointsParameters& p)
+	{
+		if (!p.points_ || !p.input_jitter_backup_valid_)
+			return;
+		const uint32 count = nb_cells<PVertex>(*p.points_);
+		if (p.input_position_backup_.size() < count || p.input_normal_backup_.size() < count)
+		{
+			p.input_jitter_backup_valid_ = false;
+			return;
+		}
+		foreach_cell(*p.points_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.points_, v);
+			(*p.position_)[v_idx] = p.input_position_backup_[v_idx];
+			(*p.normal_)[v_idx] = p.input_normal_backup_[v_idx];
+			return true;
+		});
+
+		rebuild_input_kdtree(p);
+		points_provider_->emit_attribute_changed(*p.points_, p.position_.get());
+		points_provider_->emit_attribute_changed(*p.points_, p.normal_.get());
+		invalidate_samples_after_input_change(p);
+	}
+
+	void apply_samples_position_jitter(PointsParameters& p)
+	{
+		if (!p.samples_mesh_)
+			return;
+		const uint32 count = nb_cells<PVertex>(*p.samples_mesh_);
+		if (count == 0)
+			return;
+		const Scalar diag = samples_bbox_diagonal(p);
+		const Scalar pct = static_cast<Scalar>(p.samples_jitter_pos_pct_) * Scalar(0.01);
+		if (diag <= Scalar(0) || pct <= Scalar(0))
+			return;
+		if (!p.samples_jitter_backup_valid_)
+			backup_samples_state(p);
+
+		const Scalar sigma = diag * pct;
+		std::mt19937 gen(p.seed_ + 1337);
+		std::normal_distribution<Scalar> normal(Scalar(0), sigma);
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			Vec3 pos = (*p.samples_position_)[v_idx];
+			pos += Vec3(normal(gen), normal(gen), normal(gen));
+			(*p.samples_position_)[v_idx] = pos;
+			return true;
+		});
+
+		p.fitting_data_computed_ = false;
+		p.samples_winding_number_.reset();
+		p.samples_wn_bvh_.reset();
+		p.cluster_gpu_dirty_ = true;
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
+	}
+
+	void apply_samples_normal_jitter(PointsParameters& p)
+	{
+		if (!p.samples_mesh_)
+			return;
+		const uint32 count = nb_cells<PVertex>(*p.samples_mesh_);
+		if (count == 0)
+			return;
+		const Scalar sigma = static_cast<Scalar>(p.samples_jitter_normal_sigma_);
+		if (sigma <= Scalar(0))
+			return;
+		if (!p.samples_jitter_backup_valid_)
+			backup_samples_state(p);
+
+		std::mt19937 gen(p.seed_ + 1337);
+		std::normal_distribution<Scalar> normal(Scalar(0), sigma);
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			Vec3 n = (*p.samples_normal_)[v_idx];
+			n += Vec3(normal(gen), normal(gen), normal(gen));
+			if (n.squaredNorm() > Scalar(0))
+				n.normalize();
+			else
+				n = Vec3(0, 0, 1);
+			(*p.samples_normal_)[v_idx] = n;
+			return true;
+		});
+
+		refresh_sample_normals_color(p);
+		p.fitting_data_computed_ = false;
+		p.samples_winding_number_.reset();
+		p.samples_wn_bvh_.reset();
+		p.cluster_gpu_dirty_ = true;
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
+	}
+
+	void restore_samples_state(PointsParameters& p)
+	{
+		if (!p.samples_mesh_ || !p.samples_jitter_backup_valid_)
+			return;
+		const uint32 count = nb_cells<PVertex>(*p.samples_mesh_);
+		if (p.samples_position_backup_.size() < count || p.samples_normal_backup_.size() < count)
+		{
+			p.samples_jitter_backup_valid_ = false;
+			return;
+		}
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			(*p.samples_position_)[v_idx] = p.samples_position_backup_[v_idx];
+			(*p.samples_normal_)[v_idx] = p.samples_normal_backup_[v_idx];
+			return true;
+		});
+
+		refresh_sample_normals_color(p);
+		p.fitting_data_computed_ = false;
+		p.samples_winding_number_.reset();
+		p.samples_wn_bvh_.reset();
+		p.cluster_gpu_dirty_ = true;
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
+	}
+
 	std::pair<Vec3, Vec3> project_and_normal(PointsParameters& p, const Vec3& sample_pos)
 	{
 		std::pair<uint32, Scalar> knn_res;
 		p.input_kdtree_->find_nn(sample_pos, &knn_res);
 		PVertex nn = p.input_kdtree_vertices_[knn_res.first];
 		Vec3 nn_pos = (*p.position_)[index_of(*p.points_, nn)];
-		Vec3 n = (sample_pos - nn_pos).normalized();
+		Vec3 n = sample_pos - nn_pos;
+		const Scalar eps = Scalar(1e-12);
+		if (n.squaredNorm() < eps)
+		{
+			// Fallback to PCA normal when the sample coincides with its nearest neighbor.
+			std::vector<std::pair<uint32, Scalar>> knn_res_all;
+			p.input_kdtree_->find_nns(sample_pos, p.knn_k_, &knn_res_all);
+			std::vector<uint32> indices;
+			indices.reserve(knn_res_all.size());
+			for (const auto& res : knn_res_all)
+				indices.push_back(res.first);
+			n = compute_pca_normal(*p.points_, *p.position_, indices, p.input_kdtree_vertices_);
+		}
+		if (n.squaredNorm() < eps)
+			n = Vec3(0, 0, 1);
+		else
+			n.normalize();
 		Vec3 query = nn_pos + n * p.alpha_;
 		PVertex last_nn = PVertex();
 		do
 		{
 			p.input_kdtree_->find_nn(query, &knn_res);
 			nn = p.input_kdtree_vertices_[knn_res.first];
-			Vec3 nn_pos = (*p.position_)[index_of(*p.points_, nn)];
-			Vec3 n = (query - nn_pos).normalized();
-			query = nn_pos + n * p.alpha_;
+			nn_pos = (*p.position_)[index_of(*p.points_, nn)];
+			Vec3 step_dir = query - nn_pos;
+			if (step_dir.squaredNorm() < eps)
+				step_dir = n;
+			step_dir.normalize();
+			query = nn_pos + step_dir * p.alpha_;
 			last_nn = nn;
 		} while (index_of(*p.points_, nn) != index_of(*p.points_, last_nn));
 
@@ -1988,6 +2306,18 @@ private:
 
 	void sample_points(PointsParameters& p)
 	{
+
+		// Resampling from a point cloud invalidates cached fitting data and samples.
+		p.fitting_data_computed_ = false;
+		p.samples_winding_number_.reset();
+		p.samples_wn_bvh_.reset();
+		p.cluster_gpu_dirty_ = true;
+		p.samples_jitter_backup_valid_ = false;
+		p.samples_position_backup_.clear();
+		p.samples_normal_backup_.clear();
+		if (p.samples_mesh_)
+			points_provider_->clear_mesh(*p.samples_mesh_);
+
 		std::uniform_real_distribution<Scalar> uniform(0.0, 1.0);
 		std::mt19937 gen(p.seed_);
 
@@ -1996,6 +2326,19 @@ private:
 		uint32 rand_start_idx = uniform_idx(gen);
 		PVertex start_seed_vertex = p.input_kdtree_vertices_[rand_start_idx];
 		Vec3 generator = (*p.position_)[index_of(*p.points_, start_seed_vertex)];
+		// Jitter the initial generator to avoid zero-length projection direction.
+		Scalar jitter_radius =Scalar(0.001);
+		if (jitter_radius > Scalar(0))
+		{
+			Vec3 jitter(uniform(gen) * Scalar(2.0) - Scalar(1.0),
+						uniform(gen) * Scalar(2.0) - Scalar(1.0),
+						uniform(gen) * Scalar(2.0) - Scalar(1.0));
+			if (jitter.squaredNorm() > Scalar(0))
+			{
+				jitter.normalize();
+				generator += jitter * jitter_radius;
+			}
+		}
 
 		// --- Spatial Grid Optimization ---
 		SpatialGrid grid(p.sample_radius_);
@@ -4127,6 +4470,9 @@ protected:
 					if (p.samples_mesh_)
 						points_provider_->clear_mesh(*p.samples_mesh_);
 					p.fitting_data_computed_ = false;
+					p.samples_jitter_backup_valid_ = false;
+					p.samples_position_backup_.clear();
+					p.samples_normal_backup_.clear();
 				}
 
 				if (p.samples_mesh_)
@@ -4147,11 +4493,60 @@ protected:
 					if (p.samples_mesh_)
 						points_provider_->clear_mesh(*p.samples_mesh_);
 					p.fitting_data_computed_ = false;
+					p.samples_jitter_backup_valid_ = false;
+					p.samples_position_backup_.clear();
+					p.samples_normal_backup_.clear();
 				}
 			}
 		}
 
 		bool has_samples = p.samples_mesh_ && nb_cells<PVertex>(*p.samples_mesh_) > 0;
+
+		ImGui::Separator();
+		ImGui::Text("Input Point Cloud Noise");
+		ImGui::SliderFloat("Input Pos Noise (%)", &p.input_jitter_pos_pct_, 0.0f, 5.0f, "%.3f");
+		if (ImGui::Button("Jitter Input Positions"))
+		{
+			std::lock_guard<std::mutex> lock(p.mutex_);
+			apply_input_position_jitter(p);
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Restore Input Positions"))
+		{
+			std::lock_guard<std::mutex> lock(p.mutex_);
+			restore_input_state(p);
+		}
+
+		if (has_samples)
+		{
+			ImGui::Separator();
+			ImGui::Text("Sample Point Noise");
+			ImGui::SliderFloat("Sample Pos Noise (%)", &p.samples_jitter_pos_pct_, 0.0f, 5.0f, "%.3f");
+			if (ImGui::Button("Jitter Sample Positions"))
+			{
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				apply_samples_position_jitter(p);
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Restore Sample Positions"))
+			{
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				restore_samples_state(p);
+			}
+
+			ImGui::SliderFloat("Sample Normal Sigma", &p.samples_jitter_normal_sigma_, 0.0f, 0.2f, "%.4f");
+			if (ImGui::Button("Jitter Sample Normals"))
+			{
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				apply_samples_normal_jitter(p);
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Restore Sample Normals"))
+			{
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				restore_samples_state(p);
+			}
+		}
 
 		if (!has_samples)
 		{
