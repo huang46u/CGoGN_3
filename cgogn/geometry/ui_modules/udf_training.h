@@ -14,7 +14,10 @@
 #include <cgogn/geometry/functions/bounding_box.h>
 #include <cgogn/geometry/types/line_quadric.h>
 #include <cgogn/geometry/types/quadric.h>
+#include <cgogn/geometry/types/ray_level_set_sampler.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
+#include <cgogn/geometry/types/spatial_grid.h>
+#include <cgogn/geometry/types/udf_forward.h>
 #include <cgogn/geometry/types/vector_traits.h>
 #include <cgogn/geometry/types/fast_winding_number_traits.h>
 #include <cgogn/geometry/types/fast_winding_number.h>
@@ -64,6 +67,10 @@ using geometry::Scalar;
 using geometry::Spherical_Quadric;
 using geometry::Quadric;
 using geometry::SQEM_CASE;
+using geometry::SpatialGrid;
+using geometry::BatchUDFResult;
+using geometry::RayLevelSetSampler;
+using geometry::UDFForward;
 using geometry::Vec3;
 using geometry::Vec4;
 
@@ -116,207 +123,10 @@ class UDFTraining : public ViewModule
 	};
 
 private:
-	struct SpatialGrid
-	{
-		struct GridKey
-		{
-			int x, y, z;
-			bool operator==(const GridKey& o) const
-			{
-				return x == o.x && y == o.y && z == o.z;
-			}
-		};
-		struct GridKeyHash
-		{
-			std::size_t operator()(const GridKey& k) const
-			{
-				return std::hash<int>()(k.x) ^ (std::hash<int>()(k.y) << 1) ^ (std::hash<int>()(k.z) << 2);
-			}
-		};
-
-		Scalar cell_size_;
-		std::unordered_map<GridKey, std::vector<uint32>, GridKeyHash> grid_;
-
-		SpatialGrid(Scalar cell_size) : cell_size_(cell_size)
-		{
-		}
-
-		GridKey get_key(const Vec3& v) const
-		{
-			return {(int)std::floor(v[0] / cell_size_), (int)std::floor(v[1] / cell_size_),
-					(int)std::floor(v[2] / cell_size_)};
-		}
-
-		void insert(const Vec3& pos, uint32 idx)
-		{
-			grid_[get_key(pos)].push_back(idx);
-		}
-
-		template <typename PositionAttribute>
-		bool is_valid_sample(const Vec3& pos, Scalar radius, const PositionAttribute& positions) const
-		{
-			GridKey k = get_key(pos);
-			Scalar r2 = radius * radius;
-			// Check 3x3x3 neighborhood
-			for (int dx = -1; dx <= 1; ++dx)
-			{
-				for (int dy = -1; dy <= 1; ++dy)
-				{
-					for (int dz = -1; dz <= 1; ++dz)
-					{
-						GridKey neighbor_key = {k.x + dx, k.y + dy, k.z + dz};
-						auto it = grid_.find(neighbor_key);
-						if (it != grid_.end())
-						{
-							for (uint32 idx : it->second)
-							{
-								if ((positions[idx] - pos).squaredNorm() < r2)
-									return false;
-							}
-						}
-					}
-				}
-			}
-			return true;
-		}
-	};
-
 	struct PointsParameters;
 
-	struct RayLevelSetSampler
-	{
-		struct Ray
-		{
-			Vec3 origin;
-			Vec3 direction;
-			Scalar t_min;
-			Scalar t_max;
-		};
-
-		// Generate rays with uniform direction distribution
-		static std::vector<Ray> generate_rays(const Vec3& bbox_min, const Vec3& bbox_max, int num_rays,
-											  const PointsParameters& p, std::mt19937& gen)
-		{
-			std::vector<Ray> rays;
-			rays.reserve(num_rays);
-
-			// Expand bbox
-
-			Vec3 center = (bbox_min + bbox_max) * 0.5;
-			Vec3 half_size = (bbox_max - bbox_min) * 0.5 * (1.0 + p.udf_bbox_expand_);
-			Vec3 expanded_min = center - half_size;
-			Vec3 expanded_max = center + half_size;
-			const Scalar diag = (expanded_max - expanded_min).norm();
-
-			std::uniform_real_distribution<Scalar> uniform(0.0, 1.0);
-			auto uniform_signed = [&](Scalar a) {
-				return (uniform(gen) * 2.0 - 1.0) * a; // [-a, a]
-			};
-			for (int i = 0; i < num_rays; ++i)
-			{
-				Ray ray;
-
-				// Uniform direction on sphere (Marsaglia method)
-				Scalar u1, u2, s;
-				do
-				{
-					u1 = uniform(gen) * 2.0 - 1.0;
-					u2 = uniform(gen) * 2.0 - 1.0;
-					s = u1 * u1 + u2 * u2;
-				} while (s >= 1.0);
-
-				Scalar factor = 2.0 * std::sqrt(1.0 - s);
-				ray.direction = Vec3(u1 * factor, u2 * factor, 1.0 - 2.0 * s);
-
-				// Generate orthogonal basis
-				Vec3 l = ray.direction;
-
-				// Chose a vector not aligned with l
-				Vec3 a, n, b;
-				Vec3 ad = l.cwiseAbs();
-				if (ad.x() <= ad.y() && ad.x() <= ad.z())
-					a = Vec3(1, 0, 0);
-				else if (ad.y() <= ad.x() && ad.y() <= ad.z())
-					a = Vec3(0, 1, 0);
-				else
-					a = Vec3(0, 0, 1);
-
-				n = l.cross(a).normalized();
-				b = l.cross(n);
-
-				// Sample on plane perpendicular to major axis
-				Vec3 origin;
-				while (true)
-				{
-					Scalar u = uniform_signed(diag * 0.5);
-					Scalar v = uniform_signed(diag * 0.5);
-
-					Vec3 q = center + n * u + b * v; // candidate point on plane
-
-					Ray tmp;
-					tmp.origin = q;
-					tmp.direction = l;
-
-					auto [t_enter, t_exit] = intersect_bbox(tmp, expanded_min, expanded_max);
-					if (!(t_exit > t_enter))
-						continue;
-
-					// Unique ray: start at entry point
-					ray.origin = q + t_enter * l;
-					ray.t_min = 0.0;
-					ray.t_max = t_exit - t_enter;
-					break;
-				}
-				rays.push_back(ray);
-			}
-
-			return rays;
-		}
-
-		static std::pair<Scalar, Scalar> intersect_bbox(const Ray& ray, const Vec3& bbox_min, const Vec3& bbox_max)
-		{
-			Scalar t_min = 0.0;
-			Scalar t_max = std::numeric_limits<Scalar>::max();
-			const Scalar eps = 1e-8;
-
-			for (int i = 0; i < 3; ++i)
-			{
-				Scalar o = ray.origin[i];
-				Scalar d = ray.direction[i];
-
-				if (std::abs(d) < eps)
-				{
-					// Ray parallel to slab
-					if (o < bbox_min[i] || o > bbox_max[i])
-						return {Scalar(1), Scalar(0)}; // no intersection
-					continue;
-				}
-
-				Scalar t1 = (bbox_min[i] - o) / d;
-				Scalar t2 = (bbox_max[i] - o) / d;
-				if (t1 > t2)
-					std::swap(t1, t2);
-
-				t_min = std::max(t_min, t1);
-				t_max = std::min(t_max, t2);
-
-				if (t_max < t_min)
-					return {Scalar(1), Scalar(0)};
-			}
-
-			return {t_min, t_max};
-		}
-	};
-
-	struct BatchUDFResult
-	{
-		std::vector<Scalar> values;	 // size N
-		std::vector<Vec3> gradients; // size N
-		bool ok;
-	};
 
 	struct Tet;
-	using Ray = typename RayLevelSetSampler::Ray;
 	struct PointsParameters
 	{
 		bool initialized_ = false;
@@ -338,18 +148,7 @@ private:
 		std::string neural_udf_model_path_ = "";
 
 		// Ray Sampling
-		int ray_capacity_ = 0;
-		torch::Device ray_device_ = torch::kCPU;
-
-		torch::Tensor ray_origins_cpu_;
-		torch::Tensor ray_directions_cpu_;
-		torch::Tensor ray_t_cpu_;
-		torch::Tensor ray_tmax_cpu_;
-
-		torch::Tensor ray_origins_;
-		torch::Tensor ray_directions_;
-		torch::Tensor ray_t_;
-		torch::Tensor ray_tmax_;
+		std::unique_ptr<RayLevelSetSampler> ray_sampler_;
 
 		// Sampling & Fitting Data
 		POINTS* samples_mesh_ = nullptr;
@@ -503,14 +302,6 @@ private:
 		}
 	};
 
-	struct RayBatchBuffers
-	{
-		torch::Tensor O;
-		torch::Tensor D;
-		torch::Tensor t;
-		torch::Tensor t_max;
-	};
-
 	struct Tet
 	{
 		std::size_t tet_id;
@@ -588,151 +379,9 @@ public:
 		}
 	}
 
-	Scalar forward(PointsParameters& p, const Vec3& query_point)
+	UDFForward make_udf_forward(PointsParameters& p)
 	{
-		if (!p.neural_udf_loaded_)
-		{
-			std::cerr << "Neural UDF model not loaded." << std::endl;
-			return std::numeric_limits<Scalar>::max();
-		}
-		try
-		{
-			torch::Tensor point = torch::tensor({query_point.x(), query_point.y(), query_point.z()}, torch::kFloat32)
-									  .unsqueeze(0)
-									  .to(device_);
-			torch::Tensor output = p.neural_udf_model_.forward({point}).toTensor();
-			float udf_value = output.item<float>();
-			return static_cast<Scalar>(udf_value);
-		}
-		catch (const c10::Error& e)
-		{
-			std::cerr << "Error during Neural UDF forward pass: " << e.what() << std::endl;
-			return std::numeric_limits<Scalar>::max();
-		}
-	}
-	BatchUDFResult forward_batch(PointsParameters& p, const std::vector<Vec3>& query_points)
-	{
-		BatchUDFResult r;
-		r.ok = false;
-		const size_t N = query_points.size();
-
-		if (!p.neural_udf_loaded_ || N == 0)
-			return r;
-
-		try
-		{
-			torch::NoGradGuard no_grad;
-
-			torch::Tensor points_cpu = torch::empty({static_cast<long>(N), 3},
-													torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-			auto acc = points_cpu.accessor<float, 2>();
-
-			for (size_t i = 0; i < N; ++i)
-			{
-				acc[i][0] = query_points[i].x();
-				acc[i][1] = query_points[i].y();
-				acc[i][2] = query_points[i].z();
-			}
-
-			torch::Tensor points = points_cpu.to(device_);
-			torch::Tensor output = p.neural_udf_model_.forward({points}).toTensor();
-
-			if (output.dim() != 2 || output.size(0) != N)
-				return r;
-
-			torch::Tensor output_cpu = output.detach().to(torch::kCPU).contiguous();
-			auto out_acc = output_cpu.accessor<float, 2>();
-
-			r.values.resize(N);
-			r.gradients.clear();
-
-			for (size_t i = 0; i < N; ++i)
-				r.values[i] = static_cast<Scalar>(out_acc[(long)i][0]);
-
-			r.ok = true;
-			return r;
-		}
-		catch (const c10::Error& e)
-		{
-			std::cerr << "Error during batch forward: " << e.what() << std::endl;
-			return r;
-		}
-	}
-
-	BatchUDFResult forward_batch_with_grad(PointsParameters& p, const std::vector<Vec3>& query_points)
-	{
-		BatchUDFResult r;
-		r.ok = false;
-		const size_t N = query_points.size();
-		if (!p.neural_udf_loaded_)
-		{
-			std::cerr << "Neural UDF model not loaded." << std::endl;
-			return r;
-		}
-		if (N == 0)
-		{
-			std::cerr << "No query points provided for batch UDF evaluation." << std::endl;
-			return r;
-		}
-		try
-		{
-			// std::cout << "Evaluating Neural UDF for batch of " << N << " points." << std::endl;
-			torch::Tensor points_cpu = torch::empty({static_cast<long>(N), 3},
-													torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-			auto acc = points_cpu.accessor<float, 2>();
-			// std::cout << "Preparing input tensor." << std::endl;
-			for (size_t i = 0; i < N; ++i)
-			{
-				acc[i][0] = query_points[i].x();
-				acc[i][1] = query_points[i].y();
-				acc[i][2] = query_points[i].z();
-			}
-			torch::Tensor points = points_cpu.to(device_);
-			points.set_requires_grad(true);
-
-			// std::cout << "Performing forward pass." << std::endl;
-			//  forward pass
-			torch::Tensor output = p.neural_udf_model_.forward({points}).toTensor();
-
-			// Check output shape
-			if (output.dim() != 2 || output.size(0) != N)
-			{
-				std::cerr << "Unexpected output shape: " << output.sizes() << std::endl;
-				return r;
-			}
-
-			// backward pass to compute gradients
-			output.backward(torch::ones_like(output));
-
-			torch::Tensor grads = points.grad();
-			// Validate gradient tensor
-			r.values.reserve(N);
-			r.gradients.reserve(N);
-
-			torch::Tensor output_cpu = output.detach().to(torch::kCPU).contiguous();
-			torch::Tensor grads_cpu = grads.detach().to(torch::kCPU).contiguous();
-
-			auto out_acc = output_cpu.accessor<float, 2>();
-			auto grad_acc = grads_cpu.accessor<float, 2>();
-
-			r.values.resize(N);
-			r.gradients.resize(N);
-
-			for (size_t i = 0; i < N; ++i)
-			{
-				r.values[i] = static_cast<Scalar>(out_acc[(long)i][0]);
-				r.gradients[i] =
-					Vec3(static_cast<Scalar>(grad_acc[(long)i][0]), static_cast<Scalar>(grad_acc[(long)i][1]),
-						 static_cast<Scalar>(grad_acc[(long)i][2]));
-			}
-			r.ok = true;
-			return r;
-		}
-		catch (const c10::Error& e)
-		{
-			std::cerr << "Error during Neural UDF batch forward/grad: " << e.what() << std::endl;
-			return r;
-		}
+		return UDFForward(&p.neural_udf_model_, p.neural_udf_loaded_, device_);
 	}
 	void load_alpha_samples_to_mesh(PointsParameters& p, size_t num_points)
 	{
@@ -748,7 +397,28 @@ public:
 
 		// Sample points on alpha level set
 		// std::vector<Vec3> sampled_points = sample_alpha_level_set(p, num_points*10);
-		std::vector<Vec3> sampled_points = sample_alpha_level_set_rays(p, num_points);
+		UDFForward udf = make_udf_forward(p);
+		RayLevelSetSampler::Params ray_params;
+		ray_params.bbox_expand = p.udf_bbox_expand_;
+		ray_params.alpha = p.alpha_;
+		ray_params.tol = p.tol_;
+		ray_params.step_bound = Scalar(2.0);
+		ray_params.batch_size = p.batch_size_;
+		ray_params.max_iterations = p.udf_max_iterations_;
+		ray_params.max_outer_iterations = 500;
+		ray_params.seed = p.seed_;
+
+		if (!p.ray_sampler_)
+			p.ray_sampler_ = std::make_unique<RayLevelSetSampler>(ray_params, udf.device());
+		else
+		{
+			p.ray_sampler_->set_params(ray_params);
+			p.ray_sampler_->set_device(udf.device());
+		}
+
+		std::vector<Vec3> sampled_points =
+			p.ray_sampler_->sample_alpha_level_set_rays(udf, num_points, p.samples_spatial_grid_.get(),
+														p.grid_cell_size_);
 		pre_process_sampling_points(p, sampled_points);
 		// sampled_points = poisson_eliminate_points(sampled_points, num_points);
 		if (sampled_points.empty())
@@ -785,7 +455,7 @@ public:
 			return true;
 		});
 
-		BatchUDFResult grad_result = forward_batch_with_grad(p, all_positions);
+		BatchUDFResult grad_result = udf.forward_batch_with_grad(all_positions);
 		if (grad_result.ok && grad_result.gradients.size() == all_positions.size())
 		{
 			uint32 idx = 0;
@@ -812,229 +482,6 @@ public:
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
 
 		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
-	}
-
-	std::pair<torch::Tensor, torch::Tensor> forward_values_grad_gpu(PointsParameters& p,
-																	const torch::Tensor& points_gpu)
-	{
-		try
-		{
-			torch::Tensor x = points_gpu;
-			if (x.device() != device_)
-				x = x.to(device_);
-			x = x.detach().requires_grad_(true);
-
-			torch::Tensor y = p.neural_udf_model_.forward({x}).toTensor();
-			if (y.dim() == 2 && y.size(1) == 1)
-				y = y.squeeze(1); // [N]
-
-			torch::Tensor grad_outputs = torch::ones_like(y);
-
-			std::vector<torch::Tensor> grads = torch::autograd::grad(
-				/*outputs=*/{y},
-				/*inputs=*/{x},
-				/*grad_outputs=*/{grad_outputs},
-				/*retain_graph=*/false,
-				/*create_graph=*/false,
-				/*allow_unused=*/false);
-
-			torch::Tensor dx = grads[0]; // [N,3]
-
-			return {y.detach(), dx.detach()};
-		}
-		catch (const c10::Error& e)
-		{
-			std::cerr << "GPU forward with grad failed: " << e.what() << std::endl;
-			return {torch::Tensor(), torch::Tensor()};
-		}
-	}
-
-	torch::Tensor forward_values_gpu(PointsParameters& p, const torch::Tensor& points_gpu)
-	{
-		if (!p.neural_udf_loaded_)
-			return torch::Tensor();
-		try
-		{
-			torch::NoGradGuard no_grad; //  No Grad
-
-			torch::Tensor output = p.neural_udf_model_.forward({points_gpu}).toTensor();
-
-			if (output.dim() == 2 && output.size(1) == 1)
-				output = output.squeeze(1);
-			output = output.detach();
-			return output;
-		}
-		catch (const c10::Error& e)
-		{
-			std::cerr << "GPU forward failed: " << e.what() << std::endl;
-			return torch::Tensor();
-		}
-	}
-
-	torch::Tensor compute_directional_derivative_fd(PointsParameters& p, const torch::Tensor& points_gpu,
-													const torch::Tensor& directions_gpu, Scalar h = 1e-5f)
-	{
-		torch::InferenceMode guard;
-
-		torch::Tensor points_plus = points_gpu + h * directions_gpu;
-		torch::Tensor points_minus = points_gpu - h * directions_gpu;
-
-		torch::Tensor f_plus = forward_values_gpu(p, points_plus);
-		torch::Tensor f_minus = forward_values_gpu(p, points_minus);
-
-		return (f_plus - f_minus) / (2.0f * h);
-	}
-
-	std::vector<Vec3> sample_alpha_level_set_rays(PointsParameters& p, size_t target_num_points)
-	{
-		if (!p.neural_udf_loaded_)
-		{
-			std::cerr << "Neural UDF model not loaded." << std::endl;
-			return {};
-		}
-
-		Vec3 bbox_min(0, 0, 0);
-		Vec3 bbox_max(1, 1, 1);
-
-		std::vector<Vec3> all_samples;
-		all_samples.reserve(target_num_points * 1.5);
-
-		std::mt19937 gen(p.seed_);
-		const float eps = std::max(1e-5f, p.tol_);
-		const float step_bound = 2.0f;
-		const int max_steps = std::max(1, p.udf_max_iterations_);
-		const int check_interval = 500;
-		int total_rays = 0;
-		for (int iter = 0; iter < 500 && all_samples.size() < target_num_points; ++iter)
-		{
-			auto rays = RayLevelSetSampler::generate_rays(bbox_min, bbox_max, p.batch_size_, p, gen);
-			total_rays += rays.size();
-			const int R = static_cast<int>(rays.size());
-			if (R == 0)
-				break;
-
-			std::cout << "Iteration " << iter << ": Processing " << R << " rays on GPU..." << std::endl;
-
-			auto buffers = prepare_ray_batch_buffers(p, rays);
-
-			auto& O = buffers.O;
-			auto& D = buffers.D;
-			auto& t = buffers.t;
-			auto& t_max = buffers.t_max;
-
-			torch::Tensor X = O + t.unsqueeze(1) * D;
-			torch::Tensor d = forward_values_gpu(p, X);
-			if (!d.defined())
-				break;
-			d = d - p.alpha_;
-			torch::Tensor delta = torch::abs(d);
-
-			torch::Tensor not_converged = t < t_max;
-
-			std::vector<Vec3> iter_samples;
-			for (int step = 0; step < max_steps; ++step)
-			{
-				if (step % check_interval == 0)
-				{
-					int active_count = torch::sum(not_converged).item<int>();
-					if (active_count == 0)
-						break;
-					std::cout << "    Step " << step << ": " << active_count << " active\r" << std::flush;
-				}
-
-				torch::Tensor near_mask = not_converged & (delta < eps);
-				torch::Tensor hit_idx = torch::nonzero(near_mask).squeeze(1);
-				if (hit_idx.numel() > 0)
-				{
-					torch::Tensor hit_X = X.index_select(0, hit_idx).to(torch::kCPU);
-					auto hit_acc = hit_X.accessor<float, 2>();
-
-					for (int64_t i = 0; i < hit_X.size(0); ++i)
-					{
-						Vec3 pt(hit_acc[i][0], hit_acc[i][1], hit_acc[i][2]);
-						pt = pt.cwiseMax(0.0).cwiseMin(1.0);
-
-						if (!p.samples_spatial_grid_ ||
-							p.samples_spatial_grid_->is_valid_sample(pt, p.grid_cell_size_, all_samples))
-						{
-							iter_samples.push_back(pt);
-							all_samples.push_back(pt);
-							if (p.samples_spatial_grid_)
-								p.samples_spatial_grid_->insert(pt, static_cast<uint32>(all_samples.size() - 1));
-						}
-					}
-
-					// One-step cross to avoid repeated near-surface iterations.
-					torch::Tensor p_near = X.index_select(0, hit_idx);
-					torch::Tensor delta_near = delta.index_select(0, hit_idx);
-					torch::Tensor t_near = t.index_select(0, hit_idx);
-					torch::Tensor D_near = D.index_select(0, hit_idx);
-
-					torch::Tensor min_step = torch::full_like(delta_near, eps * 0.5f);
-					torch::Tensor step_size = torch::maximum(delta_near, min_step);
-
-					p_near = p_near + step_size.unsqueeze(1) * D_near;
-					t_near = t_near + step_size;
-
-					torch::Tensor d_near = forward_values_gpu(p, p_near);
-					if (!d_near.defined())
-						break;
-					d_near = d_near - p.alpha_;
-					delta_near = torch::abs(d_near);
-
-					X.index_copy_(0, hit_idx, p_near);
-					t.index_copy_(0, hit_idx, t_near);
-					delta.index_copy_(0, hit_idx, delta_near);
-					d.index_copy_(0, hit_idx, d_near);
-				}
-
-				torch::Tensor march_mask = not_converged & (~near_mask);
-				torch::Tensor nc_idx = torch::nonzero(march_mask).squeeze(1);
-				if (nc_idx.numel() == 0)
-				{
-					not_converged = t < t_max;
-					if (all_samples.size() >= target_num_points)
-						break;
-					continue;
-				}
-
-				torch::Tensor p_far = X.index_select(0, nc_idx);
-				torch::Tensor delta_far = delta.index_select(0, nc_idx);
-				torch::Tensor t_far = t.index_select(0, nc_idx);
-				torch::Tensor D_far = D.index_select(0, nc_idx);
-
-				torch::Tensor step_size = delta_far / step_bound;
-				p_far = p_far + step_size.unsqueeze(1) * D_far;
-				t_far = t_far + step_size;
-
-				torch::Tensor d_far = forward_values_gpu(p, p_far);
-				if (!d_far.defined())
-					break;
-				d_far = d_far - p.alpha_;
-				torch::Tensor delta_far_new = torch::abs(d_far);
-
-				X.index_copy_(0, nc_idx, p_far);
-				t.index_copy_(0, nc_idx, t_far);
-				delta.index_copy_(0, nc_idx, delta_far_new);
-				d.index_copy_(0, nc_idx, d_far);
-
-				not_converged = t < t_max;
-
-				if (all_samples.size() >= target_num_points)
-					break;
-			}
-
-			std::cout << std::endl;
-			std::cout << "  Collected " << iter_samples.size() << " unique samples this iteration" << std::endl;
-			std::cout << "  Total: " << all_samples.size() << " / " << target_num_points << std::endl;
-		}
-
-		if (all_samples.size() > target_num_points)
-		{
-			std::shuffle(all_samples.begin(), all_samples.end(), gen);
-			all_samples.resize(target_num_points);
-		}
-		return all_samples;
 	}
 
 	void pre_process_sampling_points(PointsParameters& p, std::vector<Vec3>& points)
@@ -1090,6 +537,7 @@ public:
 		const size_t nb_points = points.size();
 		const int max_iters = 30;
 		const Scalar tol = 1e-6f;
+		UDFForward udf = make_udf_forward(p);
 
 		try
 		{
@@ -1112,7 +560,7 @@ public:
 			for (int iter = 0; iter < max_iters; ++iter)
 			{
 
-				auto [f, grad] = forward_values_grad_gpu(p, X);
+				auto [f, grad] = udf.forward_values_grad_gpu(X);
 				if (!f.defined() || !grad.defined())
 					break;
 				torch::Tensor residual = f - p.alpha_;
@@ -1139,7 +587,7 @@ public:
 
 				X = torch::clamp(X, 0.0f, 1.0f);
 			}
-			auto [f, grad] = forward_values_grad_gpu(p, X);
+			auto [f, grad] = udf.forward_values_grad_gpu(X);
 
 			torch::Tensor final_X_cpu = X.to(torch::kCPU);
 			torch::Tensor final_grad_cpu = grad.to(torch::kCPU);
@@ -1177,7 +625,8 @@ public:
 			test_points[i] = Vec3(dis(gen), dis(gen), dis(gen));
 		}
 		// evaluate batch
-		BatchUDFResult result = forward_batch_with_grad(p, test_points);
+		UDFForward udf = make_udf_forward(p);
+		BatchUDFResult result = udf.forward_batch_with_grad(test_points);
 		// print some results
 		if (result.ok)
 		{
@@ -1311,84 +760,6 @@ protected:
 	}
 
 private:
-	// Ray sampling helpers
-	void init_ray_buffers(PointsParameters& p, int R)
-	{
-		if (R <= 0)
-			return;
-
-		const bool need_realloc = (p.ray_capacity_ < R) || (!p.ray_origins_.defined()) || (p.ray_device_ != device_);
-
-		if (!need_realloc)
-			return;
-
-		p.ray_capacity_ = R;
-		p.ray_device_ = device_;
-
-		auto cput_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-		if (device_.is_cuda())
-			cput_opts = cput_opts.pinned_memory(true);
-
-		p.ray_origins_cpu_ = torch::empty({p.ray_capacity_, 3}, cput_opts);
-		p.ray_directions_cpu_ = torch::empty({p.ray_capacity_, 3}, cput_opts);
-		p.ray_t_cpu_ = torch::empty({p.ray_capacity_}, cput_opts);
-		p.ray_tmax_cpu_ = torch::empty({p.ray_capacity_}, cput_opts);
-
-		auto gput_opts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
-		auto bool_opts = torch::TensorOptions().dtype(torch::kBool).device(device_);
-
-		p.ray_origins_ = torch::empty({p.ray_capacity_, 3}, gput_opts);
-		p.ray_directions_ = torch::empty({p.ray_capacity_, 3}, gput_opts);
-		p.ray_t_ = torch::empty({p.ray_capacity_}, gput_opts);
-		p.ray_tmax_ = torch::empty({p.ray_capacity_}, gput_opts);
-		
-	}
-
-	RayBatchBuffers prepare_ray_batch_buffers(PointsParameters& p, const std::vector<Ray>& rays)
-	{
-		const int R = static_cast<int>(rays.size());
-		init_ray_buffers(p, R);
-
-		auto O_cpu = p.ray_origins_cpu_.narrow(0, 0, R);
-		auto D_cpu = p.ray_directions_cpu_.narrow(0, 0, R);
-		auto t_cpu = p.ray_t_cpu_.narrow(0, 0, R);
-		auto tmax_cpu = p.ray_tmax_cpu_.narrow(0, 0, R);
-
-		auto O_acc = O_cpu.accessor<float, 2>();
-		auto D_acc = D_cpu.accessor<float, 2>();
-		auto t_acc = t_cpu.accessor<float, 1>();
-		auto tmax_acc = tmax_cpu.accessor<float, 1>();
-
-		for (int i = 0; i < R; ++i)
-		{
-			O_acc[i][0] = static_cast<float>(rays[i].origin.x());
-			O_acc[i][1] = static_cast<float>(rays[i].origin.y());
-			O_acc[i][2] = static_cast<float>(rays[i].origin.z());
-			D_acc[i][0] = static_cast<float>(rays[i].direction.x());
-			D_acc[i][1] = static_cast<float>(rays[i].direction.y());
-			D_acc[i][2] = static_cast<float>(rays[i].direction.z());
-			t_acc[i] = static_cast<float>(rays[i].t_min);
-			tmax_acc[i] = static_cast<float>(rays[i].t_max);
-		}
-
-		RayBatchBuffers buffers;
-
-		buffers.O = p.ray_origins_.narrow(0, 0, R);
-		buffers.D = p.ray_directions_.narrow(0, 0, R);
-		buffers.t = p.ray_t_.narrow(0, 0, R);
-		buffers.t_max = p.ray_tmax_.narrow(0, 0, R);
-		
-
-		const bool nonblocking = device_.is_cuda();
-		buffers.O.copy_(O_cpu, nonblocking);
-		buffers.D.copy_(D_cpu, nonblocking);
-		buffers.t.copy_(t_cpu, nonblocking);
-		buffers.t_max.copy_(tmax_cpu, nonblocking);
-		
-
-		return buffers;
-	}
-
 	void build_surface_bvh()
 	{
 		if (!selected_surface_ || !surface_provider_)
@@ -3211,7 +2582,8 @@ private:
 
 		// === 3. ??????UDF??????? ===
 		std::cout << "Verifying projected points..." << std::endl;
-		BatchUDFResult udf_result = forward_batch(p, all_projected);
+		UDFForward udf = make_udf_forward(p);
+		BatchUDFResult udf_result = udf.forward_batch(all_projected);
 
 		std::vector<bool> is_valid(all_projected.size(), false);
 		int valid_count = 0;
