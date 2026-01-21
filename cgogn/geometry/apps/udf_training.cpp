@@ -53,24 +53,123 @@ using cgogn::geometry::Vec3;
 
 int main(int argc, char** argv)
 {
+	auto print_usage = [&](const char* exe_name) {
+		std::cout << "Usage: " << exe_name << " <mesh_path> [model.pt] [--udf-out-dim N]\n"
+				  << "  <mesh_path>           Input mesh or point cloud file.\n"
+				  << "  model.pt              Optional Neural UDF model path.\n"
+				  << "  --udf-out-dim N        Required when using a model, optional otherwise.\n"
+				  << "  -h, --help             Show this help message.\n";
+	};
+
 	std::string model_path;
 	bool use_neural_udf = false;
 	std::string filename;
+	int udf_output_dim = 0;
+	bool udf_output_dim_set = false;
+	bool invalid_args = false;
+	std::string invalid_reason;
 	if (argc < 2)
 		filename = std::string(DEFAULT_MESH_PATH) + std::string("ply/546.ply");
 	else
 	{
-		filename = std::string(argv[1]);
-		if (argc >= 3)
+		std::string first_arg = std::string(argv[1]);
+		if (first_arg == "-h" || first_arg == "--help")
 		{
-			std::string second_arg = std::string(argv[2]);
-			if (second_arg.find(".pt")!=std::string::npos)
-			{
-				model_path = second_arg;
-				use_neural_udf = true;
-				std::cout << "Neural UDF mode: will load model from " << model_path << std::endl;
-			}
+			print_usage(argv[0]);
+			return 0;
 		}
+		if (!first_arg.empty() && first_arg[0] == '-')
+		{
+			invalid_args = true;
+			invalid_reason = "Missing mesh path.";
+		}
+		else
+		{
+			filename = first_arg;
+		}
+		for (int i = 2; i < argc; ++i)
+		{
+			std::string arg = std::string(argv[i]);
+			const std::string dim_prefix = "--udf-out-dim=";
+			if (arg == "-h" || arg == "--help")
+			{
+				print_usage(argv[0]);
+				return 0;
+			}
+			if (arg == "--udf-out-dim" && i + 1 < argc)
+			{
+				try
+				{
+					udf_output_dim = std::stoi(argv[i + 1]);
+					udf_output_dim_set = true;
+				}
+				catch (const std::exception&)
+				{
+					invalid_args = true;
+					invalid_reason = "Invalid value for --udf-out-dim.";
+				}
+				++i;
+				continue;
+			}
+			if (arg.rfind(dim_prefix, 0) == 0)
+			{
+				try
+				{
+					udf_output_dim = std::stoi(arg.substr(dim_prefix.size()));
+					udf_output_dim_set = true;
+				}
+				catch (const std::exception&)
+				{
+					invalid_args = true;
+					invalid_reason = "Invalid value for --udf-out-dim.";
+				}
+				continue;
+			}
+			if (arg.find(".pt") != std::string::npos)
+			{
+				if (!model_path.empty())
+				{
+					invalid_args = true;
+					invalid_reason = "Multiple model paths provided.";
+				}
+				else
+				{
+					model_path = arg;
+					use_neural_udf = true;
+					std::cout << "Neural UDF mode: will load model from " << model_path << std::endl;
+				}
+				continue;
+			}
+			if (!arg.empty() && arg[0] == '-')
+			{
+				invalid_args = true;
+				invalid_reason = "Unknown option: " + arg;
+				continue;
+			}
+			invalid_args = true;
+			invalid_reason = "Unexpected argument: " + arg;
+		}
+	}
+	if (udf_output_dim_set && udf_output_dim <= 0)
+	{
+		invalid_args = true;
+		invalid_reason = "--udf-out-dim must be positive.";
+	}
+	if (use_neural_udf && !udf_output_dim_set)
+	{
+		invalid_args = true;
+		invalid_reason = "Missing required --udf-out-dim when using a model.";
+	}
+	if (!use_neural_udf && argc > 2 && !udf_output_dim_set)
+	{
+		invalid_args = true;
+		invalid_reason = "Missing --udf-out-dim when no model is provided.";
+	}
+	if (invalid_args)
+	{
+		std::cerr << "Invalid arguments: " << invalid_reason << std::endl;
+		print_usage(argv[0]);
+		return 1;
 	}
 
 	cgogn::thread_start();
@@ -153,6 +252,8 @@ int main(int argc, char** argv)
 		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
 		// print bounding box of point_cloud
 		udf.set_selected_points(*p);
+		if (udf_output_dim > 0)
+			udf.set_udf_output_dim(*p, udf_output_dim);
 		udf.load_neural_udf_model(*p, model_path);
 	
 		
