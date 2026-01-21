@@ -6,8 +6,10 @@
 #include <torch/script.h>
 #include <torch/torch.h>
 
+#include <array>
 #include <iostream>
 #include <limits>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -17,16 +19,25 @@ namespace cgogn
 namespace geometry
 {
 
+template <int OutDim>
 struct BatchUDFResult
 {
-	std::vector<Scalar> values;	 // size N
-	std::vector<Vec3> gradients; // size N
+	static_assert(OutDim > 0, "OutDim must be positive");
+	using ValueType = std::conditional_t<OutDim == 1, Scalar, std::array<Scalar, OutDim>>;
+	std::vector<ValueType> values; // size N
+	std::vector<Vec3> gradients;   // size N
 	bool ok = false;
 };
 
+template <int OutDim>
 class UDFForward
 {
 public:
+	static_assert(OutDim > 0, "OutDim must be positive");
+	static constexpr int kOutDim = OutDim;
+	using Result = BatchUDFResult<OutDim>;
+	using ValueType = typename Result::ValueType;
+
 	UDFForward(torch::jit::Module* module, bool loaded, const torch::Device& device)
 		: module_(module), loaded_(loaded), device_(device)
 	{
@@ -42,62 +53,62 @@ public:
 		return device_;
 	}
 
-	Scalar forward_point(const Vec3& query_point) const
+	ValueType forward_point(const Vec3& query_point) const
 	{
 		return forward_point_impl(query_point, device_);
 	}
 
-	Scalar forward_point_cpu(const Vec3& query_point) const
+	ValueType forward_point_cpu(const Vec3& query_point) const
 	{
 		return forward_point_impl(query_point, torch::kCPU);
 	}
 
-	Scalar forward_point_gpu(const Vec3& query_point) const
+	ValueType forward_point_gpu(const Vec3& query_point) const
 	{
 		return forward_point_impl(query_point, device_);
 	}
 
-	std::pair<Scalar, Vec3> forward_point_with_grad(const Vec3& query_point) const
+	std::pair<ValueType, Vec3> forward_point_with_grad(const Vec3& query_point) const
 	{
 		return forward_point_with_grad_impl(query_point, device_);
 	}
 
-	std::pair<Scalar, Vec3> forward_point_with_grad_cpu(const Vec3& query_point) const
+	std::pair<ValueType, Vec3> forward_point_with_grad_cpu(const Vec3& query_point) const
 	{
 		return forward_point_with_grad_impl(query_point, torch::kCPU);
 	}
 
-	std::pair<Scalar, Vec3> forward_point_with_grad_gpu(const Vec3& query_point) const
+	std::pair<ValueType, Vec3> forward_point_with_grad_gpu(const Vec3& query_point) const
 	{
 		return forward_point_with_grad_impl(query_point, device_);
 	}
 
-	BatchUDFResult forward_batch(const std::vector<Vec3>& query_points) const
+	Result forward_batch(const std::vector<Vec3>& query_points) const
 	{
 		return forward_batch_impl(query_points, device_, false);
 	}
 
-	BatchUDFResult forward_batch_cpu(const std::vector<Vec3>& query_points) const
+	Result forward_batch_cpu(const std::vector<Vec3>& query_points) const
 	{
 		return forward_batch_impl(query_points, torch::kCPU, false);
 	}
 
-	BatchUDFResult forward_batch_gpu(const std::vector<Vec3>& query_points) const
+	Result forward_batch_gpu(const std::vector<Vec3>& query_points) const
 	{
 		return forward_batch_impl(query_points, device_, false);
 	}
 
-	BatchUDFResult forward_batch_with_grad(const std::vector<Vec3>& query_points) const
+	Result forward_batch_with_grad(const std::vector<Vec3>& query_points) const
 	{
 		return forward_batch_impl(query_points, device_, true);
 	}
 
-	BatchUDFResult forward_batch_with_grad_cpu(const std::vector<Vec3>& query_points) const
+	Result forward_batch_with_grad_cpu(const std::vector<Vec3>& query_points) const
 	{
 		return forward_batch_impl(query_points, torch::kCPU, true);
 	}
 
-	BatchUDFResult forward_batch_with_grad_gpu(const std::vector<Vec3>& query_points) const
+	Result forward_batch_with_grad_gpu(const std::vector<Vec3>& query_points) const
 	{
 		return forward_batch_impl(query_points, device_, true);
 	}
@@ -115,8 +126,19 @@ public:
 				x = x.to(device_);
 
 			torch::Tensor output = module_->forward({x}).toTensor();
-			if (output.dim() == 2 && output.size(1) == 1)
-				output = output.squeeze(1);
+			if constexpr (OutDim == 1)
+			{
+				if (output.dim() == 2 && output.size(1) == 1)
+					output = output.squeeze(1);
+				if (output.dim() != 1)
+					return torch::Tensor();
+			}
+			else
+			{
+				if (output.dim() != 2 || output.size(1) != OutDim)
+					return torch::Tensor();
+			}
+
 			return output.detach();
 		}
 		catch (const c10::Error& e)
@@ -139,13 +161,27 @@ public:
 				x = x.to(device_);
 			x = x.detach().requires_grad_(true);
 
-			torch::Tensor y = module_->forward({x}).toTensor();
-			if (y.dim() == 2 && y.size(1) == 1)
-				y = y.squeeze(1);
+			torch::Tensor output = module_->forward({x}).toTensor();
+			torch::Tensor values = output;
+			torch::Tensor grad_target;
+			if constexpr (OutDim == 1)
+			{
+				if (values.dim() == 2 && values.size(1) == 1)
+					values = values.squeeze(1);
+				if (values.dim() != 1)
+					return {torch::Tensor(), torch::Tensor()};
+				grad_target = values;
+			}
+			else
+			{
+				if (values.dim() != 2 || values.size(1) != OutDim)
+					return {torch::Tensor(), torch::Tensor()};
+				grad_target = values.select(1, 0);
+			}
 
-			torch::Tensor grad_outputs = torch::ones_like(y);
+			torch::Tensor grad_outputs = torch::ones_like(grad_target);
 			std::vector<torch::Tensor> grads = torch::autograd::grad(
-				/*outputs=*/{y},
+				/*outputs=*/{grad_target},
 				/*inputs=*/{x},
 				/*grad_outputs=*/{grad_outputs},
 				/*retain_graph=*/false,
@@ -153,7 +189,7 @@ public:
 				/*allow_unused=*/false);
 
 			torch::Tensor dx = grads[0];
-			return {y.detach(), dx.detach()};
+			return {values.detach(), dx.detach()};
 		}
 		catch (const c10::Error& e)
 		{
@@ -189,26 +225,37 @@ private:
 		bool moved_;
 	};
 
-	Scalar forward_point_impl(const Vec3& query_point, const torch::Device& device) const
+	ValueType invalid_value() const
 	{
-		BatchUDFResult r = forward_batch_impl({query_point}, device, false);
-		if (!r.ok || r.values.empty())
+		if constexpr (OutDim == 1)
 			return std::numeric_limits<Scalar>::max();
+		else
+		{
+			ValueType v;
+			v.fill(std::numeric_limits<Scalar>::max());
+			return v;
+		}
+	}
+
+	ValueType forward_point_impl(const Vec3& query_point, const torch::Device& device) const
+	{
+		Result r = forward_batch_impl({query_point}, device, false);
+		if (!r.ok || r.values.empty())
+			return invalid_value();
 		return r.values[0];
 	}
 
-	std::pair<Scalar, Vec3> forward_point_with_grad_impl(const Vec3& query_point, const torch::Device& device) const
+	std::pair<ValueType, Vec3> forward_point_with_grad_impl(const Vec3& query_point, const torch::Device& device) const
 	{
-		BatchUDFResult r = forward_batch_impl({query_point}, device, true);
+		Result r = forward_batch_impl({query_point}, device, true);
 		if (!r.ok || r.values.empty() || r.gradients.empty())
-			return {std::numeric_limits<Scalar>::max(), Vec3(0, 0, 0)};
+			return {invalid_value(), Vec3(0, 0, 0)};
 		return {r.values[0], r.gradients[0]};
 	}
 
-	BatchUDFResult forward_batch_impl(const std::vector<Vec3>& query_points, const torch::Device& device,
-									  bool with_grad) const
+	Result forward_batch_impl(const std::vector<Vec3>& query_points, const torch::Device& device, bool with_grad) const
 	{
-		BatchUDFResult r;
+		Result r;
 		r.ok = false;
 		const size_t N = query_points.size();
 		if (!is_loaded() || N == 0)
@@ -230,9 +277,9 @@ private:
 		}
 	}
 
-	BatchUDFResult forward_batch_impl_no_grad(const std::vector<Vec3>& query_points, const torch::Device& device) const
+	Result forward_batch_impl_no_grad(const std::vector<Vec3>& query_points, const torch::Device& device) const
 	{
-		BatchUDFResult r;
+		Result r;
 		r.ok = false;
 		const size_t N = query_points.size();
 
@@ -251,26 +298,30 @@ private:
 
 		torch::Tensor points = points_cpu.to(device);
 		torch::Tensor output = module_->forward({points}).toTensor();
-		if (output.dim() == 2 && output.size(1) == 1)
-			output = output.squeeze(1);
-		if (output.dim() != 1 || output.size(0) != static_cast<long>(N))
-			return r;
+		if constexpr (OutDim == 1)
+		{
+			if (output.dim() == 2 && output.size(1) == 1)
+				output = output.squeeze(1);
+			if (output.dim() != 1 || output.size(0) != static_cast<long>(N))
+				return r;
+		}
+		else
+		{
+			if (output.dim() != 2 || output.size(0) != static_cast<long>(N) || output.size(1) != OutDim)
+				return r;
+		}
 
 		torch::Tensor output_cpu = output.detach().to(torch::kCPU).contiguous();
-		auto out_acc = output_cpu.accessor<float, 1>();
-
-		r.values.resize(N);
-		r.gradients.clear();
-		for (size_t i = 0; i < N; ++i)
-			r.values[i] = static_cast<Scalar>(out_acc[(long)i]);
+		if (!fill_values_from_output(r, output_cpu, N))
+			return r;
 
 		r.ok = true;
 		return r;
 	}
 
-	BatchUDFResult forward_batch_impl_with_grad(const std::vector<Vec3>& query_points, const torch::Device& device) const
+	Result forward_batch_impl_with_grad(const std::vector<Vec3>& query_points, const torch::Device& device) const
 	{
-		BatchUDFResult r;
+		Result r;
 		r.ok = false;
 		const size_t N = query_points.size();
 
@@ -291,14 +342,25 @@ private:
 		points.set_requires_grad(true);
 
 		torch::Tensor output = module_->forward({points}).toTensor();
-		if (output.dim() == 2 && output.size(1) == 1)
-			output = output.squeeze(1);
-		if (output.dim() != 1 || output.size(0) != static_cast<long>(N))
-			return r;
+		torch::Tensor grad_target;
+		if constexpr (OutDim == 1)
+		{
+			if (output.dim() == 2 && output.size(1) == 1)
+				output = output.squeeze(1);
+			if (output.dim() != 1 || output.size(0) != static_cast<long>(N))
+				return r;
+			grad_target = output;
+		}
+		else
+		{
+			if (output.dim() != 2 || output.size(0) != static_cast<long>(N) || output.size(1) != OutDim)
+				return r;
+			grad_target = output.select(1, 0);
+		}
 
-		torch::Tensor grad_outputs = torch::ones_like(output);
+		torch::Tensor grad_outputs = torch::ones_like(grad_target);
 		std::vector<torch::Tensor> grads = torch::autograd::grad(
-			/*outputs=*/{output},
+			/*outputs=*/{grad_target},
 			/*inputs=*/{points},
 			/*grad_outputs=*/{grad_outputs},
 			/*retain_graph=*/false,
@@ -312,20 +374,50 @@ private:
 		torch::Tensor output_cpu = output.detach().to(torch::kCPU).contiguous();
 		torch::Tensor grad_cpu = grad.detach().to(torch::kCPU).contiguous();
 
-		auto out_acc = output_cpu.accessor<float, 1>();
-		auto grad_acc = grad_cpu.accessor<float, 2>();
+		if (!fill_values_from_output(r, output_cpu, N))
+			return r;
 
-		r.values.resize(N);
+		auto grad_acc = grad_cpu.accessor<float, 2>();
 		r.gradients.resize(N);
 		for (size_t i = 0; i < N; ++i)
 		{
-			r.values[i] = static_cast<Scalar>(out_acc[(long)i]);
 			r.gradients[i] = Vec3(static_cast<Scalar>(grad_acc[(long)i][0]), static_cast<Scalar>(grad_acc[(long)i][1]),
-								  static_cast<Scalar>(grad_acc[(long)i][2]));
+							  static_cast<Scalar>(grad_acc[(long)i][2]));
 		}
 
 		r.ok = true;
 		return r;
+	}
+
+	bool fill_values_from_output(Result& r, const torch::Tensor& output_cpu, size_t N) const
+	{
+		if constexpr (OutDim == 1)
+		{
+			if (output_cpu.dim() != 1 || output_cpu.size(0) != static_cast<long>(N))
+				return false;
+			auto out_acc = output_cpu.accessor<float, 1>();
+			r.values.resize(N);
+			r.gradients.clear();
+			for (size_t i = 0; i < N; ++i)
+				r.values[i] = static_cast<Scalar>(out_acc[(long)i]);
+			return true;
+		}
+		else
+		{
+			if (output_cpu.dim() != 2 || output_cpu.size(0) != static_cast<long>(N) || output_cpu.size(1) != OutDim)
+				return false;
+			auto out_acc = output_cpu.accessor<float, 2>();
+			r.values.resize(N);
+			r.gradients.clear();
+			for (size_t i = 0; i < N; ++i)
+			{
+				ValueType v;
+				for (int j = 0; j < OutDim; ++j)
+					v[j] = static_cast<Scalar>(out_acc[(long)i][j]);
+				r.values[i] = v;
+			}
+			return true;
+		}
 	}
 
 	torch::jit::Module* module_;

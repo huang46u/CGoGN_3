@@ -146,6 +146,7 @@ private:
 		bool neural_udf_loaded_ = false;
 		torch::jit::Module neural_udf_model_;
 		std::string neural_udf_model_path_ = "";
+		int udf_output_dim_ = 1;
 
 		// Ray Sampling
 		std::unique_ptr<RayLevelSetSampler> ray_sampler_;
@@ -379,9 +380,32 @@ public:
 		}
 	}
 
-	UDFForward make_udf_forward(PointsParameters& p)
+	void set_udf_output_dim(POINTS& points, int output_dim)
 	{
-		return UDFForward(&p.neural_udf_model_, p.neural_udf_loaded_, device_);
+		if (output_dim <= 0)
+			return;
+		if (output_dim != 1 && output_dim != 3)
+		{
+			std::cout << "Unsupported UDF output dim " << output_dim << ", falling back to 1." << std::endl;
+			output_dim = 1;
+		}
+		PointsParameters& p = points_parameters_[&points];
+		p.udf_output_dim_ = output_dim;
+	}
+
+	template <int OutDim>
+	UDFForward<OutDim> make_udf_forward(PointsParameters& p)
+	{
+		return UDFForward<OutDim>(&p.neural_udf_model_, p.neural_udf_loaded_, device_);
+	}
+
+	template <int OutDim>
+	static Scalar udf_value0(const BatchUDFResult<OutDim>& r, size_t idx)
+	{
+		if constexpr (OutDim == 1)
+			return r.values[idx];
+		else
+			return r.values[idx][0];
 	}
 	void load_alpha_samples_to_mesh(PointsParameters& p, size_t num_points)
 	{
@@ -397,7 +421,6 @@ public:
 
 		// Sample points on alpha level set
 		// std::vector<Vec3> sampled_points = sample_alpha_level_set(p, num_points*10);
-		UDFForward udf = make_udf_forward(p);
 		RayLevelSetSampler::Params ray_params;
 		ray_params.bbox_expand = p.udf_bbox_expand_;
 		ray_params.alpha = p.alpha_;
@@ -408,17 +431,33 @@ public:
 		ray_params.max_outer_iterations = 500;
 		ray_params.seed = p.seed_;
 
-		if (!p.ray_sampler_)
-			p.ray_sampler_ = std::make_unique<RayLevelSetSampler>(ray_params, udf.device());
+		auto update_ray_sampler = [&](const torch::Device& device) {
+			if (!p.ray_sampler_)
+				p.ray_sampler_ = std::make_unique<RayLevelSetSampler>(ray_params, device);
+			else
+			{
+				p.ray_sampler_->set_params(ray_params);
+				p.ray_sampler_->set_device(device);
+			}
+		};
+
+		std::vector<Vec3> sampled_points;
+		if (p.udf_output_dim_ == 3)
+		{
+			UDFForward<3> udf = make_udf_forward<3>(p);
+			update_ray_sampler(udf.device());
+			sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(udf, num_points,
+																		 p.samples_spatial_grid_.get(),
+																		 p.grid_cell_size_);
+		}
 		else
 		{
-			p.ray_sampler_->set_params(ray_params);
-			p.ray_sampler_->set_device(udf.device());
+			UDFForward<1> udf = make_udf_forward<1>(p);
+			update_ray_sampler(udf.device());
+			sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(udf, num_points,
+																		 p.samples_spatial_grid_.get(),
+																		 p.grid_cell_size_);
 		}
-
-		std::vector<Vec3> sampled_points =
-			p.ray_sampler_->sample_alpha_level_set_rays(udf, num_points, p.samples_spatial_grid_.get(),
-														p.grid_cell_size_);
 		pre_process_sampling_points(p, sampled_points);
 		// sampled_points = poisson_eliminate_points(sampled_points, num_points);
 		if (sampled_points.empty())
@@ -455,26 +494,41 @@ public:
 			return true;
 		});
 
-		BatchUDFResult grad_result = udf.forward_batch_with_grad(all_positions);
-		if (grad_result.ok && grad_result.gradients.size() == all_positions.size())
-		{
-			uint32 idx = 0;
-			foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-				uint32 v_idx = index_of(*p.samples_mesh_, v);
-				Vec3 normal = grad_result.gradients[idx].normalized();
-				(*p.samples_normal_)[v_idx] = normal;
+		auto apply_grad_normals = [&](const auto& grad_result) {
+			if (grad_result.ok && grad_result.gradients.size() == all_positions.size())
+			{
+				uint32 idx = 0;
+				foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+					uint32 v_idx = index_of(*p.samples_mesh_, v);
+					Vec3 normal = grad_result.gradients[idx].normalized();
+					(*p.samples_normal_)[v_idx] = normal;
 
-				// Compute normal color for visualization
-				(*p.samples_normal_color_)[v_idx] =
-					Vec4((normal.x() + 1.0) * 0.5, (normal.y() + 1.0) * 0.5, (normal.z() + 1.0) * 0.5, 1.0);
-				idx++;
+					// Compute normal color for visualization
+					(*p.samples_normal_color_)[v_idx] =
+						Vec4((normal.x() + 1.0) * 0.5, (normal.y() + 1.0) * 0.5, (normal.z() + 1.0) * 0.5, 1.0);
+					idx++;
+					return true;
+				});
 				return true;
-			});
+			}
+			return false;
+		};
+
+		bool normals_ok = false;
+		if (p.udf_output_dim_ == 3)
+		{
+			UDFForward<3> udf = make_udf_forward<3>(p);
+			BatchUDFResult<3> grad_result = udf.forward_batch_with_grad(all_positions);
+			normals_ok = apply_grad_normals(grad_result);
 		}
 		else
 		{
-			std::cerr << "Failed to compute normals from UDF gradients." << std::endl;
+			UDFForward<1> udf = make_udf_forward<1>(p);
+			BatchUDFResult<1> grad_result = udf.forward_batch_with_grad(all_positions);
+			normals_ok = apply_grad_normals(grad_result);
 		}
+		if (!normals_ok)
+			std::cerr << "Failed to compute normals from UDF gradients." << std::endl;
 
 		std::cout << "Building KDTree for sampled points..." << std::endl;
 		build_kdtree(p);
@@ -531,13 +585,14 @@ public:
 		return out;
 	}
 
-	std::pair<std::vector<Vec3>, std::vector<Vec3>> project_points_to_alpha_gpu(PointsParameters& p,
-																				const std::vector<Vec3>& points)
+	template <int OutDim>
+	std::pair<std::vector<Vec3>, std::vector<Vec3>> project_points_to_alpha_gpu_impl(PointsParameters& p,
+																					 const std::vector<Vec3>& points)
 	{
 		const size_t nb_points = points.size();
 		const int max_iters = 30;
 		const Scalar tol = 1e-6f;
-		UDFForward udf = make_udf_forward(p);
+		UDFForward<OutDim> udf = make_udf_forward<OutDim>(p);
 
 		try
 		{
@@ -559,12 +614,25 @@ public:
 
 			for (int iter = 0; iter < max_iters; ++iter)
 			{
-
-				auto [f, grad] = udf.forward_values_grad_gpu(X);
-				if (!f.defined() || !grad.defined())
+				auto [values, grad] = udf.forward_values_grad_gpu(X);
+				if (!values.defined() || !grad.defined())
 					break;
-				torch::Tensor residual = f - p.alpha_;
 
+				torch::Tensor f;
+				if constexpr (OutDim == 1)
+				{
+					f = values;
+					if (f.dim() == 2 && f.size(1) == 1)
+						f = f.squeeze(1);
+				}
+				else
+				{
+					if (values.dim() != 2 || values.size(1) != OutDim)
+						break;
+					f = values.select(1, 0);
+				}
+
+				torch::Tensor residual = f - p.alpha_;
 				torch::Tensor abs_residual = torch::abs(residual);
 
 				//// DEBUG
@@ -587,7 +655,10 @@ public:
 
 				X = torch::clamp(X, 0.0f, 1.0f);
 			}
-			auto [f, grad] = udf.forward_values_grad_gpu(X);
+
+			auto [values, grad] = udf.forward_values_grad_gpu(X);
+			if (!values.defined() || !grad.defined())
+				return {};
 
 			torch::Tensor final_X_cpu = X.to(torch::kCPU);
 			torch::Tensor final_grad_cpu = grad.to(torch::kCPU);
@@ -613,6 +684,14 @@ public:
 		}
 	}
 
+	std::pair<std::vector<Vec3>, std::vector<Vec3>> project_points_to_alpha_gpu(PointsParameters& p,
+																				const std::vector<Vec3>& points)
+	{
+		if (p.udf_output_dim_ == 3)
+			return project_points_to_alpha_gpu_impl<3>(p, points);
+		return project_points_to_alpha_gpu_impl<1>(p, points);
+	}
+
 	void test_batch_forward(PointsParameters& p)
 	{
 		// generate batch of random test points in [0,1]^3
@@ -625,21 +704,42 @@ public:
 			test_points[i] = Vec3(dis(gen), dis(gen), dis(gen));
 		}
 		// evaluate batch
-		UDFForward udf = make_udf_forward(p);
-		BatchUDFResult result = udf.forward_batch_with_grad(test_points);
-		// print some results
-		if (result.ok)
+		if (p.udf_output_dim_ == 3)
 		{
-			std::cout << "Batch UDF evaluation successful. Sample results:" << std::endl;
-			for (size_t i = 0; i < 5; ++i)
+			UDFForward<3> udf = make_udf_forward<3>(p);
+			BatchUDFResult<3> result = udf.forward_batch_with_grad(test_points);
+			if (result.ok)
 			{
-				std::cout << "Point: " << test_points[i].transpose() << " UDF: " << result.values[i]
-						  << " Grad: " << result.gradients[i].transpose() << std::endl;
+				std::cout << "Batch UDF evaluation successful. Sample results:" << std::endl;
+				for (size_t i = 0; i < 5; ++i)
+				{
+					const auto& v = result.values[i];
+					std::cout << "Point: " << test_points[i].transpose() << " UDF: [" << v[0] << ", " << v[1]
+							  << ", " << v[2] << "] Grad: " << result.gradients[i].transpose() << std::endl;
+				}
+			}
+			else
+			{
+				std::cerr << "Batch UDF evaluation failed." << std::endl;
 			}
 		}
 		else
 		{
-			std::cerr << "Batch UDF evaluation failed." << std::endl;
+			UDFForward<1> udf = make_udf_forward<1>(p);
+			BatchUDFResult<1> result = udf.forward_batch_with_grad(test_points);
+			if (result.ok)
+			{
+				std::cout << "Batch UDF evaluation successful. Sample results:" << std::endl;
+				for (size_t i = 0; i < 5; ++i)
+				{
+					std::cout << "Point: " << test_points[i].transpose() << " UDF: " << result.values[i]
+							  << " Grad: " << result.gradients[i].transpose() << std::endl;
+				}
+			}
+			else
+			{
+				std::cerr << "Batch UDF evaluation failed." << std::endl;
+			}
 		}
 	}
 
@@ -2582,20 +2682,37 @@ private:
 
 		// === 3. ??????UDF??????? ===
 		std::cout << "Verifying projected points..." << std::endl;
-		UDFForward udf = make_udf_forward(p);
-		BatchUDFResult udf_result = udf.forward_batch(all_projected);
-
 		std::vector<bool> is_valid(all_projected.size(), false);
 		int valid_count = 0;
 
-		if (udf_result.ok)
+		if (p.udf_output_dim_ == 3)
 		{
-			for (size_t i = 0; i < all_projected.size(); ++i)
+			UDFForward<3> udf = make_udf_forward<3>(p);
+			BatchUDFResult<3> udf_result = udf.forward_batch(all_projected);
+			if (udf_result.ok)
 			{
-				Scalar error = std::abs(udf_result.values[i] - p.alpha_);
-				is_valid[i] = (error < p.tol_);
-				if (is_valid[i])
-					valid_count++;
+				for (size_t i = 0; i < all_projected.size(); ++i)
+				{
+					Scalar error = std::abs(udf_value0(udf_result, i) - p.alpha_);
+					is_valid[i] = (error < p.tol_);
+					if (is_valid[i])
+						valid_count++;
+				}
+			}
+		}
+		else
+		{
+			UDFForward<1> udf = make_udf_forward<1>(p);
+			BatchUDFResult<1> udf_result = udf.forward_batch(all_projected);
+			if (udf_result.ok)
+			{
+				for (size_t i = 0; i < all_projected.size(); ++i)
+				{
+					Scalar error = std::abs(udf_value0(udf_result, i) - p.alpha_);
+					is_valid[i] = (error < p.tol_);
+					if (is_valid[i])
+						valid_count++;
+				}
 			}
 		}
 
