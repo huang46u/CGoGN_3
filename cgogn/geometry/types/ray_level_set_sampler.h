@@ -3,7 +3,7 @@
 
 #include <cgogn/core/utils/numerics.h>
 #include <cgogn/geometry/types/spatial_grid.h>
-#include <cgogn/geometry/types/udf_forward.h>
+#include <cgogn/geometry/types/neural_field_forward.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <algorithm>
@@ -58,8 +58,7 @@ public:
 		device_ = device;
 	}
 
-	template <int OutDim>
-	std::vector<Vec3> sample_alpha_level_set_rays(UDFForward<OutDim>& udf, size_t target_num_points,
+	std::vector<Vec3> sample_alpha_level_set_rays(NeuralFieldForward& udf, size_t target_num_points,
 												  SpatialGrid* spatial_grid, Scalar grid_cell_size)
 	{
 		if (!udf.is_loaded())
@@ -100,22 +99,9 @@ public:
 			auto& t_max = buffers.t_max;
 
 			torch::Tensor X = O + t.unsqueeze(1) * D;
-			torch::Tensor values = udf.forward_values_gpu(X);
-			if (!values.defined())
+			torch::Tensor d = udf.forward_values_gpu(X);
+			if (!d.defined())
 				break;
-			torch::Tensor d;
-			if constexpr (OutDim == 1)
-			{
-				d = values;
-			}
-			else
-			{
-				if (values.dim() != 2 || values.size(1) != OutDim)
-					break;
-				d = values.select(1, 0);
-			}
-			if (d.dim() == 2 && d.size(1) == 1)
-				d = d.squeeze(1);
 
 			d = d - params_.alpha;
 			torch::Tensor delta = torch::abs(d);
@@ -166,22 +152,9 @@ public:
 					p_near = p_near + step_size.unsqueeze(1) * D_near;
 					t_near = t_near + step_size;
 
-					torch::Tensor values_near = udf.forward_values_gpu(p_near);
-					if (!values_near.defined())
+					torch::Tensor d_near = udf.forward_values_gpu(p_near);
+					if (!d_near.defined())
 						break;
-					torch::Tensor d_near;
-					if constexpr (OutDim == 1)
-					{
-						d_near = values_near;
-					}
-					else
-					{
-						if (values_near.dim() != 2 || values_near.size(1) != OutDim)
-							break;
-						d_near = values_near.select(1, 0);
-					}
-					if (d_near.dim() == 2 && d_near.size(1) == 1)
-						d_near = d_near.squeeze(1);
 
 					d_near = d_near - params_.alpha;
 					delta_near = torch::abs(d_near);
@@ -211,22 +184,9 @@ public:
 				p_far = p_far + step_size.unsqueeze(1) * D_far;
 				t_far = t_far + step_size;
 
-				torch::Tensor values_far = udf.forward_values_gpu(p_far);
-				if (!values_far.defined())
+				torch::Tensor d_far = udf.forward_values_gpu(p_far);
+				if (!d_far.defined())
 					break;
-				torch::Tensor d_far;
-				if constexpr (OutDim == 1)
-				{
-					d_far = values_far;
-				}
-				else
-				{
-					if (values_far.dim() != 2 || values_far.size(1) != OutDim)
-						break;
-					d_far = values_far.select(1, 0);
-				}
-				if (d_far.dim() == 2 && d_far.size(1) == 1)
-					d_far = d_far.squeeze(1);
 
 				d_far = d_far - params_.alpha;
 				torch::Tensor delta_far_new = torch::abs(d_far);

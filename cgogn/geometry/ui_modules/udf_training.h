@@ -17,7 +17,7 @@
 #include <cgogn/geometry/types/ray_level_set_sampler.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/spatial_grid.h>
-#include <cgogn/geometry/types/udf_forward.h>
+#include <cgogn/geometry/types/neural_field_forward.h>
 #include <cgogn/geometry/types/vector_traits.h>
 #include <cgogn/geometry/types/fast_winding_number_traits.h>
 #include <cgogn/geometry/types/fast_winding_number.h>
@@ -70,7 +70,7 @@ using geometry::SQEM_CASE;
 using geometry::SpatialGrid;
 using geometry::BatchUDFResult;
 using geometry::RayLevelSetSampler;
-using geometry::UDFForward;
+using geometry::NeuralFieldForward;
 using geometry::Vec3;
 using geometry::Vec4;
 
@@ -146,7 +146,6 @@ private:
 		bool neural_udf_loaded_ = false;
 		torch::jit::Module neural_udf_model_;
 		std::string neural_udf_model_path_ = "";
-		int udf_output_dim_ = 1;
 
 		// Ray Sampling
 		std::unique_ptr<RayLevelSetSampler> ray_sampler_;
@@ -275,7 +274,7 @@ private:
 		float udf_bbox_expand_ = 0.1f;
 		float udf_lipschitz_ = 4.0f;
 		float udf_delta_enter_ = 0.003f;
-		int udf_max_iterations_ = 6000;
+		int udf_max_iterations_ = 3000;
 
 		// State
 		Scalar total_error_ = 0.0;
@@ -380,32 +379,9 @@ public:
 		}
 	}
 
-	void set_udf_output_dim(POINTS& points, int output_dim)
+	NeuralFieldForward make_neural_field_forward(PointsParameters& p)
 	{
-		if (output_dim <= 0)
-			return;
-		if (output_dim != 1 && output_dim != 3)
-		{
-			std::cout << "Unsupported UDF output dim " << output_dim << ", falling back to 1." << std::endl;
-			output_dim = 1;
-		}
-		PointsParameters& p = points_parameters_[&points];
-		p.udf_output_dim_ = output_dim;
-	}
-
-	template <int OutDim>
-	UDFForward<OutDim> make_udf_forward(PointsParameters& p)
-	{
-		return UDFForward<OutDim>(&p.neural_udf_model_, p.neural_udf_loaded_, device_);
-	}
-
-	template <int OutDim>
-	static Scalar udf_value0(const BatchUDFResult<OutDim>& r, size_t idx)
-	{
-		if constexpr (OutDim == 1)
-			return r.values[idx];
-		else
-			return r.values[idx][0];
+		return NeuralFieldForward(&p.neural_udf_model_, p.neural_udf_loaded_, device_);
 	}
 	void load_alpha_samples_to_mesh(PointsParameters& p, size_t num_points)
 	{
@@ -441,23 +417,10 @@ public:
 			}
 		};
 
-		std::vector<Vec3> sampled_points;
-		if (p.udf_output_dim_ == 3)
-		{
-			UDFForward<3> udf = make_udf_forward<3>(p);
-			update_ray_sampler(udf.device());
-			sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(udf, num_points,
-																		 p.samples_spatial_grid_.get(),
-																		 p.grid_cell_size_);
-		}
-		else
-		{
-			UDFForward<1> udf = make_udf_forward<1>(p);
-			update_ray_sampler(udf.device());
-			sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(udf, num_points,
-																		 p.samples_spatial_grid_.get(),
-																		 p.grid_cell_size_);
-		}
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		update_ray_sampler(udf.device());
+		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
+			udf, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_);
 		pre_process_sampling_points(p, sampled_points);
 		// sampled_points = poisson_eliminate_points(sampled_points, num_points);
 		if (sampled_points.empty())
@@ -514,19 +477,8 @@ public:
 			return false;
 		};
 
-		bool normals_ok = false;
-		if (p.udf_output_dim_ == 3)
-		{
-			UDFForward<3> udf = make_udf_forward<3>(p);
-			BatchUDFResult<3> grad_result = udf.forward_batch_with_grad(all_positions);
-			normals_ok = apply_grad_normals(grad_result);
-		}
-		else
-		{
-			UDFForward<1> udf = make_udf_forward<1>(p);
-			BatchUDFResult<1> grad_result = udf.forward_batch_with_grad(all_positions);
-			normals_ok = apply_grad_normals(grad_result);
-		}
+		BatchUDFResult grad_result = udf.forward_batch_with_grad(all_positions);
+		bool normals_ok = apply_grad_normals(grad_result);
 		if (!normals_ok)
 			std::cerr << "Failed to compute normals from UDF gradients." << std::endl;
 
@@ -585,14 +537,13 @@ public:
 		return out;
 	}
 
-	template <int OutDim>
 	std::pair<std::vector<Vec3>, std::vector<Vec3>> project_points_to_alpha_gpu_impl(PointsParameters& p,
 																					 const std::vector<Vec3>& points)
 	{
 		const size_t nb_points = points.size();
 		const int max_iters = 30;
 		const Scalar tol = 1e-6f;
-		UDFForward<OutDim> udf = make_udf_forward<OutDim>(p);
+		NeuralFieldForward udf = make_neural_field_forward(p);
 
 		try
 		{
@@ -618,19 +569,9 @@ public:
 				if (!values.defined() || !grad.defined())
 					break;
 
-				torch::Tensor f;
-				if constexpr (OutDim == 1)
-				{
-					f = values;
-					if (f.dim() == 2 && f.size(1) == 1)
-						f = f.squeeze(1);
-				}
-				else
-				{
-					if (values.dim() != 2 || values.size(1) != OutDim)
-						break;
-					f = values.select(1, 0);
-				}
+				torch::Tensor f = values;
+				if (f.dim() == 2 && f.size(1) == 1)
+					f = f.squeeze(1);
 
 				torch::Tensor residual = f - p.alpha_;
 				torch::Tensor abs_residual = torch::abs(residual);
@@ -687,9 +628,7 @@ public:
 	std::pair<std::vector<Vec3>, std::vector<Vec3>> project_points_to_alpha_gpu(PointsParameters& p,
 																				const std::vector<Vec3>& points)
 	{
-		if (p.udf_output_dim_ == 3)
-			return project_points_to_alpha_gpu_impl<3>(p, points);
-		return project_points_to_alpha_gpu_impl<1>(p, points);
+		return project_points_to_alpha_gpu_impl(p, points);
 	}
 
 	void test_batch_forward(PointsParameters& p)
@@ -703,43 +642,20 @@ public:
 		{
 			test_points[i] = Vec3(dis(gen), dis(gen), dis(gen));
 		}
-		// evaluate batch
-		if (p.udf_output_dim_ == 3)
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		BatchUDFResult result = udf.forward_batch_with_grad(test_points);
+		if (result.ok)
 		{
-			UDFForward<3> udf = make_udf_forward<3>(p);
-			BatchUDFResult<3> result = udf.forward_batch_with_grad(test_points);
-			if (result.ok)
+			std::cout << "Batch UDF evaluation successful. Sample results:" << std::endl;
+			for (size_t i = 0; i < 5; ++i)
 			{
-				std::cout << "Batch UDF evaluation successful. Sample results:" << std::endl;
-				for (size_t i = 0; i < 5; ++i)
-				{
-					const auto& v = result.values[i];
-					std::cout << "Point: " << test_points[i].transpose() << " UDF: [" << v[0] << ", " << v[1]
-							  << ", " << v[2] << "] Grad: " << result.gradients[i].transpose() << std::endl;
-				}
-			}
-			else
-			{
-				std::cerr << "Batch UDF evaluation failed." << std::endl;
+				std::cout << "Point: " << test_points[i].transpose() << " UDF: " << result.values[i]
+						  << " Grad: " << result.gradients[i].transpose() << std::endl;
 			}
 		}
 		else
 		{
-			UDFForward<1> udf = make_udf_forward<1>(p);
-			BatchUDFResult<1> result = udf.forward_batch_with_grad(test_points);
-			if (result.ok)
-			{
-				std::cout << "Batch UDF evaluation successful. Sample results:" << std::endl;
-				for (size_t i = 0; i < 5; ++i)
-				{
-					std::cout << "Point: " << test_points[i].transpose() << " UDF: " << result.values[i]
-							  << " Grad: " << result.gradients[i].transpose() << std::endl;
-				}
-			}
-			else
-			{
-				std::cerr << "Batch UDF evaluation failed." << std::endl;
-			}
+			std::cerr << "Batch UDF evaluation failed." << std::endl;
 		}
 	}
 
@@ -2685,34 +2601,16 @@ private:
 		std::vector<bool> is_valid(all_projected.size(), false);
 		int valid_count = 0;
 
-		if (p.udf_output_dim_ == 3)
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		BatchUDFResult udf_result = udf.forward_batch(all_projected);
+		if (udf_result.ok)
 		{
-			UDFForward<3> udf = make_udf_forward<3>(p);
-			BatchUDFResult<3> udf_result = udf.forward_batch(all_projected);
-			if (udf_result.ok)
+			for (size_t i = 0; i < all_projected.size(); ++i)
 			{
-				for (size_t i = 0; i < all_projected.size(); ++i)
-				{
-					Scalar error = std::abs(udf_value0(udf_result, i) - p.alpha_);
-					is_valid[i] = (error < p.tol_);
-					if (is_valid[i])
-						valid_count++;
-				}
-			}
-		}
-		else
-		{
-			UDFForward<1> udf = make_udf_forward<1>(p);
-			BatchUDFResult<1> udf_result = udf.forward_batch(all_projected);
-			if (udf_result.ok)
-			{
-				for (size_t i = 0; i < all_projected.size(); ++i)
-				{
-					Scalar error = std::abs(udf_value0(udf_result, i) - p.alpha_);
-					is_valid[i] = (error < p.tol_);
-					if (is_valid[i])
-						valid_count++;
-				}
+				Scalar error = std::abs(udf_result.values[i] - p.alpha_);
+				is_valid[i] = (error < p.tol_);
+				if (is_valid[i])
+					valid_count++;
 			}
 		}
 
