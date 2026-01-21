@@ -11,12 +11,14 @@
 #include <cgogn/geometry/algos/medial_axis.h>
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
+#include <cgogn/geometry/functions/bounding_box.h>
 #include <cgogn/geometry/types/line_quadric.h>
 #include <cgogn/geometry/types/quadric.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/vector_traits.h>
 #include <cgogn/geometry/types/fast_winding_number_traits.h>
 #include <cgogn/geometry/types/fast_winding_number.h>
+
 
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
 #include <cgogn/rendering/ui_modules/surface_render.h>
@@ -348,27 +350,6 @@ private:
 		torch::Tensor ray_directions_;
 		torch::Tensor ray_t_;
 		torch::Tensor ray_tmax_;
-		torch::Tensor ray_tmin0_;
-		torch::Tensor ray_active_;
-		torch::Tensor ray_last_udf_;
-		torch::Tensor ray_in_band_;
-
-		int refine_capacity_ = 0;
-		int refine_count_ = 0;
-
-		torch::Tensor refine_ray_ids_;
-		torch::Tensor refine_tstart_;
-		torch::Tensor refine_tend_;
-
-		int refine_work_capacity_ = 0;
-		int refine_dense_samples_nb_ = 32;
-
-		torch::Tensor refine_task_O_;
-		torch::Tensor refine_task_D_;
-		torch::Tensor refine_dense_t_;
-		torch::Tensor refine_dense_X_;
-		torch::Tensor refine_tspan_;
-		torch::Tensor refine_lin_;
 
 		// Sampling & Fitting Data
 		POINTS* samples_mesh_ = nullptr;
@@ -486,18 +467,15 @@ private:
 		int cluster_min_points_ = 20;
 		float grid_cell_size_ = 0.0025f;
 		// Neural UDF Sampling
-		int num_alpha_samples_ = 60000;
-		int batch_size_ = 8192;	   // sample batch
-		float newton_steps_ = 0.7; // stpes of newton's method
-		int max_sample_iter_ = 6;  // max iterations for adjusting samples
-		float newton_epsilon_ = 1e-8;
+		int num_alpha_samples_ = 200000;
+		int batch_size_ = 65532;	   // sample batch
 		float tol_ = 1e-5; // convergence tolerance
 
 		// Neural UDF ray sampling parameters
 		float udf_bbox_expand_ = 0.1f;
 		float udf_lipschitz_ = 4.0f;
 		float udf_delta_enter_ = 0.003f;
-		int udf_max_iterations_ = 1000;
+		int udf_max_iterations_ = 6000;
 
 		// State
 		Scalar total_error_ = 0.0;
@@ -531,10 +509,6 @@ private:
 		torch::Tensor D;
 		torch::Tensor t;
 		torch::Tensor t_max;
-		torch::Tensor t_min0;
-		torch::Tensor active;
-		torch::Tensor last_udf;
-		torch::Tensor in_band;
 	};
 
 	struct Tet
@@ -579,6 +553,8 @@ public:
 
 	void set_selected_surface(SURFACE& s)
 	{
+		selected_surface_ = &s;
+		surface_bvh_dirty_ = true;
 	} // Compatibility
 
 	void set_selected_points(POINTS& p)
@@ -773,6 +749,7 @@ public:
 		// Sample points on alpha level set
 		// std::vector<Vec3> sampled_points = sample_alpha_level_set(p, num_points*10);
 		std::vector<Vec3> sampled_points = sample_alpha_level_set_rays(p, num_points);
+		pre_process_sampling_points(p, sampled_points);
 		// sampled_points = poisson_eliminate_points(sampled_points, num_points);
 		if (sampled_points.empty())
 		{
@@ -923,12 +900,18 @@ public:
 		all_samples.reserve(target_num_points * 1.5);
 
 		std::mt19937 gen(p.seed_);
+		const float eps = std::max(1e-5f, p.tol_);
+		const float step_bound = 2.0f;
+		const int max_steps = std::max(1, p.udf_max_iterations_);
+		const int check_interval = 500;
 		int total_rays = 0;
 		for (int iter = 0; iter < 500 && all_samples.size() < target_num_points; ++iter)
 		{
 			auto rays = RayLevelSetSampler::generate_rays(bbox_min, bbox_max, p.batch_size_, p, gen);
 			total_rays += rays.size();
 			const int R = static_cast<int>(rays.size());
+			if (R == 0)
+				break;
 
 			std::cout << "Iteration " << iter << ": Processing " << R << " rays on GPU..." << std::endl;
 
@@ -938,100 +921,111 @@ public:
 			auto& D = buffers.D;
 			auto& t = buffers.t;
 			auto& t_max = buffers.t_max;
-			auto& t_min0 = buffers.t_min0;
-			auto& active = buffers.active;
-			auto& last_udf = buffers.last_udf;
-			auto& in_band = buffers.in_band;
+
+			torch::Tensor X = O + t.unsqueeze(1) * D;
+			torch::Tensor d = forward_values_gpu(p, X);
+			if (!d.defined())
+				break;
+			d = d - p.alpha_;
+			torch::Tensor delta = torch::abs(d);
+
+			torch::Tensor not_converged = t < t_max;
 
 			std::vector<Vec3> iter_samples;
-			int64_t refine_task_count = 0;
-
-			for (int step = 0; step < p.udf_max_iterations_; ++step)
+			for (int step = 0; step < max_steps; ++step)
 			{
-				int active_count = 0;
-				if (step % 50 == 0)
+				if (step % check_interval == 0)
 				{
-					active_count = torch::sum(active).item<int>();
+					int active_count = torch::sum(not_converged).item<int>();
 					if (active_count == 0)
 						break;
+					std::cout << "    Step " << step << ": " << active_count << " active\r" << std::flush;
 				}
-				torch::Tensor t_eff = torch::min(t, t_max);
 
-				torch::Tensor X = O + t_eff.unsqueeze(1) * D;
+				torch::Tensor near_mask = not_converged & (delta < eps);
+				torch::Tensor hit_idx = torch::nonzero(near_mask).squeeze(1);
+				if (hit_idx.numel() > 0)
+				{
+					torch::Tensor hit_X = X.index_select(0, hit_idx).to(torch::kCPU);
+					auto hit_acc = hit_X.accessor<float, 2>();
 
-				torch::Tensor udf = forward_values_gpu(p, X);
-				if (!udf.defined())
+					for (int64_t i = 0; i < hit_X.size(0); ++i)
+					{
+						Vec3 pt(hit_acc[i][0], hit_acc[i][1], hit_acc[i][2]);
+						pt = pt.cwiseMax(0.0).cwiseMin(1.0);
+
+						if (!p.samples_spatial_grid_ ||
+							p.samples_spatial_grid_->is_valid_sample(pt, p.grid_cell_size_, all_samples))
+						{
+							iter_samples.push_back(pt);
+							all_samples.push_back(pt);
+							if (p.samples_spatial_grid_)
+								p.samples_spatial_grid_->insert(pt, static_cast<uint32>(all_samples.size() - 1));
+						}
+					}
+
+					// One-step cross to avoid repeated near-surface iterations.
+					torch::Tensor p_near = X.index_select(0, hit_idx);
+					torch::Tensor delta_near = delta.index_select(0, hit_idx);
+					torch::Tensor t_near = t.index_select(0, hit_idx);
+					torch::Tensor D_near = D.index_select(0, hit_idx);
+
+					torch::Tensor min_step = torch::full_like(delta_near, eps * 0.5f);
+					torch::Tensor step_size = torch::maximum(delta_near, min_step);
+
+					p_near = p_near + step_size.unsqueeze(1) * D_near;
+					t_near = t_near + step_size;
+
+					torch::Tensor d_near = forward_values_gpu(p, p_near);
+					if (!d_near.defined())
+						break;
+					d_near = d_near - p.alpha_;
+					delta_near = torch::abs(d_near);
+
+					X.index_copy_(0, hit_idx, p_near);
+					t.index_copy_(0, hit_idx, t_near);
+					delta.index_copy_(0, hit_idx, delta_near);
+					d.index_copy_(0, hit_idx, d_near);
+				}
+
+				torch::Tensor march_mask = not_converged & (~near_mask);
+				torch::Tensor nc_idx = torch::nonzero(march_mask).squeeze(1);
+				if (nc_idx.numel() == 0)
+				{
+					not_converged = t < t_max;
+					if (all_samples.size() >= target_num_points)
+						break;
+					continue;
+				}
+
+				torch::Tensor p_far = X.index_select(0, nc_idx);
+				torch::Tensor delta_far = delta.index_select(0, nc_idx);
+				torch::Tensor t_far = t.index_select(0, nc_idx);
+				torch::Tensor D_far = D.index_select(0, nc_idx);
+
+				torch::Tensor step_size = delta_far / step_bound;
+				p_far = p_far + step_size.unsqueeze(1) * D_far;
+				t_far = t_far + step_size;
+
+				torch::Tensor d_far = forward_values_gpu(p, p_far);
+				if (!d_far.defined())
 					break;
+				d_far = d_far - p.alpha_;
+				torch::Tensor delta_far_new = torch::abs(d_far);
 
-				torch::Tensor residual = torch::abs(udf - p.alpha_);
+				X.index_copy_(0, nc_idx, p_far);
+				t.index_copy_(0, nc_idx, t_far);
+				delta.index_copy_(0, nc_idx, delta_far_new);
+				d.index_copy_(0, nc_idx, d_far);
 
-				torch::Tensor f_curr = udf - p.alpha_;
-				torch::Tensor f_last = last_udf - p.alpha_;
+				not_converged = t < t_max;
 
-				torch::Tensor sign_change = (f_curr * f_last < 0) & (last_udf > 0);
-
-				torch::Tensor near_band = residual < p.udf_delta_enter_;
-
-				torch::Tensor enter_band = near_band & (~in_band);
-
-				torch::Tensor should_refine = (sign_change | enter_band) & active;
-
-				torch::Tensor refine_indices = torch::nonzero(should_refine).squeeze(1);
-				if (refine_indices.numel() > 0)
-				{
-					refine_task_count += refine_indices.numel();
-
-					torch::Tensor t_curr = t.index_select(0, refine_indices);
-					torch::Tensor res = residual.index_select(0, refine_indices);
-					torch::Tensor t_min = t_min0.index_select(0, refine_indices);
-					torch::Tensor t_max_local = t_max.index_select(0, refine_indices);
-
-					torch::Tensor min_half = torch::full_like(res, p.udf_delta_enter_ * 2.0f);
-					torch::Tensor window_half = torch::max(res / p.udf_lipschitz_ * 2.0f, min_half);
-
-					torch::Tensor t_start = torch::max(t_min, t_curr - window_half);
-					torch::Tensor t_end = torch::min(t_max_local, t_curr + window_half);
-
-					append_refine_tasks(p, refine_indices, t_start, t_end, O, D, iter_samples, all_samples);
-				}
-
-				in_band = near_band;
-
-				last_udf.copy_(udf);
-
-				torch::Tensor safe_step = residual /*/ p.udf_lipschitz_*/ * 0.8f;
-				// std::cout << "safe_step: " << safe_step.index({torch::indexing::Slice(0, 5)}) << std::endl;
-				safe_step = torch::clamp_min(safe_step, p.alpha_ * 0.02f);
-
-				torch::Tensor window_skip = residual /*/ p.udf_lipschitz_*/ * 2.0f;
-				// std::cout << "window_skip:" << window_skip.index({torch::indexing::Slice(0, 5)}) << std::endl;
-				window_skip = torch::clamp_min(window_skip, p.udf_delta_enter_ * 2.0f);
-
-				torch::Tensor step_size = torch::where(should_refine, window_skip, safe_step);
-
-				t.add_(step_size);
-
-				active.logical_and_(t < t_max);
-
-				t.clamp_max_(t_max);
-				// t = t + step_size;
-
-				// active = active & (t < t_max);
-
-				// t = torch::min(t, t_max);
-
-				if (step % 50 == 0)
-				{
-					std::cout << "    Step " << step << ": " << active_count << " active, " << refine_task_count
-							  << " refine tasks\r" << std::flush;
-				}
+				if (all_samples.size() >= target_num_points)
+					break;
 			}
 
 			std::cout << std::endl;
-
-			flush_refine_tasks(p, O, D, iter_samples, all_samples);
 			std::cout << "  Collected " << iter_samples.size() << " unique samples this iteration" << std::endl;
-
 			std::cout << "  Total: " << all_samples.size() << " / " << target_num_points << std::endl;
 		}
 
@@ -1041,6 +1035,32 @@ public:
 			all_samples.resize(target_num_points);
 		}
 		return all_samples;
+	}
+
+	void pre_process_sampling_points(PointsParameters& p, std::vector<Vec3>& points)
+	{
+		const Scalar tol = Scalar(1e-2);
+		const Scalar max_dist = p.alpha_ + tol;
+
+		if (p.input_kdtree_)
+		{
+			auto new_end = std::remove_if(points.begin(), points.end(), [&](const Vec3& pos) {
+				std::pair<uint32, Scalar> knn_res;
+				return !p.input_kdtree_->find_nn(pos, &knn_res, max_dist);
+			});
+			points.erase(new_end, points.end());
+			return;
+		}
+		//Todo: the bvh shuld not be built here, to be moved
+		build_surface_bvh();
+		if (!surface_bvh_)
+			return;
+
+		auto new_end = std::remove_if(points.begin(), points.end(), [&](const Vec3& pos) {
+			std::pair<uint32, Vec3> cp;
+			return !surface_bvh_->closest_point(pos, &cp, max_dist);
+		});
+		points.erase(new_end, points.end());
 	}
 
 	std::vector<Vec3> poisson_eliminate_points(const std::vector<Vec3>& points, size_t target_num)
@@ -1321,32 +1341,7 @@ private:
 		p.ray_directions_ = torch::empty({p.ray_capacity_, 3}, gput_opts);
 		p.ray_t_ = torch::empty({p.ray_capacity_}, gput_opts);
 		p.ray_tmax_ = torch::empty({p.ray_capacity_}, gput_opts);
-		p.ray_tmin0_ = torch::empty({p.ray_capacity_}, gput_opts);
-		p.ray_last_udf_ = torch::empty({p.ray_capacity_}, gput_opts);
-		p.ray_active_ = torch::empty({p.ray_capacity_}, bool_opts);
-		p.ray_in_band_ = torch::empty({p.ray_capacity_}, bool_opts);
-	}
-
-	void init_refine_buffers(PointsParameters& p, int refine_capacity)
-	{
-		if (refine_capacity <= 0)
-			return;
-
-		const bool need_realloc =
-			(p.refine_capacity_ < refine_capacity) || (!p.refine_ray_ids_.defined()) || (p.ray_device_ != device_);
-
-		if (!need_realloc)
-			return;
-
-		p.refine_capacity_ = refine_capacity;
-		p.refine_count_ = 0;
-
-		auto i64_opts = torch::TensorOptions().dtype(torch::kInt64).device(device_);
-		auto f32_opts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
-
-		p.refine_ray_ids_ = torch::empty({p.refine_capacity_}, i64_opts);
-		p.refine_tstart_ = torch::empty({p.refine_capacity_}, f32_opts);
-		p.refine_tend_ = torch::empty({p.refine_capacity_}, f32_opts);
+		
 	}
 
 	RayBatchBuffers prepare_ray_batch_buffers(PointsParameters& p, const std::vector<Ray>& rays)
@@ -1382,262 +1377,75 @@ private:
 		buffers.D = p.ray_directions_.narrow(0, 0, R);
 		buffers.t = p.ray_t_.narrow(0, 0, R);
 		buffers.t_max = p.ray_tmax_.narrow(0, 0, R);
-		buffers.t_min0 = p.ray_tmin0_.narrow(0, 0, R);
-		buffers.active = p.ray_active_.narrow(0, 0, R);
-		buffers.last_udf = p.ray_last_udf_.narrow(0, 0, R);
-		buffers.in_band = p.ray_in_band_.narrow(0, 0, R);
+		
 
 		const bool nonblocking = device_.is_cuda();
 		buffers.O.copy_(O_cpu, nonblocking);
 		buffers.D.copy_(D_cpu, nonblocking);
 		buffers.t.copy_(t_cpu, nonblocking);
 		buffers.t_max.copy_(tmax_cpu, nonblocking);
-		buffers.t_min0.copy_(t_cpu, nonblocking);
-		buffers.active.fill_(true);
-		buffers.last_udf.fill_(-1.0f);
-		buffers.in_band.fill_(false);
+		
 
 		return buffers;
 	}
 
-	void init_renfine_buffers(PointsParameters& p, int refine_capacity)
+	void build_surface_bvh()
 	{
-		if (refine_capacity <= 0)
+		if (!selected_surface_ || !surface_provider_)
+			return;
+		if (surface_bvh_ && !surface_bvh_dirty_)
 			return;
 
-		const bool need_realloc =
-			(p.refine_capacity_ < refine_capacity) || (!p.refine_ray_ids_.defined()) || (p.ray_active_ != device_);
-
-		if (!need_realloc)
-			return;
-
-		p.refine_capacity_ = refine_capacity;
-		p.refine_count_ = 0;
-
-		auto i64_opts = torch::TensorOptions().dtype(torch::kInt64).device(device_);
-		auto f32_opts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
-
-		p.refine_ray_ids_ = torch::empty({p.refine_capacity_}, i64_opts);
-		p.refine_tstart_ = torch::empty({p.refine_capacity_}, f32_opts);
-		p.refine_tend_ = torch::empty({p.refine_capacity_}, f32_opts);
-	}
-
-	void init_renfine_work_buffers(PointsParameters& p, int work_capacity, int dense_sample_nb)
-	{
-		if (dense_sample_nb <= 0)
-			return;
-
-		const bool need_realloc = (p.refine_work_capacity_ < work_capacity) || (!p.refine_task_O_.defined()) ||
-								  (p.ray_device_ != device_) || (p.refine_dense_samples_nb_ != dense_sample_nb);
-
-		if (!need_realloc)
-			return;
-
-		p.refine_work_capacity_ = work_capacity;
-		p.refine_dense_samples_nb_ = dense_sample_nb;
-
-		auto f32_opts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
-
-		p.refine_task_O_ = torch::empty({p.refine_work_capacity_, 3}, f32_opts);
-		p.refine_task_D_ = torch::empty({p.refine_work_capacity_, 3}, f32_opts);
-		p.refine_dense_t_ = torch::empty({p.refine_work_capacity_, dense_sample_nb}, f32_opts);
-		p.refine_dense_X_ = torch::empty({p.refine_work_capacity_, dense_sample_nb, 3}, f32_opts);
-		p.refine_tspan_ = torch::empty({p.refine_work_capacity_}, f32_opts);
-		p.refine_lin_ = torch::linspace(0.0f, 1.0f, dense_sample_nb, f32_opts);
-	}
-
-	void run_refine_chunk(PointsParameters& p, torch::Tensor& ray_ids, torch::Tensor& t_start, torch::Tensor& t_end,
-						  const torch::Tensor& O, const torch::Tensor& D, std::vector<Vec3>& iter_samples,
-						  std::vector<Vec3>& all_samples)
-	{
-		const int dense_samples = p.refine_dense_samples_nb_;
-		const int K = static_cast<int>(ray_ids.size(0));
-		if (K <= 0)
-			return;
-
-		init_renfine_work_buffers(p, K, dense_samples);
-
-		auto task_O = p.refine_task_O_.narrow(0, 0, K);
-		auto task_D = p.refine_task_D_.narrow(0, 0, K);
-		auto dense_t = p.refine_dense_t_.narrow(0, 0, K);
-		auto dense_X = p.refine_dense_X_.narrow(0, 0, K);
-		auto t_span = p.refine_tspan_.narrow(0, 0, K);
-		auto lin = p.refine_lin_;
-
-		torch::index_select_out(task_O, O, 0, ray_ids);
-		torch::index_select_out(task_D, D, 0, ray_ids);
-
-		t_span.copy_(t_end);
-		t_span.sub_(t_start);
-
-		dense_t.copy_(t_start.unsqueeze(1));
-		dense_t.addcmul_(t_span.unsqueeze(1).expand({K, dense_samples}), lin.unsqueeze(0).expand({K, dense_samples}));
-		auto dump = [](const torch::Tensor& t, const char* name) {
-			std::cout << name << " sizes=" << t.sizes() << " device=" << t.device() << " dtype=" << t.dtype()
-					  << " defined=" << t.defined() << std::endl;
-		};
-
-		dense_X.copy_(task_O.unsqueeze(1).expand({K, dense_samples, 3}));
-		dense_X.addcmul_(dense_t.unsqueeze(2), task_D.unsqueeze(1));
-
-		auto dense_X_flat = dense_X.reshape({K * dense_samples, 3});
-		torch::Tensor dense_udf = forward_values_gpu(p, dense_X_flat);
-		dense_udf = dense_udf.reshape({K, dense_samples});
-
-		torch::Tensor v1 = dense_udf.slice(1, 0, dense_samples - 1) - p.alpha_;
-		torch::Tensor v2 = dense_udf.slice(1, 1, dense_samples) - p.alpha_;
-		torch::Tensor sign_change = (v1 * v2) < 0;
-
-		torch::Tensor bracket_indices = torch::nonzero(sign_change);
-		if (bracket_indices.numel() == 0)
-			return;
-
-		// int N = static_cast<int>(bracket_indices.size(0));
-		// torch::Tensor bi_cpu = bracket_indices.to(torch::kCPU);
-		// torch::Tensor dt_cpu_tensor = dense_t.to(torch::kCPU);
-		// torch::Tensor rid_cpu_tensor = ray_ids.to(torch::kCPU);
-
-		// auto bi_acc = bi_cpu.accessor<int64_t, 2>();
-		// auto dt_cpu = dt_cpu_tensor.accessor<float, 2>();
-		// auto rid_cpu = rid_cpu_tensor.accessor<int64_t, 1>();
-
-		// // Newton
-		// torch::Tensor newton_t_cpu =
-		// 	torch::empty({N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-		// torch::Tensor newton_ray_ids_cpu =
-		// 	torch::empty({N}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
-		// torch::Tensor ta_cpu = torch::empty({N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-		// torch::Tensor tb_cpu = torch::empty({N}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-
-		// auto nt_acc = newton_t_cpu.accessor<float, 1>();
-		// auto nrid_acc = newton_ray_ids_cpu.accessor<int64_t, 1>();
-		// auto ta_acc = ta_cpu.accessor<float, 1>();
-		// auto tb_acc = tb_cpu.accessor<float, 1>();
-
-		// for (int i = 0; i < N; ++i)
-		// {
-		// 	int task_idx = static_cast<int>(bi_acc[i][0]);
-		// 	int j = static_cast<int>(bi_acc[i][1]);
-
-		// 	nrid_acc[i] = rid_cpu[task_idx];
-		// 	float t_a = dt_cpu[task_idx][j];
-		// 	float t_b = dt_cpu[task_idx][j + 1];
-		// 	nt_acc[i] = (t_a + t_b) * 0.5f;
-		// 	ta_acc[i] = t_a;
-		// 	tb_acc[i] = t_b;
-		// }
-		// torch::Tensor newton_t = newton_t_cpu.to(device_);
-		// torch::Tensor newton_ray_ids = newton_ray_ids_cpu.to(device_);
-		// torch::Tensor ta = ta_cpu.to(device_);
-		// torch::Tensor tb = tb_cpu.to(device_);
-
-		// bracket_indices: [N,2], columns = {task_idx, j}
-		torch::Tensor task_ids = bracket_indices.select(1, 0); //[N]
-		torch::Tensor j = bracket_indices.select(1, 1);		   //[N]
-
-		torch::Tensor dense_t_task = dense_t.index_select(0, task_ids); //[N, dense_samples]
-
-		// t_a = dense_t[task, j], t_b = dense_t[task, j+1]
-		torch::Tensor j1 = torch::clamp(j + 1, 0, dense_samples - 1);
-		torch::Tensor t_a = dense_t_task.gather(1, j.unsqueeze(1)).squeeze(1);
-		torch::Tensor t_b = dense_t_task.gather(1, j1.unsqueeze(1)).squeeze(1);
-
-		// Newton init
-		torch::Tensor newton_t = 0.5f * (t_a + t_b);
-		torch::Tensor newton_ray_ids = ray_ids.index_select(0, task_ids);
-
-		// bounds
-		torch::Tensor ta = t_a;
-		torch::Tensor tb = t_b;
-
-		for (int nit = 0; nit < p.max_sample_iter_; ++nit)
+		auto s_pos = get_attribute<Vec3, SVertex>(*selected_surface_, "position");
+		if (!s_pos)
 		{
-			torch::Tensor newton_O = O.index_select(0, newton_ray_ids);
-			torch::Tensor newton_D = D.index_select(0, newton_ray_ids);
-			torch::Tensor newton_X = newton_O + newton_t.unsqueeze(1) * newton_D;
-
-			auto [f_raw, grad] = forward_values_grad_gpu(p, newton_X);
-			if (!f_raw.defined() || !grad.defined())
-				break;
-
-			torch::Tensor f = f_raw - p.alpha_;
-			torch::Tensor dfdt = (grad * newton_D).sum(1);
-
-			torch::Tensor delta_t = torch::zeros_like(dfdt);
-			torch::Tensor ok = dfdt.abs() > 1e-10f;
-			delta_t = torch::where(ok, -f / dfdt, delta_t);
-			newton_t = torch::clamp(newton_t + delta_t, ta, tb);
+			surface_bvh_.reset();
+			surface_bvh_dirty_ = false;
+			return;
 		}
 
-		torch::Tensor final_O = O.index_select(0, newton_ray_ids);
-		torch::Tensor final_D = D.index_select(0, newton_ray_ids);
-		torch::Tensor final_X = final_O + newton_t.unsqueeze(1) * final_D;
-		torch::cuda::synchronize();
-
-		torch::Tensor final_udf = forward_values_gpu(p, final_X);
-
-		torch::Tensor final_err = torch::abs(final_udf - p.alpha_);
-		torch::Tensor valid = final_err < (p.tol_ * 5);
-		torch::Tensor valid_indices = torch::nonzero(valid).squeeze(1);
-		std::cout << "bracket=" << bracket_indices.numel() << " valid=" << valid_indices.numel() << std::endl;
-
-		if (valid_indices.numel() > 0)
+		MeshData<SURFACE>& md = surface_provider_->mesh_data(*selected_surface_);
+		uint32 nb_vertices = md.template nb_cells<SVertex>();
+		uint32 nb_faces = md.template nb_cells<SFace>();
+		if (nb_vertices == 0 || nb_faces == 0)
 		{
-			torch::Tensor valid_X = final_X.index_select(0, valid_indices);
-			torch::Tensor valid_X_cpu = valid_X.to(torch::kCPU);
-			auto vx_acc = valid_X_cpu.accessor<float, 2>();
-
-			for (int64_t i = 0; i < valid_indices.size(0); ++i)
-			{
-				Vec3 pt(vx_acc[i][0], vx_acc[i][1], vx_acc[i][2]);
-				pt = pt.cwiseMax(0.0).cwiseMin(1.0);
-
-				if (p.samples_spatial_grid_->is_valid_sample(pt, p.grid_cell_size_, all_samples))
-				{
-					iter_samples.push_back(pt);
-					all_samples.push_back(pt);
-					p.samples_spatial_grid_->insert(pt, static_cast<uint32>(all_samples.size() - 1));
-				}
-			}
-		}
-	}
-
-	void append_refine_tasks(PointsParameters& p, const torch::Tensor& refine_indices, const torch::Tensor& t_start,
-							 const torch::Tensor& t_end, const torch::Tensor& O, const torch::Tensor& D,
-							 std::vector<Vec3>& iter_samples, std::vector<Vec3>& all_samples)
-	{
-		const int n = static_cast<int>(refine_indices.size(0));
-		if (n == 0)
+			surface_bvh_.reset();
+			surface_bvh_dirty_ = false;
 			return;
-
-		init_refine_buffers(p, p.batch_size_);
-
-		if (p.refine_count_ + n > p.refine_capacity_)
-		{
-			auto ids = p.refine_ray_ids_.narrow(0, 0, p.refine_count_);
-			auto ts = p.refine_tstart_.narrow(0, 0, p.refine_count_);
-			auto te = p.refine_tend_.narrow(0, 0, p.refine_count_);
-			run_refine_chunk(p, ids, ts, te, O, D, iter_samples, all_samples);
-			p.refine_count_ = 0;
 		}
 
-		p.refine_ray_ids_.narrow(0, p.refine_count_, n).copy_(refine_indices);
-		p.refine_tstart_.narrow(0, p.refine_count_, n).copy_(t_start);
-		p.refine_tend_.narrow(0, p.refine_count_, n).copy_(t_end);
-		p.refine_count_ += n;
-	}
+		auto bvh_vertex_index = get_or_add_attribute<uint32, SVertex>(*selected_surface_, "__bvh_vertex_index");
 
-	void flush_refine_tasks(PointsParameters& p, const torch::Tensor& O, const torch::Tensor& D,
-							std::vector<Vec3>& iter_samples, std::vector<Vec3>& all_samples)
-	{
-		if (p.refine_count_ == 0)
-			return;
+		surface_bvh_vertices_.clear();
+		surface_bvh_vertices_.reserve(nb_vertices);
+		surface_bvh_vertex_positions_.clear();
+		surface_bvh_vertex_positions_.reserve(nb_vertices);
 
-		auto ids = p.refine_ray_ids_.narrow(0, 0, p.refine_count_);
-		auto ts = p.refine_tstart_.narrow(0, 0, p.refine_count_);
-		auto te = p.refine_tend_.narrow(0, 0, p.refine_count_);
-		run_refine_chunk(p, ids, ts, te, O, D, iter_samples, all_samples);
-		p.refine_count_ = 0;
+		uint32 idx = 0;
+		foreach_cell(*selected_surface_, [&](SVertex v) -> bool {
+			surface_bvh_vertices_.push_back(v);
+			value<uint32>(*selected_surface_, bvh_vertex_index, v) = idx++;
+			surface_bvh_vertex_positions_.push_back(value<Vec3>(*selected_surface_, s_pos, v));
+			return true;
+		});
+
+		surface_bvh_faces_.clear();
+		surface_bvh_faces_.reserve(nb_faces);
+		std::vector<uint32> face_vertex_indices;
+		face_vertex_indices.reserve(nb_faces * 3);
+		foreach_cell(*selected_surface_, [&](SFace f) -> bool {
+			surface_bvh_faces_.push_back(f);
+			foreach_incident_vertex(*selected_surface_, f, [&](SVertex v) -> bool {
+				face_vertex_indices.push_back(value<uint32>(*selected_surface_, bvh_vertex_index, v));
+				return true;
+			});
+			return true;
+		});
+
+		surface_bvh_ = std::make_unique<acc::BVHTree<uint32, Vec3>>(face_vertex_indices, surface_bvh_vertex_positions_);
+
+		remove_attribute<SVertex>(*selected_surface_, bvh_vertex_index);
+		surface_bvh_dirty_ = false;
 	}
 
 	// --- Initialization ---
@@ -2004,62 +1812,6 @@ private:
 		});
 	}
 
-	Scalar input_bbox_diagonal(PointsParameters& p)
-	{
-		if (!p.points_ || !p.position_)
-			return Scalar(0);
-		bool has_point = false;
-		Vec3 min_v(0, 0, 0);
-		Vec3 max_v(0, 0, 0);
-		foreach_cell(*p.points_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.points_, v);
-			const Vec3& pos = (*p.position_)[v_idx];
-			if (!has_point)
-			{
-				min_v = pos;
-				max_v = pos;
-				has_point = true;
-			}
-			else
-			{
-				min_v = min_v.cwiseMin(pos);
-				max_v = max_v.cwiseMax(pos);
-			}
-			return true;
-		});
-		if (!has_point)
-			return Scalar(0);
-		return (max_v - min_v).norm();
-	}
-
-	Scalar samples_bbox_diagonal(PointsParameters& p)
-	{
-		if (!p.samples_mesh_)
-			return Scalar(0);
-		bool has_sample = false;
-		Vec3 min_v(0, 0, 0);
-		Vec3 max_v(0, 0, 0);
-		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			const Vec3& pos = (*p.samples_position_)[v_idx];
-			if (!has_sample)
-			{
-				min_v = pos;
-				max_v = pos;
-				has_sample = true;
-			}
-			else
-			{
-				min_v = min_v.cwiseMin(pos);
-				max_v = max_v.cwiseMax(pos);
-			}
-			return true;
-		});
-		if (!has_sample)
-			return Scalar(0);
-		return (max_v - min_v).norm();
-	}
-
 	void rebuild_input_kdtree(PointsParameters& p)
 	{
 		if (p.input_kdtree_)
@@ -2120,7 +1872,8 @@ private:
 		const uint32 count = nb_cells<PVertex>(*p.points_);
 		if (count == 0)
 			return;
-		const Scalar diag = input_bbox_diagonal(p);
+		auto [bb_min, bb_max] = cgogn::geometry::bounding_box(*p.position_.get());
+		const Scalar diag = (bb_max - bb_min).norm();
 		const Scalar pct = static_cast<Scalar>(p.input_jitter_pos_pct_) * Scalar(0.01);
 		if (diag <= Scalar(0) || pct <= Scalar(0))
 			return;
@@ -2175,7 +1928,8 @@ private:
 		const uint32 count = nb_cells<PVertex>(*p.samples_mesh_);
 		if (count == 0)
 			return;
-		const Scalar diag = samples_bbox_diagonal(p);
+		auto [bb_min, bb_max] = cgogn::geometry::bounding_box(*p.samples_position_.get());
+		const Scalar diag = (bb_max - bb_min).norm();
 		const Scalar pct = static_cast<Scalar>(p.samples_jitter_pos_pct_) * Scalar(0.01);
 		if (diag <= Scalar(0) || pct <= Scalar(0))
 			return;
@@ -4455,8 +4209,6 @@ protected:
 				ImGui::InputInt("Num Samples", &p.num_alpha_samples_, 1000, 10000);
 				ImGui::InputFloat("Grid Cell Size", &p.grid_cell_size_, 0.001f, 0.01f, "%.4f");
 				ImGui::InputInt("Batch Size", &p.batch_size_, 256, 1024);
-				ImGui::InputInt("Max Newton Iters", &p.max_sample_iter_, 1, 15);
-				ImGui::InputFloat("Newton Step Size", &p.newton_steps_, 0.1f, 0.1f, "%.2f");
 				ImGui::InputFloat("Tolerance", &p.tol_, 0.0f, 0.0f, "%.6f");
 
 				if (ImGui::Button("Sample UDF"))
@@ -4758,6 +4510,13 @@ private:
 	MeshProvider<POINTS>* points_provider_ = nullptr;
 	PointCloudRender<POINTS>* pcr_ = nullptr;
 	MeshProvider<NONMANIFOLD>* non_manifold_provider_ = nullptr;
+
+	SURFACE* selected_surface_ = nullptr;
+	std::unique_ptr<acc::BVHTree<uint32, Vec3>> surface_bvh_;
+	std::vector<SFace> surface_bvh_faces_;
+	std::vector<SVertex> surface_bvh_vertices_;
+	std::vector<Vec3> surface_bvh_vertex_positions_;
+	bool surface_bvh_dirty_ = false;
 
 	POINTS* selected_points_ = nullptr;
 	std::map<POINTS*, PointsParameters> points_parameters_;
