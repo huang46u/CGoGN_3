@@ -138,6 +138,38 @@ public:
 		}
 	}
 
+	// Forward points in GPU tensor and return UDF values + optional SDF values
+	std::pair<torch::Tensor, torch::Tensor> forward_values_sdf_gpu(const torch::Tensor& points_gpu) const
+	{
+		if (!is_loaded())
+			return {torch::Tensor(), torch::Tensor()};
+		try
+		{
+			ModuleDeviceScope module_scope(module_, device_, device_);
+			torch::NoGradGuard no_grad;
+			torch::Tensor x = points_gpu;
+			if (x.device() != device_)
+				x = x.to(device_);
+
+			torch::IValue output = module_->forward({x});
+			ParsedOutput parsed;
+			OutputKind kind = OutputKind::Unknown;
+			if (!parse_output(output, parsed, kind))
+				return {torch::Tensor(), torch::Tensor()};
+			if (kind != OutputKind::Unknown)
+				output_kind_ = kind;
+
+			if (parsed.has_sdf)
+				return {parsed.values.detach(), parsed.sdf.detach()};
+			return {parsed.values.detach(), torch::Tensor()};
+		}
+		catch (const c10::Error& e)
+		{
+			std::cerr << "NeuralField forward (values+sdf) failed: " << e.what() << std::endl;
+			return {torch::Tensor(), torch::Tensor()};
+		}
+	}
+
 	// Forward points in GPU tensor with gradient
 	std::pair<torch::Tensor, torch::Tensor> forward_values_grad_gpu(const torch::Tensor& points_gpu) const
 	{
@@ -175,6 +207,8 @@ private:
 		torch::Tensor values;
 		torch::Tensor pred_grad;
 		bool has_pred_grad = false;
+		torch::Tensor sdf;
+		bool has_sdf = false;
 	};
 
 	class ModuleDeviceScope
@@ -474,6 +508,8 @@ private:
 			if (mf.size(0) != sdf.size(0))
 				return false;
 
+			parsed.sdf = sdf;
+			parsed.has_sdf = true;
 			parsed.values = mf - torch::abs(sdf);
 			parsed.pred_grad = pgrad;
 			parsed.has_pred_grad = true;
