@@ -41,6 +41,7 @@
 #include <cgogn/io/surface/obj.h>
 #include <cgogn/io/surface/off.h>
 #include <cgogn/io/surface/ply.h>
+#include <cgogn/io/surface/stl.h>
 // #include <cgogn/io/volume/cgns.h>
 #include <cgogn/io/volume/mesh.h>
 #include <cgogn/io/volume/meshb.h>
@@ -252,7 +253,7 @@ public:
 			const auto [it, inserted] = meshes_.emplace(name, std::make_unique<MESH>());
 			MESH* m = it->second.get();
 
-			std::string ext = extension(filename);
+			std::string ext = to_lower(extension(filename));
 			bool imported = false;
 			if (ext.compare("off") == 0)
 				imported = io::import_OFF(*m, filename);
@@ -260,6 +261,8 @@ public:
 				imported = io::import_OBJ(*m, filename);
 			else if (ext.compare("ply") == 0)
 				imported = io::import_PLY(*m, filename);
+			else if (ext.compare("stl") == 0)
+				imported = io::import_STL(*m, filename);
 			else if (ext.compare("ig") == 0)
 			{
 				if constexpr (std::is_same_v<MESH, IncidenceGraph>)
@@ -802,7 +805,7 @@ private:
 	std::vector<std::string> supported_graph_formats_ = {"cg", "ig", "cgr", "skel"};
 	std::vector<std::string> supported_graph_files_ = {"Graph", "*.cg *.ig *.cgr *.skel"};
 
-	std::vector<std::string> supported_surface_formats_ = {"off", "obj", "ply", "ig"};
+	std::vector<std::string> supported_surface_formats_ = {"off", "obj", "ply", "stl", "ig"};
 	std::vector<std::string> supported_surface_files_ = {"Surface", "*.off *.obj *.ply *.ig"};
 
 	std::vector<std::string> supported_volume_formats_ = {"mesh"};			 //, "cgns"};
