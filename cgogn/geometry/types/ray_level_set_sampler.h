@@ -59,7 +59,9 @@ public:
 	}
 
 	std::vector<Vec3> sample_alpha_level_set_rays(NeuralFieldForward& udf, size_t target_num_points,
-												  SpatialGrid* spatial_grid, Scalar grid_cell_size)
+												  SpatialGrid* spatial_grid, Scalar grid_cell_size,
+												  const Vec3& bbox_min, const Vec3& bbox_max,
+												  bool* used_sdf_filter = nullptr)
 	{
 		if (!udf.is_loaded())
 		{
@@ -68,9 +70,6 @@ public:
 		}
 
 		set_device(udf.device());
-
-		Vec3 bbox_min(0, 0, 0);
-		Vec3 bbox_max(1, 1, 1);
 
 		std::vector<Vec3> all_samples;
 		all_samples.reserve(target_num_points * 1.5);
@@ -81,6 +80,7 @@ public:
 		const int check_interval = 500;
 		int total_rays = 0;
 
+		bool has_sdf_any = false;
 		for (int iter = 0; iter < params_.max_outer_iterations && all_samples.size() < target_num_points; ++iter)
 		{
 			auto rays = generate_rays(bbox_min, bbox_max, params_.batch_size, gen);
@@ -99,7 +99,12 @@ public:
 			auto& t_max = buffers.t_max;
 
 			torch::Tensor X = O + t.unsqueeze(1) * D;
-			torch::Tensor d = udf.forward_values_gpu(X);
+			auto d_sdf = udf.forward_values_sdf_gpu(X);
+			torch::Tensor d = d_sdf.first;
+			torch::Tensor sdf = d_sdf.second;
+			const bool has_sdf = sdf.defined();
+			if (has_sdf)
+				has_sdf_any = true;
 			if (!d.defined())
 				break;
 
@@ -119,7 +124,12 @@ public:
 					std::cout << "    Step " << step << ": " << active_count << " active\r" << std::flush;
 				}
 
+				torch::Tensor inside_mask;
+				if (has_sdf)
+					inside_mask = sdf < 0;
 				torch::Tensor near_mask = not_converged & (delta < eps);
+				if (has_sdf)
+					near_mask = near_mask & inside_mask;
 				torch::Tensor hit_idx = torch::nonzero(near_mask).squeeze(1);
 				if (hit_idx.numel() > 0)
 				{
@@ -152,8 +162,10 @@ public:
 					p_near = p_near + step_size.unsqueeze(1) * D_near;
 					t_near = t_near + step_size;
 
-					torch::Tensor d_near = udf.forward_values_gpu(p_near);
-					if (!d_near.defined())
+					auto d_sdf_near = udf.forward_values_sdf_gpu(p_near);
+					torch::Tensor d_near = d_sdf_near.first;
+					torch::Tensor sdf_near = d_sdf_near.second;
+					if (!d_near.defined() || (has_sdf && !sdf_near.defined()))
 						break;
 
 					d_near = d_near - params_.alpha;
@@ -163,6 +175,8 @@ public:
 					t.index_copy_(0, hit_idx, t_near);
 					delta.index_copy_(0, hit_idx, delta_near);
 					d.index_copy_(0, hit_idx, d_near);
+					if (has_sdf)
+						sdf.index_copy_(0, hit_idx, sdf_near);
 				}
 
 				torch::Tensor march_mask = not_converged & (~near_mask);
@@ -180,12 +194,29 @@ public:
 				torch::Tensor t_far = t.index_select(0, nc_idx);
 				torch::Tensor D_far = D.index_select(0, nc_idx);
 
-				torch::Tensor step_size = delta_far / params_.step_bound;
+				torch::Tensor step_size;
+				if (has_sdf)
+				{
+					torch::Tensor sdf_far_current = sdf.index_select(0, nc_idx);
+					torch::Tensor inside_far = sdf_far_current < 0;
+					torch::Tensor sdf_abs = torch::abs(sdf_far_current);
+					torch::Tensor step_raw = torch::where(inside_far, delta_far, sdf_abs);
+					torch::Tensor min_step = torch::full_like(step_raw, eps * 0.5f);
+					step_size = torch::maximum(step_raw / params_.step_bound, min_step);
+					torch::Tensor cross_mask = (~inside_far) & (sdf_abs < eps);
+					step_size = torch::where(cross_mask, torch::full_like(step_size, eps), step_size);
+				}
+				else
+				{
+					step_size = delta_far / params_.step_bound;
+				}
 				p_far = p_far + step_size.unsqueeze(1) * D_far;
 				t_far = t_far + step_size;
 
-				torch::Tensor d_far = udf.forward_values_gpu(p_far);
-				if (!d_far.defined())
+				auto d_sdf_far = udf.forward_values_sdf_gpu(p_far);
+				torch::Tensor d_far = d_sdf_far.first;
+				torch::Tensor sdf_far = d_sdf_far.second;
+				if (!d_far.defined() || (has_sdf && !sdf_far.defined()))
 					break;
 
 				d_far = d_far - params_.alpha;
@@ -195,6 +226,8 @@ public:
 				t.index_copy_(0, nc_idx, t_far);
 				delta.index_copy_(0, nc_idx, delta_far_new);
 				d.index_copy_(0, nc_idx, d_far);
+				if (has_sdf)
+					sdf.index_copy_(0, nc_idx, sdf_far);
 
 				not_converged = t < t_max;
 
@@ -212,6 +245,8 @@ public:
 			std::shuffle(all_samples.begin(), all_samples.end(), gen);
 			all_samples.resize(target_num_points);
 		}
+		if (used_sdf_filter)
+			*used_sdf_filter = has_sdf_any;
 		return all_samples;
 	}
 

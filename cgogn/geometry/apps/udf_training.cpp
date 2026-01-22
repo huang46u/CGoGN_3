@@ -37,6 +37,9 @@
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
 #include <cgogn/rendering/ui_modules/surface_render.h>
 
+#include <algorithm>
+#include <cctype>
+
 #define DEFAULT_MESH_PATH CGOGN_STR(CGOGN_DATA_PATH) "/meshes/"
 
 using namespace cgogn::numerics;
@@ -155,9 +158,11 @@ int main(int argc, char** argv)
 	
 	// Check file extension
 	std::string ext = filename.substr(filename.find_last_of(".") + 1);
+	std::transform(ext.begin(), ext.end(), ext.begin(),
+				   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 	if (ext != "ply")
 	{
-		std::cout << "Detected non PLY file. Loading as Surface Mesh..." << std::endl;
+		std::cout << "Detected surface mesh file. Loading as Surface Mesh..." << std::endl;
 		Surface* s = mps.load_surface_from_file(filename);
 		if (!s)
 		{

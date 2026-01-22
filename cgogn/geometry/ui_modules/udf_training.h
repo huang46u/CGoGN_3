@@ -269,6 +269,7 @@ private:
 		int num_alpha_samples_ = 200000;
 		int batch_size_ = 65532;	   // sample batch
 		float tol_ = 1e-5; // convergence tolerance
+		bool preprocss_sample_points_ = false;
 
 		// Neural UDF ray sampling parameters
 		float udf_bbox_expand_ = 0.1f;
@@ -418,10 +419,46 @@ public:
 		};
 
 		NeuralFieldForward udf = make_neural_field_forward(p);
+		Vec3 bbox_min(0, 0, 0);
+		Vec3 bbox_max(1, 1, 1);
+		auto bbox_valid = [&](const Vec3& min, const Vec3& max) {
+			return min[0] <= max[0] && min[1] <= max[1] && min[2] <= max[2];
+		};
+		bool has_bbox = false;
+		if (p.points_ && p.position_)
+		{
+			const uint32 count = nb_cells<PVertex>(*p.points_);
+			if (count > 0)
+			{
+				auto bb = cgogn::geometry::bounding_box(*p.position_.get());
+				if (bbox_valid(bb.first, bb.second))
+				{
+					bbox_min = bb.first;
+					bbox_max = bb.second;
+					has_bbox = true;
+				}
+			}
+		}
+		if (!has_bbox && selected_surface_)
+		{
+			auto s_pos = get_attribute<Vec3, SVertex>(*selected_surface_, "position");
+			if (s_pos)
+			{
+				auto bb = cgogn::geometry::bounding_box(*s_pos.get());
+				if (bbox_valid(bb.first, bb.second))
+				{
+					bbox_min = bb.first;
+					bbox_max = bb.second;
+					has_bbox = true;
+				}
+			}
+		}
 		update_ray_sampler(udf.device());
+		bool used_sdf_filter = false;
 		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
-			udf, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_);
-		pre_process_sampling_points(p, sampled_points);
+			udf, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max, &used_sdf_filter);
+		if (p.preprocss_sample_points_ && !used_sdf_filter)
+			pre_process_sampling_points(p, sampled_points);
 		// sampled_points = poisson_eliminate_points(sampled_points, num_points);
 		if (sampled_points.empty())
 		{
@@ -494,7 +531,7 @@ public:
 	{
 		const Scalar tol = Scalar(1e-2);
 		const Scalar max_dist = p.alpha_ + tol;
-
+		std::cout << "Before pre-processing, " << points.size() << " points." << std::endl;
 		if (p.input_kdtree_)
 		{
 			auto new_end = std::remove_if(points.begin(), points.end(), [&](const Vec3& pos) {
@@ -514,6 +551,7 @@ public:
 			return !surface_bvh_->closest_point(pos, &cp, max_dist);
 		});
 		points.erase(new_end, points.end());
+		std::cout << "After pre-processing, " << points.size() << " points." << std::endl;
 	}
 
 	std::vector<Vec3> poisson_eliminate_points(const std::vector<Vec3>& points, size_t target_num)
@@ -3590,12 +3628,14 @@ protected:
 		// Sampling
 		if (ImGui::CollapsingHeader("Sampling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
+			ImGui::Checkbox("Preprocess sample points", &p.preprocss_sample_points_);
 			if (p.input_mode_ == INPUT_NEURAL_UDF)
 			{
 				ImGui::InputFloat("Alpha", &p.alpha_, 0.001f, 0.1f, "%.4f");
 				ImGui::InputInt("Num Samples", &p.num_alpha_samples_, 1000, 10000);
 				ImGui::InputFloat("Grid Cell Size", &p.grid_cell_size_, 0.001f, 0.01f, "%.4f");
 				ImGui::InputInt("Batch Size", &p.batch_size_, 256, 1024);
+				ImGui::InputInt("Max Iterations", &p.udf_max_iterations_, 1000, 8000);
 				ImGui::InputFloat("Tolerance", &p.tol_, 0.0f, 0.0f, "%.6f");
 
 				if (ImGui::Button("Sample UDF"))
