@@ -12,9 +12,11 @@
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
 #include <cgogn/geometry/functions/bounding_box.h>
+#include <cgogn/geometry/functions/normal.h>
 #include <cgogn/geometry/types/line_quadric.h>
 #include <cgogn/geometry/types/quadric.h>
 #include <cgogn/geometry/types/ray_level_set_sampler.h>
+#include <cgogn/geometry/types/ray_level_set_sampler_traits.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/spatial_grid.h>
 #include <cgogn/geometry/types/neural_field_forward.h>
@@ -36,14 +38,14 @@
 
 // import CGAL
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
-#include <CGAL/Polygon_mesh_processing/distance.h>
-#include <CGAL/Surface_mesh.h>
 #include <CGAL/poisson_eliminate.h>
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <filesystem>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <random>
@@ -52,6 +54,7 @@
 #include <torch/autograd.h>
 #include <torch/script.h>
 #include <torch/torch.h>
+#include <type_traits>
 #include <unordered_map>
 
 namespace cgogn
@@ -74,7 +77,7 @@ using geometry::NeuralFieldForward;
 using geometry::Vec3;
 using geometry::Vec4;
 
-template <typename SURFACE, typename POINTS, typename NONMANIFOLD>
+template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
 class UDFTraining : public ViewModule
 {
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
@@ -93,8 +96,6 @@ class UDFTraining : public ViewModule
 	template <typename T>
 	using NMAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
 	using K = CGAL::Exact_predicates_inexact_constructions_kernel;
-	using CGAL_Mesh = CGAL::Surface_mesh<K::Point_3>;
-	using Vector_3 = typename K::Vector_3;
 	using Point_3 = typename K::Point_3;
 	using NMFaceKey = std::array<uint32, 3>;
 
@@ -125,6 +126,10 @@ class UDFTraining : public ViewModule
 private:
 	struct PointsParameters;
 
+	using RaySamplerConfig = geometry::RaySamplerTraits<RaySamplerTag, SURFACE, POINTS>;
+	using RaySamplerTraitsType = typename RaySamplerConfig::SamplerTraits;
+	using RaySampler = geometry::RayLevelSetSampler<RaySamplerTraitsType>;
+	using RaySamplerParams = typename RaySampler::Params;
 
 	struct Tet;
 	struct PointsParameters
@@ -148,7 +153,7 @@ private:
 		std::string neural_udf_model_path_ = "";
 
 		// Ray Sampling
-		std::unique_ptr<RayLevelSetSampler> ray_sampler_;
+		std::unique_ptr<RaySampler> ray_sampler_;
 
 		// Sampling & Fitting Data
 		POINTS* samples_mesh_ = nullptr;
@@ -347,12 +352,19 @@ public:
 	{
 		selected_surface_ = &s;
 		surface_bvh_dirty_ = true;
+		if (selected_points_)
+		{
+			PointsParameters& p = points_parameters_[selected_points_];
+			p.input_mode_ = ray_sampler_input_mode();
+		}
 	} // Compatibility
 
 	void set_selected_points(POINTS& p)
 	{
 		selected_points_ = &p;
 		init_points_data(p);
+		PointsParameters& params = points_parameters_[selected_points_];
+		params.input_mode_ = ray_sampler_input_mode();
 	}
 
 	void load_neural_udf_model(POINTS& points, const std::string& model_path)
@@ -384,41 +396,29 @@ public:
 	{
 		return NeuralFieldForward(&p.neural_udf_model_, p.neural_udf_loaded_, device_);
 	}
+	
+	template <typename Tag = RaySamplerTag>
 	void load_alpha_samples_to_mesh(PointsParameters& p, size_t num_points)
 	{
-		if (!p.neural_udf_loaded_)
-		{
-			std::cerr << "Neural UDF model not loaded. Cannot sample alpha level set." << std::endl;
-			return;
+		load_alpha_samples_to_mesh_impl(p, num_points, Tag{});
 		}
 
-		p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
-
-		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
-
-		// Sample points on alpha level set
-		// std::vector<Vec3> sampled_points = sample_alpha_level_set(p, num_points*10);
-		RayLevelSetSampler::Params ray_params;
-		ray_params.bbox_expand = p.udf_bbox_expand_;
-		ray_params.alpha = p.alpha_;
-		ray_params.tol = p.tol_;
-		ray_params.step_bound = Scalar(2.0);
-		ray_params.batch_size = p.batch_size_;
-		ray_params.max_iterations = p.udf_max_iterations_;
-		ray_params.max_outer_iterations = 500;
-		ray_params.seed = p.seed_;
-
-		auto update_ray_sampler = [&](const torch::Device& device) {
-			if (!p.ray_sampler_)
-				p.ray_sampler_ = std::make_unique<RayLevelSetSampler>(ray_params, device);
-			else
+	RaySamplerParams make_ray_params(const PointsParameters& p) const
 			{
-				p.ray_sampler_->set_params(ray_params);
-				p.ray_sampler_->set_device(device);
+		RaySamplerParams params;
+		params.bbox_expand = p.udf_bbox_expand_;
+		params.alpha = p.alpha_;
+		params.tol = p.tol_;
+		params.step_bound = Scalar(2.0);
+		params.batch_size = p.batch_size_;
+		params.max_iterations = p.udf_max_iterations_;
+		params.max_outer_iterations = 500;
+		params.seed = p.seed_;
+		return params;
 			}
-		};
 
-		NeuralFieldForward udf = make_neural_field_forward(p);
+	std::pair<Vec3, Vec3> compute_sampling_bbox(PointsParameters& p) const
+	{
 		Vec3 bbox_min(0, 0, 0);
 		Vec3 bbox_max(1, 1, 1);
 		auto bbox_valid = [&](const Vec3& min, const Vec3& max) {
@@ -453,13 +453,39 @@ public:
 				}
 			}
 		}
-		update_ray_sampler(udf.device());
+		return {bbox_min, bbox_max};
+	}
+
+	void load_alpha_samples_to_mesh_impl(PointsParameters& p, size_t num_points, geometry::RaySamplerNeural)
+	{
+		if (!p.neural_udf_loaded_)
+		{
+			std::cerr << "Neural UDF model not loaded. Cannot sample alpha level set." << std::endl;
+			return;
+		}
+
+		p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
+
+		RaySamplerParams ray_params = make_ray_params(p);
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		if (!p.ray_sampler_)
+			p.ray_sampler_ = std::make_unique<RaySampler>(ray_params, udf.device());
+		else
+		{
+			p.ray_sampler_->set_params(ray_params);
+			p.ray_sampler_->set_device(udf.device());
+		}
+		auto [bbox_min, bbox_max] = compute_sampling_bbox(p);
+		std::cout << "Neural sampling bbox: min(" << bbox_min.transpose() << "), max(" << bbox_max.transpose() << ")"
+				  << std::endl;
 		bool used_sdf_filter = false;
+		auto traits = RaySamplerConfig::make(udf);
 		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
-			udf, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max, &used_sdf_filter);
+			traits, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max, &used_sdf_filter);
+
 		if (p.preprocss_sample_points_ && !used_sdf_filter)
 			pre_process_sampling_points(p, sampled_points);
-		// sampled_points = poisson_eliminate_points(sampled_points, num_points);
 		if (sampled_points.empty())
 		{
 			std::cerr << "Failed to sample points on alpha level set." << std::endl;
@@ -480,7 +506,6 @@ public:
 		{
 			PVertex v = add_vertex(*p.samples_mesh_);
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			// std::cout << pt.transpose() << std::endl;
 			(*p.samples_position_)[v_idx] = pt;
 		}
 
@@ -521,9 +546,169 @@ public:
 
 		std::cout << "Building KDTree for sampled points..." << std::endl;
 		build_kdtree(p);
-
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
+	}
 
+	void load_alpha_samples_to_mesh_impl(PointsParameters& p, size_t num_points, geometry::RaySamplerSurface)
+	{
+		build_surface_bvh();
+		if (!surface_bvh_)
+		{
+			std::cerr << "Surface BVH not available. Cannot sample alpha level set." << std::endl;
+			return;
+		}
+
+		auto s_pos = get_attribute<Vec3, SVertex>(*selected_surface_, "position");
+		if (!s_pos)
+		{
+			std::cerr << "Surface position attribute not available. Cannot sample alpha level set." << std::endl;
+			return;
+		}
+
+		p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
+
+		RaySamplerParams ray_params = make_ray_params(p);
+		if (!p.ray_sampler_)
+			p.ray_sampler_ = std::make_unique<RaySampler>(ray_params, torch::kCPU);
+		else
+		{
+			p.ray_sampler_->set_params(ray_params);
+			p.ray_sampler_->set_device(torch::kCPU);
+		}
+		auto [bbox_min, bbox_max] = compute_sampling_bbox(p);
+		std::cout << "Surface sampling bbox: min(" << bbox_min.transpose() << "), max(" << bbox_max.transpose() << ")"
+				  << std::endl;
+
+		auto traits =
+			RaySamplerConfig::make(*selected_surface_, s_pos.get(), surface_bvh_.get(), &surface_bvh_faces_);
+		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
+			traits, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max);
+
+		if (p.preprocss_sample_points_)
+			pre_process_sampling_points(p, sampled_points);
+		if (sampled_points.empty())
+		{
+			std::cerr << "Failed to sample points on alpha level set." << std::endl;
+			return;
+		}
+
+		std::cout << "Successfully sampled " << sampled_points.size() << " points." << std::endl;
+		if (p.samples_mesh_)
+			points_provider_->clear_mesh(*p.samples_mesh_);
+		p.samples_jitter_backup_valid_ = false;
+		p.samples_position_backup_.clear();
+		p.samples_normal_backup_.clear();
+		for (const Vec3& pt : sampled_points)
+		{
+			PVertex v = add_vertex(*p.samples_mesh_);
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			(*p.samples_position_)[v_idx] = pt;
+		}
+
+		std::cout << "Computing normals from surface mesh..." << std::endl;
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			const Vec3& pos = (*p.samples_position_)[v_idx];
+			std::pair<uint32, Vec3> cp;
+			surface_bvh_->closest_point(pos, &cp);
+			SFace face = surface_bvh_faces_[cp.first];
+			Vec3 n = geometry::normal(*selected_surface_, face, s_pos.get());
+			if (n.squaredNorm() < Scalar(1e-12))
+				n = Vec3(0, 0, 1);
+			else
+				n.normalize();
+			(*p.samples_normal_)[v_idx] = n;
+			(*p.samples_normal_color_)[v_idx] =
+				Vec4((n.x() + 1.0) * 0.5, (n.y() + 1.0) * 0.5, (n.z() + 1.0) * 0.5, 1.0);
+
+			return true;
+		});
+
+		std::cout << "Building KDTree for sampled points..." << std::endl;
+		build_kdtree(p);
+		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
+	}
+
+	void load_alpha_samples_to_mesh_impl(PointsParameters& p, size_t num_points, geometry::RaySamplerPointCloud)
+	{
+		if (!p.input_kdtree_)
+		{
+			std::cerr << "Input point cloud KDTree not available. Cannot sample alpha level set." << std::endl;
+			return;
+		}
+		if (!p.normal_ || !p.knn_)
+		{
+			std::cerr << "Input point cloud normals/KNN not available. Cannot sample alpha level set." << std::endl;
+			return;
+		}
+
+		p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
+
+		RaySamplerParams ray_params = make_ray_params(p);
+		if (!p.ray_sampler_)
+			p.ray_sampler_ = std::make_unique<RaySampler>(ray_params, torch::kCPU);
+		else
+		{
+			p.ray_sampler_->set_params(ray_params);
+			p.ray_sampler_->set_device(torch::kCPU);
+		}
+		auto [bbox_min, bbox_max] = compute_sampling_bbox(p);
+		std::cout << "Point cloud sampling bbox: min(" << bbox_min.transpose() << "), max(" << bbox_max.transpose()
+				  << ")" << std::endl;
+
+		auto traits = RaySamplerConfig::make(*p.points_, p.position_.get(), p.normal_.get(), p.knn_.get(),
+											 p.input_kdtree_, &p.input_kdtree_vertices_);
+		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
+			traits, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max);
+
+		if (p.preprocss_sample_points_)
+			pre_process_sampling_points(p, sampled_points);
+		if (sampled_points.empty())
+		{
+			std::cerr << "Failed to sample points on alpha level set." << std::endl;
+			return;
+		}
+
+		std::cout << "Successfully sampled " << sampled_points.size() << " points." << std::endl;
+		if (p.samples_mesh_)
+			points_provider_->clear_mesh(*p.samples_mesh_);
+		p.samples_jitter_backup_valid_ = false;
+		p.samples_position_backup_.clear();
+		p.samples_normal_backup_.clear();
+		for (const Vec3& pt : sampled_points)
+		{
+			PVertex v = add_vertex(*p.samples_mesh_);
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			(*p.samples_position_)[v_idx] = pt;
+		}
+
+		std::cout << "Computing normals from input point cloud..." << std::endl;
+		const Scalar eps = Scalar(1e-12);
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			const Vec3& pos = (*p.samples_position_)[v_idx];
+			std::pair<uint32, Scalar> knn_res;
+			p.input_kdtree_->find_nn(pos, &knn_res);
+			
+			uint32 idx = knn_res.first;
+			PVertex vn = p.input_kdtree_vertices_[idx];
+			uint32 vn_idx = index_of(*p.points_, vn);
+			Vec3 n = pos - (*p.position_)[vn_idx];
+			n.normalize();
+			(*p.samples_normal_)[v_idx] = n;
+			(*p.samples_normal_color_)[v_idx] =
+				Vec4((n.x() + 1.0) * 0.5, (n.y() + 1.0) * 0.5, (n.z() + 1.0) * 0.5, 1.0);
+		
+			return true;
+		});
+
+		std::cout << "Building KDTree for sampled points..." << std::endl;
+		build_kdtree(p);
+		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
 		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
 	}
 
@@ -698,88 +883,6 @@ public:
 	}
 
 public:
-	// --- Surface Sampling (CGAL) ---
-	void sample_surface_to_points(SURFACE& surface, POINTS& points, int num_samples)
-	{
-		points_provider_->clear_mesh(points);
-
-		// 1. Convert CGoGN SURFACE to CGAL::Surface_mesh
-		CGAL_Mesh cgal_mesh;
-		//
-		// auto pos = cgogn::get_attribute<Vec3, SVertex>(surface, "position");
-
-		// std::unordered_map<uint32, CGAL_Mesh::Vertex_index> v_map;
-
-		//// Add vertices
-		// foreach_cell(surface, [&](SVertex v) {
-		//	uint32 v_idx = index_of(surface, v);
-		//	const Vec3& p = (*pos)[v_idx];
-		//	v_map[v_idx] = cgal_mesh.add_vertex(Point_3(p[0], p[1], p[2]));
-		//	return true;
-		// });
-
-		//// Add faces
-		// foreach_cell(surface, [&](SFace f) {
-		//	std::vector<CGAL_Mesh::Vertex_index> face_v;
-		//	foreach_incident_vertex(surface, f, [&](SVertex v) {
-		//		face_v.push_back(v_map[index_of(surface, v)]);
-		//		return true;
-		//	});
-		//
-		//	cgal_mesh.add_face(face_v);
-		//	return true;
-		// });
-		std::string filename = surface_provider_->mesh_filename(surface);
-		if (!filename.empty())
-		{
-			if (!CGAL::IO::read_polygon_mesh(filename, cgal_mesh) || cgal_mesh.is_empty())
-			{
-				std::cout << "Error loading CGAL surface mesh from file: " << filename << std::endl;
-			}
-		}
-		normalize_surface_mesh(cgal_mesh);
-
-		// 2. Sample mesh
-		std::vector<Point_3> sampled_points;
-
-		// Using simple random sampling on mesh
-		CGAL::Polygon_mesh_processing::sample_triangle_mesh(
-			cgal_mesh, std::back_inserter(sampled_points),
-			CGAL::parameters::number_of_points_per_area_unit(num_samples));
-
-		std::cout << "Sampled " << sampled_points.size() << " points from surface." << std::endl;
-
-		// 3. Store in POINTS mesh
-		auto p_pos = get_or_add_attribute<Vec3, PVertex>(points, "position");
-		auto p_norm = get_or_add_attribute<Vec3, PVertex>(
-			points, "normal"); // Need to compute normals if sampler doesn't give them
-
-		// For now, reconstruct normals using input mesh or sampler?
-		// The basic sampler might not give normals directly in the point vector.
-		// We can use a location map if provided, but for now let's just add points.
-		// NOTE: Ideally we want normals too. PMP::sample_triangle_mesh can take a property map for output,
-		// or we can estimate them later. For UDF training, input normals are important.
-
-		// Let's iterate and add points. We will re-compute normals using the source surface or simple estimation.
-		// Since we have the CGAL mesh, we can use AABB tree to get normals for sampled points?
-		// Or assume dense enough and use PCA later?
-		// "compute_input_normals" is called later in the pipeline usually?
-		// modify compute_point_cloud_normals to work on this input?
-
-		for (const auto& pt : sampled_points)
-		{
-			PVertex v = add_vertex(points);
-			uint32 v_idx = index_of(points, v);
-			(*p_pos)[v_idx] = Vec3(pt.x(), pt.y(), pt.z());
-		}
-
-		// Compute normals for the new input point cloud
-		// Since we just sampled from a surface, we can use the surface normals directly if we had a location map.
-		// Alternatively, just re-use the generic compute_pca_normal or rely on external processing.
-		// For robustness, let's just ensure the attribute exists.
-		// If the user wants precise surface normals, we'd need to use a different sampler overload.
-		points_provider_->emit_connectivity_changed(points);
-	}
 
 protected:
 	void init() override
@@ -814,6 +917,16 @@ protected:
 	}
 
 private:
+	static constexpr InputMode ray_sampler_input_mode()
+	{
+		if constexpr (std::is_same_v<RaySamplerTag, geometry::RaySamplerNeural>)
+			return INPUT_NEURAL_UDF;
+		else if constexpr (std::is_same_v<RaySamplerTag, geometry::RaySamplerSurface>)
+			return INPUT_SURFACE_MESH;
+		else
+			return INPUT_POINT_CLOUD;
+	}
+
 	void build_surface_bvh()
 	{
 		if (!selected_surface_ || !surface_provider_)
@@ -873,30 +986,6 @@ private:
 		surface_bvh_dirty_ = false;
 	}
 
-	// --- Initialization ---
-	void normalize_surface_mesh(CGAL_Mesh& mesh)
-	{
-		if (mesh.is_empty())
-			return;
-
-		CGAL::Bbox_3 bbox;
-		for (auto v : mesh.vertices())
-			bbox = bbox + mesh.point(v).bbox();
-
-		double cx = (bbox.xmin() + bbox.xmax()) / 2.0;
-		double cy = (bbox.ymin() + bbox.ymax()) / 2.0;
-		double cz = (bbox.zmin() + bbox.zmax()) / 2.0;
-		double max_dim = std::max({bbox.xmax() - bbox.xmin(), bbox.ymax() - bbox.ymin(), bbox.zmax() - bbox.zmin()});
-
-		for (auto v : mesh.vertices())
-		{
-			Point_3 p = mesh.point(v);
-			double nx = (p.x() - bbox.xmin()) / max_dim;
-			double ny = (p.y() - bbox.ymin()) / max_dim;
-			double nz = (p.z() - bbox.zmin()) / max_dim;
-			mesh.point(v) = Point_3(nx, ny, nz);
-		}
-	}
 	void init_points_data(POINTS& m)
 	{
 
@@ -924,6 +1013,7 @@ private:
 				return true;
 			});
 			p.input_kdtree_ = new acc::KDTree<3, uint32>(points);
+			compute_input_normals(p);
 		}
 
 		// Init Samples Mesh
@@ -1075,8 +1165,12 @@ private:
 			p.input_kdtree_->find_nns(pt, p.knn_k_, &knn_res);
 
 			std::vector<uint32> indices;
+			(*p.knn_)[v_idx].clear();
 			for (auto& res : knn_res)
+			{
 				indices.push_back(res.first);
+				(*p.knn_)[v_idx].push_back(p.input_kdtree_vertices_[res.first]);
+			}
 
 			(*p.normal_)[v_idx] = compute_pca_normal(*p.points_, *p.position_, indices, p.input_kdtree_vertices_);
 			return true;
@@ -2316,7 +2410,6 @@ private:
 
 		p.total_error_diff_ = std::abs(p.total_error_ - p.last_total_error_);
 		p.last_total_error_ = p.total_error_;
-		std::cout << "compute_spheres_error end" << std::endl;
 	}
 
 	void update_spheres_color(PointsParameters& p)
@@ -3629,8 +3722,6 @@ protected:
 		if (ImGui::CollapsingHeader("Sampling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
 			ImGui::Checkbox("Preprocess sample points", &p.preprocss_sample_points_);
-			if (p.input_mode_ == INPUT_NEURAL_UDF)
-			{
 				ImGui::InputFloat("Alpha", &p.alpha_, 0.001f, 0.1f, "%.4f");
 				ImGui::InputInt("Num Samples", &p.num_alpha_samples_, 1000, 10000);
 				ImGui::InputFloat("Grid Cell Size", &p.grid_cell_size_, 0.001f, 0.01f, "%.4f");
@@ -3657,27 +3748,6 @@ protected:
 				if (p.samples_mesh_)
 					ImGui::Text("Number of samples: %zu", nb_cells<PVertex>(*p.samples_mesh_));
 			}
-			else
-			{
-				ImGui::InputFloat("Alpha", &p.alpha_, 0.001f, 0.1f, "%.4f");
-				ImGui::InputFloat("Sample Radius", &p.sample_radius_, 0.0001f, 0.01f, "%.4f");
-				ImGui::SliderInt("Sample Iterations", &p.sample_iterations_, 10, 100);
-				ImGui::SliderInt("KNN for Normal", &p.knn_k_, 3, 50);
-
-				if (ImGui::Button("Sample Points"))
-					sample_points(p);
-				ImGui::SameLine();
-				if (ImGui::Button("Clear Samples"))
-				{
-					if (p.samples_mesh_)
-						points_provider_->clear_mesh(*p.samples_mesh_);
-					p.fitting_data_computed_ = false;
-					p.samples_jitter_backup_valid_ = false;
-					p.samples_position_backup_.clear();
-					p.samples_normal_backup_.clear();
-				}
-			}
-		}
 
 		bool has_samples = p.samples_mesh_ && nb_cells<PVertex>(*p.samples_mesh_) > 0;
 

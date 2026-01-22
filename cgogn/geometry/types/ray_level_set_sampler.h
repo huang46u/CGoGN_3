@@ -3,7 +3,6 @@
 
 #include <cgogn/core/utils/numerics.h>
 #include <cgogn/geometry/types/spatial_grid.h>
-#include <cgogn/geometry/types/neural_field_forward.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <algorithm>
@@ -13,6 +12,7 @@
 #include <random>
 #include <utility>
 #include <vector>
+#include <torch/torch.h>
 
 namespace cgogn
 {
@@ -20,6 +20,7 @@ namespace cgogn
 namespace geometry
 {
 
+template <typename Traits>
 class RayLevelSetSampler
 {
 public:
@@ -58,19 +59,38 @@ public:
 		device_ = device;
 	}
 
-	std::vector<Vec3> sample_alpha_level_set_rays(NeuralFieldForward& udf, size_t target_num_points,
+	std::vector<Vec3> sample_alpha_level_set_rays(Traits& traits, size_t target_num_points,
 												  SpatialGrid* spatial_grid, Scalar grid_cell_size,
 												  const Vec3& bbox_min, const Vec3& bbox_max,
 												  bool* used_sdf_filter = nullptr)
 	{
-		if (!udf.is_loaded())
+	
+		if constexpr (Traits::kUsesTorch)
 		{
-			std::cerr << "Neural UDF model not loaded." << std::endl;
-			return {};
+			set_device(traits.device());
+			return sample_alpha_level_set_rays_gpu(traits, target_num_points, spatial_grid, grid_cell_size, bbox_min,
+												   bbox_max, used_sdf_filter);
 		}
+		else
+		{
+			if (used_sdf_filter)
+				*used_sdf_filter = false;
+			return sample_alpha_level_set_rays_cpu(traits, target_num_points, spatial_grid, grid_cell_size, bbox_min,
+												   bbox_max);
+		}
+	}
 
-		set_device(udf.device());
+private:
+	static Vec3 clamp_point(const Vec3& p, const Vec3& bbox_min, const Vec3& bbox_max)
+	{
+		return p.cwiseMax(bbox_min).cwiseMin(bbox_max);
+	}
 
+	std::vector<Vec3> sample_alpha_level_set_rays_gpu(Traits& traits, size_t target_num_points,
+													  SpatialGrid* spatial_grid, Scalar grid_cell_size,
+													  const Vec3& bbox_min, const Vec3& bbox_max,
+													  bool* used_sdf_filter)
+	{
 		std::vector<Vec3> all_samples;
 		all_samples.reserve(target_num_points * 1.5);
 
@@ -99,7 +119,7 @@ public:
 			auto& t_max = buffers.t_max;
 
 			torch::Tensor X = O + t.unsqueeze(1) * D;
-			auto d_sdf = udf.forward_values_sdf_gpu(X);
+			auto d_sdf = traits.eval_values_sdf(X);
 			torch::Tensor d = d_sdf.first;
 			torch::Tensor sdf = d_sdf.second;
 			const bool has_sdf = sdf.defined();
@@ -139,7 +159,7 @@ public:
 					for (int64_t i = 0; i < hit_X.size(0); ++i)
 					{
 						Vec3 pt(hit_acc[i][0], hit_acc[i][1], hit_acc[i][2]);
-						pt = pt.cwiseMax(0.0).cwiseMin(1.0);
+						pt = clamp_point(pt, bbox_min, bbox_max);
 
 						if (!spatial_grid || spatial_grid->is_valid_sample(pt, grid_cell_size, all_samples))
 						{
@@ -162,7 +182,7 @@ public:
 					p_near = p_near + step_size.unsqueeze(1) * D_near;
 					t_near = t_near + step_size;
 
-					auto d_sdf_near = udf.forward_values_sdf_gpu(p_near);
+					auto d_sdf_near = traits.eval_values_sdf(p_near);
 					torch::Tensor d_near = d_sdf_near.first;
 					torch::Tensor sdf_near = d_sdf_near.second;
 					if (!d_near.defined() || (has_sdf && !sdf_near.defined()))
@@ -213,7 +233,7 @@ public:
 				p_far = p_far + step_size.unsqueeze(1) * D_far;
 				t_far = t_far + step_size;
 
-				auto d_sdf_far = udf.forward_values_sdf_gpu(p_far);
+				auto d_sdf_far = traits.eval_values_sdf(p_far);
 				torch::Tensor d_far = d_sdf_far.first;
 				torch::Tensor sdf_far = d_sdf_far.second;
 				if (!d_far.defined() || (has_sdf && !sdf_far.defined()))
@@ -250,7 +270,102 @@ public:
 		return all_samples;
 	}
 
-private:
+	std::vector<Vec3> sample_alpha_level_set_rays_cpu(Traits& traits, size_t target_num_points,
+													  SpatialGrid* spatial_grid, Scalar grid_cell_size,
+													  const Vec3& bbox_min, const Vec3& bbox_max)
+	{
+		std::vector<Vec3> all_samples;
+		all_samples.reserve(target_num_points * 1.5);
+
+		std::mt19937 gen(params_.seed);
+		const Scalar eps = std::max(Scalar(1e-5), params_.tol);
+		const int max_steps = std::max(1, params_.max_iterations);
+		const int check_interval = 10;
+
+		for (int iter = 0; iter < params_.max_outer_iterations && all_samples.size() < target_num_points; ++iter)
+		{
+			auto rays = generate_rays(bbox_min, bbox_max, params_.batch_size, gen);
+			const int R = static_cast<int>(rays.size());
+			if (R == 0)
+				break;
+
+			std::cout << "Iteration " << iter << ": Processing " << R << " rays on CPU..." << std::endl;
+
+			std::vector<Scalar> t(static_cast<size_t>(R));
+			std::vector<Scalar> t_max(static_cast<size_t>(R));
+			for (int i = 0; i < R; ++i)
+			{
+				t[i] = rays[i].t_min;
+				t_max[i] = rays[i].t_max;
+			}
+			int active_count = R;
+			std::vector<Vec3> iter_samples;
+			for (int step = 0; step < max_steps; ++step)
+			{
+				if (step % check_interval == 0)
+				{
+					if (active_count == 0)
+						break;
+					std::cout << "    Step " << step << ": " << active_count << " active\r" << std::flush;
+				}
+
+				for (int i = 0; i < R; ++i)
+				{
+					if (t[i] >= t_max[i])
+						continue;
+
+					const Ray& ray = rays[i];
+					const Vec3 X = ray.origin + t[i] * ray.direction;
+					const Scalar udf = traits.eval_distance(X);
+					if (!std::isfinite(static_cast<double>(udf)))
+					{
+						t[i] = t_max[i];
+						continue;
+					}
+
+					const Scalar delta = std::abs(udf - params_.alpha);
+					if (delta < eps)
+					{
+						Vec3 pt = clamp_point(X, bbox_min, bbox_max);
+						if (!spatial_grid || spatial_grid->is_valid_sample(pt, grid_cell_size, all_samples))
+						{
+							iter_samples.push_back(pt);
+							all_samples.push_back(pt);
+							if (spatial_grid)
+								spatial_grid->insert(pt, static_cast<uint32>(all_samples.size() - 1));
+						}
+
+						const Scalar step_size = std::max(delta, eps * Scalar(0.5));
+						t[i] += step_size;
+					}
+					else
+					{
+						const Scalar step_size = std::max(delta / params_.step_bound, eps * Scalar(0.5));
+						t[i] += step_size;
+					}
+					if (t[i] >= t_max[i])
+						--active_count;
+					if (all_samples.size() >= target_num_points)
+						break;
+				}
+				if (all_samples.size() >= target_num_points)
+					break;
+			}
+
+			std::cout << std::endl;
+			std::cout << "  Collected " << iter_samples.size() << " unique samples this iteration" << std::endl;
+			std::cout << "  Total: " << all_samples.size() << " / " << target_num_points << std::endl;
+		}
+
+		if (all_samples.size() > target_num_points)
+		{
+			std::shuffle(all_samples.begin(), all_samples.end(), gen);
+			all_samples.resize(target_num_points);
+		}
+
+		return all_samples;
+	}
+
 	struct RayBatchBuffers
 	{
 		torch::Tensor O;

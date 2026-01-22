@@ -54,6 +54,92 @@ using PVertex = typename cgogn::mesh_traits<Points>::Vertex;
 
 using cgogn::geometry::Vec3;
 
+template <typename RaySamplerTag>
+int run_udf_training_app(const std::string& filename, const std::string& model_path, bool use_neural_udf,
+						 bool is_surface_file)
+{
+	cgogn::thread_start();
+
+	cgogn::ui::App app;
+	app.set_window_title("UDF Training");
+	app.set_window_size(1000, 800);
+
+	cgogn::ui::MeshProvider<Surface> mps(app);
+	cgogn::ui::MeshProvider<Points> mpp(app);
+	cgogn::ui::MeshProvider<NonManifold> mpnm(app);
+
+	cgogn::ui::SurfaceRender<Surface> sr(app);
+	cgogn::ui::PointCloudRender<Points> pcr(app);
+	cgogn::ui::SurfaceRender<NonManifold> srnm(app);
+
+	cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag> udf(app);
+
+	app.init_modules();
+
+	cgogn::ui::View* v1 = app.current_view();
+	v1->link_module(&mps);
+	v1->link_module(&mpp);
+	v1->link_module(&mpnm);
+	v1->link_module(&pcr);
+	v1->link_module(&sr);
+	v1->link_module(&srnm);
+	v1->link_module(&udf);
+
+	Points* p = nullptr;
+	if (is_surface_file)
+	{
+		std::cout << "Detected surface mesh file. Loading as Surface Mesh..." << std::endl;
+		Surface* s = mps.load_surface_from_file(filename);
+		if (!s)
+		{
+			std::cout << "Failed to load surface mesh." << std::endl;
+			return 1;
+		}
+
+		using SVertex = typename cgogn::mesh_traits<Surface>::Vertex;
+		auto s_pos = cgogn::get_attribute<Vec3, SVertex>(*s, "position");
+		mps.set_mesh_bb_vertex_position(*s, s_pos);
+		sr.set_vertex_position(*v1, *s, s_pos);
+			udf.set_selected_surface(*s);
+
+			p = mpp.add_mesh("input_points");
+			udf.set_selected_points(*p);
+		}
+	else
+	{
+		std::cout << "Loading as Point Cloud..." << std::endl;
+		p = mpp.load_points_from_file(filename);
+		if (!p)
+		{
+			std::cout << "File could not be loaded" << std::endl;
+			return 1;
+		}
+		auto p_vertex_position = cgogn::get_attribute<Vec3, PVertex>(*p, "position");
+		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
+
+		udf.set_selected_points(*p);
+		pcr.set_vertex_position(*v1, *p, p_vertex_position);
+	}
+
+	if (use_neural_udf)
+	{
+		std::cout << "=== Neural UDF Mode ===" << std::endl;
+		auto p_vertex_position = cgogn::get_or_add_attribute<Vec3, PVertex>(*p, "position");
+		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
+		udf.set_selected_points(*p);
+		udf.load_neural_udf_model(*p, model_path);
+
+		pcr.set_vertex_position(*v1, *p, p_vertex_position);
+		auto [bb_min, bb_max] = mpp.meshes_bb();
+		std::cout << "Loaded point cloud bounding box: min(" << bb_min.transpose() << "), max(" << bb_max.transpose()
+				  << ")" << std::endl;
+		std::cout << "Neural UDF model loaded. Use UI to sample alpha-level set." << std::endl;
+	}
+
+	app.background_color_ = cgogn::rendering::GLColor(0.5f, 0.5f, 0.5f, 1.0f);
+	return app.launch();
+}
+
 int main(int argc, char** argv)
 {
 	auto print_usage = [&](const char* exe_name) {
@@ -126,99 +212,14 @@ int main(int argc, char** argv)
 		print_usage(argv[0]);
 		return 1;
 	}
-
-	cgogn::thread_start();
-
-	cgogn::ui::App app;
-	app.set_window_title("UDF Training");
-	app.set_window_size(1000, 800);
-
-	cgogn::ui::MeshProvider<Surface> mps(app);
-	cgogn::ui::MeshProvider<Points> mpp(app);
-	cgogn::ui::MeshProvider<NonManifold> mpnm(app);
-
-	cgogn::ui::SurfaceRender<Surface> sr(app);
-	cgogn::ui::PointCloudRender<Points> pcr(app);
-	cgogn::ui::SurfaceRender<NonManifold> srnm(app);
-
-	cgogn::ui::UDFTraining<Surface, Points, NonManifold> udf(app);
-
-	app.init_modules();
-
-	cgogn::ui::View* v1 = app.current_view();
-	v1->link_module(&mps);
-	v1->link_module(&mpp);
-	v1->link_module(&mpnm);
-	v1->link_module(&pcr);
-	v1->link_module(&sr);
-	v1->link_module(&srnm);
-	v1->link_module(&udf);
-
-	Points* p = nullptr;
-	
-	// Check file extension
 	std::string ext = filename.substr(filename.find_last_of(".") + 1);
 	std::transform(ext.begin(), ext.end(), ext.begin(),
 				   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-	if (ext != "ply")
-	{
-		std::cout << "Detected surface mesh file. Loading as Surface Mesh..." << std::endl;
-		Surface* s = mps.load_surface_from_file(filename);
-		if (!s)
-		{
-			std::cout << "Failed to load surface mesh." << std::endl;
-			return 1;
-		}
+	const bool is_surface_file = (ext != "ply");
 
-		// Setup Surface Render
-		using SVertex = typename cgogn::mesh_traits<Surface>::Vertex;
-		auto s_pos = cgogn::get_attribute<Vec3, SVertex>(*s, "position");
-		mps.set_mesh_bb_vertex_position(*s, s_pos);
-		sr.set_vertex_position(*v1, *s, s_pos);
-		udf.set_selected_surface(*s);
-		p = mpp.add_mesh("input_points");
-		if (!use_neural_udf)
-		{
-			// Sample Points from Surface
-			std::cout << "Sampling input point cloud directly from surface..." << std::endl;
-			udf.sample_surface_to_points(*s, *p, 100000);
-		}
-	}
-	else
-	{
-		std::cout << "Loading as Point Cloud..." << std::endl;
-		p = mpp.load_points_from_file(filename);
-		if (!p)
-		{
-			std::cout << "File could not be loaded" << std::endl;
-			return 1;
-		}
-		auto p_vertex_position = cgogn::get_attribute<Vec3, PVertex>(*p, "position");
-		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
-
-		udf.set_selected_points(*p);
-
-		pcr.set_vertex_position(*v1, *p, p_vertex_position);
-
-	}
-	
 	if (use_neural_udf)
-	{
-		std::cout << "=== Neural UDF Mode ===" << std::endl;
-		auto p_vertex_position = cgogn::get_or_add_attribute<Vec3, PVertex>(*p, "position");
-		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
-		// print bounding box of point_cloud
-		udf.set_selected_points(*p);
-		udf.load_neural_udf_model(*p, model_path);
-	
-		
-		pcr.set_vertex_position(*v1, *p, p_vertex_position);
-		auto [bb_min, bb_max] = mpp.meshes_bb();
-		std::cout << "Loaded point cloud bounding box: min(" << bb_min.transpose() << "), max(" << bb_max.transpose()
-				  << ")" << std::endl;
-		std::cout << "Neural UDF model loaded. Use UI to sample alpha-level set." << std::endl;
-	}
-	app.background_color_ = cgogn::rendering::GLColor(0.5f, 0.5f, 0.5f, 1.0f);
-
-	return app.launch();
+		return run_udf_training_app<cgogn::geometry::RaySamplerNeural>(filename, model_path, true, is_surface_file);
+	if (is_surface_file)
+		return run_udf_training_app<cgogn::geometry::RaySamplerSurface>(filename, model_path, false, true);
+	return run_udf_training_app<cgogn::geometry::RaySamplerPointCloud>(filename, model_path, false, false);
 }
