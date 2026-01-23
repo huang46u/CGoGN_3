@@ -175,6 +175,12 @@ private:
 		std::shared_ptr<PAttribute<Scalar>> samples_error_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> samples_color_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> samples_normal_color_ = nullptr;
+		std::shared_ptr<PAttribute<Vec4>> samples_knn_color_ = nullptr;
+		bool show_knn_hover_ = false;
+		bool knn_hover_locked_ = false;
+		PVertex hovered_sample_;
+		std::vector<uint32> hovered_color_indices_;
+		std::vector<Vec4> hovered_color_backup_;
 		std::vector<Vec3> samples_position_backup_;
 		std::vector<Vec3> samples_normal_backup_;
 		bool samples_jitter_backup_valid_ = false;
@@ -517,6 +523,8 @@ public:
 			PVertex v = add_vertex(*p.samples_mesh_);
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			(*p.samples_position_)[v_idx] = pt;
+			if (p.samples_knn_color_)
+				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
 		}
 
 		std::cout << "Computing normals from UDF gradients..." << std::endl;
@@ -611,6 +619,8 @@ public:
 			PVertex v = add_vertex(*p.samples_mesh_);
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			(*p.samples_position_)[v_idx] = pt;
+			if (p.samples_knn_color_)
+				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
 		}
 
 		std::cout << "Computing normals from surface mesh..." << std::endl;
@@ -689,6 +699,8 @@ public:
 			PVertex v = add_vertex(*p.samples_mesh_);
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			(*p.samples_position_)[v_idx] = pt;
+			if (p.samples_knn_color_)
+				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
 		}
 
 		std::cout << "Computing normals from input point cloud..." << std::endl;
@@ -907,6 +919,9 @@ protected:
 		non_manifold_provider_ = static_cast<ui::MeshProvider<NONMANIFOLD>*>(
 			app_.module("MeshProvider (" + std::string{mesh_traits<NONMANIFOLD>::name} + ")"));
 
+		pcr_ = static_cast<PointCloudRender<POINTS>*>(
+			app_.module("PointCloudRender (" + std::string{mesh_traits<POINTS>::name} + ")"));
+
 		timer_connection_ = boost::synapse::connect<App::timer_tick>(&app_, [this]() {
 			if (selected_points_)
 			{
@@ -1050,6 +1065,7 @@ private:
 		p.samples_error_ = get_or_add_attribute<Scalar, PVertex>(*p.samples_mesh_, "error");
 		p.samples_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_mesh_, "color");
 		p.samples_normal_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_mesh_, "normal_color");
+		p.samples_knn_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_mesh_, "knn_color");
 
 		// Init Spheres Mesh
 		std::string sphere_name = points_provider_->mesh_name(m) + "_spheres";
@@ -1176,7 +1192,7 @@ private:
 			uint32 v_idx = index_of(*p.points_, v);
 			const Vec3& pt = (*p.position_)[v_idx];
 			std::vector<std::pair<uint32, Scalar>> knn_res;
-			p.input_kdtree_->find_nns(pt, p.knn_k_, &knn_res);
+			p.input_kdtree_->find_nns(pt, p.knn_k_+1, &knn_res);
 
 			std::vector<uint32> indices;
 			(*p.knn_)[v_idx].clear();
@@ -1200,7 +1216,7 @@ private:
 		const Vec3& n = (*p.normal_)[v_idx];
 
 		std::vector<std::pair<uint32, Scalar>> knn_res;
-		kdtree.find_nns(pt, p.knn_k_, &knn_res);
+		kdtree.find_nns(pt, p.knn_k_+1, &knn_res);
 
 		Vec3 avg_n(0, 0, 0);
 		for (auto& res : knn_res)
@@ -1224,16 +1240,44 @@ private:
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			const Vec3& pt = (*p.samples_position_)[v_idx];
 			std::vector<std::pair<uint32, Scalar>> knn_res;
-			p.samples_kdtree_->find_nns(pt, p.knn_k_, &knn_res);
+			p.samples_kdtree_->find_nns(pt, p.knn_k_+1, &knn_res);
 
 			(*p.samples_knn_)[v_idx].clear();
 			Scalar sum_dist = 0.0;
+			const Scalar eps = Scalar(1e-12);
+			float band = p.alpha_;
+			Vec3 n = (*p.samples_normal_)[v_idx];
+			const Scalar n2 = n.squaredNorm();
+			if (n2 > eps)
+				n /= std::sqrt(n2);
+			else
+				n = Vec3(0, 0, 1);
+			uint32 kept = 0;
 			for (auto& res : knn_res)
 			{
 				if (p.samples_kdtree_vertices_[res.first] != v)
 				{
-					(*p.samples_knn_)[v_idx].push_back(p.samples_kdtree_vertices_[res.first]);
+					PVertex nb = p.samples_kdtree_vertices_[res.first];
+					uint32 nb_idx = index_of(*p.samples_mesh_, nb);
+					const Vec3& q = (*p.samples_position_)[nb_idx];
+					const Scalar dn = (q - pt).dot(n);
+					if (std::abs(dn) > band)
+						continue;
+					(*p.samples_knn_)[v_idx].push_back(nb);
 					sum_dist += res.second;
+					++kept;
+				}
+			}
+			if (kept == 0)
+			{
+				for (auto& res : knn_res)
+				{
+					if (p.samples_kdtree_vertices_[res.first] != v)
+					{
+						PVertex nb = p.samples_kdtree_vertices_[res.first];
+						(*p.samples_knn_)[v_idx].push_back(nb);
+						sum_dist += res.second;
+					}
 				}
 			}
 			// Normals are already computed/oriented in sample_points
@@ -3785,6 +3829,23 @@ protected:
 			return;
 		PointsParameters& p = points_parameters_[selected_points_];
 
+		if (key_code == GLFW_KEY_S && p.show_knn_hover_)
+		{
+			if (p.knn_hover_locked_)
+			{
+				clear_knn_hover(p);
+				p.knn_hover_locked_ = false;
+			}
+			else
+			{
+				update_knn_hover(view, p, view->mouse_x(), view->mouse_y(), true);
+				if (p.hovered_sample_.is_valid())
+					p.knn_hover_locked_ = true;
+			}
+			view->request_update();
+			return;
+		}
+
 		if (key_code == GLFW_KEY_G && view->control_pressed())
 		{
 			if (p.running_)
@@ -3850,6 +3911,107 @@ protected:
 		}
 	}
 
+	void mouse_move_event(View* view, int32 x, int32 y) override
+	{
+		if (!selected_points_)
+			return;
+		// No hover update: highlight is toggled by key press.
+	}
+
+	void clear_knn_hover(PointsParameters& p)
+	{
+		if (!p.samples_mesh_ || !p.samples_knn_color_)
+			return;
+		if (p.hovered_color_indices_.empty())
+			return;
+		for (size_t i = 0; i < p.hovered_color_indices_.size(); ++i)
+		{
+			uint32 v_idx = p.hovered_color_indices_[i];
+			if (v_idx < nb_cells<PVertex>(*p.samples_mesh_))
+				(*p.samples_knn_color_)[v_idx] = p.hovered_color_backup_[i];
+		}
+		p.hovered_color_indices_.clear();
+		p.hovered_color_backup_.clear();
+		p.hovered_sample_ = PVertex();
+		p.knn_hover_locked_ = false;
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_knn_color_.get());
+	}
+
+	void update_knn_hover(View* view, PointsParameters& p, int32 x, int32 y, bool force)
+	{
+		if (!p.show_knn_hover_)
+			return;
+		if (!force && !p.knn_hover_locked_)
+			return;
+		if (!p.samples_mesh_ || !p.samples_kdtree_ || !p.samples_position_ || !p.samples_knn_ ||
+			!p.samples_knn_color_)
+		{
+			clear_knn_hover(p);
+			return;
+		}
+
+		rendering::GLVec3d near_ = view->unproject(x, y, 0.0);
+		rendering::GLVec3d far_d = view->unproject(x, y, 1.0);
+		Vec3 A{near_.x(), near_.y(), near_.z()};
+		Vec3 B{far_d.x(), far_d.y(), far_d.z()};
+		Vec3 D = (B - A);
+		const Scalar d2 = D.squaredNorm();
+		if (d2 <= Scalar(1e-12))
+		{
+			clear_knn_hover(p);
+			return;
+		}
+
+		Scalar best_d2 = std::numeric_limits<Scalar>::max();
+		PVertex best_v;
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			const Vec3& pos = (*p.samples_position_)[v_idx];
+			Scalar dist2 = geometry::squared_distance_line_point(A, B, pos);
+			if (dist2 < best_d2)
+			{
+				best_d2 = dist2;
+				best_v = v;
+			}
+			return true;
+		});
+
+		if (!best_v.is_valid())
+		{
+			clear_knn_hover(p);
+			return;
+		}
+
+		if (p.hovered_sample_.is_valid() && best_v == p.hovered_sample_)
+			return;
+
+		clear_knn_hover(p);
+
+		uint32 best_idx = index_of(*p.samples_mesh_, best_v);
+		p.hovered_sample_ = best_v;
+
+		p.hovered_color_indices_.clear();
+		p.hovered_color_backup_.clear();
+
+		auto backup_color = [&](uint32 idx) {
+			p.hovered_color_indices_.push_back(idx);
+			p.hovered_color_backup_.push_back((*p.samples_knn_color_)[idx]);
+		};
+
+		backup_color(best_idx);
+		(*p.samples_knn_color_)[best_idx] = Vec4(1.0, 0.2, 0.2, 1.0);
+
+		const auto& neighbors = (*p.samples_knn_)[best_idx];
+		for (PVertex vn : neighbors)
+		{
+			uint32 vn_idx = index_of(*p.samples_mesh_, vn);
+			backup_color(vn_idx);
+			(*p.samples_knn_color_)[vn_idx] = Vec4(1.0, 1.0, 0.2, 1.0);
+		}
+
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_knn_color_.get());
+	}
+
 protected:
 	void left_panel() override
 	{
@@ -3907,6 +4069,22 @@ protected:
 			ImGui::InputInt("Batch Size", &p.batch_size_, 256, 1024);
 			ImGui::InputInt("Max Iterations", &p.udf_max_iterations_, 1000, 8000);
 			ImGui::InputFloat("Tolerance", &p.tol_, 0.0f, 0.0f, "%.6f");
+			ImGui::InputInt("KNN K", &p.knn_k_, 1, 5);
+			if (ImGui::Checkbox("Hover KNN", &p.show_knn_hover_))
+			{
+				if (!p.show_knn_hover_)
+				{
+					clear_knn_hover(p);
+					p.knn_hover_locked_ = false;
+					if (pcr_ && p.samples_mesh_)
+						pcr_->set_vertex_color(*app_.current_view(), *p.samples_mesh_, p.samples_color_);
+				}
+				else
+				{
+					if (pcr_ && p.samples_mesh_)
+						pcr_->set_vertex_color(*app_.current_view(), *p.samples_mesh_, p.samples_knn_color_);
+				}
+			}
 
 			if (ImGui::Button("Sample UDF"))
 			{
