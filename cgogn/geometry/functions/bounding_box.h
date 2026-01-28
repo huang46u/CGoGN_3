@@ -83,6 +83,31 @@ void rescale_centered(CONTAINER<VEC>& container, typename vector_traits<VEC>::Sc
 	}
 }
 
+template <template <typename VEC> typename CONTAINER, typename VEC>
+std::pair<VEC, typename vector_traits<VEC>::Scalar> normalize_centered(CONTAINER<VEC>& container)
+{
+	using Scalar = typename vector_traits<VEC>::Scalar;
+	const std::size_t dimension = vector_traits<VEC>::SIZE;
+
+	auto [bb_min, bb_max] = bounding_box(container);
+	VEC center = (bb_min + bb_max) * Scalar(0.5);
+	VEC range = bb_max - bb_min;
+
+	Scalar scale = Scalar(0);
+	for (std::size_t i = 0; i < dimension; ++i)
+	{
+		if (range[i] > scale)
+			scale = range[i];
+	}
+	if (scale <= std::numeric_limits<Scalar>::epsilon())
+		scale = Scalar(1);
+
+	for (VEC& v : container)
+		v = (v - center) / scale;
+
+	return {center, scale};
+}
+
 } // namespace geometry
 
 } // namespace cgogn

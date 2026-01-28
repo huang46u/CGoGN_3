@@ -56,7 +56,7 @@ using cgogn::geometry::Vec3;
 
 template <typename RaySamplerTag>
 int run_udf_training_app(const std::string& filename, const std::string& model_path, bool use_neural_udf,
-						 bool is_surface_file)
+						 bool is_surface_file, bool neural_is_mf)
 {
 	cgogn::thread_start();
 
@@ -127,7 +127,9 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 		auto p_vertex_position = cgogn::get_or_add_attribute<Vec3, PVertex>(*p, "position");
 		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
 		udf.set_selected_points(*p);
-		udf.load_neural_udf_model(*p, model_path);
+		udf.load_neural_udf_model(*p, model_path,
+								  neural_is_mf ? cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag>::NEURAL_MODEL_MF
+											   : cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag>::NEURAL_MODEL_UDF);
 
 		pcr.set_vertex_position(*v1, *p, p_vertex_position);
 		auto [bb_min, bb_max] = mpp.meshes_bb();
@@ -143,14 +145,17 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 int main(int argc, char** argv)
 {
 	auto print_usage = [&](const char* exe_name) {
-		std::cout << "Usage: " << exe_name << " <mesh_path> [model.pt]\n"
+		std::cout << "Usage: " << exe_name << " <mesh_path> [model.pt] [--neural-type udf|mf]\n"
 				  << "  <mesh_path>           Input mesh or point cloud file.\n"
 				  << "  model.pt              Optional Neural UDF model path.\n"
+				  << "  --neural-type udf|mf   Required when model.pt is provided.\n"
 				  << "  -h, --help             Show this help message.\n";
 	};
 
 	std::string model_path;
 	bool use_neural_udf = false;
+	bool neural_type_set = false;
+	bool neural_is_mf = false;
 	std::string filename;
 	bool invalid_args = false;
 	std::string invalid_reason;
@@ -181,6 +186,34 @@ int main(int argc, char** argv)
 				print_usage(argv[0]);
 				return 0;
 			}
+			if (arg.rfind("--neural-type", 0) == 0)
+			{
+				std::string value;
+				auto eq_pos = arg.find('=');
+				if (eq_pos != std::string::npos)
+					value = arg.substr(eq_pos + 1);
+				else if (i + 1 < argc)
+					value = std::string(argv[++i]);
+				else
+					value.clear();
+
+				if (value == "udf")
+				{
+					neural_type_set = true;
+					neural_is_mf = false;
+				}
+				else if (value == "mf")
+				{
+					neural_type_set = true;
+					neural_is_mf = true;
+				}
+				else
+				{
+					invalid_args = true;
+					invalid_reason = "Invalid value for --neural-type (use udf or mf).";
+				}
+				continue;
+			}
 			if (arg.find(".pt") != std::string::npos)
 			{
 				if (!model_path.empty())
@@ -206,6 +239,16 @@ int main(int argc, char** argv)
 			invalid_reason = "Unexpected argument: " + arg;
 		}
 	}
+	if (use_neural_udf && !neural_type_set)
+	{
+		invalid_args = true;
+		invalid_reason = "Missing --neural-type for neural model.";
+	}
+	if (!use_neural_udf && neural_type_set)
+	{
+		invalid_args = true;
+		invalid_reason = "--neural-type provided without model.pt.";
+	}
 	if (invalid_args)
 	{
 		std::cerr << "Invalid arguments: " << invalid_reason << std::endl;
@@ -218,8 +261,9 @@ int main(int argc, char** argv)
 	const bool is_surface_file = (ext != "ply");
 
 	if (use_neural_udf)
-		return run_udf_training_app<cgogn::geometry::RaySamplerNeural>(filename, model_path, true, is_surface_file);
+		return run_udf_training_app<cgogn::geometry::RaySamplerNeural>(filename, model_path, true, is_surface_file,
+																	  neural_is_mf);
 	if (is_surface_file)
-		return run_udf_training_app<cgogn::geometry::RaySamplerSurface>(filename, model_path, false, true);
-	return run_udf_training_app<cgogn::geometry::RaySamplerPointCloud>(filename, model_path, false, false);
+		return run_udf_training_app<cgogn::geometry::RaySamplerSurface>(filename, model_path, false, true, false);
+	return run_udf_training_app<cgogn::geometry::RaySamplerPointCloud>(filename, model_path, false, false, false);
 }

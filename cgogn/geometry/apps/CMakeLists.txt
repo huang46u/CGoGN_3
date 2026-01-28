@@ -114,6 +114,7 @@ function(cgogn_add_torch_executable target)
 
   target_link_libraries(${target}
     PRIVATE
+      cgogn::geometry
       cgogn::core
       cgogn::ui
       cgogn::io

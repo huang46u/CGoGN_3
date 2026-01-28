@@ -9,6 +9,7 @@
 #include <cgogn/geometry/algos/fitting.h>
 #include <cgogn/geometry/algos/length.h>
 #include <cgogn/geometry/algos/medial_axis.h>
+#include <cgogn/geometry/algos/normal.h>
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
 #include <cgogn/geometry/functions/bounding_box.h>
@@ -80,6 +81,7 @@ using geometry::Vec4;
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
 class UDFTraining : public ViewModule
 {
+public:	
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
 	using NMVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
 	using SVertex = typename mesh_traits<SURFACE>::Vertex;
@@ -95,6 +97,8 @@ class UDFTraining : public ViewModule
 	using PAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
 	template <typename T>
 	using NMAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
+	template <typename T>
+	using SAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
 	using K = CGAL::Exact_predicates_inexact_constructions_kernel;
 	using Point_3 = typename K::Point_3;
 	using NMFaceKey = std::array<uint32, 3>;
@@ -121,6 +125,11 @@ class UDFTraining : public ViewModule
 		INPUT_POINT_CLOUD,
 		INPUT_SURFACE_MESH,
 		INPUT_NEURAL_UDF
+	};
+	enum NeuralModelType : uint32
+	{
+		NEURAL_MODEL_UDF,
+		NEURAL_MODEL_MF
 	};
 
 private:
@@ -152,6 +161,9 @@ private:
 		bool neural_udf_loaded_ = false;
 		torch::jit::Module neural_udf_model_;
 		std::string neural_udf_model_path_ = "";
+		NeuralModelType neural_model_type_ = NEURAL_MODEL_UDF;
+		bool udf_input_normalized_ = false;
+		const void* udf_normalized_source_ = nullptr;
 
 		// Ray Sampling
 		std::unique_ptr<RaySampler> ray_sampler_;
@@ -263,11 +275,15 @@ private:
 		CorrectionMode sphere_correction_mode_ = CORRECT_ALWAYS;
 		DistanceMode distance_mode_ = SPHERE_EUCLIDEAN_DISTANCE;
 		bool use_gpu_spheres_ = true;
+		bool use_local_clusters_ = false;
 		bool auto_stop_ = false;
 		bool auto_split_ = false;
 		AutoSplitMode auto_split_mode_ = ERROR_THRESHOLD;
 		float32 auto_split_error_threshold_ = 0.00025f;
 		uint32 auto_split_max_nb_spheres_ = 50;
+		float32 auto_split_ratio_ = 0.2f;
+		uint32 auto_split_max_per_iter_error_ = 10;
+		uint32 auto_split_max_per_iter_max_ = 200;
 		bool error_as_spheres_color_ = false;
 		float32 spheres_transparency_ = 0.5f;
 		float32 sqem_update_lambda_ = 0.20f;
@@ -295,6 +311,12 @@ private:
 		float udf_lipschitz_ = 4.0f;
 		float udf_delta_enter_ = 0.003f;
 		int udf_max_iterations_ = 3000;
+		// MF medial axis search (neural)
+		float mf_search_radius_scale_ = 2.0f;
+		int mf_coarse_steps_ = 9;
+		int mf_refine_steps_ = 5;
+		int mf_newton_iters_ = 6;
+		float mf_newton_step_scale_ = 0.6f;
 
 		// State
 		Scalar total_error_ = 0.0;
@@ -381,7 +403,7 @@ public:
 		params.input_mode_ = ray_sampler_input_mode();
 	}
 
-	void load_neural_udf_model(POINTS& points, const std::string& model_path)
+	void load_neural_udf_model(POINTS& points, const std::string& model_path, NeuralModelType model_type)
 	{
 		PointsParameters& p = points_parameters_[&points];
 		if (!std::filesystem::exists(model_path))
@@ -396,6 +418,9 @@ public:
 			p.neural_udf_model_.eval();
 			p.neural_udf_loaded_ = true;
 			p.neural_udf_model_path_ = model_path;
+			p.neural_model_type_ = model_type;
+			p.udf_input_normalized_ = false;
+			p.udf_normalized_source_ = nullptr;
 			p.input_mode_ = INPUT_NEURAL_UDF;
 			std::cout << "Loaded neural UDF model from: " << model_path << std::endl;
 		}
@@ -435,6 +460,19 @@ public:
 	{
 		Vec3 bbox_min(0, 0, 0);
 		Vec3 bbox_max(1, 1, 1);
+		if (p.input_mode_ == INPUT_NEURAL_UDF)
+		{
+			if (p.neural_model_type_ == NEURAL_MODEL_UDF)
+			{
+				bbox_min = Vec3(-0.5, -0.5, -0.5);
+				bbox_max = Vec3(0.5, 0.5, 0.5);
+			}
+			else
+			{
+				bbox_min = Vec3(0, 0, 0);
+				bbox_max = Vec3(1, 1, 1);
+			}
+		}
 		auto bbox_valid = [&](const Vec3& min, const Vec3& max) {
 			return min[0] <= max[0] && min[1] <= max[1] && min[2] <= max[2];
 		};
@@ -470,6 +508,43 @@ public:
 		return {bbox_min, bbox_max};
 	}
 
+	void normalize_input_for_udf_model(PointsParameters& p)
+	{
+		const void* source = nullptr;
+		if (p.points_ && p.position_)
+			source = p.points_;
+		else if (selected_surface_)
+			source = selected_surface_;
+		else
+			return;
+
+		if (p.udf_input_normalized_ && p.udf_normalized_source_ == source)
+			return;
+
+		if (p.points_ && p.position_ && source == p.points_)
+		{
+			geometry::normalize_centered(*p.position_);
+			rebuild_input_kdtree(p);
+			compute_input_normals(p);
+			points_provider_->emit_attribute_changed(*p.points_, p.position_.get());
+			points_provider_->emit_attribute_changed(*p.points_, p.normal_.get());
+			invalidate_samples_after_input_change(p);
+		}
+		else if (selected_surface_ && surface_provider_)
+		{
+			auto s_pos = get_attribute<Vec3, SVertex>(*selected_surface_, "position");
+			if (s_pos)
+			{
+				geometry::normalize_centered(*s_pos.get());
+				surface_bvh_dirty_ = true;
+				surface_provider_->emit_attribute_changed(*selected_surface_, s_pos.get());
+			}
+		}
+
+		p.udf_input_normalized_ = true;
+		p.udf_normalized_source_ = source;
+	}
+
 	void load_alpha_samples_to_mesh_impl(PointsParameters& p, size_t num_points, geometry::RaySamplerNeural)
 	{
 		if (!p.neural_udf_loaded_)
@@ -483,6 +558,9 @@ public:
 
 		RaySamplerParams ray_params = make_ray_params(p);
 		NeuralFieldForward udf = make_neural_field_forward(p);
+		if (p.neural_model_type_ == NEURAL_MODEL_UDF)
+			normalize_input_for_udf_model(p);
+		auto [bbox_min, bbox_max] = compute_sampling_bbox(p);
 		if (!p.ray_sampler_)
 			p.ray_sampler_ = std::make_unique<RaySampler>(ray_params, udf.device());
 		else
@@ -490,7 +568,6 @@ public:
 			p.ray_sampler_->set_params(ray_params);
 			p.ray_sampler_->set_device(udf.device());
 		}
-		auto [bbox_min, bbox_max] = compute_sampling_bbox(p);
 		std::cout << "Neural sampling bbox: min(" << bbox_min.transpose() << "), max(" << bbox_max.transpose() << ")"
 				  << std::endl;
 		bool used_sdf_filter = false;
@@ -513,6 +590,36 @@ public:
 		}
 
 		std::cout << "Successfully sampled " << sampled_points.size() << " points." << std::endl;
+		{
+			const size_t check_n = std::min<size_t>(30, sampled_points.size());
+			if (check_n > 0)
+			{
+				std::vector<size_t> indices(sampled_points.size());
+				std::iota(indices.begin(), indices.end(), size_t(0));
+				std::mt19937 gen(p.seed_ + 1337);
+				std::shuffle(indices.begin(), indices.end(), gen);
+				std::vector<Vec3> check_points;
+				check_points.reserve(check_n);
+				for (size_t i = 0; i < check_n; ++i)
+					check_points.push_back(sampled_points[indices[i]]);
+
+				BatchUDFResult check_res = udf.forward_batch(check_points);
+				if (check_res.ok && check_res.values.size() == check_n)
+				{
+					std::cout << "UDF check (random " << check_n << "):" << std::endl;
+					for (size_t i = 0; i < check_n; ++i)
+					{
+						const Scalar v = check_res.values[i];
+						std::cout << "  " << i << ": udf=" << v << " |udf-alpha|=" << std::abs(v - p.alpha_)
+								  << std::endl;
+					}
+				}
+				else
+				{
+					std::cerr << "UDF check failed (forward_batch)." << std::endl;
+				}
+			}
+		}
 		if (p.samples_mesh_)
 			points_provider_->clear_mesh(*p.samples_mesh_);
 		p.samples_jitter_backup_valid_ = false;
@@ -631,10 +738,38 @@ public:
 			surface_bvh_->closest_point(pos, &cp);
 			SFace face = surface_bvh_faces_[cp.first];
 			Vec3 n = geometry::normal(*selected_surface_, face, s_pos.get());
+			if (surface_vertex_normal_)
+			{
+				std::array<SVertex, 3> vertices;
+				uint32 vi = 0;
+				foreach_incident_vertex(*selected_surface_, face, [&](SVertex sv) -> bool {
+					if (vi < vertices.size())
+						vertices[vi++] = sv;
+					return true;
+				});
+				if (vi == vertices.size())
+				{
+					const Vec3& p0 = value<Vec3>(*selected_surface_, s_pos, vertices[0]);
+					const Vec3& p1 = value<Vec3>(*selected_surface_, s_pos, vertices[1]);
+					const Vec3& p2 = value<Vec3>(*selected_surface_, s_pos, vertices[2]);
+					Scalar u = 0.0, v_bary = 0.0, w = 0.0;
+					cgogn::geometry::closest_point_in_triangle(cp.second, p0, p1, p2, u, v_bary, w);
+					const Vec3& n0 = value<Vec3>(*selected_surface_, surface_vertex_normal_, vertices[0]);
+					const Vec3& n1 = value<Vec3>(*selected_surface_, surface_vertex_normal_, vertices[1]);
+					const Vec3& n2 = value<Vec3>(*selected_surface_, surface_vertex_normal_, vertices[2]);
+					n = u * n0 + v_bary * n1 + w * n2;
+				}
+			}
 			if (n.squaredNorm() < Scalar(1e-12))
 				n = Vec3(0, 0, 1);
 			else
 				n.normalize();
+			Vec3 to_sample = pos - cp.second;
+			if (to_sample.squaredNorm() > Scalar(1e-12))
+			{
+				if (to_sample.dot(n) < Scalar(0))
+					n = -n;
+			}
 			(*p.samples_normal_)[v_idx] = n;
 			(*p.samples_normal_color_)[v_idx] =
 				Vec4((n.x() + 1.0) * 0.5, (n.y() + 1.0) * 0.5, (n.z() + 1.0) * 0.5, 1.0);
@@ -969,6 +1104,10 @@ private:
 		}
 
 		MeshData<SURFACE>& md = surface_provider_->mesh_data(*selected_surface_);
+
+		surface_vertex_normal_ = get_or_add_attribute<Vec3, SVertex>(*selected_surface_, "normal");
+		geometry::compute_normal<SVertex>(*selected_surface_, s_pos.get(), surface_vertex_normal_.get());
+		surface_provider_->emit_attribute_changed(*selected_surface_, surface_vertex_normal_.get());
 		uint32 nb_vertices = md.template nb_cells<SVertex>();
 		uint32 nb_faces = md.template nb_cells<SFace>();
 		if (nb_vertices == 0 || nb_faces == 0)
@@ -1123,9 +1262,88 @@ private:
 		std::cout << "Computing Initial Medial Axis..." << std::endl;
 		compute_initial_medial_axis(p);
 
+		if (p.neural_udf_loaded_ && p.samples_ma_position_)
+		{
+			NeuralFieldForward udf = make_neural_field_forward(p);
+			if (udf.is_loaded())
+			{
+				std::vector<Vec3> medial_positions;
+				medial_positions.reserve(nb_cells<PVertex>(*p.samples_mesh_));
+				foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+					uint32 v_idx = index_of(*p.samples_mesh_, v);
+					medial_positions.push_back((*p.samples_ma_position_)[v_idx]);
+					return true;
+				});
+
+				const size_t check_n = std::min<size_t>(30, medial_positions.size());
+				if (check_n > 0)
+				{
+					std::vector<size_t> indices(medial_positions.size());
+					std::iota(indices.begin(), indices.end(), size_t(0));
+					std::mt19937 gen(p.seed_ + 2024);
+					std::shuffle(indices.begin(), indices.end(), gen);
+
+					std::vector<Vec3> check_medial_points;
+					check_medial_points.reserve(check_n);
+					std::vector<Vec3> check_sample_points;
+					check_sample_points.reserve(check_n);
+					for (size_t i = 0; i < check_n; ++i)
+					{
+						size_t idx = indices[i];
+						check_medial_points.push_back(medial_positions[idx]);
+						check_sample_points.push_back((*p.samples_position_)[static_cast<uint32>(idx)]);
+					}
+
+					BatchUDFResult medial_res = udf.forward_batch_with_grad(check_medial_points);
+					BatchUDFResult sample_res = udf.forward_batch_with_grad(check_sample_points);
+					if (medial_res.ok && sample_res.ok && medial_res.values.size() == check_n &&
+						sample_res.values.size() == check_n && medial_res.gradients.size() == check_n &&
+						sample_res.gradients.size() == check_n)
+					{
+						std::cout << "Medial UDF check (random " << check_n << "):" << std::endl;
+						for (size_t i = 0; i < check_n; ++i)
+						{
+							const Scalar medial_udf = medial_res.values[i];
+							const Scalar sample_udf = sample_res.values[i];
+							const Scalar medial_grad_norm = medial_res.gradients[i].norm();
+							const Scalar sample_grad_norm = sample_res.gradients[i].norm();
+							std::cout << "  " << i << ": medial_udf=" << medial_udf << " | sample_udf=" << sample_udf
+									  << " | sample_udf-alpha=" << (sample_udf - p.alpha_)
+									  << " | medial_grad_norm=" << medial_grad_norm
+									  << " | sample_grad_norm=" << sample_grad_norm << std::endl;
+						}
+					}
+					else
+					{
+						std::cerr << "Medial UDF check failed (forward_batch)." << std::endl;
+					}
+				}
+			}
+		}
+
 		std::cout << "Fitting Data Computed." << std::endl;
 
 		p.fitting_data_computed_ = true;
+	}
+
+	static bool barycentric_coords(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, Scalar& u, Scalar& v,
+								   Scalar& w)
+	{
+		const Vec3 v0 = b - a;
+		const Vec3 v1 = c - a;
+		const Vec3 v2 = p - a;
+		const Scalar d00 = v0.dot(v0);
+		const Scalar d01 = v0.dot(v1);
+		const Scalar d11 = v1.dot(v1);
+		const Scalar d20 = v2.dot(v0);
+		const Scalar d21 = v2.dot(v1);
+		const Scalar denom = d00 * d11 - d01 * d01;
+		if (std::abs(denom) < Scalar(1e-20))
+			return false;
+		v = (d11 * d20 - d01 * d21) / denom;
+		w = (d00 * d21 - d01 * d20) / denom;
+		u = Scalar(1.0) - v - w;
+		return true;
 	}
 
 	void build_kdtree(PointsParameters& p)
@@ -1240,7 +1458,7 @@ private:
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			const Vec3& pt = (*p.samples_position_)[v_idx];
 			std::vector<std::pair<uint32, Scalar>> knn_res;
-			p.samples_kdtree_->find_nns(pt, p.knn_k_+1, &knn_res);
+			p.samples_kdtree_->find_nns(pt, p.knn_k_+10, &knn_res);
 
 			(*p.samples_knn_)[v_idx].clear();
 			Scalar sum_dist = 0.0;
@@ -1266,9 +1484,13 @@ private:
 					(*p.samples_knn_)[v_idx].push_back(nb);
 					sum_dist += res.second;
 					++kept;
+					if (kept >= p.knn_k_ +1)
+					{
+						break;
+					}
 				}
 			}
-			if (kept == 0)
+			if (kept == 0) // fall back
 			{
 				for (auto& res : knn_res)
 				{
@@ -1750,29 +1972,388 @@ private:
 	void compute_initial_medial_axis(PointsParameters& p)
 	{
 		uint32 total = nb_cells<PVertex>(*p.samples_mesh_);
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		const bool use_neural = (p.input_mode_ == INPUT_NEURAL_UDF && p.neural_udf_loaded_ && udf.is_loaded());
+		const bool mf_model = (p.neural_model_type_ == NEURAL_MODEL_MF);
 
-		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			const Vec3& pt = (*p.samples_position_)[v_idx];
-			const Vec3& n = (*p.samples_normal_)[v_idx];
+		if (use_neural && mf_model && p.samples_kdtree_)
+		{
+			const Scalar t_max = std::max<Scalar>(Scalar(0), p.mf_search_radius_scale_ * p.alpha_);
+			const int coarse_steps = std::max(1, p.mf_coarse_steps_);
+			const int refine_steps = std::max(1, p.mf_refine_steps_);
+			const Scalar coarse_step = (coarse_steps > 1) ? (t_max / Scalar(coarse_steps - 1)) : Scalar(0);
+			const size_t batch_size = 4096;
 
-			/*auto [c1, r1, q1] = cgogn::geometry::shrinking_ball_center<PVertex>(
-				pt, n, p.samples_kdtree_, p.samples_kdtree_vertices_, p.alpha_ * 1.5
-			);*/
+			std::vector<PVertex> vertices;
+			std::vector<Vec3> positions;
+			std::vector<Vec3> normals;
+			vertices.reserve(total);
+			positions.reserve(total);
+			normals.reserve(total);
 
-			auto c = pt - n * p.alpha_;
-			Scalar r = p.alpha_;
-			auto q = c - n * r;
-			std::pair<uint32, Scalar> knn_res;
-			p.samples_kdtree_->find_nn(q, &knn_res);
-			PVertex q1 = p.samples_kdtree_vertices_[knn_res.first];
+			foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+				uint32 v_idx = index_of(*p.samples_mesh_, v);
+				vertices.push_back(v);
+				positions.push_back((*p.samples_position_)[v_idx]);
+				normals.push_back((*p.samples_normal_)[v_idx]);
+				return true;
+			});
 
-			(*p.samples_ma_position_)[v_idx] = c;
-			(*p.samples_ma_radius_)[v_idx] = r;
-			(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q1);
+			std::vector<Scalar> best_t(positions.size(), Scalar(0));
+			std::vector<Scalar> best_val(positions.size(), std::numeric_limits<Scalar>::max());
 
-			return true;
-		});
+			if (t_max > Scalar(0) && coarse_steps > 1)
+			{
+				for (size_t base = 0; base < positions.size(); base += batch_size)
+				{
+					const size_t count = std::min(batch_size, positions.size() - base);
+					std::vector<Vec3> query;
+					query.reserve(count * coarse_steps);
+					for (size_t i = 0; i < count; ++i)
+					{
+						const Vec3& p0 = positions[base + i];
+						const Vec3& n = normals[base + i];
+						for (int k = 0; k < coarse_steps; ++k)
+						{
+							const Scalar t = coarse_step * Scalar(k);
+							query.push_back(p0 - n * t);
+						}
+					}
+
+					BatchUDFResult res = udf.forward_batch(query);
+					if (!res.ok || res.values.size() != query.size())
+					{
+						for (size_t i = 0; i < count; ++i)
+						{
+							best_t[base + i] = p.alpha_;
+							best_val[base + i] = std::numeric_limits<Scalar>::max();
+						}
+						continue;
+					}
+
+					for (size_t i = 0; i < count; ++i)
+					{
+						Scalar min_val = std::numeric_limits<Scalar>::max();
+						Scalar min_t = Scalar(0);
+						for (int k = 0; k < coarse_steps; ++k)
+						{
+							const Scalar v = res.values[i * coarse_steps + k];
+							if (v < min_val)
+							{
+								min_val = v;
+								min_t = coarse_step * Scalar(k);
+							}
+						}
+						best_val[base + i] = min_val;
+						best_t[base + i] = min_t;
+					}
+				}
+			}
+
+			if (refine_steps > 1 && coarse_step > Scalar(0))
+			{
+				for (size_t base = 0; base < positions.size(); base += batch_size)
+				{
+					const size_t count = std::min(batch_size, positions.size() - base);
+					std::vector<Vec3> query;
+					query.reserve(count * refine_steps);
+					std::vector<Scalar> t0s(count, Scalar(0));
+					std::vector<Scalar> t1s(count, Scalar(0));
+					for (size_t i = 0; i < count; ++i)
+					{
+						const Scalar t_center = best_t[base + i];
+						const Scalar t0 = std::max(Scalar(0), t_center - coarse_step);
+						const Scalar t1 = std::min(t_max, t_center + coarse_step);
+						t0s[i] = t0;
+						t1s[i] = t1;
+
+						const Vec3& p0 = positions[base + i];
+						const Vec3& n = normals[base + i];
+						for (int k = 0; k < refine_steps; ++k)
+						{
+							const Scalar t = t0 + (t1 - t0) * (Scalar(k) / Scalar(refine_steps - 1));
+							query.push_back(p0 - n * t);
+						}
+					}
+
+					BatchUDFResult res = udf.forward_batch(query);
+					if (!res.ok || res.values.size() != query.size())
+						continue;
+
+					for (size_t i = 0; i < count; ++i)
+					{
+						Scalar min_val = best_val[base + i];
+						Scalar min_t = best_t[base + i];
+						for (int k = 0; k < refine_steps; ++k)
+						{
+							const Scalar v = res.values[i * refine_steps + k];
+							if (v < min_val)
+							{
+								min_val = v;
+								min_t = t0s[i] + (t1s[i] - t0s[i]) * (Scalar(k) / Scalar(refine_steps - 1));
+							}
+						}
+						best_val[base + i] = min_val;
+						best_t[base + i] = min_t;
+					}
+				}
+			}
+
+			std::vector<Vec3> centers;
+			centers.resize(vertices.size());
+
+			std::vector<size_t> debug_indices;
+			const size_t check_n = std::min<size_t>(30, centers.size());
+			if (check_n > 0)
+			{
+				debug_indices.resize(centers.size());
+				std::iota(debug_indices.begin(), debug_indices.end(), size_t(0));
+				std::mt19937 gen(p.seed_ + 2024);
+				std::shuffle(debug_indices.begin(), debug_indices.end(), gen);
+				debug_indices.resize(check_n);
+			}
+
+			for (size_t i = 0; i < vertices.size(); ++i)
+			{
+				const Vec3& p0 = positions[i];
+				const Vec3& n = normals[i];
+				const Scalar t = best_t[i];
+				centers[i] = p0 - n * t;
+			}
+
+			const int newton_iters = std::max(0, p.mf_newton_iters_);
+			for (int iter = 0; iter < newton_iters; ++iter)
+			{
+				BatchUDFResult res = udf.forward_batch_with_grad(centers);
+				if (!res.ok || res.values.size() != centers.size() || res.gradients.size() != centers.size())
+				{
+					std::cerr << "Medial Newton refinement (MF) failed (forward_batch)." << std::endl;
+					break;
+				}
+				if (!debug_indices.empty())
+				{
+					std::cout << "MF Newton step " << iter << ":" << std::endl;
+					for (size_t i = 0; i < debug_indices.size(); ++i)
+					{
+						const Scalar v = res.values[debug_indices[i]];
+						std::cout << "  " << i << ": udf=" << v << std::endl;
+					}
+				}
+
+				std::vector<Vec3> step_normals;
+				step_normals.resize(centers.size());
+				for (size_t i = 0; i < centers.size(); ++i)
+				{
+					Vec3 n = res.gradients[i];
+					if (n.squaredNorm() > Scalar(0))
+						n.normalize();
+					else
+						n = normals[i];
+					step_normals[i] = n;
+				}
+
+				std::vector<Vec3> proposed;
+				proposed.reserve(centers.size());
+				for (size_t i = 0; i < centers.size(); ++i)
+					proposed.push_back(centers[i] -
+									   step_normals[i] * (res.values[i] * p.mf_newton_step_scale_));
+
+				BatchUDFResult res_new = udf.forward_batch(proposed);
+				const bool can_check = res_new.ok && res_new.values.size() == centers.size();
+				if (can_check)
+				{
+					for (size_t i = 0; i < centers.size(); ++i)
+					{
+						if (std::abs(res_new.values[i]) > std::abs(res.values[i]))
+						{
+							step_normals[i] = -step_normals[i];
+							proposed[i] = centers[i] +
+										  step_normals[i] * (res.values[i] * p.mf_newton_step_scale_);
+						}
+					}
+				}
+
+				// Optional SDF sign check (MF model only)
+				try
+				{
+					torch::Tensor points_cpu = torch::empty({static_cast<long>(proposed.size()), 3},
+															torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
+					auto acc = points_cpu.accessor<float, 2>();
+					for (size_t i = 0; i < proposed.size(); ++i)
+					{
+						acc[i][0] = static_cast<float>(proposed[i].x());
+						acc[i][1] = static_cast<float>(proposed[i].y());
+						acc[i][2] = static_cast<float>(proposed[i].z());
+					}
+
+					torch::Tensor points = points_cpu.to(udf.device());
+					auto sdf_pair = udf.forward_values_sdf_gpu(points);
+					torch::Tensor sdf = sdf_pair.second;
+					if (sdf.defined())
+					{
+						torch::Tensor sdf_cpu = sdf.to(torch::kCPU).contiguous();
+						auto sdf_acc = sdf_cpu.accessor<float, 1>();
+						for (size_t i = 0; i < proposed.size(); ++i)
+						{
+							if (sdf_acc[static_cast<long>(i)] > 0.0f)
+							{
+								step_normals[i] = -step_normals[i];
+								proposed[i] = centers[i] +
+											  step_normals[i] * (res.values[i] * p.mf_newton_step_scale_);
+							}
+						}
+					}
+				}
+				catch (const c10::Error&)
+				{
+					// ignore SDF check failures
+				}
+
+				centers.swap(proposed);
+				normals.swap(step_normals);
+			}
+
+			for (size_t i = 0; i < vertices.size(); ++i)
+			{
+				uint32 v_idx = index_of(*p.samples_mesh_, vertices[i]);
+				const Vec3& n = normals[i];
+				Vec3 c = centers[i];
+				Scalar r = p.alpha_;
+				Vec3 q = c - n * r;
+				std::pair<uint32, Scalar> knn_res;
+				p.samples_kdtree_->find_nn(q, &knn_res);
+				PVertex q1 = p.samples_kdtree_vertices_[knn_res.first];
+
+				(*p.samples_ma_position_)[v_idx] = c;
+				(*p.samples_ma_radius_)[v_idx] = r;
+				(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q1);
+			}
+		}
+		else
+		{
+			parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+				uint32 v_idx = index_of(*p.samples_mesh_, v);
+				const Vec3& pt = (*p.samples_position_)[v_idx];
+				const Vec3& n = (*p.samples_normal_)[v_idx];
+
+				/*auto [c1, r1, q1] = cgogn::geometry::shrinking_ball_center<PVertex>(
+					pt, n, p.samples_kdtree_, p.samples_kdtree_vertices_, p.alpha_ * 1.5
+				);*/
+
+				auto c = pt - n * p.alpha_;
+				Scalar r = p.alpha_;
+				auto q = c - n * r;
+				std::pair<uint32, Scalar> knn_res;
+				p.samples_kdtree_->find_nn(q, &knn_res);
+				PVertex q1 = p.samples_kdtree_vertices_[knn_res.first];
+
+				(*p.samples_ma_position_)[v_idx] = c;
+				(*p.samples_ma_radius_)[v_idx] = r;
+				(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q1);
+
+				return true;
+			});
+		}
+
+		if (use_neural && !mf_model && p.samples_kdtree_)
+		{
+			if (udf.is_loaded())
+			{
+				const int newton_iters = 5;
+				std::cout << "Refining medial positions with " << newton_iters << " Newton steps..." << std::endl;
+
+				std::vector<PVertex> vertices;
+				std::vector<Vec3> centers;
+				std::vector<Vec3> normals;
+				vertices.reserve(total);
+				centers.reserve(total);
+				normals.reserve(total);
+
+				foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+					uint32 v_idx = index_of(*p.samples_mesh_, v);
+					vertices.push_back(v);
+					centers.push_back((*p.samples_ma_position_)[v_idx]);
+					normals.push_back((*p.samples_normal_)[v_idx]);
+					return true;
+				});
+
+				std::vector<size_t> debug_indices;
+				const size_t check_n = std::min<size_t>(30, centers.size());
+				if (check_n > 0)
+				{
+					debug_indices.resize(centers.size());
+					std::iota(debug_indices.begin(), debug_indices.end(), size_t(0));
+					std::mt19937 gen(p.seed_ + 2024);
+					std::shuffle(debug_indices.begin(), debug_indices.end(), gen);
+					debug_indices.resize(check_n);
+				}
+
+				for (int iter = 0; iter < newton_iters; ++iter)
+				{
+					BatchUDFResult res = udf.forward_batch(centers);
+					if (!res.ok || res.values.size() != centers.size())
+					{
+						std::cerr << "Medial Newton refinement failed (forward_batch)." << std::endl;
+						break;
+					}
+					if (!debug_indices.empty())
+					{
+						std::vector<Vec3> debug_centers;
+						debug_centers.reserve(debug_indices.size());
+						for (size_t idx : debug_indices)
+							debug_centers.push_back(centers[idx]);
+						BatchUDFResult debug_res = udf.forward_batch_with_grad(debug_centers);
+						if (debug_res.ok && debug_res.values.size() == debug_indices.size() &&
+							debug_res.gradients.size() == debug_indices.size())
+						{
+							std::cout << "Newton step " << iter << " (medial):" << std::endl;
+							for (size_t i = 0; i < debug_indices.size(); ++i)
+							{
+								const Scalar v = debug_res.values[i];
+								const Scalar g = debug_res.gradients[i].norm();
+								std::cout << "  " << i << ": udf=" << v << " grad_norm=" << g << std::endl;
+							}
+						}
+					}
+
+					std::vector<Vec3> proposed;
+					proposed.reserve(centers.size());
+					for (size_t i = 0; i < centers.size(); ++i)
+						proposed.push_back(centers[i] - normals[i] * res.values[i]);
+
+					BatchUDFResult res_new = udf.forward_batch(proposed);
+					const bool can_check = res_new.ok && res_new.values.size() == centers.size();
+					for (size_t i = 0; i < centers.size(); ++i)
+					{
+						const Vec3 c_old = centers[i];
+						const Vec3 n = normals[i];
+						const Scalar v_old = res.values[i];
+						if (can_check && std::abs(res_new.values[i]) > std::abs(v_old))
+						{
+							normals[i] = -n;
+							centers[i] = c_old + n * v_old;
+						}
+						else
+						{
+							centers[i] = proposed[i];
+						}
+					}
+				}
+
+				for (size_t i = 0; i < vertices.size(); ++i)
+				{
+					uint32 v_idx = index_of(*p.samples_mesh_, vertices[i]);
+					(*p.samples_ma_position_)[v_idx] = centers[i];
+
+					const Scalar r = (*p.samples_ma_radius_)[v_idx];
+					Vec3 q = centers[i] - normals[i] * r;
+					std::pair<uint32, Scalar> knn_res;
+					p.samples_kdtree_->find_nn(q, &knn_res);
+					PVertex q1 = p.samples_kdtree_vertices_[knn_res.first];
+					(*p.samples_ma_secondary_vertex_)[v_idx] = *reinterpret_cast<PVertex*>(&q1);
+				}
+			}
+		}
 	}
 
 	void init_spheres(PointsParameters& p, uint32 max_nb_spheres)
@@ -2043,7 +2624,7 @@ private:
 		p.cluster_gpu_knn_k_ = p.knn_k_;
 	}
 
-	void compute_clusters(PointsParameters& p)
+	void compute_clusters_full(PointsParameters& p)
 	{
 		// clean cluster affectation
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
@@ -2122,6 +2703,105 @@ private:
 			return true;
 		});
 		// augment_insufficient_clusters(p);
+	}
+
+	void compute_clusters_local(PointsParameters& p)
+	{
+		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.spheres_, v);
+			(*p.spheres_cluster_)[v_index].clear();
+			(*p.spheres_cluster_area_)[v_index] = 0.0;
+			return true;
+		});
+
+		if (p.nb_spheres_ == 0)
+			return;
+		
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.samples_mesh_, v);
+
+			Scalar a = (*p.samples_area_)[v_index];
+			const Vec3& vp = (*p.samples_position_)[v_index];
+			PVertex cluster_sphere = (*p.samples_sphere_)[v_index];
+			if (!cluster_sphere.is_valid())
+			{
+				PVertex sphere = of_index<PVertex>(*p.spheres_, 0);
+				(*p.samples_sphere_)[v_index] = sphere;
+
+				std::lock_guard<std::mutex> lock(spheres_mutex_[0 % spheres_mutex_.size()]);
+				(*p.spheres_cluster_)[0].push_back(v);
+				(*p.spheres_cluster_area_)[0] += a;
+				return true;
+			}
+
+			uint32 cs_index = index_of(*p.spheres_, cluster_sphere);
+			auto neighbors_spheres = (*p.spheres_neighbor_clusters_)[cs_index];
+			neighbors_spheres.insert(cluster_sphere);
+
+			Scalar min_distance = std::numeric_limits<Scalar>::max();
+			PVertex closest_sphere;
+			uint32 closest_sphere_index;
+
+			for (PVertex pv : neighbors_spheres)
+			{
+				uint32 pv_index = index_of(*p.spheres_, pv);
+
+				const Vec3& center = (*p.spheres_position_)[pv_index];
+				Scalar radius = (*p.spheres_radius_)[pv_index];
+
+				Scalar dist = 0.0;
+				Scalar dist_other = 0.0;
+				switch (p.distance_mode_)
+				{
+				case SPHERE_EUCLIDEAN_DISTANCE: {
+					Scalar dist_sqem =
+						(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
+					dist_other = ((vp - center).norm() - radius);
+					dist_other *= dist_other;
+					dist_other *= a;
+					dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
+				}
+				break;
+
+				case LINE_QUADRIC_DISTANCE: {
+					Scalar dist_sqem =
+						(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
+					dist_other = (*p.samples_line_quadric_)[v_index].eval(center);
+					dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
+				}
+				break;
+
+				case PURE_EUCLIDEAN_DISTANCE: {
+					dist_other = ((vp - center).norm() - radius);
+					dist_other *= dist_other;
+					dist = dist_other * a;
+				}
+				break;
+				}
+				if (dist < min_distance)
+				{
+					min_distance = dist;
+					closest_sphere = pv;
+					closest_sphere_index = pv_index;
+				}
+			}
+
+			(*p.samples_sphere_)[v_index] = closest_sphere;
+
+			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
+			(*p.spheres_cluster_)[closest_sphere_index].push_back(v);
+			(*p.spheres_cluster_area_)[closest_sphere_index] += a;
+
+			return true;
+		});
+	}
+
+	void compute_clusters(PointsParameters& p)
+	{
+		if (p.use_local_clusters_)
+			compute_clusters_local(p);
+		else
+			compute_clusters_full(p);
 	}
 
 	void compute_clusters_gpu(PointsParameters& p, bool sync_cpu = true)
@@ -3135,7 +3815,8 @@ private:
 							   (*p.spheres_error_)[index_of(*p.spheres_, b)];
 					});
 
-					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * 0.2)), 10u);
+					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)),
+												  p.auto_split_max_per_iter_error_);
 					for (PVertex sphere : sorted_spheres)
 					{
 						uint32 s_index = index_of(*p.spheres_, sphere);
@@ -3177,8 +3858,9 @@ private:
 							   (*p.spheres_error_)[index_of(*p.spheres_, b)];
 					});
 
-					// uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * 0.2)), 100u);
-					uint32 to_split_max = std::max(0.5 * p.nb_spheres_, 1.0);
+					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)),
+												  p.auto_split_max_per_iter_max_);
+					//uint32 to_split_max = std::max(0.5 * p.nb_spheres_, 1.0);
 					for (PVertex sphere : sorted_spheres)
 					{
 						uint32 s_index = index_of(*p.spheres_, sphere);
@@ -3398,6 +4080,144 @@ private:
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
 	}
 
+	void inherit_sphere_neighbors(PointsParameters& p, PVertex parent, PVertex child)
+	{
+		if (!parent.is_valid() || !child.is_valid())
+			return;
+		if (p.nb_spheres_ == 2)
+		{
+			uint32 parent_index = index_of(*p.spheres_, parent);
+			uint32 child_index = index_of(*p.spheres_, child);
+			(*p.spheres_neighbor_clusters_)[parent_index].clear();
+			(*p.spheres_neighbor_clusters_)[child_index].clear();
+			(*p.spheres_neighbor_clusters_)[parent_index].insert(child);
+			(*p.spheres_neighbor_clusters_)[child_index].insert(parent);
+			return;
+		}
+		uint32 parent_index = index_of(*p.spheres_, parent);
+		uint32 child_index = index_of(*p.spheres_, child);
+
+		(*p.spheres_neighbor_clusters_)[child_index].clear();
+		(*p.spheres_neighbor_clusters_)[child_index].insert(parent);
+		for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[parent_index])
+		{
+			if (!neighbor.is_valid() || neighbor == child)
+				continue;
+			(*p.spheres_neighbor_clusters_)[child_index].insert(neighbor);
+			uint32 n_index = index_of(*p.spheres_, neighbor);
+			(*p.spheres_neighbor_clusters_)[n_index].insert(child);
+		}
+		(*p.spheres_neighbor_clusters_)[parent_index].insert(child);
+	}
+
+	void recompute_clusters_local_neighborhood(PointsParameters& p, PVertex center_sphere)
+	{
+		if (!center_sphere.is_valid() || p.nb_spheres_ == 0)
+			return;
+
+		const uint32 nb_samples = nb_cells<PVertex>(*p.samples_mesh_);
+		if (nb_samples == 0)
+			return;
+
+		uint32 center_index = index_of(*p.spheres_, center_sphere);
+
+		std::vector<PVertex> candidate_spheres;
+		candidate_spheres.push_back(center_sphere);
+		for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[center_index])
+		{
+			if (neighbor.is_valid())
+				candidate_spheres.push_back(neighbor);
+		}
+
+		std::vector<PVertex> samples;
+		samples.reserve(nb_samples);
+		std::vector<uint8_t> marked(nb_samples, 0);
+		for (PVertex sphere : candidate_spheres)
+		{
+			uint32 s_index = index_of(*p.spheres_, sphere);
+			for (PVertex v : (*p.spheres_cluster_)[s_index])
+			{
+				uint32 v_idx = index_of(*p.samples_mesh_, v);
+				if (v_idx >= nb_samples || marked[v_idx])
+					continue;
+				marked[v_idx] = 1;
+				samples.push_back(v);
+			}
+		}
+
+		for (PVertex sphere : candidate_spheres)
+		{
+			uint32 s_index = index_of(*p.spheres_, sphere);
+			(*p.spheres_cluster_)[s_index].clear();
+			(*p.spheres_cluster_area_)[s_index] = 0.0;
+		}
+
+		if (samples.empty())
+			return;
+
+		auto eval_distance = [&](uint32 v_index, const Vec3& vp, Scalar a, uint32 sphere_index) -> Scalar {
+			const Vec3& center = (*p.spheres_position_)[sphere_index];
+			Scalar radius = (*p.spheres_radius_)[sphere_index];
+			Scalar dist = 0.0;
+			Scalar dist_other = 0.0;
+			switch (p.distance_mode_)
+			{
+			case SPHERE_EUCLIDEAN_DISTANCE: {
+				Scalar dist_sqem =
+					(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
+				dist_other = ((vp - center).norm() - radius);
+				dist_other *= dist_other;
+				dist_other *= a;
+				dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
+			}
+			break;
+			case LINE_QUADRIC_DISTANCE: {
+				Scalar dist_sqem =
+					(*p.samples_quadric_)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
+				dist_other = (*p.samples_line_quadric_)[v_index].eval(center);
+				dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
+			}
+			break;
+			case PURE_EUCLIDEAN_DISTANCE: {
+				dist_other = ((vp - center).norm() - radius);
+				dist_other *= dist_other;
+				dist = dist_other * a;
+			}
+			break;
+			}
+			return dist;
+		};
+
+		for (PVertex v : samples)
+		{
+			uint32 v_index = index_of(*p.samples_mesh_, v);
+			Scalar a = (*p.samples_area_)[v_index];
+			const Vec3& vp = (*p.samples_position_)[v_index];
+
+			Scalar min_distance = std::numeric_limits<Scalar>::max();
+			PVertex closest_sphere;
+			uint32 closest_sphere_index = 0;
+
+			for (PVertex sphere : candidate_spheres)
+			{
+				uint32 s_index = index_of(*p.spheres_, sphere);
+				Scalar dist = eval_distance(v_index, vp, a, s_index);
+				if (dist < min_distance)
+				{
+					min_distance = dist;
+					closest_sphere = sphere;
+					closest_sphere_index = s_index;
+				}
+			}
+
+			if (!closest_sphere.is_valid())
+				continue;
+			(*p.samples_sphere_)[v_index] = closest_sphere;
+			(*p.spheres_cluster_)[closest_sphere_index].push_back(v);
+			(*p.spheres_cluster_area_)[closest_sphere_index] += a;
+		}
+	}
+
 protected:
 	void split_sphere(PointsParameters& p, PVertex sphere)
 	{
@@ -3441,6 +4261,8 @@ protected:
 				 0.5 + 0.5 * (rand() % 256) / 256.0, 1.0);
 
 		p.nb_spheres_++;
+		inherit_sphere_neighbors(p, sphere, new_sphere);
+		recompute_clusters_local_neighborhood(p, new_sphere);
 	}
 
 	//------------------------------//
@@ -4160,6 +4982,26 @@ protected:
 		}
 		else
 		{
+			ImGui::Separator();
+			ImGui::Text("MF Medial Axis (Neural)");
+			ImGui::SliderFloat("MF Search Radius xAlpha", &p.mf_search_radius_scale_, 0.1f, 5.0f, "%.2f");
+			ImGui::InputInt("MF Coarse Steps", &p.mf_coarse_steps_, 1, 5);
+			ImGui::InputInt("MF Refine Steps", &p.mf_refine_steps_, 1, 5);
+			ImGui::InputInt("MF Newton Iters", &p.mf_newton_iters_, 1, 5);
+			ImGui::SliderFloat("MF Newton Step", &p.mf_newton_step_scale_, 0.1f, 1.0f, "%.2f");
+			if (p.mf_search_radius_scale_ < 0.0f)
+				p.mf_search_radius_scale_ = 0.0f;
+			if (p.mf_coarse_steps_ < 1)
+				p.mf_coarse_steps_ = 1;
+			if (p.mf_refine_steps_ < 1)
+				p.mf_refine_steps_ = 1;
+			if (p.mf_newton_iters_ < 0)
+				p.mf_newton_iters_ = 0;
+			if (p.mf_newton_step_scale_ < 0.0f)
+				p.mf_newton_step_scale_ = 0.0f;
+			if (p.mf_newton_step_scale_ > 2.0f)
+				p.mf_newton_step_scale_ = 2.0f;
+
 			static uint32 init_max_nb_spheres = 1;
 			if (ImGui::Button("Compute Fitting Data"))
 			{
@@ -4228,6 +5070,9 @@ protected:
 							update_render_data(p);
 						}
 					}
+					ImGui::SameLine();
+					if (ImGui::Button(p.use_local_clusters_ ? "Cluster Mode: Neighbor" : "Cluster Mode: Global"))
+						p.use_local_clusters_ = !p.use_local_clusters_;
 					ImGui::SameLine();
 					if (ImGui::Button("Power Cluster"))
 					{
@@ -4312,10 +5157,18 @@ protected:
 						ImGui::SameLine();
 						ImGui::RadioButton("Max nb sphere", (int*)&p.auto_split_mode_, MAX_NB_SPHERES);
 						if (p.auto_split_mode_ == ERROR_THRESHOLD)
+						{
 							ImGui::SliderFloat("Threshold", &p.auto_split_error_threshold_, 0.0f, 1.0f, "%.6f",
 											   ImGuiSliderFlags_Logarithmic);
+							ImGui::SliderFloat("Split ratio", &p.auto_split_ratio_, 0.0f, 1.0f, "%.3f");
+							ImGui::InputScalar("Max split/iter", ImGuiDataType_U32, &p.auto_split_max_per_iter_error_);
+						}
 						else
+						{
 							ImGui::InputScalar("Nb spheres", ImGuiDataType_U32, &p.auto_split_max_nb_spheres_);
+							ImGui::SliderFloat("Split ratio", &p.auto_split_ratio_, 0.0f, 1.0f, "%.3f");
+							ImGui::InputScalar("Max split/iter", ImGuiDataType_U32, &p.auto_split_max_per_iter_max_);
+						}
 					}
 
 					if (ImGui::Checkbox("Error as color", &p.error_as_spheres_color_))
@@ -4373,6 +5226,7 @@ private:
 	std::vector<SFace> surface_bvh_faces_;
 	std::vector<SVertex> surface_bvh_vertices_;
 	std::vector<Vec3> surface_bvh_vertex_positions_;
+	std::shared_ptr<SAttribute<Vec3>> surface_vertex_normal_ = nullptr;
 	bool surface_bvh_dirty_ = false;
 
 	POINTS* selected_points_ = nullptr;

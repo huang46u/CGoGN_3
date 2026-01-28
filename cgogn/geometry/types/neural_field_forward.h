@@ -45,6 +45,16 @@ public:
 		return device_;
 	}
 
+	bool output_kind_known() const
+	{
+		return output_kind_ != OutputKind::Unknown;
+	}
+
+	bool is_mf_model() const
+	{
+		return output_kind_ == OutputKind::MFTuple;
+	}
+
 	//Forward a single point
 	Scalar forward_point(const Vec3& query_point) const
 	{
