@@ -24,7 +24,6 @@
 #include <cgogn/geometry/types/vector_traits.h>
 #include <cgogn/geometry/types/fast_winding_number_traits.h>
 #include <cgogn/geometry/types/fast_winding_number.h>
-#include <cgogn/geometry/torch/vmas_troch.h>
 
 
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
@@ -228,32 +227,6 @@ private:
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_not_normalized_ = nullptr;
 
-		// GPU cluster cache
-		bool cluster_gpu_dirty_ = true;
-		int64_t cluster_gpu_samples_ = 0;
-		int64_t cluster_gpu_spheres_ = 0;
-		torch::Device cluster_gpu_device_ = torch::kCPU;
-
-		torch::Tensor samples_pos_gpu_;
-		torch::Tensor samples_area_gpu_;
-		torch::Tensor samples_normal_gpu_;
-		torch::Tensor samples_knn_gpu_;
-		torch::Tensor samples_knn_pos_gpu_;
-		torch::Tensor samples_knn_normal_gpu_;
-		torch::Tensor samples_knn_area_gpu_;
-		torch::Tensor samples_cluster_gpu_;
-		torch::Tensor spheres_center_gpu_;
-		torch::Tensor spheres_radius_gpu_;
-		torch::Tensor samples_sqem_A_gpu_;
-		torch::Tensor samples_sqem_b_gpu_;
-		torch::Tensor samples_sqem_c_gpu_;
-
-		torch::Tensor samples_line_Q_gpu_;
-		int cluster_gpu_knn_k_ = 0;
-
-		std::vector<PVertex> samples_gpu_order_;
-		std::vector<PVertex> spheres_gpu_order_;
-
 		// Skeleton
 		NONMANIFOLD* skeleton_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_position_ = nullptr;
@@ -274,7 +247,6 @@ private:
 		bool sphere_correction_ = false;
 		CorrectionMode sphere_correction_mode_ = CORRECT_ALWAYS;
 		DistanceMode distance_mode_ = SPHERE_EUCLIDEAN_DISTANCE;
-		bool use_gpu_spheres_ = true;
 		bool use_local_clusters_ = false;
 		bool auto_stop_ = false;
 		bool auto_split_ = false;
@@ -304,7 +276,7 @@ private:
 		// Neural UDF Sampling
 		int num_alpha_samples_ = 200000;
 		int batch_size_ = 131064;	   // sample batch
-		float tol_ = 1e-5; // convergence tolerance
+		float tol_ = 1e-5f; // convergence tolerance
 
 		// Neural UDF ray sampling parameters
 		float udf_bbox_expand_ = 0.1f;
@@ -1260,7 +1232,7 @@ private:
 		std::cout << "Computing Quadrics..." << std::endl;
 		compute_quadrics(p);
 		std::cout << "Computing Initial Medial Axis..." << std::endl;
-		compute_initial_medial_axis(p);
+		compute_initial_medial_axis_shrinking_ball(p);
 
 		if (p.neural_udf_loaded_ && p.samples_ma_position_)
 		{
@@ -1324,26 +1296,6 @@ private:
 		std::cout << "Fitting Data Computed." << std::endl;
 
 		p.fitting_data_computed_ = true;
-	}
-
-	static bool barycentric_coords(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, Scalar& u, Scalar& v,
-								   Scalar& w)
-	{
-		const Vec3 v0 = b - a;
-		const Vec3 v1 = c - a;
-		const Vec3 v2 = p - a;
-		const Scalar d00 = v0.dot(v0);
-		const Scalar d01 = v0.dot(v1);
-		const Scalar d11 = v1.dot(v1);
-		const Scalar d20 = v2.dot(v0);
-		const Scalar d21 = v2.dot(v1);
-		const Scalar denom = d00 * d11 - d01 * d01;
-		if (std::abs(denom) < Scalar(1e-20))
-			return false;
-		v = (d11 * d20 - d01 * d21) / denom;
-		w = (d00 * d21 - d01 * d20) / denom;
-		u = Scalar(1.0) - v - w;
-		return true;
 	}
 
 	void build_kdtree(PointsParameters& p)
@@ -1470,7 +1422,7 @@ private:
 				n /= std::sqrt(n2);
 			else
 				n = Vec3(0, 0, 1);
-			uint32 kept = 0;
+			int kept = 0;
 			for (auto& res : knn_res)
 			{
 				if (p.samples_kdtree_vertices_[res.first] != v)
@@ -1640,7 +1592,6 @@ private:
 		p.fitting_data_computed_ = false;
 		p.samples_winding_number_.reset();
 		p.samples_wn_bvh_.reset();
-		p.cluster_gpu_dirty_ = true;
 		p.samples_jitter_backup_valid_ = false;
 		p.samples_position_backup_.clear();
 		p.samples_normal_backup_.clear();
@@ -1750,7 +1701,6 @@ private:
 		p.fitting_data_computed_ = false;
 		p.samples_winding_number_.reset();
 		p.samples_wn_bvh_.reset();
-		p.cluster_gpu_dirty_ = true;
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
 	}
 
@@ -1785,7 +1735,6 @@ private:
 		p.fitting_data_computed_ = false;
 		p.samples_winding_number_.reset();
 		p.samples_wn_bvh_.reset();
-		p.cluster_gpu_dirty_ = true;
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
 	}
@@ -1811,7 +1760,6 @@ private:
 		p.fitting_data_computed_ = false;
 		p.samples_winding_number_.reset();
 		p.samples_wn_bvh_.reset();
-		p.cluster_gpu_dirty_ = true;
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
@@ -1865,7 +1813,6 @@ private:
 		p.fitting_data_computed_ = false;
 		p.samples_winding_number_.reset();
 		p.samples_wn_bvh_.reset();
-		p.cluster_gpu_dirty_ = true;
 		p.samples_jitter_backup_valid_ = false;
 		p.samples_position_backup_.clear();
 		p.samples_normal_backup_.clear();
@@ -1968,6 +1915,58 @@ private:
 	}
 
 	// --- Shrinking Balls ---
+
+	void compute_initial_medial_axis_shrinking_ball(PointsParameters& p)
+	{
+		if (!p.samples_mesh_ || !p.samples_kdtree_ || !p.samples_position_ || !p.samples_normal_ ||
+			!p.samples_ma_position_ || !p.samples_ma_radius_ || !p.samples_ma_secondary_vertex_)
+			return;
+
+		const Scalar fallback_radius = p.alpha_;
+		const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(1.5), Scalar(0));
+		const Scalar min_norm = Scalar(1e-12);
+
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			const Vec3& pt = (*p.samples_position_)[v_idx];
+			Vec3 n = (*p.samples_normal_)[v_idx];
+
+			if (n.squaredNorm() > min_norm)
+				n.normalize();
+
+			Vec3 c = pt - n * fallback_radius;
+			Scalar r = fallback_radius;
+			PVertex secondary;
+
+			if (n.squaredNorm() > min_norm)
+			{
+				auto [c1, r1, q1] = geometry::shrinking_ball_center<PVertex>(
+					pt, n, p.samples_kdtree_, p.samples_kdtree_vertices_, initial_radius);
+
+				if (std::isfinite(static_cast<double>(r1)) && r1 > Scalar(0))
+				{
+					c = c1;
+					r = r1;
+					secondary = q1;
+					std::cout << "Shrinking ball init: r = " << r << std::endl;
+				}
+			}
+
+			if (!secondary.is_valid())
+			{
+				const Vec3 q = c - n * r;
+				std::pair<uint32, Scalar> knn_res;
+				p.samples_kdtree_->find_nn(q, &knn_res);
+				secondary = p.samples_kdtree_vertices_[knn_res.first];
+			}
+
+			(*p.samples_ma_position_)[v_idx] = c;
+			(*p.samples_ma_radius_)[v_idx] = r;
+			(*p.samples_ma_secondary_vertex_)[v_idx] = secondary;
+
+			return true;
+		});
+	}
 
 	void compute_initial_medial_axis(PointsParameters& p)
 	{
@@ -2444,184 +2443,10 @@ private:
 
 		remove_attribute<PVertex>(*p.samples_mesh_, covered);
 
-		compute_clusters(p);
+		compute_clusters_full(p);
 
 		if (!p.running_)
 			update_render_data(p);
-	}
-
-	void build_cluster_gpu_cache(PointsParameters& p)
-	{
-		const int64_t N = static_cast<int64_t>(nb_cells<PVertex>(*p.samples_mesh_));
-		const int64_t M = static_cast<int64_t>(nb_cells<PVertex>(*p.spheres_));
-		if (N == 0 || M == 0)
-			return;
-
-		const bool need_rebuild = p.cluster_gpu_dirty_ || !p.samples_pos_gpu_.defined() ||
-								  !p.spheres_center_gpu_.defined() || !p.samples_normal_gpu_.defined() ||
-								  !p.samples_knn_gpu_.defined() || !p.samples_knn_pos_gpu_.defined() ||
-								  !p.samples_knn_normal_gpu_.defined() || !p.samples_knn_area_gpu_.defined() ||
-								  p.cluster_gpu_samples_ != N || p.cluster_gpu_spheres_ != M ||
-								  p.cluster_gpu_device_ != device_ || p.cluster_gpu_knn_k_ != p.knn_k_;
-
-		if (!need_rebuild)
-			return;
-
-		p.cluster_gpu_samples_ = N;
-		p.cluster_gpu_spheres_ = M;
-		p.cluster_gpu_device_ = device_;
-		p.cluster_gpu_dirty_ = false;
-
-		auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-		if (device_.is_cuda())
-			cpu_opts = cpu_opts.pinned_memory(true);
-
-		// samples
-		p.samples_gpu_order_.clear();
-		p.samples_gpu_order_.reserve(N);
-
-		torch::Tensor samples_pos_cpu = torch::empty({N, 3}, cpu_opts);
-		torch::Tensor samples_area_cpu = torch::empty({N}, cpu_opts);
-		torch::Tensor samples_normal_cpu = torch::empty({N, 3}, cpu_opts);
-		torch::Tensor A_cpu = torch::empty({N, 4, 4}, cpu_opts);
-		torch::Tensor b_cpu = torch::empty({N, 4}, cpu_opts);
-		torch::Tensor c_cpu = torch::empty({N}, cpu_opts);
-		torch::Tensor Q_cpu = torch::empty({N, 4, 4}, cpu_opts);
-
-		auto knn_opts = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
-		if (device_.is_cuda())
-			knn_opts = knn_opts.pinned_memory(true);
-		const int64_t knn_k = std::max<int64_t>(0, p.knn_k_);
-		torch::Tensor samples_knn_cpu = torch::full({N, knn_k}, -1, knn_opts);
-
-		auto knn_val_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-		if (device_.is_cuda())
-			knn_val_opts = knn_val_opts.pinned_memory(true);
-		torch::Tensor samples_knn_pos_cpu = torch::zeros({N, knn_k, 3}, knn_val_opts);
-		torch::Tensor samples_knn_normal_cpu = torch::zeros({N, knn_k, 3}, knn_val_opts);
-		torch::Tensor samples_knn_area_cpu = torch::zeros({N, knn_k}, knn_val_opts);
-
-		auto pos_acc = samples_pos_cpu.accessor<float, 2>();
-		auto area_acc = samples_area_cpu.accessor<float, 1>();
-		auto normal_acc = samples_normal_cpu.accessor<float, 2>();
-		auto A_acc = A_cpu.accessor<float, 3>();
-		auto b_acc = b_cpu.accessor<float, 2>();
-		auto c_acc = c_cpu.accessor<float, 1>();
-		auto Q_acc = Q_cpu.accessor<float, 3>();
-		auto knn_acc = samples_knn_cpu.accessor<int64_t, 2>();
-		auto knn_pos_acc = samples_knn_pos_cpu.accessor<float, 3>();
-		auto knn_normal_acc = samples_knn_normal_cpu.accessor<float, 3>();
-		auto knn_area_acc = samples_knn_area_cpu.accessor<float, 2>();
-
-		int64_t i = 0;
-		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			const Vec3& pt = (*p.samples_position_)[v_idx];
-
-			// copy position
-			pos_acc[i][0] = static_cast<float>(pt.x());
-			pos_acc[i][1] = static_cast<float>(pt.y());
-			pos_acc[i][2] = static_cast<float>(pt.z());
-			// copy area
-			area_acc[i] = static_cast<float>((*p.samples_area_)[v_idx]);
-			// copy normal
-			Vec3 n = Vec3(0, 0, 1);
-			if (p.samples_normal_)
-				n = (*p.samples_normal_)[v_idx];
-			normal_acc[i][0] = static_cast<float>(n.x());
-			normal_acc[i][1] = static_cast<float>(n.y());
-			normal_acc[i][2] = static_cast<float>(n.z());
-
-			// copy knn indices (in sample index space)
-			if (knn_k > 0 && p.samples_knn_)
-			{
-				const auto& neighbors = (*p.samples_knn_)[v_idx];
-				const int64_t count = std::min<int64_t>(knn_k, neighbors.size());
-				for (int64_t j = 0; j < count; ++j)
-				{
-					uint32 n_idx = index_of(*p.samples_mesh_, neighbors[j]);
-					knn_acc[i][j] = static_cast<int64_t>(n_idx);
-					const Vec3& np = (*p.samples_position_)[n_idx];
-					Vec3 nn = Vec3(0, 0, 1);
-					if (p.samples_normal_)
-						nn = (*p.samples_normal_)[n_idx];
-					const Scalar na = (*p.samples_area_)[n_idx];
-
-					knn_pos_acc[i][j][0] = static_cast<float>(np.x());
-					knn_pos_acc[i][j][1] = static_cast<float>(np.y());
-					knn_pos_acc[i][j][2] = static_cast<float>(np.z());
-					knn_normal_acc[i][j][0] = static_cast<float>(nn.x());
-					knn_normal_acc[i][j][1] = static_cast<float>(nn.y());
-					knn_normal_acc[i][j][2] = static_cast<float>(nn.z());
-					knn_area_acc[i][j] = static_cast<float>(na);
-				}
-			}
-			// copy quadric
-
-			const Spherical_Quadric& sq = (*p.samples_quadric_)[v_idx];
-			const Quadric& lq = (*p.samples_line_quadric_)[v_idx].get_quadric();
-
-			// Spherical quadric
-			for (int r = 0; r < 4; ++r)
-			{
-				for (int c = 0; c < 4; ++c)
-					A_acc[i][r][c] = static_cast<float>(sq._A(r, c));
-				b_acc[i][r] = static_cast<float>(sq._b(r));
-			}
-			c_acc[i] = static_cast<float>(sq._c);
-
-			// Line quadric
-			Mat4 q_mat = lq.matrix();
-			for (int r = 0; r < 4; ++r)
-				for (int c = 0; c < 4; ++c)
-					Q_acc[i][r][c] = static_cast<float>(q_mat(r, c));
-
-			p.samples_gpu_order_.push_back(v);
-			++i;
-			return true;
-		});
-
-		// spheres
-		p.spheres_gpu_order_.clear();
-		p.spheres_gpu_order_.reserve(M);
-
-		torch::Tensor spheres_center_cpu = torch::empty({M, 3}, cpu_opts);
-		torch::Tensor spheres_radius_cpu = torch::empty({M}, cpu_opts);
-
-		auto cen_acc = spheres_center_cpu.accessor<float, 2>();
-		auto rad_acc = spheres_radius_cpu.accessor<float, 1>();
-
-		int64_t s = 0;
-		foreach_cell(*p.spheres_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.spheres_, v);
-			const Vec3& c = (*p.spheres_position_)[v_idx];
-			Scalar r = (*p.spheres_radius_)[v_idx];
-
-			cen_acc[s][0] = static_cast<float>(c.x());
-			cen_acc[s][1] = static_cast<float>(c.y());
-			cen_acc[s][2] = static_cast<float>(c.z());
-			rad_acc[s] = static_cast<float>(r);
-
-			p.spheres_gpu_order_.push_back(v);
-			++s;
-			return true;
-		});
-
-		const bool nonblocking = device_.is_cuda();
-		p.samples_pos_gpu_ = samples_pos_cpu.to(device_, nonblocking);
-		p.samples_area_gpu_ = samples_area_cpu.to(device_, nonblocking);
-		p.samples_normal_gpu_ = samples_normal_cpu.to(device_, nonblocking);
-		p.samples_knn_gpu_ = samples_knn_cpu.to(device_, nonblocking);
-		p.samples_knn_pos_gpu_ = samples_knn_pos_cpu.to(device_, nonblocking);
-		p.samples_knn_normal_gpu_ = samples_knn_normal_cpu.to(device_, nonblocking);
-		p.samples_knn_area_gpu_ = samples_knn_area_cpu.to(device_, nonblocking);
-		p.spheres_center_gpu_ = spheres_center_cpu.to(device_, nonblocking);
-		p.spheres_radius_gpu_ = spheres_radius_cpu.to(device_, nonblocking);
-		p.samples_sqem_A_gpu_ = A_cpu.to(device_, nonblocking);
-		p.samples_sqem_b_gpu_ = b_cpu.to(device_, nonblocking);
-		p.samples_sqem_c_gpu_ = c_cpu.to(device_, nonblocking);
-		p.samples_line_Q_gpu_ = Q_cpu.to(device_, nonblocking);
-		p.cluster_gpu_knn_k_ = p.knn_k_;
 	}
 
 	void compute_clusters_full(PointsParameters& p)
@@ -2740,7 +2565,7 @@ private:
 
 			Scalar min_distance = std::numeric_limits<Scalar>::max();
 			PVertex closest_sphere;
-			uint32 closest_sphere_index;
+			uint32 closest_sphere_index = INVALID_INDEX;
 
 			for (PVertex pv : neighbors_spheres)
 			{
@@ -2802,61 +2627,6 @@ private:
 			compute_clusters_local(p);
 		else
 			compute_clusters_full(p);
-	}
-
-	void compute_clusters_gpu(PointsParameters& p, bool sync_cpu = true)
-	{
-		
-		if (!device_.is_cuda())
-			return;	
-		const int64_t N = static_cast<int64_t>(nb_cells<PVertex>(*p.samples_mesh_));
-		const int64_t M = static_cast<int64_t>(nb_cells<PVertex>(*p.spheres_));
-
-		build_cluster_gpu_cache(p);
-
-		auto samples_pos = p.samples_pos_gpu_;	 // [N,3]
-		auto samples_area = p.samples_area_gpu_; // [N]
-		auto centers = p.spheres_center_gpu_;	 // [M,3]
-		auto radius = p.spheres_radius_gpu_;	 // [M]
-		const int64_t chunk_size = 1024;
-		auto result = cgogn::geometry::vmas_troch::compute_clusters_gpu(
-			samples_pos, samples_area, centers, radius, p.samples_sqem_A_gpu_, p.samples_sqem_b_gpu_,
-			p.samples_sqem_c_gpu_, p.samples_line_Q_gpu_, static_cast<int64_t>(p.distance_mode_),
-			static_cast<float>(p.sqem_clustering_lambda_), chunk_size);
-		torch::Tensor argmin = result.first;
-		p.samples_cluster_gpu_ = argmin;
-		if (!sync_cpu)
-			return;
-
-		// back to CPU, map results to PVertex
-		torch::Tensor argmin_cpu = argmin.to(torch::kCPU, true);
-		auto arg_acc = argmin_cpu.accessor<int64_t, 1>();
-
-		// clear cluster
-		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*p.spheres_, v);
-			(*p.spheres_cluster_)[v_index].clear();
-			(*p.spheres_cluster_area_)[v_index] = 0.0;
-			return true;
-		});
-		p.samples_sphere_->fill(PVertex());
-
-		for (int64_t i = 0; i < N; ++i)
-		{
-			const int64_t sid = arg_acc[i];
-			if (sid < 0 || sid >= static_cast<int64_t>(p.spheres_gpu_order_.size()))
-				continue;
-
-			PVertex sv = p.samples_gpu_order_[i];
-			PVertex sp = p.spheres_gpu_order_[sid];
-
-			uint32 sv_idx = index_of(*p.samples_mesh_, sv);
-			uint32 sp_idx = index_of(*p.spheres_, sp);
-
-			(*p.samples_sphere_)[sv_idx] = sp;
-			(*p.spheres_cluster_)[sp_idx].push_back(sv);
-			(*p.spheres_cluster_area_)[sp_idx] += (*p.samples_area_)[sv_idx];
-		}
 	}
 
 	void augment_insufficient_clusters(PointsParameters& p)
@@ -3130,95 +2900,6 @@ private:
 		
 	}
 
-	void compute_spheres_error_gpu(PointsParameters& p)
-	{
-		
-		if (!p.samples_cluster_gpu_.defined() || !p.spheres_center_gpu_.defined() || !p.spheres_radius_gpu_.defined())
-			return;
-		
-		auto result = geometry::vmas_troch::compute_spheres_error_gpu(
-			p.samples_pos_gpu_, p.samples_area_gpu_, p.samples_sqem_A_gpu_, p.samples_sqem_b_gpu_, p.samples_sqem_c_gpu_,
-			p.samples_line_Q_gpu_, p.spheres_center_gpu_, p.spheres_radius_gpu_, p.samples_cluster_gpu_,
-			static_cast<int64_t>(p.distance_mode_), static_cast<float>(p.sqem_clustering_lambda_));
-
-		torch::Tensor sphere_err = std::get<0>(result);
-		torch::Tensor sphere_err_nn = std::get<1>(result);
-		torch::Tensor cluster_area = std::get<2>(result);
-		torch::Tensor total_error = std::get<3>(result);
-		torch::Tensor total_error_nn = std::get<4>(result);
-		torch::Tensor min_error = std::get<5>(result);
-		torch::Tensor max_error = std::get<6>(result);
-		torch::Tensor max_idx = std::get<7>(result);
-
-		const int64_t M = static_cast<int64_t>(nb_cells<PVertex>(*p.spheres_));
-		if (M == 0)
-			return;
-
-		auto err_cpu = sphere_err.to(torch::kCPU, true).contiguous();
-		auto err_nn_cpu = sphere_err_nn.to(torch::kCPU, true).contiguous();
-		auto area_cpu = cluster_area.to(torch::kCPU, true).contiguous();
-
-		auto err_acc = err_cpu.accessor<float, 1>();
-		auto err_nn_acc = err_nn_cpu.accessor<float, 1>();
-		auto area_acc = area_cpu.accessor<float, 1>();
-
-		for (int64_t i = 0; i < M; ++i)
-		{
-			if (i >= static_cast<int64_t>(p.spheres_gpu_order_.size()))
-				break;
-			PVertex v = p.spheres_gpu_order_[i];
-			uint32 v_idx = index_of(*p.spheres_, v);
-			(*p.spheres_error_)[v_idx] = static_cast<Scalar>(err_acc[i]);
-			(*p.spheres_error_not_normalized_)[v_idx] = static_cast<Scalar>(err_nn_acc[i]);
-			(*p.spheres_cluster_area_)[v_idx] = static_cast<Scalar>(area_acc[i]);
-		}
-
-		p.total_error_ = static_cast<Scalar>(total_error.item<float>());
-		p.total_error_not_normalized_ = static_cast<Scalar>(total_error_nn.item<float>());
-		p.min_error_ = static_cast<Scalar>(min_error.item<float>());
-		p.max_error_ = static_cast<Scalar>(max_error.item<float>());
-
-		const int64_t max_idx_cpu = max_idx.to(torch::kCPU, true).item<int64_t>();
-		if (max_idx_cpu >= 0 && max_idx_cpu < static_cast<int64_t>(p.spheres_gpu_order_.size()))
-			p.max_error_sphere_ = p.spheres_gpu_order_[max_idx_cpu];
-		else
-			p.max_error_sphere_ = PVertex();
-
-		p.total_error_diff_ = std::abs(p.total_error_ - p.last_total_error_);
-		p.last_total_error_ = p.total_error_;
-	}
-
-	void compute_spheres_error_gpu_stats(PointsParameters& p)
-	{
-		if (!p.samples_cluster_gpu_.defined() || !p.spheres_center_gpu_.defined() || !p.spheres_radius_gpu_.defined())
-			return;
-
-		auto result = geometry::vmas_troch::compute_spheres_error_gpu(
-			p.samples_pos_gpu_, p.samples_area_gpu_, p.samples_sqem_A_gpu_, p.samples_sqem_b_gpu_, p.samples_sqem_c_gpu_,
-			p.samples_line_Q_gpu_, p.spheres_center_gpu_, p.spheres_radius_gpu_, p.samples_cluster_gpu_,
-			static_cast<int64_t>(p.distance_mode_), static_cast<float>(p.sqem_clustering_lambda_));
-
-		torch::Tensor total_error = std::get<3>(result);
-		torch::Tensor total_error_nn = std::get<4>(result);
-		torch::Tensor min_error = std::get<5>(result);
-		torch::Tensor max_error = std::get<6>(result);
-		torch::Tensor max_idx = std::get<7>(result);
-
-		p.total_error_ = static_cast<Scalar>(total_error.item<float>());
-		p.total_error_not_normalized_ = static_cast<Scalar>(total_error_nn.item<float>());
-		p.min_error_ = static_cast<Scalar>(min_error.item<float>());
-		p.max_error_ = static_cast<Scalar>(max_error.item<float>());
-
-		const int64_t max_idx_cpu = max_idx.to(torch::kCPU, true).item<int64_t>();
-		if (max_idx_cpu >= 0 && max_idx_cpu < static_cast<int64_t>(p.spheres_gpu_order_.size()))
-			p.max_error_sphere_ = p.spheres_gpu_order_[max_idx_cpu];
-		else
-			p.max_error_sphere_ = PVertex();
-
-		p.total_error_diff_ = std::abs(p.total_error_ - p.last_total_error_);
-		p.last_total_error_ = p.total_error_;
-	}
-
 	void update_spheres_color(PointsParameters& p)
 	{
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
@@ -3404,7 +3085,7 @@ private:
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
 
-	void update_sphere_line_quadric_distance(PointsParameters& p, PVertex sphere)
+	void update_sphere_line_quadric_distance_fix_radius(PointsParameters& p, PVertex sphere)
 	{
 		uint32 sphere_index = index_of(*p.spheres_, sphere);
 
@@ -3659,109 +3340,28 @@ private:
 		});
 	}
 
-	void update_spheres_gpu(PointsParameters& p, bool sync_cpu = true)
-	{
-		torch::InferenceMode guard;
-		compute_clusters_gpu(p, false);
-
-		if (!p.samples_cluster_gpu_.defined() || !p.spheres_center_gpu_.defined() || !p.spheres_radius_gpu_.defined())
-			return;
-
-		const int64_t M = static_cast<int64_t>(nb_cells<PVertex>(*p.spheres_));
-		if (M == 0)
-			return;
-
-		std::pair<torch::Tensor, torch::Tensor> result;
-		switch (p.distance_mode_)
-		{
-		case SPHERE_EUCLIDEAN_DISTANCE: {
-			if (!p.samples_normal_gpu_.defined() || !p.samples_knn_pos_gpu_.defined() ||
-				!p.samples_knn_normal_gpu_.defined() || !p.samples_knn_area_gpu_.defined())
-				return;
-			result = geometry::vmas_troch::update_spheres_sqem_gpu(
-				p.samples_pos_gpu_, p.samples_normal_gpu_, p.samples_area_gpu_, p.samples_knn_pos_gpu_,
-				p.samples_knn_normal_gpu_, p.samples_knn_area_gpu_, p.samples_cluster_gpu_, p.spheres_center_gpu_,
-				p.spheres_radius_gpu_, static_cast<int64_t>(p.knn_k_),
-				static_cast<float>(p.sqem_update_lambda_), 10);
-		}
-		break;
-		case LINE_QUADRIC_DISTANCE: {
-			result = geometry::vmas_troch::update_spheres_line_quadric_gpu(
-				p.samples_area_gpu_, p.samples_sqem_A_gpu_, p.samples_sqem_b_gpu_, p.samples_line_Q_gpu_,
-				p.samples_cluster_gpu_, p.spheres_center_gpu_, static_cast<float>(p.alpha_),
-				static_cast<float>(p.sqem_update_lambda_));
-		}
-		break;
-		case PURE_EUCLIDEAN_DISTANCE: {
-			result = geometry::vmas_troch::update_spheres_euclidean_gpu(
-				p.samples_pos_gpu_, p.samples_area_gpu_, p.samples_cluster_gpu_, p.spheres_center_gpu_,
-				static_cast<float>(p.alpha_), 10);
-		}
-		break;
-		}
-
-		if (!result.first.defined() || !result.second.defined())
-			return;
-
-		p.spheres_center_gpu_ = result.first;
-		p.spheres_radius_gpu_ = result.second;
-
-		if (sync_cpu)
-			sync_spheres_from_gpu(p);
-	}
-
-	void sync_spheres_from_gpu(PointsParameters& p)
-	{
-		const int64_t M = static_cast<int64_t>(nb_cells<PVertex>(*p.spheres_));
-		if (M == 0 || !p.spheres_center_gpu_.defined() || !p.spheres_radius_gpu_.defined())
-			return;
-
-		torch::Tensor centers_cpu = p.spheres_center_gpu_.to(torch::kCPU, true).contiguous();
-		torch::Tensor radius_cpu = p.spheres_radius_gpu_.to(torch::kCPU, true).contiguous();
-
-		auto c_acc = centers_cpu.accessor<float, 2>();
-		auto r_acc = radius_cpu.accessor<float, 1>();
-
-		for (int64_t i = 0; i < M; ++i)
-		{
-			if (i >= static_cast<int64_t>(p.spheres_gpu_order_.size()))
-				break;
-			PVertex v = p.spheres_gpu_order_[i];
-			uint32 v_idx = index_of(*p.spheres_, v);
-			(*p.spheres_position_)[v_idx] = Vec3(c_acc[i][0], c_acc[i][1], c_acc[i][2]);
-			(*p.spheres_radius_)[v_idx] = static_cast<Scalar>(r_acc[i]);
-		}
-	}
 	void update_spheres(PointsParameters& p)
 	{
-		const bool use_gpu = device_.is_cuda() && p.use_gpu_spheres_;
-		if (use_gpu)
-		{
-			update_spheres_gpu(p, false);
-		}
-		else
-		{
-			compute_clusters(p);
+		compute_clusters(p);
 
-			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-				switch (p.distance_mode_)
-				{
-				case SPHERE_EUCLIDEAN_DISTANCE: {
-					update_sphere_sqem(p, v);
-				}
-				break;
-				case LINE_QUADRIC_DISTANCE: {
-					update_sphere_line_quadric_distance(p, v);
-				}
-				break;
-				case PURE_EUCLIDEAN_DISTANCE: {
-					update_sphere_euclidean(p, v);
-				}
-				break;
-				}
-				return true;
-			});
-		}
+		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			switch (p.distance_mode_)
+			{
+			case SPHERE_EUCLIDEAN_DISTANCE: {
+				update_sphere_sqem(p, v);
+			}
+			break;
+			case LINE_QUADRIC_DISTANCE: {
+				update_sphere_line_quadric_distance_fix_radius(p, v);
+			}
+			break;
+			case PURE_EUCLIDEAN_DISTANCE: {
+				update_sphere_euclidean(p, v);
+			}
+			break;
+			}
+			return true;
+		});
 
 		if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
 		{
@@ -3776,19 +3376,10 @@ private:
 			return true;
 		});
 
-		if (use_gpu)
-			compute_spheres_error_gpu_stats(p);
-		else
-			compute_spheres_error(p);
+		compute_spheres_error(p);
 
 		if (p.auto_split_ && (p.total_error_diff_ < 1e-5 || p.iteration_count_ % 10 == 0))
 		{
-			if (use_gpu)
-			{
-				sync_spheres_from_gpu(p);
-				compute_clusters(p);
-				compute_spheres_error(p);
-			}
 			switch (p.auto_split_mode_)
 			{
 			case ERROR_THRESHOLD: {
@@ -5045,9 +4636,6 @@ protected:
 					ImGui::RadioButton("Pure Euclidean", (int*)&p.distance_mode_, PURE_EUCLIDEAN_DISTANCE);
 					ImGui::SameLine();
 					ImGui::RadioButton("Line Quadric", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE);
-					ImGui::BeginDisabled(!device_.is_cuda());
-					ImGui::Checkbox("Use GPU (spheres)", &p.use_gpu_spheres_);
-					ImGui::EndDisabled();
 
 					if (ImGui::Button("Update spheres"))
 					{
