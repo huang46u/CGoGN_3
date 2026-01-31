@@ -198,6 +198,11 @@ private:
 		float32 samples_jitter_pos_pct_ = 0.5f;
 		float32 samples_jitter_normal_sigma_ = 0.02f;
 
+		// Alpha-inside samples
+		POINTS* alpha_inside_mesh_ = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> alpha_inside_position_ = nullptr;
+		std::shared_ptr<PAttribute<Vec4>> alpha_inside_color_ = nullptr;
+
 		std::unique_ptr<acc::BVHTreeSpheres<uint32, Vec3>> samples_wn_bvh_;
 		std::vector<Vec3> samples_wn_bvh_centers_;
 		std::vector<Scalar> samples_wn_bvh_radii_;
@@ -269,6 +274,7 @@ private:
 		float alpha_ = 0.005f;
 		float sample_radius_ = 0.0025f;
 		int sample_iterations_ = 30; // Max attempts per point
+		int alpha_inside_iterations_ = 30;
 		int knn_k_ = 10;
 		int seed_ = 42;
 		int cluster_min_points_ = 20;
@@ -283,6 +289,7 @@ private:
 		float udf_lipschitz_ = 4.0f;
 		float udf_delta_enter_ = 0.003f;
 		int udf_max_iterations_ = 3000;
+		float alpha_inside_spacing_ = 0.0f;
 		// MF medial axis search (neural)
 		float mf_search_radius_scale_ = 2.0f;
 		int mf_coarse_steps_ = 9;
@@ -641,6 +648,7 @@ public:
 		std::cout << "Building KDTree for sampled points..." << std::endl;
 		build_kdtree(p);
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		clear_alpha_inside_samples(p);
 		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
 	}
 
@@ -752,6 +760,7 @@ public:
 		std::cout << "Building KDTree for sampled points..." << std::endl;
 		build_kdtree(p);
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		clear_alpha_inside_samples(p);
 		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
 	}
 
@@ -833,6 +842,7 @@ public:
 		std::cout << "Building KDTree for sampled points..." << std::endl;
 		build_kdtree(p);
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		clear_alpha_inside_samples(p);
 		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
 	}
 
@@ -1178,6 +1188,17 @@ private:
 		p.samples_normal_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_mesh_, "normal_color");
 		p.samples_knn_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_mesh_, "knn_color");
 
+		// Init Alpha-Inside Mesh
+		std::string inside_name = points_provider_->mesh_name(*p.points_) + "_alpha_inside";
+		if (!p.alpha_inside_mesh_)
+			p.alpha_inside_mesh_ = points_provider_->has_mesh(inside_name) ? points_provider_->mesh(inside_name)
+																		   : points_provider_->add_mesh(inside_name);
+		else
+			points_provider_->clear_mesh(*p.alpha_inside_mesh_);
+
+		p.alpha_inside_position_ = get_or_add_attribute<Vec3, PVertex>(*p.alpha_inside_mesh_, "position");
+		p.alpha_inside_color_ = get_or_add_attribute<Vec4, PVertex>(*p.alpha_inside_mesh_, "color");
+
 		// Init Spheres Mesh
 		std::string sphere_name = points_provider_->mesh_name(m) + "_spheres";
 		if (!p.spheres_)
@@ -1225,6 +1246,8 @@ private:
 
 		std::cout << "Building KDTree..." << std::endl;
 		build_kdtree(p);
+		std::cout << "Recomputing Normals (PCA)..." << std::endl;
+		recompute_samples_normals_pca(p);
 		std::cout << "Computing KNN and Area..." << std::endl;
 		compute_samples_area(p); // Compute KNN and Area for samples
 		std::cout << "Computing Winding Numbers..." << std::endl;
@@ -1516,6 +1539,79 @@ private:
 
 	// --- Sampling ---
 
+	void recompute_samples_normals_pca(PointsParameters& p)
+	{
+		if (!p.samples_mesh_ || !p.samples_kdtree_ || !p.samples_position_ || !p.samples_normal_)
+			return;
+
+		const int k = std::max(3, p.knn_k_);
+		const Scalar eps = Scalar(1e-12);
+
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			const Vec3& center = (*p.samples_position_)[v_idx];
+
+			std::vector<std::pair<uint32, Scalar>> knn_res;
+			p.samples_kdtree_->find_nns(center, k + 1, &knn_res);
+
+			std::vector<Vec3> neighbors;
+			neighbors.reserve(k);
+			for (const auto& res : knn_res)
+			{
+				PVertex nb = p.samples_kdtree_vertices_[res.first];
+				if (nb == v)
+					continue;
+				uint32 nb_idx = index_of(*p.samples_mesh_, nb);
+				neighbors.push_back((*p.samples_position_)[nb_idx]);
+				if (static_cast<int>(neighbors.size()) >= k)
+					break;
+			}
+			if (neighbors.size() < 3)
+				return true;
+
+			Vec3 mean(0, 0, 0);
+			for (const Vec3& q : neighbors)
+				mean += q;
+			mean /= Scalar(neighbors.size());
+
+			Eigen::Matrix<Scalar, 3, 3> cov = Eigen::Matrix<Scalar, 3, 3>::Zero();
+			for (const Vec3& q : neighbors)
+			{
+				Vec3 d = q - mean;
+				cov(0, 0) += d.x() * d.x();
+				cov(0, 1) += d.x() * d.y();
+				cov(0, 2) += d.x() * d.z();
+				cov(1, 1) += d.y() * d.y();
+				cov(1, 2) += d.y() * d.z();
+				cov(2, 2) += d.z() * d.z();
+			}
+			cov(1, 0) = cov(0, 1);
+			cov(2, 0) = cov(0, 2);
+			cov(2, 1) = cov(1, 2);
+
+			Eigen::SelfAdjointEigenSolver<Eigen::Matrix<Scalar, 3, 3>> solver(cov);
+			if (solver.info() != Eigen::Success)
+				return true;
+
+			Eigen::Matrix<Scalar, 3, 1> ev = solver.eigenvectors().col(0);
+			Vec3 n(ev(0), ev(1), ev(2));
+			Scalar n2 = n.squaredNorm();
+			if (n2 < eps)
+				return true;
+
+			Vec3 n0 = (*p.samples_normal_)[v_idx];
+			if (n0.squaredNorm() > eps && n.dot(n0) < Scalar(0))
+				n = -n;
+			n.normalize();
+			(*p.samples_normal_)[v_idx] = n;
+			return true;
+		});
+
+		refresh_sample_normals_color(p);
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
+	}
+
 	Vec3 random_sample_around(const Vec3& p, const Scalar radius, std::uniform_real_distribution<Scalar>& uni,
 							  std::mt19937& rng)
 	{
@@ -1526,6 +1622,24 @@ private:
 		Scalar R3 = radius * radius * radius;
 		Scalar r = std::cbrt(R3 + u * (8 * R3 - R3)); // r = pow((R^3 + u(8R^3 - R^3)), 1/3)
 
+		Scalar phi = v * 2.0 * M_PI;
+		Scalar theta = std::acos(1.0 - 2.0 * w);
+
+		Scalar x = r * std::sin(theta) * std::cos(phi);
+		Scalar y = r * std::sin(theta) * std::sin(phi);
+		Scalar z = r * std::cos(theta);
+
+		return p + Vec3(x, y, z);
+	}
+
+	Vec3 random_sample_in_sphere(const Vec3& p, const Scalar radius, std::uniform_real_distribution<Scalar>& uni,
+								 std::mt19937& rng)
+	{
+		Scalar u = uni(rng);
+		Scalar v = uni(rng);
+		Scalar w = uni(rng);
+
+		Scalar r = radius * std::cbrt(u);
 		Scalar phi = v * 2.0 * M_PI;
 		Scalar theta = std::acos(1.0 - 2.0 * w);
 
@@ -1597,6 +1711,7 @@ private:
 		p.samples_normal_backup_.clear();
 		if (p.samples_mesh_)
 			points_provider_->clear_mesh(*p.samples_mesh_);
+		clear_alpha_inside_samples(p);
 	}
 
 	void backup_input_state(PointsParameters& p)
@@ -1765,6 +1880,136 @@ private:
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
 	}
 
+	void clear_alpha_inside_samples(PointsParameters& p)
+	{
+		if (p.alpha_inside_mesh_)
+			points_provider_->clear_mesh(*p.alpha_inside_mesh_);
+	}
+
+	bool filter_alpha_inside_by_mf(PointsParameters& p)
+	{
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_)
+			return false;
+		if (!p.neural_udf_loaded_)
+		{
+			std::cerr << "Neural UDF model not loaded. Skip MF filter." << std::endl;
+			return false;
+		}
+
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		if (!udf.is_loaded())
+		{
+			std::cerr << "Neural UDF model not ready. Skip MF filter." << std::endl;
+			return false;
+		}
+
+		std::vector<Vec3> points;
+		points.reserve(nb_cells<PVertex>(*p.alpha_inside_mesh_));
+		foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
+			points.push_back((*p.alpha_inside_position_)[v_idx]);
+			return true;
+		});
+		if (points.empty())
+			return true;
+
+		const size_t total = points.size();
+		const size_t batch = std::max<size_t>(1, static_cast<size_t>(p.batch_size_));
+		std::vector<Vec3> kept;
+		kept.reserve(points.size());
+
+		bool mf_checked = false;
+		for (size_t offset = 0; offset < total; offset += batch)
+		{
+			size_t count = std::min(batch, total - offset);
+			std::vector<Vec3> chunk;
+			chunk.reserve(count);
+			for (size_t i = 0; i < count; ++i)
+				chunk.push_back(points[offset + i]);
+
+			BatchUDFResult res = udf.forward_batch_gpu(chunk);
+			if (!res.ok || res.values.size() != chunk.size())
+			{
+				std::cerr << "MF filter failed: neural forward_batch_gpu error." << std::endl;
+				return false;
+			}
+			if (!mf_checked)
+			{
+				if (!udf.is_mf_model())
+					std::cerr << "Warning: model output is not MF tuple; filtering uses raw values." << std::endl;
+				mf_checked = true;
+			}
+
+			for (size_t i = 0; i < chunk.size(); ++i)
+			{
+				if (res.values[i] <= p.alpha_)
+					kept.push_back(chunk[i]);
+			}
+		}
+
+		std::cout << "MF filter: " << total << " -> " << kept.size() << " kept." << std::endl;
+		points_provider_->clear_mesh(*p.alpha_inside_mesh_);
+		for (const Vec3& pt : kept)
+		{
+			PVertex v = add_vertex(*p.alpha_inside_mesh_);
+			uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
+			(*p.alpha_inside_position_)[v_idx] = pt;
+			if (p.alpha_inside_color_)
+				(*p.alpha_inside_color_)[v_idx] = Vec4(0.2f, 0.8f, 0.9f, 1.0f);
+		}
+
+		points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
+		return true;
+	}
+
+	bool seed_alpha_inside_generator(PointsParameters& p, Vec3& generator, std::mt19937& gen,
+									 std::uniform_real_distribution<Scalar>& uni)
+	{
+		const uint32 max_attempts = 5000;
+		uint32 sphere_count = 0;
+		if (p.spheres_ && p.spheres_position_ && p.spheres_radius_)
+			sphere_count = nb_cells<PVertex>(*p.spheres_);
+
+		auto [bb_min, bb_max] = compute_sampling_bbox(p);
+		auto bbox_valid = [&](const Vec3& min, const Vec3& max) {
+			return min[0] <= max[0] && min[1] <= max[1] && min[2] <= max[2];
+		};
+
+		for (uint32 attempt = 0; attempt < max_attempts; ++attempt)
+		{
+			Vec3 candidate;
+			if (sphere_count > 0)
+			{
+				std::uniform_int_distribution<uint32> sphere_idx(0, sphere_count - 1);
+				PVertex sphere = of_index<PVertex>(*p.spheres_, sphere_idx(gen));
+				uint32 s_idx = index_of(*p.spheres_, sphere);
+				const Vec3& c = (*p.spheres_position_)[s_idx];
+				Scalar r = (*p.spheres_radius_)[s_idx];
+				if (r <= Scalar(0))
+					continue;
+				candidate = random_sample_in_sphere(c, r, uni, gen);
+			}
+			else if (bbox_valid(bb_min, bb_max))
+			{
+				candidate = Vec3(bb_min.x() + uni(gen) * (bb_max.x() - bb_min.x()),
+								 bb_min.y() + uni(gen) * (bb_max.y() - bb_min.y()),
+								 bb_min.z() + uni(gen) * (bb_max.z() - bb_min.z()));
+			}
+			else
+			{
+				return false;
+			}
+
+			if (p.samples_winding_number_ && p.samples_winding_number_->is_inside(candidate))
+			{
+				generator = candidate;
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	std::pair<Vec3, Vec3> project_and_normal(PointsParameters& p, const Vec3& sample_pos)
 	{
 		std::pair<uint32, Scalar> knn_res;
@@ -1912,6 +2157,129 @@ private:
 		});
 
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+	}
+
+	void sample_alpha_inside(PointsParameters& p)
+	{
+		if (!p.samples_mesh_ || !p.samples_position_)
+		{
+			std::cerr << "Error: No alpha level set samples found. Please sample alpha first." << std::endl;
+			return;
+		}
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_)
+		{
+			std::cerr << "Error: alpha inside mesh not initialized." << std::endl;
+			return;
+		}
+
+		if (!p.samples_kdtree_)
+			build_kdtree(p);
+		if (!p.samples_kdtree_)
+		{
+			std::cerr << "Error: Failed to build KDTree for alpha samples." << std::endl;
+			return;
+		}
+
+		if (!p.samples_winding_number_)
+		{
+			std::cout << "Recomputing Normals (PCA)..." << std::endl;
+			recompute_samples_normals_pca(p);
+			std::cout << "Computing KNN/Area for alpha samples..." << std::endl;
+			compute_samples_area(p);
+			std::cout << "Computing Winding Numbers for alpha samples..." << std::endl;
+			compute_winding_numbers(p);
+		}
+		if (!p.samples_winding_number_)
+		{
+			std::cerr << "Error: Winding number not available." << std::endl;
+			return;
+		}
+
+		Scalar min_spacing = static_cast<Scalar>(p.alpha_inside_spacing_);
+		if (min_spacing <= Scalar(0))
+		{
+			min_spacing = static_cast<Scalar>(p.sample_radius_) * Scalar(0.5);
+			if (min_spacing <= Scalar(0))
+				min_spacing = std::max<Scalar>(static_cast<Scalar>(p.grid_cell_size_) * Scalar(0.5), Scalar(1e-6));
+			p.alpha_inside_spacing_ = static_cast<float32>(min_spacing);
+		}
+		if (min_spacing <= Scalar(0))
+		{
+			std::cerr << "Error: Invalid min spacing." << std::endl;
+			return;
+		}
+
+		points_provider_->clear_mesh(*p.alpha_inside_mesh_);
+
+		std::uniform_real_distribution<Scalar> uniform(0.0, 1.0);
+		std::mt19937 gen(p.seed_ + 2025);
+
+		Vec3 generator(0, 0, 0);
+		if (!seed_alpha_inside_generator(p, generator, gen, uniform))
+		{
+			std::cerr << "Failed to find initial inside generator." << std::endl;
+			return;
+		}
+
+		SpatialGrid grid(min_spacing);
+
+		PVertex start_vertex = add_vertex(*p.alpha_inside_mesh_);
+		uint32 start_idx = index_of(*p.alpha_inside_mesh_, start_vertex);
+		(*p.alpha_inside_position_)[start_idx] = generator;
+		if (p.alpha_inside_color_)
+			(*p.alpha_inside_color_)[start_idx] = Vec4(0.2f, 0.8f, 0.9f, 1.0f);
+		grid.insert(generator, start_idx);
+
+		std::vector<PVertex> active_list = {start_vertex};
+		uint32 count = 1;
+
+		while (!active_list.empty())
+		{
+			std::uniform_int_distribution<size_t> active_idx(0, active_list.size() - 1);
+			size_t rand_index = active_idx(gen);
+			PVertex current_vertex = active_list[rand_index];
+			uint32 current_idx = index_of(*p.alpha_inside_mesh_, current_vertex);
+			Vec3 current_pos = (*p.alpha_inside_position_)[current_idx];
+			bool found_new_sample = false;
+
+			uint32 max_attempts = static_cast<uint32>(p.alpha_inside_iterations_);
+			if (max_attempts < 1)
+				max_attempts = 1;
+			for (uint32 i = 0; i < max_attempts && !found_new_sample; i++)
+			{
+				Vec3 sample_pos = random_sample_around(current_pos, min_spacing, uniform, gen);
+
+				if (!p.samples_winding_number_->is_inside(sample_pos))
+					continue;
+
+				if (grid.is_valid_sample(sample_pos, min_spacing, *p.alpha_inside_position_))
+				{
+					PVertex new_vertex = add_vertex(*p.alpha_inside_mesh_);
+					uint32 new_idx = index_of(*p.alpha_inside_mesh_, new_vertex);
+
+					(*p.alpha_inside_position_)[new_idx] = sample_pos;
+					if (p.alpha_inside_color_)
+						(*p.alpha_inside_color_)[new_idx] = Vec4(0.2f, 0.8f, 0.9f, 1.0f);
+
+					grid.insert(sample_pos, new_idx);
+					active_list.push_back(new_vertex);
+					count++;
+					found_new_sample = true;
+					if (count % 200 == 0)
+						std::cout << "Inside samples: " << count << "\r" << std::flush;
+				}
+			}
+
+			if (!found_new_sample)
+			{
+				active_list[rand_index] = active_list.back();
+				active_list.pop_back();
+			}
+		}
+
+		std::cout << "Inside sampling done. Total: " << count << std::endl;
+		if (!filter_alpha_inside_by_mf(p))
+			points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
 	}
 
 	// --- Shrinking Balls ---
@@ -4513,6 +4881,7 @@ protected:
 				p.samples_jitter_backup_valid_ = false;
 				p.samples_position_backup_.clear();
 				p.samples_normal_backup_.clear();
+				clear_alpha_inside_samples(p);
 			}
 
 			if (p.samples_mesh_)
@@ -4520,6 +4889,36 @@ protected:
 		}
 
 		bool has_samples = p.samples_mesh_ && nb_cells<PVertex>(*p.samples_mesh_) > 0;
+
+		if (ImGui::CollapsingHeader("Alpha Inside Sampling", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			if (!has_samples)
+			{
+				ImGui::TextColored(ImVec4(1, 1, 0, 1), "Please sample alpha level set first.");
+			}
+			else
+			{
+				ImGui::InputFloat("Inside Radius", &p.alpha_inside_spacing_, 0.0f, 0.0f, "%.6f");
+				if (p.alpha_inside_spacing_ < 0.0f)
+					p.alpha_inside_spacing_ = 0.0f;
+				ImGui::InputInt("Inside Attempts", &p.alpha_inside_iterations_, 1, 5);
+				if (p.alpha_inside_iterations_ < 1)
+					p.alpha_inside_iterations_ = 1;
+				ImGui::Text("Radius default: sample_radius_/2 = %.6f", p.sample_radius_ * 0.5f);
+				if (ImGui::Button("Sample Alpha Inside"))
+				{
+					sample_alpha_inside(p);
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Clear Alpha Inside"))
+				{
+					clear_alpha_inside_samples(p);
+				}
+
+				if (p.alpha_inside_mesh_)
+					ImGui::Text("Inside samples: %zu", nb_cells<PVertex>(*p.alpha_inside_mesh_));
+			}
+		}
 
 		ImGui::Separator();
 		ImGui::Text("Input Point Cloud Noise");
