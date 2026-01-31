@@ -232,10 +232,11 @@ public:
 	{
 		if constexpr (mesh_traits<MESH>::dimension == 1)
 		{
+			const std::string filepath = ensure_extension(filename, filetype);
 			if (filetype.compare("cg") == 0)
-				io::export_CG(m, vertex_position, filename + ".cg");
+				io::export_CG(m, vertex_position, filepath);
 			else if (filetype.compare("ig") == 0)
-				io::export_IG(m, vertex_position, filename + ".ig");
+				io::export_IG(m, vertex_position, filepath);
 			// else if (filetype.compare("cgr") == 0)
 			// 	// TODO io::export_CGR();
 			// else if (filetype.compare("skel") == 0)
@@ -299,14 +300,15 @@ public:
 	{
 		if constexpr (mesh_traits<MESH>::dimension == 2)
 		{
+			const std::string filepath = ensure_extension(filename, filetype);
 			if (filetype.compare("off") == 0)
-				io::export_OFF(m, vertex_position, filename + ".off");
+				io::export_OFF(m, vertex_position, filepath);
 			if (filetype.compare("ply") == 0)
-				io::export_PLY(m, vertex_position, filename + ".ply");
+				io::export_PLY(m, vertex_position, filepath);
 			else if (filetype.compare("ig") == 0)
 			{
 				if constexpr (has_edge_v<MESH>)
-					io::export_IG(m, vertex_position, filename + ".ig");
+					io::export_IG(m, vertex_position, filepath);
 			}
 		}
 	}
@@ -356,10 +358,11 @@ public:
 	{
 		if constexpr (mesh_traits<MESH>::dimension == 3)
 		{
+			const std::string filepath = ensure_extension(filename, filetype);
 			if (filetype.compare("mesh") == 0)
-				io::export_MESH(m, vertex_position, filename + ".mesh");
+				io::export_MESH(m, vertex_position, filepath);
 			// else if (filetype.compare("cgns") == 0)
-			// 	io::export_CGNS(m, vertex_position, filename + ".cgns");
+			// 	io::export_CGNS(m, vertex_position, filepath);
 
 			// else if (filetype.compare("tet") == 0)
 			// 	// TODO io::export_TET();
@@ -407,6 +410,17 @@ public:
 		}
 		else
 			return nullptr;
+	}
+
+	void save_points_to_file(MESH& m, const Attribute<Vec3>* vertex_position, const std::string& filetype,
+							 const std::string& filename)
+	{
+		if constexpr (mesh_traits<MESH>::dimension == 0)
+		{
+			const std::string filepath = ensure_extension(filename, filetype);
+			if (filetype.compare("ply") == 0)
+				io::export_PLY(m, vertex_position, filepath);
+		}
 	}
 
 
@@ -627,6 +641,36 @@ protected:
 			open_file_dialog = nullptr;
 		}
 
+		if (save_file_dialog_ && save_file_dialog_->ready())
+		{
+			const std::string result = save_file_dialog_->result();
+			if (!result.empty() && pending_save_)
+			{
+				if constexpr (mesh_traits<MESH>::dimension == 0)
+				{
+					save_points_to_file(*pending_save_->mesh, pending_save_->vertex_position.get(),
+										pending_save_->filetype, result);
+				}
+				if constexpr (mesh_traits<MESH>::dimension == 1)
+				{
+					save_graph_to_file(*pending_save_->mesh, pending_save_->vertex_position.get(),
+									   pending_save_->filetype, result);
+				}
+				if constexpr (mesh_traits<MESH>::dimension == 2)
+				{
+					save_surface_to_file(*pending_save_->mesh, pending_save_->vertex_position.get(),
+										 pending_save_->filetype, result);
+				}
+				if constexpr (mesh_traits<MESH>::dimension == 3)
+				{
+					save_volume_to_file(*pending_save_->mesh, pending_save_->vertex_position.get(),
+										pending_save_->filetype, result);
+				}
+			}
+			save_file_dialog_ = nullptr;
+			pending_save_.reset();
+		}
+
 		open_save_popup_ = false;
 		if (ImGui::BeginMenu(name_.c_str()))
 		{
@@ -692,16 +736,18 @@ protected:
 					[&](const std::shared_ptr<Attribute<Vec3>>& attribute) { selected_vertex_position = attribute; });
 				if (selected_vertex_position)
 				{
+					ImGui::PushItemFlag(ImGuiItemFlags_Disabled, (bool)save_file_dialog_);
 					if (ImGui::Button("Save", ImVec2(120, 0)))
 					{
-						if constexpr (mesh_traits<MESH>::dimension == 1)
-							save_graph_to_file(*selected_mesh, selected_vertex_position.get(), filetype, filename);
-						if constexpr (mesh_traits<MESH>::dimension == 2)
-							save_surface_to_file(*selected_mesh, selected_vertex_position.get(), filetype, filename);
-						if constexpr (mesh_traits<MESH>::dimension == 3)
-							save_volume_to_file(*selected_mesh, selected_vertex_position.get(), filetype, filename);
+						pending_save_ = PendingSave{selected_mesh, selected_vertex_position, filetype};
+						std::string default_path = filename;
+						if (!default_path.empty())
+							default_path = ensure_extension(default_path, filetype);
+						save_file_dialog_ = std::make_shared<pfd::save_file>("Save mesh", default_path,
+																			 save_filters_for(filetype));
 						close_popup = true;
 					}
+					ImGui::PopItemFlag();
 				}
 				cleanup = [&]() { selected_vertex_position = nullptr; };
 			}
@@ -799,6 +845,33 @@ protected:
 	}
 
 private:
+	struct PendingSave
+	{
+		MESH* mesh = nullptr;
+		std::shared_ptr<Attribute<Vec3>> vertex_position;
+		std::string filetype;
+	};
+
+	std::string ensure_extension(const std::string& filename, const std::string& filetype) const
+	{
+		if (filename.empty() || filetype.empty())
+			return filename;
+		const std::string ext = to_lower(extension(filename_from_path(filename)));
+		const std::string desired = to_lower(filetype);
+		if (ext.empty())
+			return filename + "." + filetype;
+		if (ext == desired)
+			return filename;
+		return remove_extension(filename) + "." + filetype;
+	}
+
+	std::vector<std::string> save_filters_for(const std::string& filetype) const
+	{
+		if (filetype.empty())
+			return {"All Files", "*"};
+		return {to_upper(filetype), "*." + filetype};
+	}
+
 	std::vector<std::string> supported_point_formats_ = {"ply"};
 	std::vector<std::string> supported_point_files_ = {"Points", "*.ply"};
 
@@ -815,6 +888,9 @@ private:
 
 	bool open_save_popup_ = false;
 	bool load_normalized_ = true;
+
+	std::optional<PendingSave> pending_save_;
+	std::shared_ptr<pfd::save_file> save_file_dialog_;
 
 	const MESH* selected_mesh_;
 	// std::array<char[32], std::tuple_size<typename mesh_traits<MESH>::Cells>::value> new_attribute_name_;

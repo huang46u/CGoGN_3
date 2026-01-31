@@ -86,8 +86,9 @@ typename std::enable_if<mesh_traits<MESH>::dimension == 2, bool>::type import_PL
 }
 
 template <typename MESH>
-void export_PLY(MESH& m, const typename mesh_traits<MESH>::template Attribute<geometry::Vec3>* vertex_position,
-				const std::string& filename)
+typename std::enable_if<mesh_traits<MESH>::dimension == 2, void>::type export_PLY(
+	MESH& m, const typename mesh_traits<MESH>::template Attribute<geometry::Vec3>* vertex_position,
+	const std::string& filename)
 {
 	static_assert(mesh_traits<MESH>::dimension == 2, "MESH dimension should be 2");
 

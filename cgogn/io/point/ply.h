@@ -67,6 +67,33 @@ typename std::enable_if<mesh_traits<MESH>::dimension == 0, bool>::type import_PL
 	return true;
 }
 
+template <typename MESH>
+typename std::enable_if<mesh_traits<MESH>::dimension == 0, void>::type export_PLY(
+	MESH& m, const typename mesh_traits<MESH>::template Attribute<geometry::Vec3>* vertex_position,
+	const std::string& filename)
+{
+	static_assert(mesh_traits<MESH>::dimension == 0, "MESH dimension should be 0");
+
+	using Vertex = typename mesh_traits<MESH>::Vertex;
+	using Vec3 = geometry::Vec3;
+
+	Scoped_C_Locale loc;
+
+	std::vector<std::array<double, 3>> position;
+	uint32 nb_vertices = nb_cells<Vertex>(m);
+	position.reserve(nb_vertices);
+
+	foreach_cell(m, [&](Vertex v) -> bool {
+		const Vec3& p = value<geometry::Vec3>(m, vertex_position, v);
+		position.push_back({p.x(), p.y(), p.z()});
+		return true;
+	});
+
+	happly::PLYData plyOut;
+	plyOut.addVertexPositions(position);
+	plyOut.write(filename);
+}
+
 } // namespace io
 
 } // namespace cgogn
