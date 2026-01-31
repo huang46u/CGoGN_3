@@ -59,7 +59,7 @@ inline Scalar compute_radius(const Vec3& p, const Vec3& n, const Vec3& q)
 }
 
 // const Scalar denoise_planar = 32.0 * M_PI / 180.0;
-const Scalar denoise_preserve = 20.0 * M_PI / 180.0;
+const Scalar denoise_preserve = 32.0 * M_PI / 180.0;
 const Scalar delta_convergence = 1e-5;
 const uint32 iteration_limit = 30;
 

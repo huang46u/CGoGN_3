@@ -1232,7 +1232,7 @@ private:
 		std::cout << "Computing Quadrics..." << std::endl;
 		compute_quadrics(p);
 		std::cout << "Computing Initial Medial Axis..." << std::endl;
-		compute_initial_medial_axis_shrinking_ball(p);
+		compute_initial_medial_axis(p);
 
 		if (p.neural_udf_loaded_ && p.samples_ma_position_)
 		{
