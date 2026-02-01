@@ -222,6 +222,26 @@ public:
 		v.request_update();
 	}
 
+	void set_render_vertices(View& v, const MESH& m, bool render)
+	{
+		Parameters& p = parameters_[&v][&m];
+		if (p.render_vertices_ == render)
+			return;
+		p.render_vertices_ = render;
+		v.request_update();
+	}
+
+	bool render_vertices(const View& v, const MESH& m) const
+	{
+		auto itv = parameters_.find(const_cast<View*>(&v));
+		if (itv == parameters_.end())
+			return true;
+		auto itm = itv->second.find(const_cast<MESH*>(&m));
+		if (itm == itv->second.end())
+			return true;
+		return itm->second.render_vertices_;
+	}
+
 protected:
 	void init() override
 	{

@@ -202,6 +202,14 @@ private:
 		POINTS* alpha_inside_mesh_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> alpha_inside_position_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> alpha_inside_color_ = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> alpha_inside_projected_position_ = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> alpha_inside_projected_normal_ = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> alpha_inside_projected_area_ = nullptr;
+		std::shared_ptr<PAttribute<std::vector<PVertex>>> alpha_inside_projected_knn_ = nullptr;
+		std::shared_ptr<PAttribute<Spherical_Quadric>> alpha_inside_projected_quadric_ = nullptr;
+		std::shared_ptr<PAttribute<Line_Quadric>> alpha_inside_projected_line_quadric_ = nullptr;
+		std::shared_ptr<PAttribute<PVertex>> alpha_inside_sphere_ = nullptr;
+		bool alpha_inside_projected_ready_ = false;
 
 		std::unique_ptr<acc::BVHTreeSpheres<uint32, Vec3>> samples_wn_bvh_;
 		std::vector<Vec3> samples_wn_bvh_centers_;
@@ -212,6 +220,9 @@ private:
 
 		acc::KDTree<3, uint32>* samples_kdtree_ = nullptr; // KDTree of alpha-expanding samples
 		std::vector<PVertex> samples_kdtree_vertices_;	   // Vertices of alpha-expanding samples in KDTree order
+
+		acc::KDTree<3, uint32>* alpha_inside_kdtree_ = nullptr; // KDTree of projected alpha-inside samples
+		std::vector<PVertex> alpha_inside_kdtree_vertices_;	 // Vertices of projected alpha-inside samples
 
 		acc::KDTree<3, uint32>* input_kdtree_ = nullptr; // KDTree of input points
 		std::vector<PVertex> input_kdtree_vertices_;	 // Vertices of input points in KDTree order
@@ -226,6 +237,8 @@ private:
 		std::shared_ptr<PAttribute<std::vector<PVertex>>> spheres_cluster_ = nullptr; // Sample points in cluster
 		std::shared_ptr<PAttribute<Scalar>> spheres_cluster_area_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> spheres_cluster_color_ = nullptr;
+		std::shared_ptr<PAttribute<std::vector<PVertex>>> spheres_inside_cluster_ = nullptr;
+		std::shared_ptr<PAttribute<uint32>> spheres_inside_components_ = nullptr;
 		std::shared_ptr<PAttribute<std::set<PVertex>>> spheres_neighbor_clusters_ = nullptr;
 		std::shared_ptr<PAttribute<PVertex>> spheres_parent_ = nullptr;
 		std::shared_ptr<PAttribute<bool>> spheres_do_not_split_ = nullptr;
@@ -318,6 +331,8 @@ private:
 		{
 			if (samples_kdtree_)
 				delete samples_kdtree_;
+			if (alpha_inside_kdtree_)
+				delete alpha_inside_kdtree_;
 			if (input_kdtree_)
 				delete input_kdtree_;
 		}
@@ -1198,6 +1213,28 @@ private:
 
 		p.alpha_inside_position_ = get_or_add_attribute<Vec3, PVertex>(*p.alpha_inside_mesh_, "position");
 		p.alpha_inside_color_ = get_or_add_attribute<Vec4, PVertex>(*p.alpha_inside_mesh_, "color");
+		p.alpha_inside_projected_position_ =
+			get_or_add_attribute<Vec3, PVertex>(*p.alpha_inside_mesh_, "projected_alpha_inside_position");
+		p.alpha_inside_projected_normal_ =
+			get_or_add_attribute<Vec3, PVertex>(*p.alpha_inside_mesh_, "projected_alpha_inside_normal");
+		p.alpha_inside_projected_area_ =
+			get_or_add_attribute<Scalar, PVertex>(*p.alpha_inside_mesh_, "projected_alpha_inside_area");
+		p.alpha_inside_projected_knn_ =
+			get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.alpha_inside_mesh_, "projected_alpha_inside_knn");
+		p.alpha_inside_projected_quadric_ =
+			get_or_add_attribute<Spherical_Quadric, PVertex>(*p.alpha_inside_mesh_,
+															 "projected_alpha_inside_quadric");
+		p.alpha_inside_projected_line_quadric_ =
+			get_or_add_attribute<Line_Quadric, PVertex>(*p.alpha_inside_mesh_,
+														"projected_alpha_inside_line_quadric");
+		p.alpha_inside_sphere_ = get_or_add_attribute<PVertex, PVertex>(*p.alpha_inside_mesh_, "sphere");
+		p.alpha_inside_projected_ready_ = false;
+		if (p.alpha_inside_kdtree_)
+		{
+			delete p.alpha_inside_kdtree_;
+			p.alpha_inside_kdtree_ = nullptr;
+		}
+		p.alpha_inside_kdtree_vertices_.clear();
 
 		// Init Spheres Mesh
 		std::string sphere_name = points_provider_->mesh_name(m) + "_spheres";
@@ -1211,6 +1248,8 @@ private:
 		p.spheres_cluster_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.spheres_, "cluster");
 		p.spheres_cluster_color_ = get_or_add_attribute<Vec4, PVertex>(*p.spheres_, "cluster_color");
 		p.spheres_cluster_area_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "cluster_area");
+		p.spheres_inside_cluster_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.spheres_, "inside_cluster");
+		p.spheres_inside_components_ = get_or_add_attribute<uint32, PVertex>(*p.spheres_, "inside_components");
 		p.spheres_neighbor_clusters_ =
 			get_or_add_attribute<std::set<PVertex>, PVertex>(*p.spheres_, "neighbor_clusters");
 		p.spheres_parent_ = get_or_add_attribute<PVertex, PVertex>(*p.spheres_, "parent");
@@ -1612,6 +1651,172 @@ private:
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
 	}
 
+	bool project_alpha_inside_to_alpha(PointsParameters& p)
+	{
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_ || !p.alpha_inside_projected_position_ ||
+			!p.alpha_inside_projected_normal_)
+			return false;
+		if (!p.neural_udf_loaded_)
+		{
+			std::cerr << "Neural UDF model not loaded. Cannot project alpha-inside points." << std::endl;
+			return false;
+		}
+
+		std::vector<Vec3> points;
+		std::vector<PVertex> vertices;
+		points.reserve(nb_cells<PVertex>(*p.alpha_inside_mesh_));
+		vertices.reserve(points.capacity());
+		foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
+			points.push_back((*p.alpha_inside_position_)[v_idx]);
+			vertices.push_back(v);
+			return true;
+		});
+
+		if (points.empty())
+			return true;
+
+		auto [projected, normals] = project_points_to_alpha_gpu(p, points);
+		if (projected.size() != points.size() || normals.size() != points.size())
+		{
+			std::cerr << "Projection to alpha level set failed: size mismatch." << std::endl;
+			return false;
+		}
+
+		for (size_t i = 0; i < vertices.size(); ++i)
+		{
+			uint32 v_idx = index_of(*p.alpha_inside_mesh_, vertices[i]);
+			(*p.alpha_inside_projected_position_)[v_idx] = projected[i];
+			(*p.alpha_inside_projected_normal_)[v_idx] = normals[i];
+		}
+
+		points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_position_.get());
+		points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_normal_.get());
+		return true;
+	}
+
+	bool prepare_alpha_inside_projected_data(PointsParameters& p)
+	{
+		if (!project_alpha_inside_to_alpha(p))
+			return false;
+		build_alpha_inside_projected_kdtree(p);
+		compute_alpha_inside_projected_knn_area(p);
+		compute_alpha_inside_projected_quadrics(p);
+		p.alpha_inside_projected_ready_ = true;
+		return true;
+	}
+
+	void build_alpha_inside_projected_kdtree(PointsParameters& p)
+	{
+		if (p.alpha_inside_kdtree_)
+			delete p.alpha_inside_kdtree_;
+
+		std::vector<Vec3> points;
+		p.alpha_inside_kdtree_vertices_.clear();
+		points.reserve(nb_cells<PVertex>(*p.alpha_inside_mesh_));
+		p.alpha_inside_kdtree_vertices_.reserve(points.size());
+
+		foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) {
+			uint32 idx = index_of(*p.alpha_inside_mesh_, v);
+			points.push_back((*p.alpha_inside_projected_position_)[idx]);
+			p.alpha_inside_kdtree_vertices_.push_back(v);
+			return true;
+		});
+
+		p.alpha_inside_kdtree_ = new acc::KDTree<3, uint32>(points);
+	}
+
+	void compute_alpha_inside_projected_knn_area(PointsParameters& p)
+	{
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_kdtree_ || !p.alpha_inside_projected_position_ ||
+			!p.alpha_inside_projected_normal_ || !p.alpha_inside_projected_knn_ || !p.alpha_inside_projected_area_)
+			return;
+
+		parallel_foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
+			const Vec3& pt = (*p.alpha_inside_projected_position_)[v_idx];
+			std::vector<std::pair<uint32, Scalar>> knn_res;
+			p.alpha_inside_kdtree_->find_nns(pt, p.knn_k_ + 10, &knn_res);
+
+			(*p.alpha_inside_projected_knn_)[v_idx].clear();
+			Scalar sum_dist = 0.0;
+			const Scalar eps = Scalar(1e-12);
+			float band = p.alpha_;
+			Vec3 n = (*p.alpha_inside_projected_normal_)[v_idx];
+			const Scalar n2 = n.squaredNorm();
+			if (n2 > eps)
+				n /= std::sqrt(n2);
+			else
+				n = Vec3(0, 0, 1);
+			int kept = 0;
+			for (auto& res : knn_res)
+			{
+				if (p.alpha_inside_kdtree_vertices_[res.first] != v)
+				{
+					PVertex nb = p.alpha_inside_kdtree_vertices_[res.first];
+					uint32 nb_idx = index_of(*p.alpha_inside_mesh_, nb);
+					const Vec3& q = (*p.alpha_inside_projected_position_)[nb_idx];
+					const Scalar dn = (q - pt).dot(n);
+					if (std::abs(dn) > band)
+						continue;
+					(*p.alpha_inside_projected_knn_)[v_idx].push_back(nb);
+					sum_dist += res.second;
+					++kept;
+					if (kept >= p.knn_k_ + 1)
+					{
+						break;
+					}
+				}
+			}
+			if (kept == 0)
+			{
+				for (auto& res : knn_res)
+				{
+					if (p.alpha_inside_kdtree_vertices_[res.first] != v)
+					{
+						PVertex nb = p.alpha_inside_kdtree_vertices_[res.first];
+						(*p.alpha_inside_projected_knn_)[v_idx].push_back(nb);
+						sum_dist += res.second;
+					}
+				}
+			}
+			(*p.alpha_inside_projected_area_)[v_idx] =
+				(sum_dist * sum_dist) / (2.0 * p.knn_k_); // Rough area estimate
+			return true;
+		});
+	}
+
+	void compute_alpha_inside_projected_quadrics(PointsParameters& p)
+	{
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_projected_position_ || !p.alpha_inside_projected_normal_ ||
+			!p.alpha_inside_projected_knn_ || !p.alpha_inside_projected_area_ ||
+			!p.alpha_inside_projected_quadric_ || !p.alpha_inside_projected_line_quadric_)
+			return;
+
+		parallel_foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
+			Spherical_Quadric& q = (*p.alpha_inside_projected_quadric_)[v_idx];
+			Line_Quadric& lq = (*p.alpha_inside_projected_line_quadric_)[v_idx];
+			q.clear();
+			lq.clear();
+			const Vec3& pos = (*p.alpha_inside_projected_position_)[v_idx];
+			const Vec3& n = (*p.alpha_inside_projected_normal_)[v_idx];
+			Scalar a = (*p.alpha_inside_projected_area_)[v_idx] / (p.knn_k_ + 1.0);
+			q += Spherical_Quadric(Vec4(pos.x(), pos.y(), pos.z(), 0), Vec4(n.x(), n.y(), n.z(), 1)) * a;
+			lq += Line_Quadric(pos, n) * a;
+			for (PVertex vn : (*p.alpha_inside_projected_knn_)[v_idx])
+			{
+				uint32 vn_idx = index_of(*p.alpha_inside_mesh_, vn);
+				const Vec3& pn = (*p.alpha_inside_projected_position_)[vn_idx];
+				const Vec3& nn = (*p.alpha_inside_projected_normal_)[vn_idx];
+				Scalar an = (*p.alpha_inside_projected_area_)[vn_idx] / (p.knn_k_ + 1.0);
+				q += Spherical_Quadric(Vec4(pn.x(), pn.y(), pn.z(), 0), Vec4(nn.x(), nn.y(), nn.z(), 1)) * an;
+				lq += Line_Quadric(pn, nn) * an;
+			}
+			return true;
+		});
+	}
+
 	Vec3 random_sample_around(const Vec3& p, const Scalar radius, std::uniform_real_distribution<Scalar>& uni,
 							  std::mt19937& rng)
 	{
@@ -1884,12 +2089,26 @@ private:
 	{
 		if (p.alpha_inside_mesh_)
 			points_provider_->clear_mesh(*p.alpha_inside_mesh_);
+		if (p.alpha_inside_kdtree_)
+		{
+			delete p.alpha_inside_kdtree_;
+			p.alpha_inside_kdtree_ = nullptr;
+		}
+		p.alpha_inside_kdtree_vertices_.clear();
+		p.alpha_inside_projected_ready_ = false;
 	}
 
 	bool filter_alpha_inside_by_mf(PointsParameters& p)
 	{
 		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_)
 			return false;
+		if (p.alpha_inside_kdtree_)
+		{
+			delete p.alpha_inside_kdtree_;
+			p.alpha_inside_kdtree_ = nullptr;
+		}
+		p.alpha_inside_kdtree_vertices_.clear();
+		p.alpha_inside_projected_ready_ = false;
 		if (!p.neural_udf_loaded_)
 		{
 			std::cerr << "Neural UDF model not loaded. Skip MF filter." << std::endl;
@@ -1948,7 +2167,7 @@ private:
 		}
 
 		std::cout << "MF filter: " << total << " -> " << kept.size() << " kept." << std::endl;
-		points_provider_->clear_mesh(*p.alpha_inside_mesh_);
+		clear_alpha_inside_samples(p);
 		for (const Vec3& pt : kept)
 		{
 			PVertex v = add_vertex(*p.alpha_inside_mesh_);
@@ -2279,7 +2498,16 @@ private:
 
 		std::cout << "Inside sampling done. Total: " << count << std::endl;
 		if (!filter_alpha_inside_by_mf(p))
+		{
 			points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
+			return;
+		}
+		if (!prepare_alpha_inside_projected_data(p))
+		{
+			points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
+			return;
+		}
+		points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
 	}
 
 	// --- Shrinking Balls ---
@@ -3170,6 +3398,55 @@ private:
 		// });
 	}
 
+	// Power distance clustering for alpha-inside points (uses original alpha-inside positions).
+	void compute_power_cluster_alpha_inside(PointsParameters& p)
+	{
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_ || !p.spheres_ || p.nb_spheres_ == 0)
+			return;
+
+		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.spheres_, v);
+			(*p.spheres_inside_cluster_)[v_index].clear();
+			(*p.spheres_inside_components_)[v_index] = 0;
+			return true;
+		});
+		if (p.alpha_inside_sphere_)
+			p.alpha_inside_sphere_->fill(PVertex());
+
+		parallel_foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.alpha_inside_mesh_, v);
+			const Vec3& vp = (*p.alpha_inside_position_)[v_index];
+
+			Scalar min_power_distance = std::numeric_limits<Scalar>::max();
+			PVertex closest_sphere;
+			uint32 closest_sphere_index = 0;
+
+			foreach_cell(*p.spheres_, [&](PVertex pv) {
+				uint32 pv_index = index_of(*p.spheres_, pv);
+				const Vec3& center = (*p.spheres_position_)[pv_index];
+				Scalar radius = (*p.spheres_radius_)[pv_index];
+
+				Scalar dist_sq = (vp - center).squaredNorm();
+				Scalar power_dist = dist_sq - radius * radius;
+
+				if (power_dist < min_power_distance)
+				{
+					min_power_distance = power_dist;
+					closest_sphere = pv;
+					closest_sphere_index = pv_index;
+				}
+				return true;
+			});
+
+			if (p.alpha_inside_sphere_)
+				(*p.alpha_inside_sphere_)[v_index] = closest_sphere;
+
+			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
+			(*p.spheres_inside_cluster_)[closest_sphere_index].push_back(v);
+			return true;
+		});
+	}
+
 	// Use power-based clusters to compute sphere neighbors and build skeleton
 	void compute_skeleton_power(PointsParameters& p, bool only_neighbors = false)
 	{
@@ -3505,6 +3782,177 @@ private:
 		r = p.alpha_;
 		(*p.spheres_position_)[sphere_index] = c;
 		(*p.spheres_radius_)[sphere_index] = r;
+	}
+
+	uint32 count_alpha_inside_components(PointsParameters& p, const std::vector<PVertex>& cluster,
+										 std::vector<uint32>& in_cluster, std::vector<uint32>& visited, uint32 stamp)
+	{
+		if (!p.alpha_inside_projected_knn_ || cluster.empty())
+			return 0;
+
+		for (PVertex v : cluster)
+		{
+			uint32 idx = index_of(*p.alpha_inside_mesh_, v);
+			in_cluster[idx] = stamp;
+		}
+
+		uint32 components = 0;
+		std::vector<PVertex> stack;
+		for (PVertex v : cluster)
+		{
+			uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
+			if (visited[v_idx] == stamp)
+				continue;
+
+			components++;
+			visited[v_idx] = stamp;
+			stack.clear();
+			stack.push_back(v);
+
+			while (!stack.empty())
+			{
+				PVertex cur = stack.back();
+				stack.pop_back();
+				uint32 cur_idx = index_of(*p.alpha_inside_mesh_, cur);
+				const auto& neighbors = (*p.alpha_inside_projected_knn_)[cur_idx];
+				for (PVertex nb : neighbors)
+				{
+					uint32 nb_idx = index_of(*p.alpha_inside_mesh_, nb);
+					if (in_cluster[nb_idx] != stamp || visited[nb_idx] == stamp)
+						continue;
+					visited[nb_idx] = stamp;
+					stack.push_back(nb);
+				}
+			}
+		}
+
+		return components;
+	}
+
+	void update_sphere_sqem_alpha_inside(PointsParameters& p, PVertex sphere)
+	{
+		uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+		const std::vector<PVertex>& cluster = (*p.spheres_inside_cluster_)[sphere_index];
+		if (cluster.empty())
+			return;
+
+		Spherical_Quadric q;
+		Scalar weight_sum = Scalar(0);
+		for (PVertex v : cluster)
+		{
+			uint32 v_index = index_of(*p.alpha_inside_mesh_, v);
+			Scalar weight = value<Scalar>(*p.alpha_inside_mesh_, p.alpha_inside_projected_area_, v);
+			if (weight <= 0.0)
+				continue;
+			q += (*p.alpha_inside_projected_quadric_)[v_index] * weight;
+			weight_sum += weight;
+		}
+
+		if (weight_sum <= Scalar(0))
+			return;
+		const Vec4 s = q._A.completeOrthogonalDecomposition().solve(q._b);
+		if (!s.allFinite())
+			return;
+
+		(*p.spheres_position_)[sphere_index] = s.head<3>();
+		(*p.spheres_radius_)[sphere_index] = s[3];
+	}
+
+	void update_sphere_line_quadric_distance_fix_radius_alpha_inside(PointsParameters& p, PVertex sphere)
+	{
+		uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+		const std::vector<PVertex>& cluster = (*p.spheres_inside_cluster_)[sphere_index];
+		if (cluster.empty())
+			return;
+
+		Vec3 c = (*p.spheres_position_)[sphere_index];
+		Spherical_Quadric q;
+		Line_Quadric lq;
+		Vec3 h;
+		h.setZero();
+		for (PVertex v : cluster)
+		{
+			uint32 v_index = index_of(*p.alpha_inside_mesh_, v);
+			Scalar weight = value<Scalar>(*p.alpha_inside_mesh_, p.alpha_inside_projected_area_, v);
+			if (weight <= 0.0)
+				std::cout << "Warning: inside sample with zero weight in sphere " << sphere_index << std::endl;
+			q += (*p.alpha_inside_projected_quadric_)[v_index] * weight;
+			h += weight * (*p.alpha_inside_projected_position_)[v_index];
+			lq += (*p.alpha_inside_projected_line_quadric_)[v_index] * weight;
+		}
+
+		Mat4 Ql = lq.get_quadric().matrix();
+		Mat3 Al = Ql.block<3, 3>(0, 0);
+		Vec3 bl = -Ql.block<3, 1>(0, 3);
+
+		Mat3 As = q._A.block<3, 3>(0, 0);
+		Vec3 bs = q._b.head<3>();
+		Vec3 Asr = q._A.block<3, 1>(0, 3);
+
+		Mat3 A = As + p.sqem_update_lambda_ * Al;
+		Vec3 b = (bs + p.sqem_update_lambda_ * bl) - Asr * p.alpha_;
+
+		c = A.ldlt().solve(b);
+		(*p.spheres_position_)[sphere_index] = c;
+		(*p.spheres_radius_)[sphere_index] = p.alpha_;
+	}
+
+	void update_spheres_alpha_inside(PointsParameters& p)
+	{
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_ || nb_cells<PVertex>(*p.alpha_inside_mesh_) == 0)
+		{
+			std::cerr << "Error: No alpha inside samples found." << std::endl;
+			return;
+		}
+		if (!p.neural_udf_loaded_)
+		{
+			std::cerr << "Error: Neural MF model not loaded." << std::endl;
+			return;
+		}
+		if (p.nb_spheres_ == 0)
+		{
+			std::cerr << "Error: No spheres to update." << std::endl;
+			return;
+		}
+		if (!p.alpha_inside_projected_ready_ || !p.alpha_inside_kdtree_)
+		{
+			std::cerr << "Error: Alpha inside projected data not ready. Please resample alpha inside." << std::endl;
+			return;
+		}
+
+		compute_power_cluster_alpha_inside(p);
+
+		const uint32 nb_inside = nb_cells<PVertex>(*p.alpha_inside_mesh_);
+		std::vector<uint32> in_cluster(nb_inside, 0);
+		std::vector<uint32> visited(nb_inside, 0);
+		uint32 stamp = 1;
+
+		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 s_index = index_of(*p.spheres_, v);
+			const std::vector<PVertex>& cluster = (*p.spheres_inside_cluster_)[s_index];
+
+			if (stamp == std::numeric_limits<uint32>::max())
+			{
+				std::fill(in_cluster.begin(), in_cluster.end(), 0);
+				std::fill(visited.begin(), visited.end(), 0);
+				stamp = 1;
+			}
+
+			uint32 components = count_alpha_inside_components(p, cluster, in_cluster, visited, stamp);
+			(*p.spheres_inside_components_)[s_index] = components;
+			stamp++;
+
+			if (components > 2)
+				update_sphere_sqem_alpha_inside(p, v);
+			else
+				update_sphere_line_quadric_distance_fix_radius_alpha_inside(p, v);
+
+			return true;
+		});
+
+		update_render_data(p);
 	}
 
 	void correct_sphere(PointsParameters& p, PVertex v)
@@ -5198,6 +5646,7 @@ protected:
 						ImGui::Text("Radius: %f", (*p.spheres_radius_)[index_of(*p.spheres_, picked_sphere_)]);
 					}
 				}
+
 			}
 		}
 	}
