@@ -1,5 +1,5 @@
-#ifndef CGOGN_MODULE_ALPHA_INSIDE_SPHERE_DEBUGGER_H_
-#define CGOGN_MODULE_ALPHA_INSIDE_SPHERE_DEBUGGER_H_
+#ifndef CGOGN_MODULE_ALPHA_SET_SPHERE_DEBUGGER_H_
+#define CGOGN_MODULE_ALPHA_SET_SPHERE_DEBUGGER_H_
 
 #include <cgogn/ui/app.h>
 #include <cgogn/ui/imgui_helpers.h>
@@ -28,6 +28,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace cgogn
@@ -45,15 +46,15 @@ using geometry::Vec3;
 using geometry::Vec4;
 
 template <typename POINTS>
-class AlphaInsideSphereDebugger : public ViewModule
+class AlphaSetSphereDebugger : public ViewModule
 {
 public:
 	template <typename T>
 	using PAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
 
-	AlphaInsideSphereDebugger(const App& app)
-		: ViewModule(app, "AlphaInsideSphereDebugger (" + std::string{mesh_traits<POINTS>::name} + ")"),
+	AlphaSetSphereDebugger(const App& app)
+		: ViewModule(app, "AlphaSetSphereDebugger (" + std::string{mesh_traits<POINTS>::name} + ")"),
 		  selected_view_(app.current_view())
 	{
 	}
@@ -62,10 +63,18 @@ private:
 	struct Parameters
 	{
 		POINTS* points_ = nullptr;
+		POINTS* samples_mesh_ = nullptr;
 		POINTS* alpha_inside_mesh_ = nullptr;
 		POINTS* spheres_mesh_ = nullptr;
 		POINTS* debug_cluster_mesh_ = nullptr;
 		POINTS* debug_sphere_mesh_ = nullptr;
+
+		std::shared_ptr<PAttribute<Vec3>> samples_position_ = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> samples_normal_ = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> samples_area_ = nullptr;
+		std::shared_ptr<PAttribute<std::vector<PVertex>>> samples_knn_ = nullptr;
+		std::shared_ptr<PAttribute<Spherical_Quadric>> samples_quadric_ = nullptr;
+		std::shared_ptr<PAttribute<Line_Quadric>> samples_line_quadric_ = nullptr;
 
 		std::shared_ptr<PAttribute<Vec3>> alpha_inside_position_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> alpha_inside_color_ = nullptr;
@@ -75,13 +84,10 @@ private:
 		std::shared_ptr<PAttribute<std::vector<PVertex>>> alpha_inside_projected_knn_ = nullptr;
 		std::shared_ptr<PAttribute<Spherical_Quadric>> alpha_inside_projected_quadric_ = nullptr;
 		std::shared_ptr<PAttribute<Line_Quadric>> alpha_inside_projected_line_quadric_ = nullptr;
-		std::shared_ptr<PAttribute<PVertex>> alpha_inside_sphere_ = nullptr;
 
 		std::shared_ptr<PAttribute<Vec3>> spheres_position_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_radius_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> spheres_cluster_color_ = nullptr;
-		std::shared_ptr<PAttribute<std::vector<PVertex>>> spheres_inside_cluster_ = nullptr;
-		std::shared_ptr<PAttribute<uint32>> spheres_inside_components_ = nullptr;
 
 		std::shared_ptr<PAttribute<Vec3>> debug_cluster_position_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> debug_cluster_projected_position_ = nullptr;
@@ -89,6 +95,20 @@ private:
 		std::shared_ptr<PAttribute<Vec3>> debug_sphere_position_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> debug_sphere_radius_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> debug_sphere_color_ = nullptr;
+
+		enum SourceMode
+		{
+			SOURCE_SAMPLES,
+			SOURCE_ALPHA_INSIDE
+		};
+		SourceMode source_mode_ = SOURCE_ALPHA_INSIDE;
+		std::vector<std::vector<PVertex>> clusters_;
+		std::vector<uint32> cluster_component_counts_;
+		std::vector<uint32> cluster_component_totals_;
+		std::vector<std::vector<uint32>> cluster_component_sizes_;
+		uint32 cluster_points_count_ = 0;
+		uint32 cluster_spheres_count_ = 0;
+		uint32 cluster_spheres_capacity_ = 0;
 
 		PVertex picked_sphere_;
 		bool show_normals_ = false;
@@ -153,11 +173,22 @@ protected:
 			return;
 
 		const uint32 s_idx = index_of(*p.spheres_mesh_, p.picked_sphere_);
+		SourceBasic src;
 		bool needs_cluster = true;
-		if (p.spheres_inside_cluster_)
-			needs_cluster = (*p.spheres_inside_cluster_)[s_idx].empty();
+		if (get_source_basic(p, src))
+		{
+			const uint32 nb_spheres = nb_cells<PVertex>(*p.spheres_mesh_);
+			const uint32 cluster_size =
+				p.spheres_position_ ? static_cast<uint32>(p.spheres_position_->size()) : nb_spheres;
+			const uint32 nb_points = nb_cells<PVertex>(*src.mesh);
+			needs_cluster = (p.cluster_spheres_count_ != nb_spheres) ||
+							(p.cluster_spheres_capacity_ != cluster_size) ||
+							(p.cluster_points_count_ != nb_points);
+			if (!needs_cluster && s_idx < p.clusters_.size())
+				needs_cluster = p.clusters_[s_idx].empty();
+		}
 		if (needs_cluster)
-			compute_power_cluster_alpha_inside(p);
+			compute_power_cluster_source(p);
 		update_debug_meshes(p, p.picked_sphere_);
 		p.solo_view_ = true;
 		set_solo_view(p, true);
@@ -184,17 +215,23 @@ protected:
 		if (it == parameters_.end())
 			return;
 		Parameters& p = parameters_[selected_points_];
-		const bool has_alpha_inside = p.alpha_inside_mesh_ && p.alpha_inside_position_;
+		const bool has_samples = p.samples_mesh_ && p.samples_position_;
+		const bool has_alpha_inside = p.alpha_inside_mesh_ && p.alpha_inside_projected_position_;
 		const bool has_spheres = p.spheres_mesh_ && p.spheres_position_ && p.spheres_radius_;
 
-		if (!has_alpha_inside)
-		{
-			ImGui::TextColored(ImVec4(1, 1, 0, 1), "Alpha inside mesh not found.");
-			return;
-		}
 		if (!has_spheres)
 		{
 			ImGui::TextColored(ImVec4(1, 1, 0, 1), "Spheres mesh not found.");
+			return;
+		}
+		if (p.source_mode_ == Parameters::SOURCE_SAMPLES && !has_samples)
+		{
+			ImGui::TextColored(ImVec4(1, 1, 0, 1), "Samples mesh not found.");
+			return;
+		}
+		if (p.source_mode_ == Parameters::SOURCE_ALPHA_INSIDE && !has_alpha_inside)
+		{
+			ImGui::TextColored(ImVec4(1, 1, 0, 1), "Alpha inside projected data not found.");
 			return;
 		}
 
@@ -202,19 +239,16 @@ protected:
 		set_solo_view(p, p.solo_view_);
 
 		ImGui::Separator();
-		if (ImGui::Button("Power Cluster (Alpha Inside)"))
+		ImGui::Text("Source: %s", p.source_mode_ == Parameters::SOURCE_SAMPLES ? "Samples" : "Alpha Inside (Projected)");
+		if (ImGui::Button("Power Cluster"))
 		{
-			compute_power_cluster_alpha_inside(p);
+			compute_power_cluster_source(p);
 			update_debug_meshes(p, p.picked_sphere_);
 		}
-		ImGui::SameLine();
-		if (ImGui::Button("Update Spheres (Alpha Inside)"))
-		{
-			update_spheres_alpha_inside(p);
-			update_debug_meshes(p, p.picked_sphere_);
-		}
-
-		ImGui::Text("Inside samples: %zu", nb_cells<PVertex>(*p.alpha_inside_mesh_));
+		if (p.source_mode_ == Parameters::SOURCE_SAMPLES)
+			ImGui::Text("Sample points: %zu", nb_cells<PVertex>(*p.samples_mesh_));
+		else
+			ImGui::Text("Alpha inside points: %zu", nb_cells<PVertex>(*p.alpha_inside_mesh_));
 
 		ImGui::Separator();
 		ImGui::Text("Press O to pick a sphere and show its cluster.");
@@ -225,29 +259,35 @@ protected:
 			ImGui::Text("Picked sphere center: (%f, %f, %f)", sp[0], sp[1], sp[2]);
 			ImGui::Text("Picked sphere radius: %f", (*p.spheres_radius_)[s_idx]);
 			ImGui::Text("Picked sphere index: %u", s_idx);
-			if (p.spheres_inside_cluster_)
+			if (s_idx < p.clusters_.size())
 			{
-				const auto& cluster = (*p.spheres_inside_cluster_)[s_idx];
+				const auto& cluster = p.clusters_[s_idx];
 				ImGui::Text("Cluster size: %zu", cluster.size());
-				if (p.alpha_inside_projected_area_ && !cluster.empty())
+			}
+			if (s_idx < p.cluster_component_counts_.size())
+			{
+				ImGui::Text("Components kept (>3): %u", p.cluster_component_counts_[s_idx]);
+				if (s_idx < p.cluster_component_totals_.size())
+					ImGui::Text("Components total: %u", p.cluster_component_totals_[s_idx]);
+				if (s_idx < p.cluster_component_sizes_.size())
 				{
-					Scalar weight_sum = Scalar(0);
-					for (PVertex v : cluster)
+					const auto& sizes = p.cluster_component_sizes_[s_idx];
+					if (!sizes.empty())
 					{
-						uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
-						weight_sum += (*p.alpha_inside_projected_area_)[v_idx];
+						std::string size_str;
+						for (size_t i = 0; i < sizes.size(); ++i)
+						{
+							if (i > 0)
+								size_str += ", ";
+							size_str += std::to_string(sizes[i]);
+						}
+						ImGui::Text("Component sizes: %s", size_str.c_str());
 					}
-					ImGui::Text("Cluster weight sum: %f", static_cast<float>(weight_sum));
 				}
 			}
-			if (p.spheres_inside_components_)
-			{
-				ImGui::Text("Components: %u", (*p.spheres_inside_components_)[s_idx]);
-			}
-			const bool projected_ready = p.alpha_inside_projected_position_ && p.alpha_inside_projected_normal_ &&
-										 p.alpha_inside_projected_area_ && p.alpha_inside_projected_quadric_ &&
-										 p.alpha_inside_projected_line_quadric_;
-			ImGui::Text("Projected data: %s", projected_ready ? "ready" : "not ready");
+			SourceData src;
+			const bool src_ready = get_source_data(p, src);
+			ImGui::Text("Source data: %s", src_ready ? "ready" : "not ready");
 		}
 
 		if (ImGui::Button("Show Cluster Colors"))
@@ -267,15 +307,14 @@ protected:
 		if (p.alpha_ < 0.0f)
 			p.alpha_ = 0.0f;
 		ImGui::SliderFloat("Update lambda", &p.sqem_update_lambda_, 0.0f, 2.0f, "%.6f");
-		const bool projected_ready = p.alpha_inside_projected_position_ && p.alpha_inside_projected_normal_ &&
-									 p.alpha_inside_projected_area_ && p.alpha_inside_projected_quadric_ &&
-									 p.alpha_inside_projected_line_quadric_;
-		if (!projected_ready)
-			ImGui::TextColored(ImVec4(1, 1, 0, 1), "Projected data not ready.");
+		SourceData src;
+		const bool src_ready = get_source_data(p, src);
+		if (!src_ready)
+			ImGui::TextColored(ImVec4(1, 1, 0, 1), "Source data not ready.");
 
 		if (ImGui::Button("Update SQEM (one-step)"))
 		{
-			if (p.picked_sphere_.is_valid() && projected_ready)
+			if (p.picked_sphere_.is_valid() && src_ready)
 			{
 				update_sphere_sqem_one_step(p, p.picked_sphere_);
 				update_debug_meshes(p, p.picked_sphere_);
@@ -283,7 +322,7 @@ protected:
 		}
 		if (ImGui::Button("Update SQEM + Euclidean (iter)"))
 		{
-			if (p.picked_sphere_.is_valid() && projected_ready)
+			if (p.picked_sphere_.is_valid() && src_ready)
 			{
 				update_sphere_sqem_euclidean(p, p.picked_sphere_);
 				update_debug_meshes(p, p.picked_sphere_);
@@ -291,7 +330,7 @@ protected:
 		}
 		if (ImGui::Button("Update SQEM + Line Quadric (fixed alpha)"))
 		{
-			if (p.picked_sphere_.is_valid() && projected_ready)
+			if (p.picked_sphere_.is_valid() && src_ready)
 			{
 				update_sphere_sqem_line_quadric_fix_alpha(p, p.picked_sphere_);
 				update_debug_meshes(p, p.picked_sphere_);
@@ -299,7 +338,7 @@ protected:
 		}
 		if (ImGui::Button("Update SQEM + Line Quadric (free radius)"))
 		{
-			if (p.picked_sphere_.is_valid() && projected_ready)
+			if (p.picked_sphere_.is_valid() && src_ready)
 			{
 				update_sphere_sqem_line_quadric_free_radius(p, p.picked_sphere_);
 				update_debug_meshes(p, p.picked_sphere_);
@@ -326,7 +365,33 @@ private:
 	void init_parameters(POINTS& m, Parameters& p)
 	{
 		p.points_ = &m;
-		const std::string base_name = points_provider_->mesh_name(m);
+		const std::string selected_name = points_provider_->mesh_name(m);
+		auto ends_with = [](const std::string& s, const std::string& suffix) {
+			return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+		};
+
+		std::string base_name = selected_name;
+		if (ends_with(selected_name, "_samples"))
+		{
+			base_name = selected_name.substr(0, selected_name.size() - std::string("_samples").size());
+			p.source_mode_ = Parameters::SOURCE_SAMPLES;
+		}
+		else if (ends_with(selected_name, "_alpha_inside"))
+		{
+			base_name = selected_name.substr(0, selected_name.size() - std::string("_alpha_inside").size());
+			p.source_mode_ = Parameters::SOURCE_ALPHA_INSIDE;
+		}
+		else
+		{
+			const std::string guess_samples = base_name + "_samples";
+			if (points_provider_->has_mesh(guess_samples))
+				p.source_mode_ = Parameters::SOURCE_SAMPLES;
+			else
+				p.source_mode_ = Parameters::SOURCE_ALPHA_INSIDE;
+		}
+
+		const std::string samples_name = base_name + "_samples";
+		p.samples_mesh_ = points_provider_->has_mesh(samples_name) ? points_provider_->mesh(samples_name) : nullptr;
 
 		const std::string inside_name = base_name + "_alpha_inside";
 		p.alpha_inside_mesh_ =
@@ -348,6 +413,16 @@ private:
 									   ? points_provider_->mesh(debug_sphere_name)
 									   : points_provider_->add_mesh(debug_sphere_name);
 
+		if (p.samples_mesh_)
+		{
+			p.samples_position_ = get_attribute<Vec3, PVertex>(*p.samples_mesh_, "position");
+			p.samples_normal_ = get_attribute<Vec3, PVertex>(*p.samples_mesh_, "normal");
+			p.samples_area_ = get_attribute<Scalar, PVertex>(*p.samples_mesh_, "area");
+			p.samples_knn_ = get_attribute<std::vector<PVertex>, PVertex>(*p.samples_mesh_, "knn");
+			p.samples_quadric_ = get_attribute<Spherical_Quadric, PVertex>(*p.samples_mesh_, "quadric");
+			p.samples_line_quadric_ = get_attribute<Line_Quadric, PVertex>(*p.samples_mesh_, "line_quadric");
+		}
+
 		if (p.alpha_inside_mesh_)
 		{
 			p.alpha_inside_position_ = get_attribute<Vec3, PVertex>(*p.alpha_inside_mesh_, "position");
@@ -364,7 +439,6 @@ private:
 				get_attribute<Spherical_Quadric, PVertex>(*p.alpha_inside_mesh_, "projected_alpha_inside_quadric");
 			p.alpha_inside_projected_line_quadric_ =
 				get_attribute<Line_Quadric, PVertex>(*p.alpha_inside_mesh_, "projected_alpha_inside_line_quadric");
-			p.alpha_inside_sphere_ = get_or_add_attribute<PVertex, PVertex>(*p.alpha_inside_mesh_, "sphere");
 		}
 
 		if (p.spheres_mesh_)
@@ -372,10 +446,6 @@ private:
 			p.spheres_position_ = get_attribute<Vec3, PVertex>(*p.spheres_mesh_, "position");
 			p.spheres_radius_ = get_attribute<Scalar, PVertex>(*p.spheres_mesh_, "radius");
 			p.spheres_cluster_color_ = get_or_add_attribute<Vec4, PVertex>(*p.spheres_mesh_, "cluster_color");
-			p.spheres_inside_cluster_ =
-				get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.spheres_mesh_, "inside_cluster");
-			p.spheres_inside_components_ =
-				get_or_add_attribute<uint32, PVertex>(*p.spheres_mesh_, "inside_components");
 		}
 
 		if (p.debug_cluster_mesh_)
@@ -401,13 +471,21 @@ private:
 		if (!pcr_ || !selected_view_)
 			return;
 
+		if (p.samples_mesh_ && p.samples_position_)
+		{
+			pcr_->set_vertex_position(*selected_view_, *p.samples_mesh_, p.samples_position_);
+			if(p.source_mode_ == Parameters::SOURCE_SAMPLES)
+				pcr_->set_render_vertices(*selected_view_, *p.samples_mesh_, true);
+		}
+
 		if (p.alpha_inside_mesh_ && p.alpha_inside_position_ && p.alpha_inside_color_)
 		{
 			pcr_->set_vertex_position(*selected_view_, *p.alpha_inside_mesh_, p.alpha_inside_position_);
 			pcr_->set_vertex_color(*selected_view_, *p.alpha_inside_mesh_, p.alpha_inside_color_);
 			pcr_->set_vertex_color_per_cell(*selected_view_, *p.alpha_inside_mesh_,
 											PointCloudRender<POINTS>::PER_VERTEX);
-			pcr_->set_render_vertices(*selected_view_, *p.alpha_inside_mesh_, true);
+			if (p.source_mode_ == Parameters::SOURCE_ALPHA_INSIDE)
+				pcr_->set_render_vertices(*selected_view_, *p.alpha_inside_mesh_, true);
 		}
 
 		if (p.spheres_mesh_ && p.spheres_position_ && p.spheres_radius_ && p.spheres_cluster_color_)
@@ -470,29 +548,172 @@ private:
 		}
 	}
 
-	void compute_power_cluster_alpha_inside(Parameters& p)
+	struct SourceData
 	{
-		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_ || !p.spheres_mesh_ || !p.spheres_position_ ||
-			!p.spheres_radius_ || !p.spheres_inside_cluster_)
+		POINTS* mesh = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> position = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> projected_position = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> cluster_position = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> normal = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> area = nullptr;
+		std::shared_ptr<PAttribute<std::vector<PVertex>>> knn = nullptr;
+		std::shared_ptr<PAttribute<Spherical_Quadric>> quadric = nullptr;
+		std::shared_ptr<PAttribute<Line_Quadric>> line_quadric = nullptr;
+	};
+
+	struct SourceBasic
+	{
+		POINTS* mesh = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> position = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> projected_position = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> cluster_position = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> normal = nullptr;
+	};
+
+	bool get_source_basic(Parameters& p, SourceBasic& out)
+	{
+		if (p.source_mode_ == Parameters::SOURCE_SAMPLES)
+		{
+			out.mesh = p.samples_mesh_;
+			out.position = p.samples_position_;
+			out.projected_position = p.samples_position_;
+			out.cluster_position = p.samples_position_;
+			out.normal = p.samples_normal_;
+		}
+		else
+		{
+			out.mesh = p.alpha_inside_mesh_;
+			out.position = p.alpha_inside_position_;
+			out.projected_position = p.alpha_inside_projected_position_;
+			out.cluster_position = p.alpha_inside_position_;
+			out.normal = p.alpha_inside_projected_normal_;
+		}
+		if (!out.mesh || !out.cluster_position || !out.projected_position)
+			return false;
+		return true;
+	}
+
+	bool get_source_data(Parameters& p, SourceData& out)
+	{
+		if (p.source_mode_ == Parameters::SOURCE_SAMPLES)
+		{
+			out.mesh = p.samples_mesh_;
+			out.position = p.samples_position_;
+			out.projected_position = p.samples_position_;
+			out.cluster_position = p.samples_position_;
+			out.normal = p.samples_normal_;
+			out.area = p.samples_area_;
+			out.knn = p.samples_knn_;
+			out.quadric = p.samples_quadric_;
+			out.line_quadric = p.samples_line_quadric_;
+		}
+		else
+		{
+			out.mesh = p.alpha_inside_mesh_;
+			out.position = p.alpha_inside_projected_position_;
+			out.projected_position = p.alpha_inside_projected_position_;
+			out.cluster_position = p.alpha_inside_position_;
+			out.normal = p.alpha_inside_projected_normal_;
+			out.area = p.alpha_inside_projected_area_;
+			out.knn = p.alpha_inside_projected_knn_;
+			out.quadric = p.alpha_inside_projected_quadric_;
+			out.line_quadric = p.alpha_inside_projected_line_quadric_;
+		}
+
+		if (!out.mesh || !out.position || !out.projected_position || !out.cluster_position || !out.normal || !out.area ||
+			!out.knn || !out.quadric || !out.line_quadric)
+			return false;
+		return true;
+	}
+
+	void filter_cluster_components(Parameters& p, const SourceData& src, std::vector<PVertex>& cluster,
+								   uint32& kept_components, uint32& total_components,
+								   std::vector<uint32>& kept_sizes)
+	{
+		kept_components = 0;
+		total_components = 0;
+		kept_sizes.clear();
+		if (cluster.empty())
 			return;
 
-		parallel_foreach_cell(*p.spheres_mesh_, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*p.spheres_mesh_, v);
-			(*p.spheres_inside_cluster_)[v_index].clear();
-			if (p.spheres_inside_components_)
-				(*p.spheres_inside_components_)[v_index] = 0;
-			return true;
-		});
+		std::unordered_set<uint32> in_cluster;
+		in_cluster.reserve(cluster.size() * 2);
+		for (PVertex v : cluster)
+			in_cluster.insert(index_of(*src.mesh, v));
 
-		if (p.alpha_inside_sphere_)
-			p.alpha_inside_sphere_->fill(PVertex());
+		std::unordered_set<uint32> visited;
+		visited.reserve(cluster.size() * 2);
 
-		if (nb_cells<PVertex>(*p.spheres_mesh_) == 0)
+		std::vector<PVertex> kept;
+		kept.reserve(cluster.size());
+
+		std::vector<PVertex> stack;
+		std::vector<PVertex> component;
+		for (PVertex v : cluster)
+		{
+			uint32 v_idx = index_of(*src.mesh, v);
+			if (visited.find(v_idx) != visited.end())
+				continue;
+
+			total_components++;
+			stack.clear();
+			component.clear();
+			stack.push_back(v);
+			visited.insert(v_idx);
+
+			while (!stack.empty())
+			{
+				PVertex cur = stack.back();
+				stack.pop_back();
+				component.push_back(cur);
+
+				uint32 cur_idx = index_of(*src.mesh, cur);
+				for (PVertex nb : (*src.knn)[cur_idx])
+				{
+					uint32 nb_idx = index_of(*src.mesh, nb);
+					if (in_cluster.find(nb_idx) == in_cluster.end())
+						continue;
+					if (visited.insert(nb_idx).second)
+						stack.push_back(nb);
+				}
+			}
+
+			if (component.size() > 3)
+			{
+				kept_components++;
+				kept_sizes.push_back(static_cast<uint32>(component.size()));
+				kept.insert(kept.end(), component.begin(), component.end());
+			}
+		}
+
+		cluster.swap(kept);
+	}
+
+	void compute_power_cluster_source(Parameters& p)
+	{
+		SourceBasic src;
+		if (!get_source_basic(p, src))
+			return;
+		if (!p.spheres_mesh_ || !p.spheres_position_ || !p.spheres_radius_)
 			return;
 
-		parallel_foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*p.alpha_inside_mesh_, v);
-			const Vec3& vp = (*p.alpha_inside_position_)[v_index];
+		const uint32 nb_spheres = nb_cells<PVertex>(*p.spheres_mesh_);
+		const uint32 cluster_size =
+			p.spheres_position_ ? static_cast<uint32>(p.spheres_position_->size()) : nb_spheres;
+		if (p.clusters_.size() != cluster_size)
+			p.clusters_.assign(cluster_size, {});
+		else
+		{
+			for (auto& c : p.clusters_)
+				c.clear();
+		}
+
+		if (nb_spheres == 0)
+			return;
+
+		parallel_foreach_cell(*src.mesh, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*src.mesh, v);
+			const Vec3& vp = (*src.cluster_position)[v_index];
 
 			Scalar min_power_distance = std::numeric_limits<Scalar>::max();
 			PVertex closest_sphere;
@@ -514,134 +735,31 @@ private:
 				return true;
 			});
 
-			if (p.alpha_inside_sphere_)
-				(*p.alpha_inside_sphere_)[v_index] = closest_sphere;
-
 			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
-			(*p.spheres_inside_cluster_)[closest_sphere_index].push_back(v);
+			p.clusters_[closest_sphere_index].push_back(v);
 			return true;
 		});
 
-		parallel_foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) -> bool {
-			uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
-			PVertex sphere = (*p.alpha_inside_sphere_)[v_idx];
-			Vec4 c(0.0f, 0.0f, 0.0f, 1.0f);
-			if (sphere.is_valid())
-				c = value<Vec4>(*p.spheres_mesh_, p.spheres_cluster_color_, sphere);
-			(*p.alpha_inside_color_)[v_idx] = c;
-			return true;
-		});
-		if (points_provider_)
-			points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_color_.get());
-	}
+		SourceData src_full;
+		if (!get_source_data(p, src_full))
+			return;
 
-	uint32 count_alpha_inside_components(Parameters& p, const std::vector<PVertex>& cluster,
-										 std::vector<uint32>& in_cluster, std::vector<uint32>& visited, uint32 stamp)
-	{
-		if (!p.alpha_inside_projected_knn_ || cluster.empty())
-			return 0;
-
-		for (PVertex v : cluster)
+		p.cluster_component_counts_.assign(cluster_size, 0);
+		p.cluster_component_totals_.assign(cluster_size, 0);
+		p.cluster_component_sizes_.assign(cluster_size, {});
+		for (uint32 i = 0; i < cluster_size; ++i)
 		{
-			uint32 idx = index_of(*p.alpha_inside_mesh_, v);
-			in_cluster[idx] = stamp;
+			uint32 kept = 0;
+			uint32 total = 0;
+			filter_cluster_components(p, src_full, p.clusters_[i], kept, total, p.cluster_component_sizes_[i]);
+			p.cluster_component_counts_[i] = kept;
+			p.cluster_component_totals_[i] = total;
 		}
-
-		uint32 components = 0;
-		std::vector<PVertex> stack;
-		for (PVertex v : cluster)
-		{
-			uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
-			if (visited[v_idx] == stamp)
-				continue;
-
-			components++;
-			visited[v_idx] = stamp;
-			stack.clear();
-			stack.push_back(v);
-
-			while (!stack.empty())
-			{
-				PVertex cur = stack.back();
-				stack.pop_back();
-				uint32 cur_idx = index_of(*p.alpha_inside_mesh_, cur);
-				const auto& neighbors = (*p.alpha_inside_projected_knn_)[cur_idx];
-				for (PVertex nb : neighbors)
-				{
-					uint32 nb_idx = index_of(*p.alpha_inside_mesh_, nb);
-					if (in_cluster[nb_idx] != stamp || visited[nb_idx] == stamp)
-						continue;
-					visited[nb_idx] = stamp;
-					stack.push_back(nb);
-				}
-			}
-		}
-
-		return components;
+		p.cluster_spheres_count_ = nb_spheres;
+		p.cluster_spheres_capacity_ = cluster_size;
+		p.cluster_points_count_ = nb_cells<PVertex>(*src.mesh);
 	}
 
-	void update_spheres_alpha_inside(Parameters& p)
-	{
-		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_ || nb_cells<PVertex>(*p.alpha_inside_mesh_) == 0)
-			return;
-		if (!p.spheres_mesh_ || nb_cells<PVertex>(*p.spheres_mesh_) == 0)
-			return;
-
-		const bool projected_ready = p.alpha_inside_projected_position_ && p.alpha_inside_projected_normal_ &&
-									 p.alpha_inside_projected_area_ && p.alpha_inside_projected_quadric_ &&
-									 p.alpha_inside_projected_line_quadric_ && p.alpha_inside_projected_knn_;
-		if (!projected_ready)
-			return;
-
-		compute_power_cluster_alpha_inside(p);
-
-		const uint32 nb_inside = nb_cells<PVertex>(*p.alpha_inside_mesh_);
-		std::vector<uint32> in_cluster(nb_inside, 0);
-		std::vector<uint32> visited(nb_inside, 0);
-		uint32 stamp = 1;
-
-		foreach_cell(*p.spheres_mesh_, [&](PVertex v) -> bool {
-			uint32 s_index = index_of(*p.spheres_mesh_, v);
-			const std::vector<PVertex>& cluster = (*p.spheres_inside_cluster_)[s_index];
-
-			if (stamp == std::numeric_limits<uint32>::max())
-			{
-				std::fill(in_cluster.begin(), in_cluster.end(), 0);
-				std::fill(visited.begin(), visited.end(), 0);
-				stamp = 1;
-			}
-
-			uint32 components = count_alpha_inside_components(p, cluster, in_cluster, visited, stamp);
-			if (p.spheres_inside_components_)
-				(*p.spheres_inside_components_)[s_index] = components;
-			stamp++;
-
-			if (components > 2)
-				update_sphere_sqem_one_step(p, v);
-			else
-				update_sphere_sqem_line_quadric_fix_alpha(p, v);
-
-			return true;
-		});
-	}
-
-	void color_alpha_inside_by_sphere_cluster(Parameters& p)
-	{
-		if (!p.alpha_inside_mesh_ || !p.alpha_inside_color_ || !p.alpha_inside_sphere_ || !p.spheres_cluster_color_)
-			return;
-
-		parallel_foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) -> bool {
-			uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
-			PVertex sphere = (*p.alpha_inside_sphere_)[v_idx];
-			Vec4 c(0.0f, 0.0f, 0.0f, 1.0f);
-			if (sphere.is_valid())
-				c = value<Vec4>(*p.spheres_mesh_, p.spheres_cluster_color_, sphere);
-			(*p.alpha_inside_color_)[v_idx] = c;
-			return true;
-		});
-		if (points_provider_)
-			points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_color_.get());
-	}
 
 	void update_debug_meshes(Parameters& p, PVertex sphere)
 	{
@@ -649,13 +767,16 @@ private:
 			return;
 		if (!p.debug_sphere_mesh_ || !p.debug_sphere_position_ || !p.debug_sphere_radius_ || !p.debug_sphere_color_)
 			return;
-		if (!p.alpha_inside_position_ || !p.spheres_position_ || !p.spheres_radius_)
+		if (!p.spheres_position_ || !p.spheres_radius_)
+			return;
+		SourceBasic src;
+		if (!get_source_basic(p, src))
 			return;
 
 		points_provider_->clear_mesh(*p.debug_cluster_mesh_);
 		points_provider_->clear_mesh(*p.debug_sphere_mesh_);
 
-		if (!sphere.is_valid() || !p.spheres_inside_cluster_)
+		if (!sphere.is_valid())
 			return;
 
 		const Vec4 base_color = p.spheres_cluster_color_
@@ -663,25 +784,22 @@ private:
 									: Vec4(0.2f, 0.8f, 0.9f, 1.0f);
 
 		const uint32 s_idx = index_of(*p.spheres_mesh_, sphere);
-		const std::vector<PVertex>& cluster = (*p.spheres_inside_cluster_)[s_idx];
+		if (s_idx >= p.clusters_.size())
+			return;
+		const std::vector<PVertex>& cluster = p.clusters_[s_idx];
 		for (PVertex v : cluster)
 		{
-			uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
+			uint32 v_idx = index_of(*src.mesh, v);
 			PVertex dv = add_vertex(*p.debug_cluster_mesh_);
 			uint32 dv_idx = index_of(*p.debug_cluster_mesh_, dv);
-			(*p.debug_cluster_position_)[dv_idx] = (*p.alpha_inside_position_)[v_idx];
+			(*p.debug_cluster_position_)[dv_idx] = (*src.cluster_position)[v_idx];
 			if (p.debug_cluster_projected_position_)
-			{
-				if (p.alpha_inside_projected_position_)
-					(*p.debug_cluster_projected_position_)[dv_idx] = (*p.alpha_inside_projected_position_)[v_idx];
-				else
-					(*p.debug_cluster_projected_position_)[dv_idx] = (*p.alpha_inside_position_)[v_idx];
-			}
+				(*p.debug_cluster_projected_position_)[dv_idx] = (*src.projected_position)[v_idx];
 
 			Vec4 c = base_color;
-			if (p.show_normals_ && p.alpha_inside_projected_normal_)
+			if (p.show_normals_ && src.normal)
 			{
-				const Vec3& n = (*p.alpha_inside_projected_normal_)[v_idx];
+				const Vec3& n = (*src.normal)[v_idx];
 				c = Vec4((n.x() + 1.0f) * 0.5f, (n.y() + 1.0f) * 0.5f, (n.z() + 1.0f) * 0.5f, 1.0f);
 			}
 			(*p.debug_cluster_color_)[dv_idx] = c;
@@ -707,13 +825,17 @@ private:
 
 	void update_sphere_sqem_one_step(Parameters& p, PVertex sphere)
 	{
-		if (!p.alpha_inside_projected_quadric_ || !p.alpha_inside_projected_area_ || !p.spheres_position_ ||
-			!p.spheres_radius_ || !p.spheres_inside_cluster_)
+		SourceData src;
+		if (!get_source_data(p, src))
+			return;
+		if (!p.spheres_position_ || !p.spheres_radius_)
 			return;
 		const uint32 s_idx = index_of(*p.spheres_mesh_, sphere);
-		if ((*p.spheres_inside_cluster_)[s_idx].empty())
-			compute_power_cluster_alpha_inside(p);
-		const std::vector<PVertex>& cluster = (*p.spheres_inside_cluster_)[s_idx];
+		if (s_idx >= p.clusters_.size() || p.clusters_[s_idx].empty())
+			compute_power_cluster_source(p);
+		if (s_idx >= p.clusters_.size())
+			return;
+		const std::vector<PVertex>& cluster = p.clusters_[s_idx];
 		if (cluster.empty())
 			return;
 
@@ -721,11 +843,11 @@ private:
 		Scalar weight_sum = Scalar(0);
 		for (PVertex v : cluster)
 		{
-			uint32 v_index = index_of(*p.alpha_inside_mesh_, v);
-			Scalar weight = value<Scalar>(*p.alpha_inside_mesh_, p.alpha_inside_projected_area_, v);
+			uint32 v_index = index_of(*src.mesh, v);
+			Scalar weight = value<Scalar>(*src.mesh, src.area, v);
 			if (weight <= 0.0)
 				continue;
-			q += (*p.alpha_inside_projected_quadric_)[v_index] * weight;
+			q += (*src.quadric)[v_index] * weight;
 			weight_sum += weight;
 		}
 
@@ -747,14 +869,17 @@ private:
 
 	void update_sphere_sqem_euclidean(Parameters& p, PVertex sphere)
 	{
-		if (!p.alpha_inside_projected_position_ || !p.alpha_inside_projected_normal_ ||
-			!p.alpha_inside_projected_area_ || !p.alpha_inside_projected_knn_ || !p.spheres_position_ ||
-			!p.spheres_radius_ || !p.spheres_inside_cluster_)
+		SourceData src;
+		if (!get_source_data(p, src))
+			return;
+		if (!p.spheres_position_ || !p.spheres_radius_)
 			return;
 		const uint32 s_idx = index_of(*p.spheres_mesh_, sphere);
-		if ((*p.spheres_inside_cluster_)[s_idx].empty())
-			compute_power_cluster_alpha_inside(p);
-		const std::vector<PVertex>& cluster = (*p.spheres_inside_cluster_)[s_idx];
+		if (s_idx >= p.clusters_.size() || p.clusters_[s_idx].empty())
+			compute_power_cluster_source(p);
+		if (s_idx >= p.clusters_.size())
+			return;
+		const std::vector<PVertex>& cluster = p.clusters_[s_idx];
 		if (cluster.empty())
 			return;
 
@@ -774,26 +899,26 @@ private:
 			idx = 0;
 			for (PVertex v : cluster)
 			{
-				uint32 v_index = index_of(*p.alpha_inside_mesh_, v);
-				const Vec3& pos = (*p.alpha_inside_projected_position_)[v_index];
+				uint32 v_index = index_of(*src.mesh, v);
+				const Vec3& pos = (*src.position)[v_index];
 
 				Eigen::Vector4d lhs = Eigen::Vector4d::Zero();
 				Scalar rhs = 0.0;
-				const Vec3& n = (*p.alpha_inside_projected_normal_)[v_index];
+				const Vec3& n = (*src.normal)[v_index];
 				Vec4 n4 = Vec4(n.x(), n.y(), n.z(), 1.0);
-				const int k = std::max<int>(1, static_cast<int>((*p.alpha_inside_projected_knn_)[v_index].size()));
-				Scalar a = sqrt((*p.alpha_inside_projected_area_)[v_index] / (k + 1.0));
+				const int k = std::max<int>(1, static_cast<int>((*src.knn)[v_index].size()));
+				Scalar a = sqrt((*src.area)[v_index] / (k + 1.0));
 				lhs += -n4 * a;
 				rhs += -1.0 * ((pos - Vec3(s(0), s(1), s(2))).dot(n) - s(3)) * a;
 
-				for (PVertex vn : (*p.alpha_inside_projected_knn_)[v_index])
+				for (PVertex vn : (*src.knn)[v_index])
 				{
-					uint32 vn_index = index_of(*p.alpha_inside_mesh_, vn);
-					const Vec3& pn = (*p.alpha_inside_projected_position_)[vn_index];
-					const Vec3& nn = (*p.alpha_inside_projected_normal_)[vn_index];
+					uint32 vn_index = index_of(*src.mesh, vn);
+					const Vec3& pn = (*src.position)[vn_index];
+					const Vec3& nn = (*src.normal)[vn_index];
 					Vec4 nn4 = Vec4(nn.x(), nn.y(), nn.z(), 1.0);
-					const int kn = std::max<int>(1, static_cast<int>((*p.alpha_inside_projected_knn_)[vn_index].size()));
-					Scalar an = sqrt((*p.alpha_inside_projected_area_)[vn_index] / (kn + 1.0));
+					const int kn = std::max<int>(1, static_cast<int>((*src.knn)[vn_index].size()));
+					Scalar an = sqrt((*src.area)[vn_index] / (kn + 1.0));
 					lhs += -nn4 * an;
 					rhs += -1.0 * ((pn - Vec3(s(0), s(1), s(2))).dot(nn) - s(3)) * an;
 				}
@@ -805,7 +930,7 @@ private:
 				Scalar l = d.norm();
 				if (l > Scalar(1e-12))
 				{
-					Scalar a_dist = sqrt((*p.alpha_inside_projected_area_)[v_index]);
+					Scalar a_dist = sqrt((*src.area)[v_index]);
 					J.row(idx) =
 						Eigen::Vector4d(-(d[0] / l), -(d[1] / l), -(d[2] / l), -1.0) * a_dist * p.sqem_update_lambda_;
 					b(idx) = -(l - s(3)) * a_dist * p.sqem_update_lambda_;
@@ -838,14 +963,17 @@ private:
 
 	void update_sphere_sqem_line_quadric_fix_alpha(Parameters& p, PVertex sphere)
 	{
-		if (!p.alpha_inside_projected_quadric_ || !p.alpha_inside_projected_line_quadric_ ||
-			!p.alpha_inside_projected_area_ || !p.spheres_position_ || !p.spheres_radius_ ||
-			!p.spheres_inside_cluster_)
+		SourceData src;
+		if (!get_source_data(p, src))
+			return;
+		if (!p.spheres_position_ || !p.spheres_radius_)
 			return;
 		const uint32 s_idx = index_of(*p.spheres_mesh_, sphere);
-		if ((*p.spheres_inside_cluster_)[s_idx].empty())
-			compute_power_cluster_alpha_inside(p);
-		const std::vector<PVertex>& cluster = (*p.spheres_inside_cluster_)[s_idx];
+		if (s_idx >= p.clusters_.size() || p.clusters_[s_idx].empty())
+			compute_power_cluster_source(p);
+		if (s_idx >= p.clusters_.size())
+			return;
+		const std::vector<PVertex>& cluster = p.clusters_[s_idx];
 		if (cluster.empty())
 			return;
 
@@ -853,12 +981,12 @@ private:
 		Line_Quadric lq;
 		for (PVertex v : cluster)
 		{
-			uint32 v_index = index_of(*p.alpha_inside_mesh_, v);
-			Scalar weight = value<Scalar>(*p.alpha_inside_mesh_, p.alpha_inside_projected_area_, v);
+			uint32 v_index = index_of(*src.mesh, v);
+			Scalar weight = value<Scalar>(*src.mesh, src.area, v);
 			if (weight <= 0.0)
 				continue;
-			q += (*p.alpha_inside_projected_quadric_)[v_index] * weight;
-			lq += (*p.alpha_inside_projected_line_quadric_)[v_index] * weight;
+			q += (*src.quadric)[v_index] * weight;
+			lq += (*src.line_quadric)[v_index] * weight;
 		}
 
 		Mat4 Ql = lq.get_quadric().matrix();
@@ -884,14 +1012,17 @@ private:
 
 	void update_sphere_sqem_line_quadric_free_radius(Parameters& p, PVertex sphere)
 	{
-		if (!p.alpha_inside_projected_quadric_ || !p.alpha_inside_projected_line_quadric_ ||
-			!p.alpha_inside_projected_area_ || !p.spheres_position_ || !p.spheres_radius_ ||
-			!p.spheres_inside_cluster_)
+		SourceData src;
+		if (!get_source_data(p, src))
+			return;
+		if (!p.spheres_position_ || !p.spheres_radius_)
 			return;
 		const uint32 s_idx = index_of(*p.spheres_mesh_, sphere);
-		if ((*p.spheres_inside_cluster_)[s_idx].empty())
-			compute_power_cluster_alpha_inside(p);
-		const std::vector<PVertex>& cluster = (*p.spheres_inside_cluster_)[s_idx];
+		if (s_idx >= p.clusters_.size() || p.clusters_[s_idx].empty())
+			compute_power_cluster_source(p);
+		if (s_idx >= p.clusters_.size())
+			return;
+		const std::vector<PVertex>& cluster = p.clusters_[s_idx];
 		if (cluster.empty())
 			return;
 
@@ -900,12 +1031,12 @@ private:
 		Scalar weight_sum = Scalar(0);
 		for (PVertex v : cluster)
 		{
-			uint32 v_index = index_of(*p.alpha_inside_mesh_, v);
-			Scalar weight = value<Scalar>(*p.alpha_inside_mesh_, p.alpha_inside_projected_area_, v);
+			uint32 v_index = index_of(*src.mesh, v);
+			Scalar weight = value<Scalar>(*src.mesh, src.area, v);
 			if (weight <= 0.0)
 				continue;
-			q += (*p.alpha_inside_projected_quadric_)[v_index] * weight;
-			lq += (*p.alpha_inside_projected_line_quadric_)[v_index] * weight;
+			q += (*src.quadric)[v_index] * weight;
+			lq += (*src.line_quadric)[v_index] * weight;
 			weight_sum += weight;
 		}
 		if (weight_sum <= Scalar(0))
@@ -944,4 +1075,4 @@ private:
 
 } // namespace cgogn
 
-#endif // CGOGN_MODULE_ALPHA_INSIDE_SPHERE_DEBUGGER_H_
+#endif // CGOGN_MODULE_ALPHA_SET_SPHERE_DEBUGGER_H_
