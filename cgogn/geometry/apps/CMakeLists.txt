@@ -154,6 +154,11 @@ if (CGOGN_USE_CGAL)
     SOURCES udf_training.cpp
     EXTRA_LIBS CGAL::CGAL
   )
+
+  cgogn_add_torch_executable(udf_training_alpha_inside
+    SOURCES udf_training_alpha_inside.cpp
+    EXTRA_LIBS CGAL::CGAL
+  )
 endif()
 add_executable(filtering filtering.cpp)
 target_link_libraries(filtering

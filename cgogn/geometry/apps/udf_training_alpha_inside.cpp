@@ -34,8 +34,8 @@
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/geometry/ui_modules/shrinking_ball_debugger.h>
-#include <cgogn/geometry/ui_modules/alpha_samples_sphere_debugger.h>
-#include <cgogn/geometry/ui_modules/udf_training.h>
+#include <cgogn/geometry/ui_modules/alpha_inside_sphere_debugger.h>
+#include <cgogn/geometry/ui_modules/udf_training_alpha_inside.h>
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
 #include <cgogn/rendering/ui_modules/surface_render.h>
 
@@ -63,7 +63,7 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 	cgogn::thread_start();
 
 	cgogn::ui::App app;
-	app.set_window_title("UDF Training");
+	app.set_window_title("UDF Training (Alpha Inside)");
 	app.set_window_size(1000, 800);
 
 	cgogn::ui::MeshProvider<Surface> mps(app);
@@ -74,9 +74,9 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 	cgogn::ui::PointCloudRender<Points> pcr(app);
 	cgogn::ui::SurfaceRender<NonManifold> srnm(app);
 	cgogn::ui::ShrinkingBallDebugger<Points> sbd(app);
-	cgogn::ui::AlphaSamplesSphereDebugger<Points> aisd(app);
+	cgogn::ui::AlphaInsideSphereDebugger<Points> aisd(app);
 
-	cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag> udf(app);
+	cgogn::ui::UDFTrainingAlphaInside<Surface, Points, NonManifold, RaySamplerTag> udf(app);
 
 	app.init_modules();
 
@@ -133,9 +133,11 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 		auto p_vertex_position = cgogn::get_or_add_attribute<Vec3, PVertex>(*p, "position");
 		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
 		udf.set_selected_points(*p);
-		udf.load_neural_udf_model(*p, model_path,
-								  neural_is_mf ? cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag>::NEURAL_MODEL_MF
-											   : cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag>::NEURAL_MODEL_UDF);
+		udf.load_neural_udf_model(
+			*p, model_path,
+			neural_is_mf
+				? cgogn::ui::UDFTrainingAlphaInside<Surface, Points, NonManifold, RaySamplerTag>::NEURAL_MODEL_MF
+				: cgogn::ui::UDFTrainingAlphaInside<Surface, Points, NonManifold, RaySamplerTag>::NEURAL_MODEL_UDF);
 
 		pcr.set_vertex_position(*v1, *p, p_vertex_position);
 		auto [bb_min, bb_max] = mpp.meshes_bb();
