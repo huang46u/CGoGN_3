@@ -3098,12 +3098,33 @@ private:
 		SphereFitData data;
 		if (!get_sphere_fit_data(p, data))
 			return;
-		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[index_of(*p.spheres_, v)];
+		const uint32 v_index = index_of(*p.spheres_, v);
+		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[v_index];
 		for (PVertex s : cluster)
 		{
 			uint32 s_idx = index_of(*data.mesh, s);
 			(*data.sphere)[s_idx] = PVertex();
 		}
+
+		// Keep neighbor lists consistent by removing the deleted sphere from adjacent sets.
+		if (p.spheres_neighbor_clusters_)
+		{
+			const std::set<PVertex>& neighbors = (*p.spheres_neighbor_clusters_)[v_index];
+			for (PVertex neighbor : neighbors)
+			{
+				if (!neighbor.is_valid())
+					continue;
+				const uint32 d_idx = neighbor.dart_.index_;
+				if (d_idx >= p.spheres_->darts_.maximum_index())
+					continue;
+				const uint32 n_index = index_of(*p.spheres_, neighbor);
+				if (n_index == INVALID_INDEX)
+					continue;
+				(*p.spheres_neighbor_clusters_)[n_index].erase(v);
+			}
+			(*p.spheres_neighbor_clusters_)[v_index].clear();
+		}
+
 		remove_vertex(*p.spheres_, v);
 		p.nb_spheres_--;
 	}
