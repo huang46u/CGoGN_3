@@ -6,6 +6,7 @@
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/geometry/algos/area.h>
+#include <cgogn/geometry/algos/euler_characteristic.h>
 #include <cgogn/geometry/algos/fitting.h>
 #include <cgogn/geometry/algos/length.h>
 #include <cgogn/geometry/algos/medial_axis.h>
@@ -44,6 +45,7 @@
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cmath>
 #include <filesystem>
 #include <limits>
@@ -167,6 +169,11 @@ private:
 		NeuralModelType neural_model_type_ = NEURAL_MODEL_UDF;
 		bool udf_input_normalized_ = false;
 		const void* udf_normalized_source_ = nullptr;
+		bool chi_ready_ = false;
+		bool chi_surface_valid_ = false;
+		bool chi_skeleton_valid_ = false;
+		int64_t chi_surface_ = 0;
+		int64_t chi_skeleton_ = 0;
 
 		// Ray Sampling
 		std::unique_ptr<RaySampler> ray_sampler_;
@@ -3619,6 +3626,8 @@ private:
 		return Vec4(1.0, 0.0, 0.0, transparency);
 	}
 
+	
+
 	void update_sphere_line_quadric_distance_fix_radius(PointsParameters& p, PVertex sphere,
 														const std::vector<PVertex>& cluster)
 	{
@@ -5317,6 +5326,38 @@ protected:
 				}
 				ImGui::SameLine();
 				ImGui::TextColored(ImVec4(1, 1, 0, 1), "Test batch evaluation");
+
+				if (p.neural_model_type_ == NEURAL_MODEL_MF)
+				{
+					ImGui::Separator();
+					if (ImGui::Button("Compute Chi (Surface/Skeleton)"))
+					{
+						p.chi_ready_ = true;
+						p.chi_surface_valid_ = false;
+						p.chi_skeleton_valid_ = false;
+						if (selected_surface_)
+						{
+							p.chi_surface_ = geometry::compute_euler_characteristic(*selected_surface_);
+							p.chi_surface_valid_ = true;
+						}
+						if (p.skeleton_)
+						{
+							p.chi_skeleton_ = geometry::compute_euler_characteristic(*p.skeleton_);
+							p.chi_skeleton_valid_ = true;
+						}
+					}
+					if (p.chi_ready_)
+					{
+						if (p.chi_surface_valid_)
+							ImGui::Text("Surface Chi: %lld", static_cast<long long>(p.chi_surface_));
+						else
+							ImGui::TextColored(ImVec4(1, 1, 0, 1), "Surface Chi: N/A (no surface)");
+						if (p.chi_skeleton_valid_)
+							ImGui::Text("Skeleton Chi: %lld", static_cast<long long>(p.chi_skeleton_));
+						else
+							ImGui::TextColored(ImVec4(1, 1, 0, 1), "Skeleton Chi: N/A (no skeleton)");
+					}
+				}
 			}
 		}
 		// Sampling
