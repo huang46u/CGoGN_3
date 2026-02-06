@@ -471,6 +471,9 @@ public:
 				}
 			}
 		}
+		const Scalar expand = Scalar(0.05);
+		bbox_min -= Vec3(expand, expand, expand);
+		bbox_max += Vec3(expand, expand, expand);
 		return {bbox_min, bbox_max};
 	}
 
