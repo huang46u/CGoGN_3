@@ -59,6 +59,7 @@
 #include <torch/torch.h>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace cgogn
 {
@@ -284,6 +285,7 @@ private:
 		bool sphere_correction_ = false;
 		CorrectionMode sphere_correction_mode_ = CORRECT_ALWAYS;
 		bool lock_skeleton_connectivity_ = false;
+		bool skeleton_udf_filter_ = false;
 		DistanceMode distance_mode_ = LINE_QUADRIC_DISTANCE;
 		AlphaInsideClusterMode alpha_inside_cluster_mode_ = ALPHA_INSIDE_CLUSTER_SQEM;
 		bool alpha_inside_component_update_ = false;
@@ -316,6 +318,7 @@ private:
 		float grid_cell_size_ = 0.0025f;
 		// Neural UDF Sampling
 		int num_alpha_samples_ = 200000;
+		int num_alpha_inside_samples_ = 200000;
 		int batch_size_ = 131064;	   // sample batch
 		float tol_ = 1e-5f; // convergence tolerance
 
@@ -517,6 +520,9 @@ public:
 				}
 			}
 		}
+		const Scalar expand = Scalar(0.05);
+		bbox_min -= Vec3(expand, expand, expand);
+		bbox_max += Vec3(expand, expand, expand);
 		return {bbox_min, bbox_max};
 	}
 
@@ -584,8 +590,14 @@ public:
 				  << std::endl;
 		bool used_sdf_filter = false;
 		auto traits = RaySamplerConfig::make(udf);
-		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
-			traits, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max, &used_sdf_filter);
+		const size_t inside_target =
+			p.num_alpha_inside_samples_ > 0 ? static_cast<size_t>(p.num_alpha_inside_samples_) : size_t(0);
+		SpatialGrid inside_grid(p.grid_cell_size_);
+		auto sample_result = p.ray_sampler_->sample_alpha_level_set_rays_with_inside(
+			traits, num_points, inside_target, p.samples_spatial_grid_.get(), &inside_grid, p.grid_cell_size_,
+			bbox_min, bbox_max, &used_sdf_filter);
+		std::vector<Vec3> sampled_points = std::move(sample_result.surface_samples);
+		std::vector<Vec3> inside_points = std::move(sample_result.inside_samples);
 
 		if (!used_sdf_filter)
 		{
@@ -646,6 +658,17 @@ public:
 				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
 		}
 
+		clear_alpha_inside_samples(p);
+		for (const Vec3& pt : inside_points)
+		{
+			PVertex v = add_vertex(*p.alpha_inside_mesh_);
+			uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
+			(*p.alpha_inside_position_)[v_idx] = pt;
+			if (p.alpha_inside_color_)
+				(*p.alpha_inside_color_)[v_idx] = Vec4(0.2f, 0.8f, 0.9f, 1.0f);
+		}
+		points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
+
 		std::cout << "Computing normals from UDF gradients..." << std::endl;
 		std::vector<Vec3> all_positions;
 		all_positions.reserve(sampled_points.size());
@@ -681,8 +704,15 @@ public:
 		std::cout << "Building KDTree for sampled points..." << std::endl;
 		build_kdtree(p);
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		clear_alpha_inside_samples(p);
 		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
+
+		if (!inside_points.empty())
+		{
+			if (!filter_alpha_inside_by_mf(p))
+				std::cerr << "MF filter failed; continuing without filtering." << std::endl;
+			if (!prepare_alpha_inside_projected_data(p))
+				points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
+		}
 	}
 
 	void load_alpha_samples_to_mesh_impl(PointsParameters& p, size_t num_points, geometry::RaySamplerSurface)
@@ -718,8 +748,14 @@ public:
 
 		auto traits =
 			RaySamplerConfig::make(*selected_surface_, s_pos.get(), surface_bvh_.get(), &surface_bvh_faces_);
-		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
-			traits, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max);
+		const size_t inside_target =
+			p.num_alpha_inside_samples_ > 0 ? static_cast<size_t>(p.num_alpha_inside_samples_) : size_t(0);
+		SpatialGrid inside_grid(p.grid_cell_size_);
+		auto sample_result = p.ray_sampler_->sample_alpha_level_set_rays_with_inside(
+			traits, num_points, inside_target, p.samples_spatial_grid_.get(), &inside_grid, p.grid_cell_size_,
+			bbox_min, bbox_max);
+		std::vector<Vec3> sampled_points = std::move(sample_result.surface_samples);
+		std::vector<Vec3> inside_points = std::move(sample_result.inside_samples);
 
 		pre_process_sampling_points_bvh(p, sampled_points);
 		if (sampled_points.empty())
@@ -742,6 +778,17 @@ public:
 			if (p.samples_knn_color_)
 				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
 		}
+
+		clear_alpha_inside_samples(p);
+		for (const Vec3& pt : inside_points)
+		{
+			PVertex v = add_vertex(*p.alpha_inside_mesh_);
+			uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
+			(*p.alpha_inside_position_)[v_idx] = pt;
+			if (p.alpha_inside_color_)
+				(*p.alpha_inside_color_)[v_idx] = Vec4(0.2f, 0.8f, 0.9f, 1.0f);
+		}
+		points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
 
 		std::cout << "Computing normals from surface mesh..." << std::endl;
 		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
@@ -793,8 +840,15 @@ public:
 		std::cout << "Building KDTree for sampled points..." << std::endl;
 		build_kdtree(p);
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		clear_alpha_inside_samples(p);
 		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
+
+		if (!inside_points.empty())
+		{
+			if (!filter_alpha_inside_by_mf(p))
+				std::cerr << "MF filter failed; continuing without filtering." << std::endl;
+			if (!prepare_alpha_inside_projected_data(p))
+				points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
+		}
 	}
 
 	void load_alpha_samples_to_mesh_impl(PointsParameters& p, size_t num_points, geometry::RaySamplerPointCloud)
@@ -827,8 +881,14 @@ public:
 
 		auto traits = RaySamplerConfig::make(*p.points_, p.position_.get(), p.normal_.get(), p.knn_.get(),
 											 p.input_kdtree_, &p.input_kdtree_vertices_);
-		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
-			traits, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max);
+		const size_t inside_target =
+			p.num_alpha_inside_samples_ > 0 ? static_cast<size_t>(p.num_alpha_inside_samples_) : size_t(0);
+		SpatialGrid inside_grid(p.grid_cell_size_);
+		auto sample_result = p.ray_sampler_->sample_alpha_level_set_rays_with_inside(
+			traits, num_points, inside_target, p.samples_spatial_grid_.get(), &inside_grid, p.grid_cell_size_,
+			bbox_min, bbox_max);
+		std::vector<Vec3> sampled_points = std::move(sample_result.surface_samples);
+		std::vector<Vec3> inside_points = std::move(sample_result.inside_samples);
 
 		pre_process_sampling_points_kdtree(p, sampled_points);
 		if (sampled_points.empty())
@@ -851,6 +911,17 @@ public:
 			if (p.samples_knn_color_)
 				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
 		}
+
+		clear_alpha_inside_samples(p);
+		for (const Vec3& pt : inside_points)
+		{
+			PVertex v = add_vertex(*p.alpha_inside_mesh_);
+			uint32 v_idx = index_of(*p.alpha_inside_mesh_, v);
+			(*p.alpha_inside_position_)[v_idx] = pt;
+			if (p.alpha_inside_color_)
+				(*p.alpha_inside_color_)[v_idx] = Vec4(0.2f, 0.8f, 0.9f, 1.0f);
+		}
+		points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
 
 		std::cout << "Computing normals from input point cloud..." << std::endl;
 		const Scalar eps = Scalar(1e-12);
@@ -875,8 +946,15 @@ public:
 		std::cout << "Building KDTree for sampled points..." << std::endl;
 		build_kdtree(p);
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		clear_alpha_inside_samples(p);
 		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
+
+		if (!inside_points.empty())
+		{
+			if (!filter_alpha_inside_by_mf(p))
+				std::cerr << "MF filter failed; continuing without filtering." << std::endl;
+			if (!prepare_alpha_inside_projected_data(p))
+				points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
+		}
 	}
 
 	void pre_process_sampling_points_kdtree(PointsParameters& p, std::vector<Vec3>& points)
@@ -1007,7 +1085,7 @@ public:
 			torch::Tensor dir = D / dir_norm;
 			torch::Tensor valid_dir = (dir_norm.squeeze(1) > 1e-6f);
 
-			const float max_dist = static_cast<float>(2.f * p.alpha_);
+			const float max_dist = static_cast<float>(3.f * p.alpha_);
 			torch::Tensor max_dist_t = torch::full({static_cast<int64_t>(nb_points), 1}, max_dist,
 												   torch::TensorOptions().dtype(torch::kFloat32).device(device_));
 
@@ -1070,7 +1148,7 @@ public:
 				return {};
 
 			torch::Tensor final_X_cpu = X.to(torch::kCPU);
-			torch::Tensor final_grad_cpu = grad.to(torch::kCPU);
+			torch::Tensor dir_sel_cpu = dir_sel.to(torch::kCPU);
 
 			torch::Tensor sdf_cpu;
 			{
@@ -1084,7 +1162,7 @@ public:
 			}
 
 			auto final_X_acc = final_X_cpu.accessor<float, 2>();
-			auto final_grad_acc = final_grad_cpu.accessor<float, 2>();
+			auto dir_sel_acc = dir_sel_cpu.accessor<float, 2>();
 
 			std::vector<Vec3> projected_points;
 			std::vector<Vec3> normals;
@@ -1103,8 +1181,12 @@ public:
 					if (p.filter_positive_projection_ && !keep)
 						continue;
 					projected_points.push_back(Vec3(final_X_acc[i][0], final_X_acc[i][1], final_X_acc[i][2]));
-					normals.push_back(
-						Vec3(final_grad_acc[i][0], final_grad_acc[i][1], final_grad_acc[i][2]).normalized());
+					Vec3 n(dir_sel_acc[i][0], dir_sel_acc[i][1], dir_sel_acc[i][2]);
+					if (n.squaredNorm() < Scalar(1e-12))
+						n = Vec3(0, 0, 1);
+					else
+						n.normalize();
+					normals.push_back(n);
 				}
 			}
 			else
@@ -1112,8 +1194,12 @@ public:
 				for (size_t i = 0; i < nb_points; ++i)
 				{
 					projected_points.push_back(Vec3(final_X_acc[i][0], final_X_acc[i][1], final_X_acc[i][2]));
-					normals.push_back(
-						Vec3(final_grad_acc[i][0], final_grad_acc[i][1], final_grad_acc[i][2]).normalized());
+					Vec3 n(dir_sel_acc[i][0], dir_sel_acc[i][1], dir_sel_acc[i][2]);
+					if (n.squaredNorm() < Scalar(1e-12))
+						n = Vec3(0, 0, 1);
+					else
+						n.normalize();
+					normals.push_back(n);
 				}
 			}
 			return {projected_points, normals};
@@ -1858,11 +1944,6 @@ private:
 		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_ || !p.alpha_inside_projected_position_ ||
 			!p.alpha_inside_projected_normal_)
 			return false;
-		if (!p.neural_udf_loaded_)
-		{
-			std::cerr << "Neural UDF model not loaded. Cannot project alpha-inside points." << std::endl;
-			return false;
-		}
 
 		std::vector<Vec3> points;
 		std::vector<PVertex> vertices;
@@ -1877,6 +1958,73 @@ private:
 
 		if (points.empty())
 			return true;
+
+		if (!p.neural_udf_loaded_)
+		{
+			if (!p.samples_mesh_ || !p.samples_position_ || !p.samples_normal_ || !p.samples_knn_ ||
+				!p.samples_kdtree_)
+			{
+				std::cerr << "Sample mesh data not ready for alpha-inside projection." << std::endl;
+				return false;
+			}
+
+			bool need_knn = false;
+			foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+				uint32 v_idx = index_of(*p.samples_mesh_, v);
+				if ((*p.samples_knn_)[v_idx].empty())
+				{
+					need_knn = true;
+					return false;
+				}
+				return false;
+			});
+			if (need_knn)
+				compute_samples_area(p);
+
+			p.last_projection_keep_mask_.assign(points.size(), 1);
+			for (size_t i = 0; i < vertices.size(); ++i)
+			{
+				const Vec3& x = points[i];
+				std::pair<uint32, Scalar> knn_res;
+				if (!p.samples_kdtree_->find_nn(x, &knn_res))
+					continue;
+
+				PVertex nn = p.samples_kdtree_vertices_[knn_res.first];
+				uint32 nn_idx = index_of(*p.samples_mesh_, nn);
+				const Vec3& n0 = (*p.samples_normal_)[nn_idx];
+				Vec3 avg_n = n0;
+				Vec3 plane_p = (*p.samples_position_)[nn_idx];
+				int count = 1;
+				for (PVertex nb : (*p.samples_knn_)[nn_idx])
+				{
+					uint32 nb_idx = index_of(*p.samples_mesh_, nb);
+					Vec3 n = (*p.samples_normal_)[nb_idx];
+					if (n.dot(n0) < Scalar(0))
+						n = -n;
+					avg_n += n;
+					plane_p += (*p.samples_position_)[nb_idx];
+					++count;
+				}
+				if (count > 0)
+					plane_p /= Scalar(count);
+
+				if (avg_n.squaredNorm() < Scalar(1e-12))
+					avg_n = Vec3(0, 0, 1);
+				else
+					avg_n.normalize();
+
+				Scalar dist = avg_n.dot(plane_p - x);
+				Vec3 proj = x + avg_n * dist;
+
+				uint32 v_idx = index_of(*p.alpha_inside_mesh_, vertices[i]);
+				(*p.alpha_inside_projected_position_)[v_idx] = proj;
+				(*p.alpha_inside_projected_normal_)[v_idx] = avg_n;
+			}
+
+			points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_position_.get());
+			points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_normal_.get());
+			return true;
+		}
 
 		const bool prev_filter = p.filter_positive_projection_;
 		p.filter_positive_projection_ = true;
@@ -1894,8 +2042,63 @@ private:
 			return false;
 		}
 
+		const Scalar proj_tol = Scalar(1e-5);
+		std::vector<uint8_t> proj_keep_mask(projected.size(), 1);
+		if (!projected.empty())
+		{
+			NeuralFieldForward udf = make_neural_field_forward(p);
+			if (udf.is_loaded())
+			{
+				auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+				if (device_.is_cuda())
+					cpu_opts = cpu_opts.pinned_memory(true);
+				torch::Tensor proj_cpu =
+					torch::empty({static_cast<int64_t>(projected.size()), 3}, cpu_opts);
+				auto proj_acc = proj_cpu.accessor<float, 2>();
+				for (size_t i = 0; i < projected.size(); ++i)
+				{
+					proj_acc[i][0] = static_cast<float>(projected[i].x());
+					proj_acc[i][1] = static_cast<float>(projected[i].y());
+					proj_acc[i][2] = static_cast<float>(projected[i].z());
+				}
+				torch::Tensor proj = proj_cpu.to(device_);
+				torch::Tensor values = udf.forward_values_gpu(proj);
+				if (values.defined())
+				{
+					if (values.dim() == 2 && values.size(1) == 1)
+						values = values.squeeze(1);
+					torch::Tensor values_cpu = values.to(torch::kCPU).contiguous();
+					auto values_acc = values_cpu.accessor<float, 1>();
+					for (size_t i = 0; i < projected.size(); ++i)
+					{
+						const Scalar v = static_cast<Scalar>(values_acc[static_cast<long>(i)]);
+						if (std::abs(v - p.alpha_) > proj_tol)
+							proj_keep_mask[i] = 0;
+					}
+				}
+				else
+				{
+					std::cerr << "Projection UDF check failed: forward_values_gpu returned empty." << std::endl;
+				}
+			}
+			else
+			{
+				std::cerr << "Projection UDF check skipped: model not loaded." << std::endl;
+			}
+		}
+
 		const bool filtered = projected.size() != points.size();
-		if (!filtered)
+		bool all_proj_kept = true;
+		for (uint8_t k : proj_keep_mask)
+		{
+			if (!k)
+			{
+				all_proj_kept = false;
+				break;
+			}
+		}
+
+		if (!filtered && all_proj_kept)
 		{
 			for (size_t i = 0; i < vertices.size(); ++i)
 			{
@@ -1905,6 +2108,8 @@ private:
 			}
 			points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_position_.get());
 			points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_normal_.get());
+			std::cout << "Projection UDF filter: " << vertices.size() << " -> " << vertices.size() << " kept."
+					  << std::endl;
 			return true;
 		}
 
@@ -1919,18 +2124,23 @@ private:
 			kept_colors.reserve(projected.size());
 
 		size_t proj_idx = 0;
+		size_t kept_count = 0;
 		for (size_t i = 0; i < vertices.size(); ++i)
 		{
 			if (!p.last_projection_keep_mask_[i])
 				continue;
-			uint32 v_idx = index_of(*p.alpha_inside_mesh_, vertices[i]);
-			kept_positions.push_back((*p.alpha_inside_position_)[v_idx]);
-			if (p.alpha_inside_color_)
-				kept_colors.push_back((*p.alpha_inside_color_)[v_idx]);
 			if (proj_idx < projected.size())
 			{
-				kept_projected.push_back(projected[proj_idx]);
-				kept_normals.push_back(normals[proj_idx]);
+				if (proj_keep_mask[proj_idx])
+				{
+					uint32 v_idx = index_of(*p.alpha_inside_mesh_, vertices[i]);
+					kept_positions.push_back((*p.alpha_inside_position_)[v_idx]);
+					if (p.alpha_inside_color_)
+						kept_colors.push_back((*p.alpha_inside_color_)[v_idx]);
+					kept_projected.push_back(projected[proj_idx]);
+					kept_normals.push_back(normals[proj_idx]);
+					kept_count++;
+				}
 				proj_idx++;
 			}
 		}
@@ -1953,6 +2163,7 @@ private:
 			points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_color_.get());
 		points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_position_.get());
 		points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_normal_.get());
+		std::cout << "Projection UDF filter: " << vertices.size() << " -> " << kept_count << " kept." << std::endl;
 		return true;
 	}
 
@@ -2147,7 +2358,7 @@ private:
 			return;
 
 		const Scalar fallback_radius = p.alpha_;
-		const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(1.5), Scalar(0));
+		const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(3.0), Scalar(0));
 		const Scalar min_norm = Scalar(1e-12);
 
 		parallel_foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) {
@@ -4320,6 +4531,184 @@ private:
 		}
 	};
 
+	struct face_key_hash
+	{
+		std::size_t operator()(const NMFaceKey& key) const
+		{
+			return std::hash<uint32>()(key[0]) ^ (std::hash<uint32>()(key[1]) << 1) ^
+				   (std::hash<uint32>()(key[2]) << 2);
+		}
+	};
+
+	struct face_key_equal
+	{
+		bool operator()(const NMFaceKey& a, const NMFaceKey& b) const
+		{
+			return a == b;
+		}
+	};
+
+	bool eval_udf_values(PointsParameters& p, const std::vector<Vec3>& points, std::vector<Scalar>& out_values)
+	{
+		out_values.clear();
+		out_values.resize(points.size(), Scalar(0));
+		if (points.empty())
+			return false;
+		if (!p.neural_udf_loaded_)
+			return false;
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		if (!udf.is_loaded())
+			return false;
+
+		const size_t batch = std::max<size_t>(1, static_cast<size_t>(p.batch_size_));
+		for (size_t offset = 0; offset < points.size(); offset += batch)
+		{
+			const size_t count = std::min(batch, points.size() - offset);
+			auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+			if (device_.is_cuda())
+				cpu_opts = cpu_opts.pinned_memory(true);
+			torch::Tensor pts_cpu = torch::empty({static_cast<int64_t>(count), 3}, cpu_opts);
+			auto pts_acc = pts_cpu.accessor<float, 2>();
+			for (size_t i = 0; i < count; ++i)
+			{
+				const Vec3& pnt = points[offset + i];
+				pts_acc[static_cast<long>(i)][0] = static_cast<float>(pnt.x());
+				pts_acc[static_cast<long>(i)][1] = static_cast<float>(pnt.y());
+				pts_acc[static_cast<long>(i)][2] = static_cast<float>(pnt.z());
+			}
+
+			torch::Tensor pts = pts_cpu.to(device_);
+			torch::Tensor values = udf.forward_values_gpu(pts);
+			if (!values.defined())
+				return false;
+			if (values.dim() == 2 && values.size(1) == 1)
+				values = values.squeeze(1);
+			torch::Tensor values_cpu = values.to(torch::kCPU).contiguous();
+			auto values_acc = values_cpu.accessor<float, 1>();
+			for (size_t i = 0; i < count; ++i)
+				out_values[offset + i] = static_cast<Scalar>(values_acc[static_cast<long>(i)]);
+		}
+		return true;
+	}
+
+	std::vector<uint32> filter_points_by_udf_zero(PointsParameters& p, const std::vector<Vec3>& points,
+												   Scalar tol)
+	{
+		std::vector<uint32> keep(points.size(), 1);
+		if (points.empty())
+			return keep;
+		if (!p.neural_udf_loaded_)
+			return keep;
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		if (!udf.is_loaded())
+			return keep;
+
+		const size_t batch = std::max<size_t>(1, static_cast<size_t>(p.batch_size_));
+		for (size_t offset = 0; offset < points.size(); offset += batch)
+		{
+			const size_t count = std::min(batch, points.size() - offset);
+			auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+			if (device_.is_cuda())
+				cpu_opts = cpu_opts.pinned_memory(true);
+			torch::Tensor pts_cpu = torch::empty({static_cast<int64_t>(count), 3}, cpu_opts);
+			auto pts_acc = pts_cpu.accessor<float, 2>();
+			for (size_t i = 0; i < count; ++i)
+			{
+				const Vec3& pnt = points[offset + i];
+				pts_acc[static_cast<long>(i)][0] = static_cast<float>(pnt.x());
+				pts_acc[static_cast<long>(i)][1] = static_cast<float>(pnt.y());
+				pts_acc[static_cast<long>(i)][2] = static_cast<float>(pnt.z());
+			}
+
+			torch::Tensor pts = pts_cpu.to(device_);
+			torch::Tensor values = udf.forward_values_gpu(pts);
+			if (!values.defined())
+			{
+				std::cerr << "UDF filter failed: forward_values_gpu returned empty." << std::endl;
+				continue;
+			}
+			if (values.dim() == 2 && values.size(1) == 1)
+				values = values.squeeze(1);
+			torch::Tensor values_cpu = values.to(torch::kCPU).contiguous();
+			auto values_acc = values_cpu.accessor<float, 1>();
+			for (size_t i = 0; i < count; ++i)
+			{
+				const Scalar v = static_cast<Scalar>(values_acc[static_cast<long>(i)]);
+				if (std::abs(v) > tol)
+					keep[offset + i] = 0;
+			}
+		}
+		return keep;
+	}
+
+	std::vector<uint32> filter_points_by_udf_reference(PointsParameters& p, const std::vector<Vec3>& points,
+													   const std::vector<Scalar>& ref_values, Scalar tol)
+	{
+		std::vector<uint32> keep(points.size(), 1);
+		if (points.empty())
+			return keep;
+		if (ref_values.size() != points.size())
+			return keep;
+		std::vector<Scalar> values;
+		if (!eval_udf_values(p, points, values))
+			return keep;
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			if (std::abs(values[i] - ref_values[i]) > tol)
+				keep[i] = 0;
+		}
+		return keep;
+	}
+
+	std::vector<uint32> filter_points_by_input_distance(PointsParameters& p, const std::vector<Vec3>& points,
+														Scalar tol)
+	{
+		std::vector<uint32> keep(points.size(), 1);
+		if (points.empty())
+			return keep;
+
+		if (p.input_mode_ == INPUT_SURFACE_MESH)
+		{
+			build_surface_bvh();
+			if (!surface_bvh_)
+				return keep;
+			for (size_t i = 0; i < points.size(); ++i)
+			{
+				std::pair<uint32, Vec3> cp;
+				if (!surface_bvh_->closest_point(points[i], &cp, tol))
+				{
+					keep[i] = 0;
+					continue;
+				}
+				if ((points[i] - cp.second).norm() > tol)
+					keep[i] = 0;
+			}
+			return keep;
+		}
+
+		if (p.input_mode_ == INPUT_POINT_CLOUD)
+		{
+			if (!p.input_kdtree_)
+				rebuild_input_kdtree(p);
+			if (!p.input_kdtree_)
+				return keep;
+			for (size_t i = 0; i < points.size(); ++i)
+			{
+				std::pair<uint32, Scalar> knn_res;
+				if (!p.input_kdtree_->find_nn(points[i], &knn_res, tol))
+				{
+					keep[i] = 0;
+					continue;
+				}
+				if (knn_res.second > tol)
+					keep[i] = 0;
+			}
+			return keep;
+		}
+
+		return keep;
+	}
+
 	void compute_skeleton(PointsParameters& p, bool only_neighbors = false)
 	{
 		if (!p.alpha_inside_projected_ready_)
@@ -4385,6 +4774,24 @@ private:
 			return true;
 		});
 
+		const Scalar udf_zero_tol = Scalar(1e-5);
+		const Scalar mf_udf_tol = Scalar(1e-3);
+		bool use_mf_filter = (p.skeleton_udf_filter_ && p.neural_model_type_ == NEURAL_MODEL_MF);
+		std::vector<Scalar> sphere_udf;
+		if (use_mf_filter)
+		{
+			const uint32 nb_spheres = nb_cells<PVertex>(*p.spheres_);
+			std::vector<Vec3> sphere_positions;
+			sphere_positions.resize(nb_spheres);
+			foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
+				uint32 pv_index = index_of(*p.spheres_, pv);
+				sphere_positions[pv_index] = (*p.spheres_position_)[pv_index];
+				return true;
+			});
+			if (!eval_udf_values(p, sphere_positions, sphere_udf))
+				use_mf_filter = false;
+		}
+
 		std::unordered_map<std::pair<uint32, uint32>, NMEdge, edge_hash, edge_equal> edge_indices;
 		auto find_edge = [&](uint32 a, uint32 b, NMEdge& out) -> bool {
 			auto it = edge_indices.find({a, b});
@@ -4394,33 +4801,84 @@ private:
 			return true;
 		};
 
+		std::vector<std::pair<uint32, uint32>> edge_pairs;
+		std::vector<Vec3> edge_midpoints;
+		std::unordered_set<std::pair<uint32, uint32>, edge_hash, edge_equal> edge_set;
 		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
 			uint32 pv_index = index_of(*p.spheres_, pv);
-			NMVertex nmv1 = (*spheres_skeleton_vertex_map)[pv_index];
-			if (!nmv1.is_valid())
-				return true;
 			const std::set<PVertex>& neighbors = (*p.spheres_neighbor_clusters_)[pv_index];
 			for (PVertex neighbor : neighbors)
 			{
 				uint32 n_index = sphere_index(neighbor);
-				if (n_index == INVALID_INDEX)
+				if (n_index == INVALID_INDEX || pv_index == n_index)
 					continue;
-				NMVertex nmv2 = (*spheres_skeleton_vertex_map)[n_index];
-				if (!nmv2.is_valid())
-					continue;
-				std::vector<NMVertex> av = adjacent_vertices_through_edge(*p.skeleton_, nmv1);
-				if (std::find(av.begin(), av.end(), nmv2) == av.end())
+				uint32 a = std::min(pv_index, n_index);
+				uint32 b = std::max(pv_index, n_index);
+				std::pair<uint32, uint32> key{a, b};
+				if (edge_set.insert(key).second)
 				{
-					NMEdge e = add_edge(*p.skeleton_, nmv1, nmv2);
-					edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv2)}] = e;
+					const Vec3& c1 = (*p.spheres_position_)[a];
+					const Vec3& c2 = (*p.spheres_position_)[b];
+					edge_pairs.push_back(key);
+					edge_midpoints.push_back((c1 + c2) * Scalar(0.5));
 				}
 			}
 			return true;
 		});
 
+		std::vector<uint32> edge_keep;
+		if (p.skeleton_udf_filter_)
+		{
+			if (!p.neural_udf_loaded_)
+			{
+				edge_keep = filter_points_by_input_distance(p, edge_midpoints, Scalar(1e-3));
+			}
+			else if (p.neural_model_type_ == NEURAL_MODEL_MF)
+			{
+				if (use_mf_filter)
+				{
+					std::vector<Scalar> edge_refs;
+					edge_refs.reserve(edge_pairs.size());
+					for (const auto& e : edge_pairs)
+					{
+						Scalar ref = std::min(sphere_udf[e.first], sphere_udf[e.second]);
+						edge_refs.push_back(ref);
+					}
+					edge_keep = filter_points_by_udf_reference(p, edge_midpoints, edge_refs, mf_udf_tol);
+				}
+				else
+				{
+					edge_keep.assign(edge_pairs.size(), 1);
+				}
+			}
+			else
+			{
+				edge_keep = filter_points_by_udf_zero(p, edge_midpoints, udf_zero_tol);
+			}
+		}
+		else
+		{
+			edge_keep.assign(edge_pairs.size(), 1);
+		}
+		for (size_t i = 0; i < edge_pairs.size(); ++i)
+		{
+			if (!edge_keep[i])
+				continue;
+			uint32 idx1 = edge_pairs[i].first;
+			uint32 idx2 = edge_pairs[i].second;
+			NMVertex nmv1 = (*spheres_skeleton_vertex_map)[idx1];
+			NMVertex nmv2 = (*spheres_skeleton_vertex_map)[idx2];
+			if (!nmv1.is_valid() || !nmv2.is_valid())
+				continue;
+			NMEdge e = add_edge(*p.skeleton_, nmv1, nmv2);
+			edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv2)}] = e;
+		}
+
+		std::vector<std::array<uint32, 3>> face_candidates;
+		std::vector<Vec3> face_centers;
+		std::unordered_set<NMFaceKey, face_key_hash, face_key_equal> face_seen;
 		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
 			uint32 idx1 = index_of(*p.spheres_, pv);
-			NMVertex nmv1 = (*spheres_skeleton_vertex_map)[idx1];
 			const std::set<PVertex>& n_pv = (*p.spheres_neighbor_clusters_)[idx1];
 			for (const PVertex& ne1 : n_pv)
 			{
@@ -4441,24 +4899,15 @@ private:
 					if (idx2 >= idx3)
 						continue;
 
-					NMVertex nmv3 = (*spheres_skeleton_vertex_map)[idx3];
-					if (!nmv3.is_valid())
-						continue;
-
-					const uint32 i1 = index_of(*p.skeleton_, nmv1);
-					const uint32 i2 = index_of(*p.skeleton_, nmv2);
-					const uint32 i3 = index_of(*p.skeleton_, nmv3);
-					NMEdge e12, e23, e13;
-					if (!find_edge(i1, i2, e12) || !find_edge(i2, i3, e23) || !find_edge(i1, i3, e13))
-						continue;
-					std::vector<NMEdge> edges;
-					edges.reserve(3);
-					edges.push_back(e12);
-					edges.push_back(e23);
-					edges.push_back(e13);
-					NMFace new_face = add_face(*p.skeleton_, edges);
-
-					p.skeleton_faces_map_[get_face_key(idx1, idx2, idx3)] = new_face;
+					NMFaceKey key = get_face_key(idx1, idx2, idx3);
+					if (face_seen.insert(key).second)
+					{
+						const Vec3& c1 = (*p.spheres_position_)[idx1];
+						const Vec3& c2 = (*p.spheres_position_)[idx2];
+						const Vec3& c3 = (*p.spheres_position_)[idx3];
+						face_candidates.push_back({idx1, idx2, idx3});
+						face_centers.push_back((c1 + c2 + c3) / Scalar(3.0));
+					}
 
 					const std::set<PVertex>& ne_ne2 = (*p.spheres_neighbor_clusters_)[idx3];
 
@@ -4478,6 +4927,69 @@ private:
 			}
 			return true;
 		});
+
+		std::vector<uint32> face_keep;
+		if (p.skeleton_udf_filter_)
+		{
+			if (!p.neural_udf_loaded_)
+			{
+				face_keep = filter_points_by_input_distance(p, face_centers, Scalar(1e-3));
+			}
+			else if (p.neural_model_type_ == NEURAL_MODEL_MF)
+			{
+				if (use_mf_filter)
+				{
+					std::vector<Scalar> face_refs;
+					face_refs.reserve(face_candidates.size());
+					for (const auto& f : face_candidates)
+					{
+						Scalar ref = std::min(sphere_udf[f[0]], std::min(sphere_udf[f[1]], sphere_udf[f[2]]));
+						face_refs.push_back(ref);
+					}
+					face_keep = filter_points_by_udf_reference(p, face_centers, face_refs, mf_udf_tol);
+				}
+				else
+				{
+					face_keep.assign(face_candidates.size(), 1);
+				}
+			}
+			else
+			{
+				face_keep = filter_points_by_udf_zero(p, face_centers, udf_zero_tol);
+			}
+		}
+		else
+		{
+			face_keep.assign(face_candidates.size(), 1);
+		}
+		for (size_t i = 0; i < face_candidates.size(); ++i)
+		{
+			if (!face_keep[i])
+				continue;
+			const uint32 idx1 = face_candidates[i][0];
+			const uint32 idx2 = face_candidates[i][1];
+			const uint32 idx3 = face_candidates[i][2];
+
+			NMVertex nmv1 = (*spheres_skeleton_vertex_map)[idx1];
+			NMVertex nmv2 = (*spheres_skeleton_vertex_map)[idx2];
+			NMVertex nmv3 = (*spheres_skeleton_vertex_map)[idx3];
+			if (!nmv1.is_valid() || !nmv2.is_valid() || !nmv3.is_valid())
+				continue;
+
+			const uint32 i1 = index_of(*p.skeleton_, nmv1);
+			const uint32 i2 = index_of(*p.skeleton_, nmv2);
+			const uint32 i3 = index_of(*p.skeleton_, nmv3);
+			NMEdge e12, e23, e13;
+			if (!find_edge(i1, i2, e12) || !find_edge(i2, i3, e23) || !find_edge(i1, i3, e13))
+				continue;
+			std::vector<NMEdge> edges;
+			edges.reserve(3);
+			edges.push_back(e12);
+			edges.push_back(e23);
+			edges.push_back(e13);
+			NMFace new_face = add_face(*p.skeleton_, edges);
+			p.skeleton_faces_map_[get_face_key(idx1, idx2, idx3)] = new_face;
+		}
 
 		// Resolve Tets
 		p.skeleton_tets_.clear();
@@ -5340,11 +5852,11 @@ protected:
 							p.chi_surface_ = geometry::compute_euler_characteristic(*selected_surface_);
 							p.chi_surface_valid_ = true;
 						}
-						if (p.skeleton_)
+						/* if (p.skeleton_)
 						{
 							p.chi_skeleton_ = geometry::compute_euler_characteristic(*p.skeleton_);
 							p.chi_skeleton_valid_ = true;
-						}
+						}*/
 					}
 					if (p.chi_ready_)
 					{
@@ -5364,7 +5876,10 @@ protected:
 		if (ImGui::CollapsingHeader("Sampling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
 			ImGui::InputFloat("Alpha", &p.alpha_, 0.001f, 0.1f, "%.4f");
-			ImGui::InputInt("Num Samples", &p.num_alpha_samples_, 1000, 10000);
+			ImGui::InputInt("Num Surface Samples", &p.num_alpha_samples_, 1000, 10000);
+			ImGui::InputInt("Num Inside Samples", &p.num_alpha_inside_samples_, 1000, 10000);
+			if (p.num_alpha_inside_samples_ < 0)
+				p.num_alpha_inside_samples_ = 0;
 			ImGui::InputFloat("Grid Cell Size", &p.grid_cell_size_, 0.001f, 0.01f, "%.4f");
 			ImGui::InputInt("Batch Size", &p.batch_size_, 256, 1024);
 			ImGui::InputInt("Max Iterations", &p.udf_max_iterations_, 1000, 8000);
@@ -5404,40 +5919,12 @@ protected:
 			}
 
 			if (p.samples_mesh_)
-				ImGui::Text("Number of samples: %zu", nb_cells<PVertex>(*p.samples_mesh_));
+				ImGui::Text("Surface samples: %zu", nb_cells<PVertex>(*p.samples_mesh_));
+			if (p.alpha_inside_mesh_)
+				ImGui::Text("Inside samples: %zu", nb_cells<PVertex>(*p.alpha_inside_mesh_));
 		}
 
 		bool has_samples = p.samples_mesh_ && nb_cells<PVertex>(*p.samples_mesh_) > 0;
-
-		if (ImGui::CollapsingHeader("Alpha Inside Sampling", ImGuiTreeNodeFlags_DefaultOpen))
-		{
-			if (!has_samples)
-			{
-				ImGui::TextColored(ImVec4(1, 1, 0, 1), "Please sample alpha level set first.");
-			}
-			else
-			{
-				ImGui::InputFloat("Inside Radius", &p.alpha_inside_spacing_, 0.0f, 0.0f, "%.6f");
-				if (p.alpha_inside_spacing_ < 0.0f)
-					p.alpha_inside_spacing_ = 0.0f;
-				ImGui::InputInt("Inside Attempts", &p.alpha_inside_iterations_, 1, 5);
-				if (p.alpha_inside_iterations_ < 1)
-					p.alpha_inside_iterations_ = 1;
-				ImGui::Text("Radius default: sample_radius_/2 = %.6f", p.sample_radius_ * 0.5f);
-				if (ImGui::Button("Sample Alpha Inside"))
-				{
-					sample_alpha_inside(p);
-				}
-				ImGui::SameLine();
-				if (ImGui::Button("Clear Alpha Inside"))
-				{
-					clear_alpha_inside_samples(p);
-				}
-
-				if (p.alpha_inside_mesh_)
-					ImGui::Text("Inside samples: %zu", nb_cells<PVertex>(*p.alpha_inside_mesh_));
-			}
-		}
 
 		ImGui::Separator();
 		ImGui::Text("Input Point Cloud Noise");
@@ -5539,6 +6026,14 @@ protected:
 					ImGui::RadioButton("Line Quadric (free r)", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE_FREE_RADIUS);
 					if (ImGui::Button(p.lock_skeleton_connectivity_ ? "Skeleton: Locked" : "Skeleton: Unlocked"))
 						p.lock_skeleton_connectivity_ = !p.lock_skeleton_connectivity_;
+					if (ImGui::Checkbox("Filter skeleton by UDF", &p.skeleton_udf_filter_))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							update_render_data(p);
+						}
+					}
 
 					const char* inside_cluster_modes[] = {"Power (inside pos)", "SQEM + Line Quadric"};
 					int inside_mode = static_cast<int>(p.alpha_inside_cluster_mode_);
