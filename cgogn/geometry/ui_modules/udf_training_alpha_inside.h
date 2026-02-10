@@ -302,10 +302,15 @@ private:
 		float32 spheres_transparency_ = 0.5f;
 		float32 sqem_update_lambda_ = 0.20f;
 		float32 sqem_clustering_lambda_ = 0.20f;
+		float32 udf_lambda_ = 0.1f;
+		bool udf_center_enabled_ = false;
+		float32 udf_center_lambda_ = 0.10f;
+		bool power_cluster_mix_line_quadric_ = false;
 
 		// Filtering
 		float32 target_radius_ = 0.1f;
 		float32 radius_tolerance_ = 0.01f;
+		bool alpha_inside_input_filter_ = false;
 
 		// Sampling Parameters
 		float alpha_ = 0.005f;
@@ -520,7 +525,7 @@ public:
 				}
 			}
 		}
-		const Scalar expand = Scalar(0.05);
+		const Scalar expand = Scalar(0.1);
 		bbox_min -= Vec3(expand, expand, expand);
 		bbox_max += Vec3(expand, expand, expand);
 		return {bbox_min, bbox_max};
@@ -546,6 +551,7 @@ public:
 			compute_input_normals(p);
 			points_provider_->emit_attribute_changed(*p.points_, p.position_.get());
 			points_provider_->emit_attribute_changed(*p.points_, p.normal_.get());
+			points_provider_->set_mesh_bb_vertex_position(*p.points_, p.position_);
 			invalidate_samples_after_input_change(p);
 		}
 		else if (selected_surface_ && surface_provider_)
@@ -555,6 +561,7 @@ public:
 			{
 				geometry::normalize_centered(*s_pos.get());
 				surface_bvh_dirty_ = true;
+				surface_provider_->set_mesh_bb_vertex_position(*selected_surface_, s_pos);
 				surface_provider_->emit_attribute_changed(*selected_surface_, s_pos.get());
 			}
 		}
@@ -576,8 +583,6 @@ public:
 
 		RaySamplerParams ray_params = make_ray_params(p);
 		NeuralFieldForward udf = make_neural_field_forward(p);
-		if (p.neural_model_type_ == NEURAL_MODEL_UDF)
-			normalize_input_for_udf_model(p);
 		auto [bbox_min, bbox_max] = compute_sampling_bbox(p);
 		if (!p.ray_sampler_)
 			p.ray_sampler_ = std::make_unique<RaySampler>(ray_params, udf.device());
@@ -598,7 +603,31 @@ public:
 			bbox_min, bbox_max, &used_sdf_filter);
 		std::vector<Vec3> sampled_points = std::move(sample_result.surface_samples);
 		std::vector<Vec3> inside_points = std::move(sample_result.inside_samples);
-
+		const bool enable_inside_input_filter =
+			p.alpha_inside_input_filter_ &&
+			(p.input_mode_ == INPUT_NEURAL_UDF && p.neural_model_type_ == NEURAL_MODEL_UDF);
+		if (enable_inside_input_filter && !inside_points.empty())
+		{
+			const Scalar tol = Scalar(p.alpha_);
+			std::vector<uint32> keep = filter_points_by_sample_distance(inside_points, sampled_points, tol);
+			size_t kept_count = 0;
+			std::vector<Vec3> filtered;
+			filtered.reserve(inside_points.size());
+			for (size_t i = 0; i < inside_points.size(); ++i)
+			{
+				if (keep[i])
+				{
+					filtered.push_back(inside_points[i]);
+					++kept_count;
+				}
+			}
+			if (kept_count != inside_points.size())
+			{
+				std::cout << "Alpha inside input filter: " << inside_points.size() << " -> " << kept_count
+						  << " kept." << std::endl;
+				inside_points.swap(filtered);
+			}
+		}
 		if (!used_sdf_filter)
 		{
 			if (p.input_kdtree_)
@@ -756,7 +785,6 @@ public:
 			bbox_min, bbox_max);
 		std::vector<Vec3> sampled_points = std::move(sample_result.surface_samples);
 		std::vector<Vec3> inside_points = std::move(sample_result.inside_samples);
-
 		pre_process_sampling_points_bvh(p, sampled_points);
 		if (sampled_points.empty())
 		{
@@ -1018,6 +1046,7 @@ public:
 		const int max_iters = 30;
 		const Scalar tol = 1e-6f;
 		NeuralFieldForward udf = make_neural_field_forward(p);
+		auto [bbox_min, bbox_max] = compute_sampling_bbox(p);
 
 		try
 		{
@@ -1073,6 +1102,62 @@ public:
 			torch::Tensor X0 = X.clone();
 			torch::Tensor D = D_cpu.to(device_);
 
+			torch::Tensor bbox_min_t =
+				torch::tensor({static_cast<float>(bbox_min.x()), static_cast<float>(bbox_min.y()),
+							   static_cast<float>(bbox_min.z())},
+							  torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+			torch::Tensor bbox_max_t =
+				torch::tensor({static_cast<float>(bbox_max.x()), static_cast<float>(bbox_max.y()),
+							   static_cast<float>(bbox_max.z())},
+							  torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+
+			torch::Tensor dir_norm = torch::sqrt((D * D).sum(1, true) + 1e-12f);
+			torch::Tensor dir = D / dir_norm;
+			torch::Tensor valid_dir = (dir_norm.squeeze(1) > 1e-6f);
+
+			if (p.neural_model_type_ == NEURAL_MODEL_UDF)
+			{
+				torch::Tensor X_iter = X0.clone();
+				const Scalar damping = Scalar(0.5);
+				for (int iter = 0; iter < max_iters; ++iter)
+				{
+					torch::Tensor f = udf.forward_values_gpu(X_iter);
+					if (!f.defined())
+						break;
+					if (f.dim() == 2 && f.size(1) == 1)
+						f = f.squeeze(1);
+					torch::Tensor residual = f - p.alpha_;
+					torch::Tensor step = residual.unsqueeze(1) * damping;
+					step = torch::where(valid_dir.unsqueeze(1), step, torch::zeros_like(step));
+					X_iter = torch::clamp(X_iter - dir * step, bbox_min_t, bbox_max_t);
+					if (torch::max(torch::abs(residual)).item<float>() < tol)
+						break;
+				}
+
+				torch::Tensor final_X_cpu = X_iter.to(torch::kCPU);
+				torch::Tensor dir_cpu = dir.to(torch::kCPU);
+
+				auto final_X_acc = final_X_cpu.accessor<float, 2>();
+				auto dir_acc = dir_cpu.accessor<float, 2>();
+
+				std::vector<Vec3> projected_points;
+				std::vector<Vec3> normals;
+				projected_points.reserve(nb_points);
+				normals.reserve(nb_points);
+				p.last_projection_keep_mask_.assign(nb_points, 1);
+				for (size_t i = 0; i < nb_points; ++i)
+				{
+					projected_points.push_back(Vec3(final_X_acc[i][0], final_X_acc[i][1], final_X_acc[i][2]));
+					Vec3 n(dir_acc[i][0], dir_acc[i][1], dir_acc[i][2]);
+					if (n.squaredNorm() < Scalar(1e-12))
+						n = Vec3(0, 0, 1);
+					else
+						n.normalize();
+					normals.push_back(n);
+				}
+				return {projected_points, normals};
+			}
+
 			torch::Tensor values0 = udf.forward_values_gpu(X);
 			if (!values0.defined())
 				return {};
@@ -1081,16 +1166,12 @@ public:
 				f0 = f0.squeeze(1);
 			torch::Tensor residual0 = f0 - p.alpha_;
 
-			torch::Tensor dir_norm = torch::sqrt((D * D).sum(1, true) + 1e-12f);
-			torch::Tensor dir = D / dir_norm;
-			torch::Tensor valid_dir = (dir_norm.squeeze(1) > 1e-6f);
-
 			const float max_dist = static_cast<float>(3.f * p.alpha_);
 			torch::Tensor max_dist_t = torch::full({static_cast<int64_t>(nb_points), 1}, max_dist,
 												   torch::TensorOptions().dtype(torch::kFloat32).device(device_));
 
-			torch::Tensor Xp = torch::clamp(X0 + dir * max_dist_t, 0.0f, 1.0f);
-			torch::Tensor Xm = torch::clamp(X0 - dir * max_dist_t, 0.0f, 1.0f);
+			torch::Tensor Xp = torch::clamp(X0 + dir * max_dist_t, bbox_min_t, bbox_max_t);
+			torch::Tensor Xm = torch::clamp(X0 - dir * max_dist_t, bbox_min_t, bbox_max_t);
 
 			torch::Tensor fp = udf.forward_values_gpu(Xp);
 			torch::Tensor fm = udf.forward_values_gpu(Xm);
@@ -1123,7 +1204,7 @@ public:
 			for (int iter = 0; iter < max_iters; ++iter)
 			{
 				torch::Tensor t_mid = (t_low + t_high) * 0.5f;
-				torch::Tensor X_mid = torch::clamp(X0 + dir_sel * t_mid, 0.0f, 1.0f);
+				torch::Tensor X_mid = torch::clamp(X0 + dir_sel * t_mid, bbox_min_t, bbox_max_t);
 				torch::Tensor f_mid = udf.forward_values_gpu(X_mid);
 				if (!f_mid.defined())
 					break;
@@ -1141,7 +1222,7 @@ public:
 			}
 
 			torch::Tensor t_final = torch::where(bracket.unsqueeze(1), t_high, torch::zeros_like(t_high));
-			X = torch::clamp(X0 + dir_sel * t_final, 0.0f, 1.0f);
+			X = torch::clamp(X0 + dir_sel * t_final, bbox_min_t, bbox_max_t);
 
 			auto [values, grad] = udf.forward_values_grad_gpu(X);
 			if (!values.defined() || !grad.defined())
@@ -2042,6 +2123,18 @@ private:
 			return false;
 		}
 
+		// Temporarily disable Projection UDF filter: keep all projected points.
+		for (size_t i = 0; i < vertices.size(); ++i)
+		{
+			uint32 v_idx = index_of(*p.alpha_inside_mesh_, vertices[i]);
+			(*p.alpha_inside_projected_position_)[v_idx] = projected[i];
+			(*p.alpha_inside_projected_normal_)[v_idx] = normals[i];
+		}
+		points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_position_.get());
+		points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_normal_.get());
+		std::cout << "Projection UDF filter disabled: " << vertices.size() << " kept." << std::endl;
+		return true;
+
 		const Scalar proj_tol = Scalar(1e-5);
 		std::vector<uint8_t> proj_keep_mask(projected.size(), 1);
 		if (!projected.empty())
@@ -2394,7 +2487,7 @@ private:
 			}
 
 			(*p.alpha_inside_ma_position_)[v_idx] = c;
-			(*p.alpha_inside_ma_radius_)[v_idx] = r;
+			(*p.alpha_inside_ma_radius_)[v_idx] = p.alpha_;
 			(*p.alpha_inside_ma_secondary_vertex_)[v_idx] = secondary;
 			return true;
 		});
@@ -3178,7 +3271,7 @@ private:
 			}
 
 			(*p.samples_ma_position_)[v_idx] = c;
-			(*p.samples_ma_radius_)[v_idx] = r;
+			(*p.samples_ma_radius_)[v_idx] = p.alpha_;
 			(*p.samples_ma_secondary_vertex_)[v_idx] = secondary;
 
 			return true;
@@ -3661,6 +3754,8 @@ private:
 			return;
 		if (!p.alpha_inside_position_ && !p.alpha_inside_projected_position_)
 			return;
+		const bool use_line_quadric =
+			p.power_cluster_mix_line_quadric_ && (p.alpha_inside_projected_line_quadric_ != nullptr);
 		// clean cluster affectation
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.spheres_, v);
@@ -3691,6 +3786,11 @@ private:
 				// Power distance: |p - center|^2 - radius^2
 				Scalar dist_sq = (vp - center).squaredNorm();
 				Scalar power_dist = dist_sq - radius * radius;
+				if (use_line_quadric)
+				{
+					Scalar lq_dist = (*p.alpha_inside_projected_line_quadric_)[v_index].eval(center);
+					power_dist += p.sqem_clustering_lambda_ * lq_dist;
+				}
 
 				if (power_dist < min_power_distance)
 				{
@@ -3855,6 +3955,7 @@ private:
 		Scalar r = (*p.spheres_radius_)[sphere_index];
 		Spherical_Quadric q;
 		Line_Quadric lq;
+		Scalar weight_sum = Scalar(0);
 		Vec3 h;
 		h.setZero();
 		for (PVertex v : cluster)
@@ -3866,7 +3967,7 @@ private:
 			q += (*p.alpha_inside_projected_quadric_)[v_index] * weight;
 			h += weight * (*p.alpha_inside_projected_position_)[v_index];
 			lq += (*p.alpha_inside_projected_line_quadric_)[v_index] * weight;
-
+			weight_sum += weight;
 		}
 
 		/*Mat4 A = q._A;
@@ -3891,6 +3992,24 @@ private:
 
 		Mat3 A = As + p.sqem_update_lambda_ * Al;
 		Vec3 b = (bs + p.sqem_update_lambda_ * bl) - Asr * p.alpha_;
+
+		if (p.udf_center_enabled_)
+		{
+			Scalar f0;
+			Vec3 g;
+			if (eval_udf_and_grad(p, c, f0, g))
+			{
+				const Scalar g2 = g.squaredNorm();
+				const Scalar eps = Scalar(1e-12);
+				if (g2 > eps && weight_sum > Scalar(0))
+				{
+					const Scalar mu = Scalar(p.udf_center_lambda_) * weight_sum;
+					const Scalar t = g.dot(c) - f0;
+					A.noalias() += mu * (g * g.transpose());
+					b.noalias() += mu * t * g;
+				}
+			}
+		}
 
 		c = A.ldlt().solve(b);
 		r = p.alpha_;
@@ -3917,6 +4036,8 @@ private:
 
 		if (cluster.empty())
 			return;
+		Vec3 c = (*p.spheres_position_)[sphere_index];
+		Scalar r = (*p.spheres_radius_)[sphere_index];
 		Spherical_Quadric q;
 		Line_Quadric lq;
 		Scalar weight_sum = Scalar(0);
@@ -3933,6 +4054,37 @@ private:
 		if (weight_sum <= Scalar(0))
 			return;
 
+		auto apply_shrinking_ball_fallback = [&]() -> bool {
+			if (!p.alpha_inside_projected_position_ || !p.alpha_inside_ma_position_ || !p.alpha_inside_ma_radius_)
+				return false;
+			if (!p.alpha_inside_kdtree_)
+				build_alpha_inside_projected_kdtree(p);
+			if (!p.alpha_inside_kdtree_)
+				return false;
+			const Vec3& c0 = (*p.spheres_position_)[sphere_index];
+			std::pair<uint32, Scalar> knn_res;
+			if (!p.alpha_inside_kdtree_->find_nn(c0, &knn_res))
+				return false;
+			if (knn_res.first >= p.alpha_inside_kdtree_vertices_.size())
+				return false;
+			PVertex nearest = p.alpha_inside_kdtree_vertices_[knn_res.first];
+			uint32 n_idx = index_of(*p.alpha_inside_mesh_, nearest);
+			const Vec3& c_sb = (*p.alpha_inside_ma_position_)[n_idx];
+			Scalar r_sb = (*p.alpha_inside_ma_radius_)[n_idx];
+			if (!c_sb.allFinite() || !std::isfinite(static_cast<double>(r_sb)) || r_sb <= Scalar(0))
+				return false;
+			(*p.spheres_position_)[sphere_index] = c_sb;
+			(*p.spheres_radius_)[sphere_index] = r_sb;
+			return true;
+		};
+
+		Scalar sqem_r = Scalar(0);
+		if (q.well_conditioned(sqem_r) == SQEM_CASE::Case4_Degenerate)
+		{
+			apply_shrinking_ball_fallback();
+			return;
+		}
+
 		Mat4 Ql = lq.get_quadric().matrix();
 		Mat3 Al = Ql.block<3, 3>(0, 0);
 		Vec3 bl = -Ql.block<3, 1>(0, 3);
@@ -3944,18 +4096,41 @@ private:
 
 		Mat4 A = q._A + p.sqem_update_lambda_ * Al_ext;
 		Vec4 b = q._b + p.sqem_update_lambda_ * bl_ext;
-		Vec4 s = A.completeOrthogonalDecomposition().solve(b);
-		if (!s.allFinite())
-			return;
-
-		if (s[3] > Scalar(0) && s[3] <= p.alpha_)
+		if (p.udf_center_enabled_)
 		{
-			(*p.spheres_position_)[sphere_index] = s.head<3>();
-			(*p.spheres_radius_)[sphere_index] = s[3];
-			return;
+			const Vec3 c0 = (*p.spheres_position_)[sphere_index];
+			Scalar f0;
+			Vec3 g;
+			if (eval_udf_and_grad(p, c0, f0, g))
+			{
+				const Scalar g2 = g.squaredNorm();
+				const Scalar eps = Scalar(1e-12);
+				if (g2 > eps)
+				{
+					const Scalar mu = Scalar(p.udf_center_lambda_) * weight_sum;
+					const Scalar t = g.dot(c0) - f0;
+					A.block<3, 3>(0, 0).noalias() += mu * (g * g.transpose());
+					b.head<3>().noalias() += mu * t * g;
+				}
+			}
 		}
+		// Vec4 s = A.completeOrthogonalDecomposition().solve(b);
+		// if (!s.allFinite())
+		// 	return;
 
-		update_sphere_line_quadric_distance_fix_radius(p, sphere);
+		// if (s[3] > Scalar(0) && s[3] <= p.alpha_)
+		// {
+		// 	(*p.spheres_position_)[sphere_index] = s.head<3>();
+		// 	(*p.spheres_radius_)[sphere_index] = s[3];
+		// 	return;
+		// }
+
+		// update_sphere_line_quadric_distance_fix_radius(p, sphere);
+		Vec4 s = A.ldlt().solve(b);
+		c = s.head<3>();
+		r = s[3];
+		(*p.spheres_position_)[sphere_index] = c;
+		(*p.spheres_radius_)[sphere_index] = r;
 	}
 
 	void update_sphere_line_quadric_distance_free_radius(PointsParameters& p, PVertex sphere)
@@ -4053,6 +4228,33 @@ private:
 
 	void correct_sphere(PointsParameters& p, PVertex v)
 	{
+		if (!p.samples_mesh_ || !p.samples_position_)
+		{
+			std::cerr << "Sphere correction skipped: samples not available." << std::endl;
+			return;
+		}
+		if (!p.samples_kdtree_)
+			build_kdtree(p);
+		if (!p.samples_kdtree_)
+		{
+			std::cerr << "Sphere correction skipped: samples KDTree not available." << std::endl;
+			return;
+		}
+		if (!p.samples_winding_number_)
+		{
+			if (!p.samples_area_ || !p.samples_normal_)
+			{
+				std::cerr << "Sphere correction skipped: samples area/normal not available." << std::endl;
+				return;
+			}
+			compute_winding_numbers(p);
+		}
+		if (!p.samples_winding_number_)
+		{
+			std::cerr << "Sphere correction skipped: winding number not available." << std::endl;
+			return;
+		}
+
 		uint32 v_index = index_of(*p.spheres_, v);
 
 		Vec3& c = (*p.spheres_position_)[v_index];
@@ -4061,7 +4263,10 @@ private:
 		bool inside = p.samples_winding_number_->is_inside(c);
 
 		std::pair<uint32, Scalar> k_res;
-		p.samples_kdtree_->find_nn(c, &k_res);
+		if (!p.samples_kdtree_->find_nn(c, &k_res))
+			return;
+		if (k_res.first >= p.samples_kdtree_vertices_.size())
+			return;
 		uint32 k_idx = index_of(*p.samples_mesh_, p.samples_kdtree_vertices_[k_res.first]);
 		Vec3 closest_pos = (*p.samples_position_)[k_idx];
 		Vec3 dir = (closest_pos - c).normalized();
@@ -4548,6 +4753,21 @@ private:
 		}
 	};
 
+	bool eval_udf_and_grad(PointsParameters& p, const Vec3& query_point, Scalar& value, Vec3& grad)
+	{
+		if (!p.neural_udf_loaded_)
+			return false;
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		if (!udf.is_loaded())
+			return false;
+		auto res = udf.forward_point_with_grad(query_point);
+		value = res.first;
+		grad = res.second;
+		if (!std::isfinite(value) || !grad.allFinite())
+			return false;
+		return true;
+	}
+
 	bool eval_udf_values(PointsParameters& p, const std::vector<Vec3>& points, std::vector<Scalar>& out_values)
 	{
 		out_values.clear();
@@ -4660,6 +4880,28 @@ private:
 		return keep;
 	}
 
+	std::vector<uint32> filter_points_by_sample_distance(const std::vector<Vec3>& points,
+														 const std::vector<Vec3>& samples, Scalar tol)
+	{
+		std::vector<uint32> keep(points.size(), 1);
+		if (points.empty() || samples.empty())
+			return keep;
+
+		acc::KDTree<3, uint32> kdtree(samples);
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			std::pair<uint32, Scalar> knn_res;
+			if (!kdtree.find_nn(points[i], &knn_res, tol))
+			{
+				keep[i] = 0;
+				continue;
+			}
+			if (knn_res.second > tol)
+				keep[i] = 0;
+		}
+		return keep;
+	}
+
 	std::vector<uint32> filter_points_by_input_distance(PointsParameters& p, const std::vector<Vec3>& points,
 														Scalar tol)
 	{
@@ -4667,7 +4909,12 @@ private:
 		if (points.empty())
 			return keep;
 
-		if (p.input_mode_ == INPUT_SURFACE_MESH)
+		const bool use_surface = (p.input_mode_ == INPUT_SURFACE_MESH) ||
+								 (p.input_mode_ == INPUT_NEURAL_UDF && selected_surface_);
+		const bool use_points = (p.input_mode_ == INPUT_POINT_CLOUD) ||
+								(p.input_mode_ == INPUT_NEURAL_UDF && p.points_ && p.position_);
+
+		if (use_surface)
 		{
 			build_surface_bvh();
 			if (!surface_bvh_)
@@ -4686,7 +4933,7 @@ private:
 			return keep;
 		}
 
-		if (p.input_mode_ == INPUT_POINT_CLOUD)
+		if (use_points)
 		{
 			if (!p.input_kdtree_)
 				rebuild_input_kdtree(p);
@@ -5877,9 +6124,10 @@ protected:
 		{
 			ImGui::InputFloat("Alpha", &p.alpha_, 0.001f, 0.1f, "%.4f");
 			ImGui::InputInt("Num Surface Samples", &p.num_alpha_samples_, 1000, 10000);
-			ImGui::InputInt("Num Inside Samples", &p.num_alpha_inside_samples_, 1000, 10000);
-			if (p.num_alpha_inside_samples_ < 0)
-				p.num_alpha_inside_samples_ = 0;
+		ImGui::InputInt("Num Inside Samples", &p.num_alpha_inside_samples_, 1000, 10000);
+		if (p.num_alpha_inside_samples_ < 0)
+			p.num_alpha_inside_samples_ = 0;
+			ImGui::Checkbox("Filter Inside by Input Dist", &p.alpha_inside_input_filter_);
 			ImGui::InputFloat("Grid Cell Size", &p.grid_cell_size_, 0.001f, 0.01f, "%.4f");
 			ImGui::InputInt("Batch Size", &p.batch_size_, 256, 1024);
 			ImGui::InputInt("Max Iterations", &p.udf_max_iterations_, 1000, 8000);
@@ -6021,6 +6269,17 @@ protected:
 							p.sqem_update_lambda_ = p.sqem_clustering_lambda_;
 					}
 
+					if (p.neural_udf_loaded_)
+					{
+						ImGui::Checkbox("UDF center term", &p.udf_center_enabled_);
+						if (p.udf_center_enabled_)
+							ImGui::SliderFloat("UDF lambda", &p.udf_center_lambda_, 0.0f, 2.0f, "%.6f");
+					}
+					else
+					{
+						ImGui::TextColored(ImVec4(1, 1, 0, 1), "UDF center term requires loaded model.");
+					}
+
 					ImGui::RadioButton("Line Quadric (fix r)", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE);
 					ImGui::SameLine();
 					ImGui::RadioButton("Line Quadric (free r)", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE_FREE_RADIUS);
@@ -6087,6 +6346,9 @@ protected:
 							update_render_data(p);
 						}
 					}
+					ImGui::SameLine();
+					if (ImGui::Button(p.power_cluster_mix_line_quadric_ ? "Power+LQ: On" : "Power+LQ: Off"))
+						p.power_cluster_mix_line_quadric_ = !p.power_cluster_mix_line_quadric_;
 
 					if (ImGui::Button("Build Skeleton"))
 					{

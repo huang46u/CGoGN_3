@@ -28,6 +28,7 @@
 #include <cgogn/core/functions/attributes.h>
 
 #include <cgogn/geometry/types/vector_traits.h>
+#include <cgogn/geometry/functions/bounding_box.h>
 
 #include <cgogn/ui/app.h>
 #include <cgogn/ui/view.h>
@@ -104,8 +105,19 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 
 		using SVertex = typename cgogn::mesh_traits<Surface>::Vertex;
 		auto s_pos = cgogn::get_attribute<Vec3, SVertex>(*s, "position");
+		if (use_neural_udf && !neural_is_mf)
+			cgogn::geometry::normalize_centered(*s_pos.get());
+		if (use_neural_udf && !neural_is_mf)
+			mps.emit_attribute_changed(*s, s_pos.get());
 		mps.set_mesh_bb_vertex_position(*s, s_pos);
 		sr.set_vertex_position(*v1, *s, s_pos);
+		if (use_neural_udf && neural_is_mf)
+		{
+			sr.set_render_vertices(*v1, *s, false);
+			sr.set_render_edges(*v1, *s, false);
+			sr.set_render_faces(*v1, *s, true);
+			sr.set_ghost_mode(*v1, *s, true);
+		}
 			udf.set_selected_surface(*s);
 
 			p = mpp.add_mesh("input_points");
@@ -121,6 +133,10 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 			return 1;
 		}
 		auto p_vertex_position = cgogn::get_attribute<Vec3, PVertex>(*p, "position");
+		if (use_neural_udf && !neural_is_mf)
+			cgogn::geometry::normalize_centered(*p_vertex_position.get());
+		if (use_neural_udf && !neural_is_mf)
+			mpp.emit_attribute_changed(*p, p_vertex_position.get());
 		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
 
 		udf.set_selected_points(*p);
@@ -145,6 +161,9 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 				  << ")" << std::endl;
 		std::cout << "Neural UDF model loaded. Use UI to sample alpha-level set." << std::endl;
 	}
+
+	v1->update_scene_bb();
+	v1->show_entire_scene();
 
 	app.background_color_ = cgogn::rendering::GLColor(0.5f, 0.5f, 0.5f, 1.0f);
 	return app.launch();

@@ -260,6 +260,8 @@ private:
 		float32 spheres_transparency_ = 0.5f;
 		float32 sqem_update_lambda_ = 0.20f;
 		float32 sqem_clustering_lambda_ = 0.20f;
+		bool udf_center_enabled_ = false;
+		float32 udf_center_lambda_ = 0.10f;
 
 		// Filtering
 		float32 target_radius_ = 0.1f;
@@ -471,7 +473,7 @@ public:
 				}
 			}
 		}
-		const Scalar expand = Scalar(0.05);
+		const Scalar expand = Scalar(0.1);
 		bbox_min -= Vec3(expand, expand, expand);
 		bbox_max += Vec3(expand, expand, expand);
 		return {bbox_min, bbox_max};
@@ -497,6 +499,7 @@ public:
 			compute_input_normals(p);
 			points_provider_->emit_attribute_changed(*p.points_, p.position_.get());
 			points_provider_->emit_attribute_changed(*p.points_, p.normal_.get());
+			points_provider_->set_mesh_bb_vertex_position(*p.points_, p.position_);
 			invalidate_samples_after_input_change(p);
 		}
 		else if (selected_surface_ && surface_provider_)
@@ -506,6 +509,7 @@ public:
 			{
 				geometry::normalize_centered(*s_pos.get());
 				surface_bvh_dirty_ = true;
+				surface_provider_->set_mesh_bb_vertex_position(*selected_surface_, s_pos);
 				surface_provider_->emit_attribute_changed(*selected_surface_, s_pos.get());
 			}
 		}
@@ -527,8 +531,6 @@ public:
 
 		RaySamplerParams ray_params = make_ray_params(p);
 		NeuralFieldForward udf = make_neural_field_forward(p);
-		if (p.neural_model_type_ == NEURAL_MODEL_UDF)
-			normalize_input_for_udf_model(p);
 		auto [bbox_min, bbox_max] = compute_sampling_bbox(p);
 		if (!p.ray_sampler_)
 			p.ray_sampler_ = std::make_unique<RaySampler>(ray_params, udf.device());
@@ -2080,12 +2082,14 @@ private:
 			}
 
 			(*p.samples_ma_position_)[v_idx] = c;
-			(*p.samples_ma_radius_)[v_idx] = r;
+			(*p.samples_ma_radius_)[v_idx] = p.alpha_;
 			(*p.samples_ma_secondary_vertex_)[v_idx] = secondary;
 
 			return true;
 		});
 	}
+
+	// MF post-process: search along opposite normal direction for minimal mf-abs(sdf)
 
 	void init_spheres(PointsParameters& p, uint32 max_nb_spheres)
 	{
@@ -2660,6 +2664,21 @@ private:
 		return Vec4(1.0, 0.0, 0.0, transparency);
 	}
 
+	bool eval_udf_and_grad(PointsParameters& p, const Vec3& query_point, Scalar& value, Vec3& grad)
+	{
+		if (!p.neural_udf_loaded_)
+			return false;
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		if (!udf.is_loaded())
+			return false;
+		auto res = udf.forward_point_with_grad(query_point);
+		value = res.first;
+		grad = res.second;
+		if (!std::isfinite(value) || !grad.allFinite())
+			return false;
+		return true;
+	}
+
 	void update_sphere_line_quadric_distance_fix_radius(PointsParameters& p, PVertex sphere)
 	{
 		SphereFitData data;
@@ -2713,6 +2732,24 @@ private:
 		Mat3 A = As + p.sqem_update_lambda_ * Al;
 		Vec3 b = (bs + p.sqem_update_lambda_ * bl) - Asr * p.alpha_;
 
+		if (p.udf_center_enabled_)
+		{
+			Scalar f0;
+			Vec3 g;
+			if (eval_udf_and_grad(p, c, f0, g))
+			{
+				const Scalar g2 = g.squaredNorm();
+				const Scalar eps = Scalar(1e-12);
+				if (g2 > eps && area > Scalar(0))
+				{
+					const Scalar mu = Scalar(p.udf_center_lambda_) /** area*/;
+					const Scalar t = g.dot(c) - f0;
+					A.noalias() += mu * (g * g.transpose());
+					b.noalias() += mu * t * g;
+				}
+			}
+		}
+
 		c = A.ldlt().solve(b);
 		r = p.alpha_;
 		(*p.spheres_position_)[sphere_index] = c;
@@ -2756,6 +2793,24 @@ private:
 
 		Mat4 A = q._A + p.sqem_update_lambda_ * Al_ext;
 		Vec4 b = q._b + p.sqem_update_lambda_ * bl_ext;
+		if (p.udf_center_enabled_)
+		{
+			const Vec3 c0 = (*p.spheres_position_)[sphere_index];
+			Scalar f0;
+			Vec3 g;
+			if (eval_udf_and_grad(p, c0, f0, g))
+			{
+				const Scalar g2 = g.squaredNorm();
+				const Scalar eps = Scalar(1e-12);
+				if (g2 > eps)
+				{
+					const Scalar mu = Scalar(p.udf_center_lambda_) /** weight_sum*/;
+					const Scalar t = g.dot(c0) - f0;
+					A.block<3, 3>(0, 0).noalias() += mu * (g * g.transpose());
+					b.head<3>().noalias() += mu * t * g;
+				}
+			}
+		}
 		Vec4 s = A.completeOrthogonalDecomposition().solve(b);
 		if (!s.allFinite())
 			return;
@@ -4215,7 +4270,6 @@ protected:
 				}
 				update_render_data(p);
 			}
-
 			const bool sphere_fit_ready = p.fitting_data_computed_;
 			if (sphere_fit_ready)
 			{
@@ -4242,6 +4296,17 @@ protected:
 					{
 						if (sync_lambda)
 							p.sqem_update_lambda_ = p.sqem_clustering_lambda_;
+					}
+
+					if (p.neural_udf_loaded_)
+					{
+						ImGui::Checkbox("UDF center term", &p.udf_center_enabled_);
+						if (p.udf_center_enabled_)
+							ImGui::SliderFloat("UDF lambda", &p.udf_center_lambda_, 0.0f, 2.0f, "%.6f");
+					}
+					else
+					{
+						ImGui::TextColored(ImVec4(1, 1, 0, 1), "UDF center term requires loaded model.");
 					}
 
 					ImGui::RadioButton("Line Quadric (fix r)", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE);
