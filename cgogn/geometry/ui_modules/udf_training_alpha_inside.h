@@ -739,8 +739,16 @@ public:
 		{
 			if (!filter_alpha_inside_by_mf(p))
 				std::cerr << "MF filter failed; continuing without filtering." << std::endl;
+			std::cout << "Preparing alpha-inside projection..." << std::endl;
 			if (!prepare_alpha_inside_projected_data(p))
+			{
+				std::cerr << "Alpha-inside projection failed." << std::endl;
 				points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
+			}
+			else
+			{
+				std::cout << "Alpha-inside projection ready." << std::endl;
+			}
 		}
 	}
 
@@ -2123,17 +2131,25 @@ private:
 			return false;
 		}
 
-		// Temporarily disable Projection UDF filter: keep all projected points.
-		for (size_t i = 0; i < vertices.size(); ++i)
+		if (p.neural_model_type_ == NEURAL_MODEL_UDF)
 		{
-			uint32 v_idx = index_of(*p.alpha_inside_mesh_, vertices[i]);
-			(*p.alpha_inside_projected_position_)[v_idx] = projected[i];
-			(*p.alpha_inside_projected_normal_)[v_idx] = normals[i];
+			if (projected.size() != vertices.size())
+			{
+				std::cerr << "Projection UDF filter disabled but sizes mismatch: " << projected.size() << " vs "
+						  << vertices.size() << std::endl;
+				return false;
+			}
+			for (size_t i = 0; i < vertices.size(); ++i)
+			{
+				uint32 v_idx = index_of(*p.alpha_inside_mesh_, vertices[i]);
+				(*p.alpha_inside_projected_position_)[v_idx] = projected[i];
+				(*p.alpha_inside_projected_normal_)[v_idx] = normals[i];
+			}
+			points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_position_.get());
+			points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_normal_.get());
+			std::cout << "Projection UDF filter disabled (UDF model): " << vertices.size() << " kept." << std::endl;
+			return true;
 		}
-		points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_position_.get());
-		points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_normal_.get());
-		std::cout << "Projection UDF filter disabled: " << vertices.size() << " kept." << std::endl;
-		return true;
 
 		const Scalar proj_tol = Scalar(1e-5);
 		std::vector<uint8_t> proj_keep_mask(projected.size(), 1);
