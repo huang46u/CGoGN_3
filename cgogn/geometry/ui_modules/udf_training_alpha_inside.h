@@ -302,6 +302,7 @@ private:
 		float32 spheres_transparency_ = 0.5f;
 		float32 sqem_update_lambda_ = 0.20f;
 		float32 sqem_clustering_lambda_ = 0.20f;
+		float32 sqem_fix_radius_scale_ = 2.0f;
 		float32 udf_lambda_ = 0.1f;
 		bool udf_center_enabled_ = false;
 		float32 udf_center_lambda_ = 0.10f;
@@ -4028,7 +4029,7 @@ private:
 		}
 
 		c = A.ldlt().solve(b);
-		r = p.alpha_;
+		r = p.alpha_ * p.sqem_fix_radius_scale_;
 		(*p.spheres_position_)[sphere_index] = c;
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
@@ -6284,6 +6285,12 @@ protected:
 						if (sync_lambda)
 							p.sqem_update_lambda_ = p.sqem_clustering_lambda_;
 					}
+					const bool fix_r_mode = (p.distance_mode_ == LINE_QUADRIC_DISTANCE);
+					if (!fix_r_mode)
+						ImGui::BeginDisabled();
+					ImGui::SliderFloat("fix radius scale", &p.sqem_fix_radius_scale_, 1.0f, 5.0f, "%.3f");
+					if (!fix_r_mode)
+						ImGui::EndDisabled();
 
 					if (p.neural_udf_loaded_)
 					{

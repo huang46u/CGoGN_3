@@ -252,14 +252,15 @@ private:
 		bool auto_split_ = false;
 		AutoSplitMode auto_split_mode_ = ERROR_THRESHOLD;
 		float32 auto_split_error_threshold_ = 0.00025f;
-		uint32 auto_split_max_nb_spheres_ = 50;
+		uint32 auto_split_max_nb_spheres_ = 500;
 		float32 auto_split_ratio_ = 0.2f;
 		uint32 auto_split_max_per_iter_error_ = 10;
-		uint32 auto_split_max_per_iter_max_ = 200;
+		uint32 auto_split_max_per_iter_max_ = 100;
 		bool error_as_spheres_color_ = false;
 		float32 spheres_transparency_ = 0.5f;
 		float32 sqem_update_lambda_ = 0.20f;
 		float32 sqem_clustering_lambda_ = 0.20f;
+		float32 sqem_fix_radius_scale_ = 2.0f;
 		bool udf_center_enabled_ = false;
 		float32 udf_center_lambda_ = 0.10f;
 
@@ -271,12 +272,12 @@ private:
 		float alpha_ = 0.005f;
 		float sample_radius_ = 0.0025f;
 		int sample_iterations_ = 30; // Max attempts per point
-		int knn_k_ = 10;
+		int knn_k_ = 20;
 		int seed_ = 42;
 		int cluster_min_points_ = 20;
 		float grid_cell_size_ = 0.0025f;
 		// Neural UDF Sampling
-		int num_alpha_samples_ = 200000;
+		int num_alpha_samples_ = 70000;
 		int batch_size_ = 131064;	   // sample batch
 		float tol_ = 1e-5f; // convergence tolerance
 
@@ -546,14 +547,6 @@ public:
 		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
 			traits, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max, &used_sdf_filter);
 
-		if (!used_sdf_filter)
-		{
-			if (p.input_kdtree_)
-				pre_process_sampling_points_kdtree(p, sampled_points);
-			else
-				pre_process_sampling_points_bvh(p, sampled_points);
-			
-		}
 		if (sampled_points.empty())
 		{
 			std::cerr << "Failed to sample points on alpha level set." << std::endl;
@@ -679,7 +672,6 @@ public:
 		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
 			traits, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max);
 
-		pre_process_sampling_points_bvh(p, sampled_points);
 		if (sampled_points.empty())
 		{
 			std::cerr << "Failed to sample points on alpha level set." << std::endl;
@@ -787,7 +779,6 @@ public:
 		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
 			traits, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max);
 
-		pre_process_sampling_points_kdtree(p, sampled_points);
 		if (sampled_points.empty())
 		{
 			std::cerr << "Failed to sample points on alpha level set." << std::endl;
@@ -866,6 +857,215 @@ public:
 		});
 		points.erase(new_end, points.end());
 		std::cout << "After pre-processing, " << points.size() << " points." << std::endl;
+	}
+
+	void recompute_samples_normals_from_current_input(PointsParameters& p)
+	{
+		if (!p.samples_mesh_ || !p.samples_position_ || !p.samples_normal_)
+			return;
+
+		const Scalar eps = Scalar(1e-12);
+		bool normals_ok = false;
+
+		if (p.input_mode_ == INPUT_NEURAL_UDF && p.neural_udf_loaded_)
+		{
+			std::vector<Vec3> all_positions;
+			all_positions.reserve(nb_cells<PVertex>(*p.samples_mesh_));
+			foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+				uint32 v_idx = index_of(*p.samples_mesh_, v);
+				all_positions.push_back((*p.samples_position_)[v_idx]);
+				return true;
+			});
+			NeuralFieldForward udf = make_neural_field_forward(p);
+			BatchUDFResult grad_result = udf.forward_batch_with_grad(all_positions);
+			if (grad_result.ok && grad_result.gradients.size() == all_positions.size())
+			{
+				uint32 idx = 0;
+				foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+					uint32 v_idx = index_of(*p.samples_mesh_, v);
+					Vec3 normal = grad_result.gradients[idx].normalized();
+					(*p.samples_normal_)[v_idx] = normal;
+					idx++;
+					return true;
+				});
+				normals_ok = true;
+			}
+		}
+
+		if (!normals_ok && p.input_mode_ == INPUT_SURFACE_MESH && selected_surface_)
+		{
+			auto s_pos = get_attribute<Vec3, SVertex>(*selected_surface_, "position");
+			build_surface_bvh();
+			if (s_pos && surface_bvh_)
+			{
+				foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+					uint32 v_idx = index_of(*p.samples_mesh_, v);
+					const Vec3& pos = (*p.samples_position_)[v_idx];
+					std::pair<uint32, Vec3> cp;
+					Vec3 n(0, 0, 1);
+					if (surface_bvh_->closest_point(pos, &cp))
+					{
+						SFace face = surface_bvh_faces_[cp.first];
+						n = geometry::normal(*selected_surface_, face, s_pos.get());
+						if (surface_vertex_normal_)
+						{
+							std::array<SVertex, 3> vertices;
+							uint32 vi = 0;
+							foreach_incident_vertex(*selected_surface_, face, [&](SVertex sv) -> bool {
+								if (vi < vertices.size())
+									vertices[vi++] = sv;
+								return true;
+							});
+							if (vi == vertices.size())
+							{
+								const Vec3& p0 = value<Vec3>(*selected_surface_, s_pos, vertices[0]);
+								const Vec3& p1 = value<Vec3>(*selected_surface_, s_pos, vertices[1]);
+								const Vec3& p2 = value<Vec3>(*selected_surface_, s_pos, vertices[2]);
+								Scalar u = 0.0, v_bary = 0.0, w = 0.0;
+								cgogn::geometry::closest_point_in_triangle(cp.second, p0, p1, p2, u, v_bary, w);
+								const Vec3& n0 = value<Vec3>(*selected_surface_, surface_vertex_normal_, vertices[0]);
+								const Vec3& n1 = value<Vec3>(*selected_surface_, surface_vertex_normal_, vertices[1]);
+								const Vec3& n2 = value<Vec3>(*selected_surface_, surface_vertex_normal_, vertices[2]);
+								n = u * n0 + v_bary * n1 + w * n2;
+							}
+						}
+						if (n.squaredNorm() < eps)
+							n = Vec3(0, 0, 1);
+						else
+							n.normalize();
+						Vec3 to_sample = pos - cp.second;
+						if (to_sample.squaredNorm() > eps && to_sample.dot(n) < Scalar(0))
+							n = -n;
+					}
+					(*p.samples_normal_)[v_idx] = n;
+					return true;
+				});
+				normals_ok = true;
+			}
+		}
+
+		if (!normals_ok && p.input_kdtree_ && p.points_ && p.position_)
+		{
+			foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+				uint32 v_idx = index_of(*p.samples_mesh_, v);
+				const Vec3& pos = (*p.samples_position_)[v_idx];
+				std::pair<uint32, Scalar> knn_res;
+				Vec3 n(0, 0, 1);
+				if (p.input_kdtree_->find_nn(pos, &knn_res))
+				{
+					uint32 idx = knn_res.first;
+					PVertex vn = p.input_kdtree_vertices_[idx];
+					uint32 vn_idx = index_of(*p.points_, vn);
+					n = pos - (*p.position_)[vn_idx];
+					if (n.squaredNorm() < eps && p.normal_)
+						n = (*p.normal_)[vn_idx];
+					if (n.squaredNorm() < eps)
+						n = Vec3(0, 0, 1);
+					else
+						n.normalize();
+				}
+				(*p.samples_normal_)[v_idx] = n;
+				return true;
+			});
+			normals_ok = true;
+		}
+
+		if (!normals_ok)
+		{
+			foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+				uint32 v_idx = index_of(*p.samples_mesh_, v);
+				(*p.samples_normal_)[v_idx] = Vec3(0, 0, 1);
+				return true;
+			});
+		}
+
+		refresh_sample_normals_color(p);
+	}
+
+	void apply_sampling_preprocess_filtering(PointsParameters& p)
+	{
+		if (!p.samples_mesh_ || !p.samples_position_)
+			return;
+		if (p.running_)
+		{
+			std::cerr << "Stop spheres update before filtering sampled points." << std::endl;
+			return;
+		}
+
+		const uint32 count = nb_cells<PVertex>(*p.samples_mesh_);
+		if (count == 0)
+		{
+			std::cout << "No sampled points to filter." << std::endl;
+			return;
+		}
+
+		std::vector<Vec3> filtered_points;
+		filtered_points.reserve(count);
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			filtered_points.push_back((*p.samples_position_)[v_idx]);
+			return true;
+		});
+
+		const size_t before = filtered_points.size();
+		if (p.input_kdtree_)
+			pre_process_sampling_points_kdtree(p, filtered_points);
+		else
+			pre_process_sampling_points_bvh(p, filtered_points);
+
+		const size_t after = filtered_points.size();
+		if (after == before)
+		{
+			std::cout << "Sampling filtering applied: no points removed (" << before << " -> " << after << ")."
+					  << std::endl;
+			return;
+		}
+
+		clear_knn_hover(p);
+		p.knn_hover_locked_ = false;
+		p.fitting_data_computed_ = false;
+		p.samples_winding_number_.reset();
+		p.samples_wn_bvh_.reset();
+		p.samples_jitter_backup_valid_ = false;
+		p.samples_position_backup_.clear();
+		p.samples_normal_backup_.clear();
+		points_provider_->clear_mesh(*p.samples_mesh_);
+
+		if (filtered_points.empty())
+		{
+			if (p.samples_kdtree_)
+			{
+				delete p.samples_kdtree_;
+				p.samples_kdtree_ = nullptr;
+			}
+			p.samples_kdtree_vertices_.clear();
+			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+			std::cout << "Sampling filtering applied: " << before << " -> 0 points." << std::endl;
+			return;
+		}
+
+		for (const Vec3& pt : filtered_points)
+		{
+			PVertex v = add_vertex(*p.samples_mesh_);
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			(*p.samples_position_)[v_idx] = pt;
+			if (p.samples_color_)
+				(*p.samples_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
+			if (p.samples_knn_color_)
+				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
+		}
+
+		recompute_samples_normals_from_current_input(p);
+		build_kdtree(p);
+		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
+		if (p.samples_knn_color_)
+			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_knn_color_.get());
+		if (p.samples_color_)
+			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
+		std::cout << "Sampling filtering applied: " << before << " -> " << after << " points." << std::endl;
 	}
 
 	std::vector<Vec3> poisson_eliminate_points(const std::vector<Vec3>& points, size_t target_num)
@@ -2082,7 +2282,7 @@ private:
 			}
 
 			(*p.samples_ma_position_)[v_idx] = c;
-			(*p.samples_ma_radius_)[v_idx] = p.alpha_;
+			(*p.samples_ma_radius_)[v_idx] = p.alpha_ * p.sqem_fix_radius_scale_;
 			(*p.samples_ma_secondary_vertex_)[v_idx] = secondary;
 
 			return true;
@@ -2751,7 +2951,7 @@ private:
 		}
 
 		c = A.ldlt().solve(b);
-		r = p.alpha_;
+		r = p.alpha_ * p.sqem_fix_radius_scale_;
 		(*p.spheres_position_)[sphere_index] = c;
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
@@ -4169,6 +4369,11 @@ protected:
 			ImGui::InputInt("Max Iterations", &p.udf_max_iterations_, 1000, 8000);
 			ImGui::InputFloat("Tolerance", &p.tol_, 0.0f, 0.0f, "%.6f");
 			ImGui::InputInt("KNN K", &p.knn_k_, 1, 5);
+			if (ImGui::Button("Apply Sampling Filtering"))
+			{
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				apply_sampling_preprocess_filtering(p);
+			}
 			if (ImGui::Checkbox("Hover KNN", &p.show_knn_hover_))
 			{
 				if (!p.show_knn_hover_)
@@ -4297,6 +4502,12 @@ protected:
 						if (sync_lambda)
 							p.sqem_update_lambda_ = p.sqem_clustering_lambda_;
 					}
+					const bool fix_r_mode = (p.distance_mode_ == LINE_QUADRIC_DISTANCE);
+					if (!fix_r_mode)
+						ImGui::BeginDisabled();
+					ImGui::SliderFloat("fix radius scale", &p.sqem_fix_radius_scale_, 1.0f, 5.0f, "%.3f");
+					if (!fix_r_mode)
+						ImGui::EndDisabled();
 
 					if (p.neural_udf_loaded_)
 					{
