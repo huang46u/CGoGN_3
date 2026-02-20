@@ -267,6 +267,8 @@ private:
 		// Filtering
 		float32 target_radius_ = 0.1f;
 		float32 radius_tolerance_ = 0.01f;
+		float32 skeleton_edge_udf_zero_tol_ = 1e-4f;
+		float32 skeleton_face_udf_zero_tol_ = 1e-4f;
 
 		// Sampling Parameters
 		float alpha_ = 0.005f;
@@ -2879,6 +2881,50 @@ private:
 		return true;
 	}
 
+	bool eval_udf_values(PointsParameters& p, const std::vector<Vec3>& points, std::vector<Scalar>& out_values)
+	{
+		out_values.clear();
+		out_values.resize(points.size(), Scalar(0));
+		if (points.empty())
+			return true;
+		if (!p.neural_udf_loaded_)
+			return false;
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		if (!udf.is_loaded())
+			return false;
+
+		const size_t batch = std::max<size_t>(1, static_cast<size_t>(p.batch_size_));
+		for (size_t offset = 0; offset < points.size(); offset += batch)
+		{
+			const size_t count = std::min(batch, points.size() - offset);
+			auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+			if (device_.is_cuda())
+				cpu_opts = cpu_opts.pinned_memory(true);
+
+			torch::Tensor pts_cpu = torch::empty({static_cast<int64_t>(count), 3}, cpu_opts);
+			auto pts_acc = pts_cpu.accessor<float, 2>();
+			for (size_t i = 0; i < count; ++i)
+			{
+				const Vec3& pnt = points[offset + i];
+				pts_acc[static_cast<long>(i)][0] = static_cast<float>(pnt.x());
+				pts_acc[static_cast<long>(i)][1] = static_cast<float>(pnt.y());
+				pts_acc[static_cast<long>(i)][2] = static_cast<float>(pnt.z());
+			}
+
+			torch::Tensor pts = pts_cpu.to(device_);
+			torch::Tensor values = udf.forward_values_gpu(pts);
+			if (!values.defined())
+				return false;
+			if (values.dim() == 2 && values.size(1) == 1)
+				values = values.squeeze(1);
+			torch::Tensor values_cpu = values.to(torch::kCPU).contiguous();
+			auto values_acc = values_cpu.accessor<float, 1>();
+			for (size_t i = 0; i < count; ++i)
+				out_values[offset + i] = static_cast<Scalar>(values_acc[static_cast<long>(i)]);
+		}
+		return true;
+	}
+
 	void update_sphere_line_quadric_distance_fix_radius(PointsParameters& p, PVertex sphere)
 	{
 		SphereFitData data;
@@ -3577,6 +3623,261 @@ private:
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
 	}
 
+	void skeleton_geometry_filter(PointsParameters& p)
+	{
+		if (!p.neural_udf_loaded_)
+		{
+			std::cerr << "Geometry filter requires a loaded neural UDF model." << std::endl;
+			return;
+		}
+
+		compute_skeleton(p, true);
+		if (!p.spheres_ || !p.spheres_position_ || !p.spheres_neighbor_clusters_ || !p.skeleton_)
+			return;
+
+		auto get_face_key = [](uint32 i1, uint32 i2, uint32 i3) -> NMFaceKey {
+			std::array<uint32, 3> key = {i1, i2, i3};
+			std::sort(key.begin(), key.end());
+			return key;
+		};
+		auto edge_key = [](uint32 a, uint32 b) -> std::pair<uint32, uint32> {
+			return {std::min(a, b), std::max(a, b)};
+		};
+		std::set<std::pair<uint32, uint32>> edge_candidates_set;
+		std::vector<std::pair<uint32, uint32>> edge_candidates;
+		std::vector<Vec3> edge_midpoints;
+		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
+			const uint32 idx1 = index_of(*p.spheres_, pv);
+			const std::set<PVertex>& neighbors = (*p.spheres_neighbor_clusters_)[idx1];
+			for (PVertex neighbor : neighbors)
+			{
+				const uint32 idx2 = index_of(*p.spheres_, neighbor);
+				if (idx2 == INVALID_INDEX || idx1 == idx2)
+					continue;
+				const auto key = edge_key(idx1, idx2);
+				if (!edge_candidates_set.insert(key).second)
+					continue;
+				edge_candidates.push_back(key);
+				const Vec3& c1 = (*p.spheres_position_)[key.first];
+				const Vec3& c2 = (*p.spheres_position_)[key.second];
+				edge_midpoints.push_back((c1 + c2) * Scalar(0.5));
+			}
+			return true;
+		});
+
+		std::vector<Scalar> edge_udf_values;
+		if (!edge_midpoints.empty() && !eval_udf_values(p, edge_midpoints, edge_udf_values))
+		{
+			std::cerr << "Geometry filter failed: unable to evaluate UDF on edge midpoints." << std::endl;
+			return;
+		}
+
+		std::set<std::pair<uint32, uint32>> kept_edges;
+		for (size_t i = 0; i < edge_candidates.size(); ++i)
+		{
+			if (std::abs(edge_udf_values[i]) <= Scalar(p.skeleton_edge_udf_zero_tol_))
+				kept_edges.insert(edge_candidates[i]);
+		}
+
+		std::set<NMFaceKey> face_seen;
+		std::vector<std::array<uint32, 3>> face_candidates;
+		std::vector<Vec3> face_centers;
+		std::vector<std::array<uint32, 4>> raw_tets;
+		std::set<std::array<uint32, 4>> raw_tet_seen;
+
+		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
+			const uint32 idx1 = index_of(*p.spheres_, pv);
+			const std::set<PVertex>& n_pv = (*p.spheres_neighbor_clusters_)[idx1];
+			for (const PVertex& ne1 : n_pv)
+			{
+				const uint32 idx2 = index_of(*p.spheres_, ne1);
+				if (idx2 == INVALID_INDEX || idx1 >= idx2)
+					continue;
+				const std::set<PVertex>& ne_ne1 = (*p.spheres_neighbor_clusters_)[idx2];
+				for (const PVertex& ne2 : ne_ne1)
+				{
+					if (n_pv.find(ne2) == n_pv.end())
+						continue;
+					const uint32 idx3 = index_of(*p.spheres_, ne2);
+					if (idx3 == INVALID_INDEX || idx2 >= idx3)
+						continue;
+
+					const NMFaceKey fkey = get_face_key(idx1, idx2, idx3);
+					if (face_seen.insert(fkey).second)
+					{
+						const bool e12 = kept_edges.find(edge_key(idx1, idx2)) != kept_edges.end();
+						const bool e13 = kept_edges.find(edge_key(idx1, idx3)) != kept_edges.end();
+						const bool e23 = kept_edges.find(edge_key(idx2, idx3)) != kept_edges.end();
+						if (e12 && e13 && e23)
+						{
+							face_candidates.push_back({idx1, idx2, idx3});
+							const Vec3& c1 = (*p.spheres_position_)[idx1];
+							const Vec3& c2 = (*p.spheres_position_)[idx2];
+							const Vec3& c3 = (*p.spheres_position_)[idx3];
+							face_centers.push_back((c1 + c2 + c3) / Scalar(3.0));
+						}
+					}
+
+					const std::set<PVertex>& ne_ne2 = (*p.spheres_neighbor_clusters_)[idx3];
+					for (const PVertex& ne3 : ne_ne2)
+					{
+						const uint32 idx4 = index_of(*p.spheres_, ne3);
+						if (idx4 == INVALID_INDEX || idx3 >= idx4)
+							continue;
+						const bool connected_v1 = (n_pv.find(ne3) != n_pv.end());
+						const bool connected_v2 = (ne_ne1.find(ne3) != ne_ne1.end());
+						if (!connected_v1 || !connected_v2)
+							continue;
+
+						std::array<uint32, 4> tet = {idx1, idx2, idx3, idx4};
+						std::sort(tet.begin(), tet.end());
+						if (raw_tet_seen.insert(tet).second)
+							raw_tets.push_back(tet);
+					}
+				}
+			}
+			return true;
+		});
+
+		std::vector<Scalar> face_udf_values;
+		if (!face_centers.empty() && !eval_udf_values(p, face_centers, face_udf_values))
+		{
+			std::cerr << "Geometry filter failed: unable to evaluate UDF on face centers." << std::endl;
+			return;
+		}
+
+		std::set<NMFaceKey> kept_faces;
+		for (size_t i = 0; i < face_candidates.size(); ++i)
+		{
+			if (std::abs(face_udf_values[i]) <= Scalar(p.skeleton_face_udf_zero_tol_))
+				kept_faces.insert(get_face_key(face_candidates[i][0], face_candidates[i][1], face_candidates[i][2]));
+		}
+
+		clear(*p.skeleton_);
+		p.skeleton_faces_map_.clear();
+		auto spheres_skeleton_vertex_map =
+			add_attribute<NMVertex, PVertex>(*p.spheres_, "__spheres_skeleton_vertex_map");
+		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
+			const uint32 pv_index = index_of(*p.spheres_, pv);
+			const NMVertex nmv = add_vertex(*p.skeleton_);
+			(*p.skeleton_position_)[index_of(*p.skeleton_, nmv)] = (*p.spheres_position_)[pv_index];
+			(*spheres_skeleton_vertex_map)[pv_index] = nmv;
+			return true;
+		});
+
+		std::unordered_map<std::pair<uint32, uint32>, NMEdge, edge_hash, edge_equal> edge_indices;
+		for (const auto& ekey : kept_edges)
+		{
+			const NMVertex v1 = (*spheres_skeleton_vertex_map)[ekey.first];
+			const NMVertex v2 = (*spheres_skeleton_vertex_map)[ekey.second];
+			if (!v1.is_valid() || !v2.is_valid() || v1 == v2)
+				continue;
+			const NMEdge e = add_edge(*p.skeleton_, v1, v2);
+			edge_indices[{index_of(*p.skeleton_, v1), index_of(*p.skeleton_, v2)}] = e;
+		}
+
+		auto find_edge = [&](uint32 a, uint32 b, NMEdge& out) -> bool {
+			auto it = edge_indices.find({a, b});
+			if (it == edge_indices.end() || !it->second.is_valid())
+				return false;
+			out = it->second;
+			return true;
+		};
+
+		for (const auto& f : face_candidates)
+		{
+			const NMFaceKey fkey = get_face_key(f[0], f[1], f[2]);
+			if (kept_faces.find(fkey) == kept_faces.end())
+				continue;
+
+			const NMVertex v1 = (*spheres_skeleton_vertex_map)[f[0]];
+			const NMVertex v2 = (*spheres_skeleton_vertex_map)[f[1]];
+			const NMVertex v3 = (*spheres_skeleton_vertex_map)[f[2]];
+			if (!v1.is_valid() || !v2.is_valid() || !v3.is_valid())
+				continue;
+
+			const uint32 i1 = index_of(*p.skeleton_, v1);
+			const uint32 i2 = index_of(*p.skeleton_, v2);
+			const uint32 i3 = index_of(*p.skeleton_, v3);
+			NMEdge e12, e23, e13;
+			if (!find_edge(i1, i2, e12) || !find_edge(i2, i3, e23) || !find_edge(i1, i3, e13))
+				continue;
+
+			std::vector<NMEdge> fedges;
+			fedges.reserve(3);
+			fedges.push_back(e12);
+			fedges.push_back(e23);
+			fedges.push_back(e13);
+			NMFace new_face = add_face(*p.skeleton_, fedges);
+			p.skeleton_faces_map_[fkey] = new_face;
+		}
+
+		p.skeleton_tets_.clear();
+		p.skeleton_tets_.reserve(raw_tets.size());
+		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			value<std::set<std::size_t>>(*p.skeleton_, p.incident_tets_, f).clear();
+			value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.0, 0.0, 0.0);
+			return true;
+		});
+
+		std::size_t tet_index = 0;
+		for (const auto& rt : raw_tets)
+		{
+			const uint32 v[4] = {rt[0], rt[1], rt[2], rt[3]};
+			const NMFaceKey keys[4] = {get_face_key(v[1], v[2], v[3]), get_face_key(v[0], v[2], v[3]),
+									   get_face_key(v[0], v[1], v[3]), get_face_key(v[0], v[1], v[2])};
+
+			std::array<NMFace, 4> tet_faces = {NMFace(), NMFace(), NMFace(), NMFace()};
+			bool complete_tet = true;
+			for (uint32 i = 0; i < 4; ++i)
+			{
+				auto it = p.skeleton_faces_map_.find(keys[i]);
+				if (it == p.skeleton_faces_map_.end())
+				{
+					complete_tet = false;
+					break;
+				}
+				tet_faces[i] = it->second;
+			}
+			if (!complete_tet)
+				continue;
+
+			Tet new_tet;
+			for (uint32 i = 0; i < 4; ++i)
+			{
+				new_tet.faces[i] = tet_faces[i];
+				value<std::set<size_t>>(*p.skeleton_, p.incident_tets_, tet_faces[i]).insert(tet_index);
+				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, tet_faces[i]) = Vec3(0.8, 0.5, 0.5);
+			}
+			new_tet.tet_id = tet_index;
+			p.skeleton_tets_.insert({tet_index, new_tet});
+			++tet_index;
+		}
+
+		parallel_foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			const auto in_tets = value<std::set<size_t>>(*p.skeleton_, p.incident_tets_, f);
+			if (in_tets.size() == 1)
+				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(1.0, 0.0, 0.0);
+			else if (in_tets.empty())
+				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.0, 0.0, 0.0);
+			return true;
+		});
+
+		parallel_foreach_cell(*p.skeleton_, [&](NMEdge e) -> bool {
+			value<Vec3>(*p.skeleton_, p.skeleton_edge_color_, e) = Vec3(0.0, 0.0, 0.0);
+			return true;
+		});
+		compute_edge_degree(p);
+		remove_attribute<PVertex>(*p.spheres_, spheres_skeleton_vertex_map);
+
+		std::cout << "Geometry filter: edges " << edge_candidates.size() << " -> " << kept_edges.size()
+				  << ", faces " << face_candidates.size() << " -> " << kept_faces.size() << std::endl;
+
+		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
+	}
+
 	void inherit_sphere_neighbors(PointsParameters& p, PVertex parent, PVertex child)
 	{
 		if (!parent.is_valid() || !child.is_valid())
@@ -4082,7 +4383,7 @@ protected:
 
 				if (p.auto_stop_)
 				{
-					if (p.total_error_diff_ < 1e-5)
+					if (p.total_error_diff_ < 1e-10)
 					{
 						switch (p.auto_split_mode_)
 						{
@@ -4583,9 +4884,24 @@ protected:
 							non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 						}
 					}
-					if (ImGui::Button("Topology fix"))
+					ImGui::InputFloat("Edge UDF |0| tol", &p.skeleton_edge_udf_zero_tol_, 0.0f, 0.0f, "%.6f");
+					ImGui::InputFloat("Face UDF |0| tol", &p.skeleton_face_udf_zero_tol_, 0.0f, 0.0f, "%.6f");
+					if (ImGui::Button("Geometry filter"))
 					{
-						skeleton_post_pocessing(p);
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							skeleton_geometry_filter(p);
+						}
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Topology filter"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							skeleton_post_pocessing(p);
+						}
 					}
 
 					ImGui::Checkbox("Sphere correction step", &p.sphere_correction_);
