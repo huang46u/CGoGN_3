@@ -49,6 +49,7 @@
 #include <limits>
 #include <mutex>
 #include <numeric>
+#include <queue>
 #include <random>
 #include <set>
 #include <thread>
@@ -57,6 +58,7 @@
 #include <torch/torch.h>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace cgogn
 {
@@ -233,12 +235,19 @@ private:
 		std::shared_ptr<NMAttribute<std::set<std::size_t>>> incident_tets_ = nullptr;
 
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_color_ = nullptr;
+		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_udf_color_ = nullptr;
+		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_boundary_tet_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_color_ = nullptr;
+		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_boundary_tet_color_ = nullptr;
 		std::shared_ptr<NMAttribute<uint32>> edge_degree_ = nullptr;
 
 		std::map<NMFaceKey, NMFace> skeleton_faces_map_;
 
 		std::unordered_map<std::size_t, Tet> skeleton_tets_;
+		bool topology_stage_snapshot_valid_ = false;
+		NONMANIFOLD* topology_stage_snapshot_mesh_ = nullptr;
+		std::map<NMFaceKey, NMFace> topology_stage_snapshot_faces_map_;
+		std::unordered_map<std::size_t, Tet> topology_stage_snapshot_tets_;
 
 		float32 filter_radius_threshold_ = 0.0f;
 		float32 init_dilation_factor_ = 3.0f;
@@ -269,6 +278,7 @@ private:
 		float32 radius_tolerance_ = 0.01f;
 		float32 skeleton_edge_udf_zero_tol_ = 1e-4f;
 		float32 skeleton_face_udf_zero_tol_ = 1e-4f;
+		bool topology_edge_stage_diffuse_ = true;
 
 		// Sampling Parameters
 		float alpha_ = 0.005f;
@@ -1441,7 +1451,11 @@ private:
 		p.incident_tets_ = get_or_add_attribute<std::set<std::size_t>, NMFace>(*p.skeleton_, "incident_tets");
 		p.edge_degree_ = get_or_add_attribute<uint32, NMEdge>(*p.skeleton_, "degree"); // edge face degree
 		p.skeleton_face_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "color");
+		p.skeleton_face_udf_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "udf_color");
+		p.skeleton_face_boundary_tet_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "boundary_tet_color");
 		p.skeleton_edge_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "color");
+		p.skeleton_edge_boundary_tet_color_ =
+			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "boundary_tet_best_edge_color");
 		p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
 
 		p.initialized_ = true;
@@ -3621,6 +3635,7 @@ private:
 
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
+		invalidate_topology_stage_snapshot(p);
 	}
 
 	void skeleton_geometry_filter(PointsParameters& p)
@@ -3876,6 +3891,7 @@ private:
 		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
+		invalidate_topology_stage_snapshot(p);
 	}
 
 	void inherit_sphere_neighbors(PointsParameters& p, PVertex parent, PVertex child)
@@ -4059,220 +4075,534 @@ protected:
 		});
 	}
 
-	bool is_simple_face_3d(PointsParameters& p, NMFace& f)
+	bool is_simple_face_3d(PointsParameters& p, const NMFace& f)
 	{
 		if (!f.is_valid())
 			return false;
 		uint32 idf = index_of(*p.skeleton_, f);
-		if ((*p.incident_tets_)[idf].size() != 1)
+		if (idf == INVALID_INDEX)
 			return false;
-		auto edges = incident_edges(*p.skeleton_, f);
-
-		for (NMEdge e : edges)
-		{
-			auto in_faces = incident_faces(*p.skeleton_, e);
-			return in_faces.size() <= 2;
-		}
-		return false;
+		return (*p.incident_tets_)[idf].size() == 1;
 	}
 
-	bool is_simple_face_2d(PointsParameters& p, NMFace& f)
+	bool compute_skeleton_face_udf_integrals_adaptive(PointsParameters& p, std::unordered_map<uint32, Scalar>& face_score_cache,
+		uint32 max_adaptive_depth = 2, Scalar adaptive_abs_range_tol = Scalar(1e-4),
+		Scalar adaptive_rel_range_tol = Scalar(0.35), const char* log_prefix = "[FaceUDF]")
 	{
-		if (!f.is_valid())
+		if (!p.skeleton_ || !p.skeleton_position_)
 			return false;
-		uint32 idf = index_of(*p.skeleton_, f);
-		auto edges = incident_edges(*p.skeleton_, f);
-		for (NMEdge e : edges)
+
+		struct AdaptiveTriangleTask
 		{
-			auto in_faces = incident_faces(*p.skeleton_, e);
-			if (in_faces.size() == 1)
-				return true;
-		}
-		return false;
-	}
+			uint32 face_id = INVALID_INDEX;
+			Vec3 a;
+			Vec3 b;
+			Vec3 c;
+			uint32 depth = 0;
+		};
 
-	bool is_simple_tet(PointsParameters& p, Tet& t)
-	{
-		for (uint32 i = 0; i < 4; ++i)
-		{
-			NMFace f = t.faces[i];
-			if (!f.is_valid())
-			{
-				continue;
-			}
-			uint32 idf = index_of(*p.skeleton_, f);
-			if (is_simple_face_3d(p, f))
-			{
-				return true;
-			}
-		}
-		return false;
-	}
+		static const std::array<std::array<Scalar, 3>, 7> dunavant7_bary = {{
+			{{Scalar(1.0 / 3.0), Scalar(1.0 / 3.0), Scalar(1.0 / 3.0)}},
+			{{Scalar(0.470142064105115), Scalar(0.470142064105115), Scalar(0.059715871789770)}},
+			{{Scalar(0.470142064105115), Scalar(0.059715871789770), Scalar(0.470142064105115)}},
+			{{Scalar(0.059715871789770), Scalar(0.470142064105115), Scalar(0.470142064105115)}},
+			{{Scalar(0.101286507323456), Scalar(0.101286507323456), Scalar(0.797426985353087)}},
+			{{Scalar(0.101286507323456), Scalar(0.797426985353087), Scalar(0.101286507323456)}},
+			{{Scalar(0.797426985353087), Scalar(0.101286507323456), Scalar(0.101286507323456)}},
+		}};
+		static const std::array<Scalar, 7> dunavant7_w = {
+			Scalar(0.225000000000000), Scalar(0.132394152788506), Scalar(0.132394152788506),
+			Scalar(0.132394152788506), Scalar(0.125939180544827), Scalar(0.125939180544827),
+			Scalar(0.125939180544827)};
 
-	// find a face of tet t that has at least one edge with degree 2
-	NMFace find_simple_tet_face(PointsParameters& p, Tet& t)
-	{
+		auto subdivide_triangle = [&](const AdaptiveTriangleTask& tri, std::vector<AdaptiveTriangleTask>& out) {
+			const Vec3 ab = (tri.a + tri.b) * Scalar(0.5);
+			const Vec3 bc = (tri.b + tri.c) * Scalar(0.5);
+			const Vec3 ca = (tri.c + tri.a) * Scalar(0.5);
+			const uint32 next_depth = tri.depth + 1;
+			out.push_back({tri.face_id, tri.a, ab, ca, next_depth});
+			out.push_back({tri.face_id, ab, tri.b, bc, next_depth});
+			out.push_back({tri.face_id, ca, bc, tri.c, next_depth});
+			out.push_back({tri.face_id, ab, bc, ca, next_depth});
+		};
 
-		NMEdge e;
-		for (uint32 i = 0; i < 4; ++i)
-		{
-			NMFace f = t.faces[i];
-			if (!f.is_valid())
-				continue;
-			if (is_simple_face_3d(p, f))
-			{
-				return f;
-			}
-		}
-		return NMFace();
-	}
-
-	void skeleton_post_pocessing(PointsParameters& p)
-	{
-		// compute_edge_degree(p);
-		std::queue<std::size_t> Q_tet;
-		std::queue<NMFace> Q_face;
-		std::vector<bool> visited_tet(p.skeleton_tets_.size(), false);
-		std::unordered_map<uint32, std::size_t> face_id_map;
-		std::size_t face_count = 0;
+		face_score_cache.clear();
+		face_score_cache.reserve(nb_cells<NMFace>(*p.skeleton_));
+		std::vector<AdaptiveTriangleTask> pending_tris;
+		pending_tris.reserve(nb_cells<NMFace>(*p.skeleton_) * 2);
 		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
-			face_id_map[index_of(*p.skeleton_, f)] = face_count++;
+			const uint32 idf = index_of(*p.skeleton_, f);
+			if (idf == INVALID_INDEX)
+				return true;
+			face_score_cache[idf] = Scalar(0);
+			if (!f.is_valid())
+				return true;
+			const std::vector<NMVertex> vertices = incident_vertices(*p.skeleton_, f);
+			if (vertices.size() < 3)
+				return true;
+			const Vec3 p0 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[0]);
+			for (uint32 i = 1; i + 1 < vertices.size(); ++i)
+			{
+				const Vec3 p1 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[i]);
+				const Vec3 p2 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[i + 1]);
+				if (!(geometry::area(p0, p1, p2) > Scalar(0)))
+					continue;
+				pending_tris.push_back({idf, p0, p1, p2, 0});
+			}
 			return true;
 		});
-		auto get_face_id = [&](NMFace f) -> uint32 {
-			uint32 idf = index_of(*p.skeleton_, f);
-			return face_id_map[idf];
+
+		size_t root_triangle_count = pending_tris.size();
+		size_t accepted_triangle_count = 0;
+		size_t refined_triangle_count = 0;
+		size_t total_udf_query_points = 0;
+		size_t udf_batch_passes = 0;
+		while (!pending_tris.empty())
+		{
+			std::vector<AdaptiveTriangleTask> next_tris;
+			next_tris.reserve(pending_tris.size() * 2);
+
+			struct TriBatchMeta
+			{
+				size_t tri_idx = 0;
+				size_t sample_offset = 0;
+				Scalar area = Scalar(0);
+			};
+			std::vector<TriBatchMeta> tri_batch;
+			tri_batch.reserve(pending_tris.size());
+
+			std::vector<Vec3> sample_points;
+			sample_points.reserve(pending_tris.size() * 7);
+
+			for (size_t tri_idx = 0; tri_idx < pending_tris.size(); ++tri_idx)
+			{
+				const AdaptiveTriangleTask& tri = pending_tris[tri_idx];
+				const Scalar tri_area = geometry::area(tri.a, tri.b, tri.c);
+				if (!(tri_area > Scalar(0)))
+					continue;
+				const size_t sample_offset = sample_points.size();
+				for (uint32 k = 0; k < 7; ++k)
+				{
+					const Scalar l0 = dunavant7_bary[k][0];
+					const Scalar l1 = dunavant7_bary[k][1];
+					const Scalar l2 = dunavant7_bary[k][2];
+					sample_points.push_back(tri.a * l0 + tri.b * l1 + tri.c * l2);
+				}
+				tri_batch.push_back({tri_idx, sample_offset, tri_area});
+			}
+
+			if (sample_points.empty())
+			{
+				pending_tris.clear();
+				break;
+			}
+
+			std::vector<Scalar> udf_values;
+			if (!eval_udf_values(p, sample_points, udf_values))
+			{
+				std::cerr << log_prefix << " face score UDF evaluation failed." << std::endl;
+				return false;
+			}
+
+			++udf_batch_passes;
+			total_udf_query_points += sample_points.size();
+
+			for (const TriBatchMeta& tri_eval : tri_batch)
+			{
+				const AdaptiveTriangleTask& tri = pending_tris[tri_eval.tri_idx];
+				Scalar weighted_mean = Scalar(0);
+				Scalar min_udf = std::numeric_limits<Scalar>::max();
+				Scalar max_udf = std::numeric_limits<Scalar>::lowest();
+				for (uint32 k = 0; k < 7; ++k)
+				{
+					const Scalar u = udf_values[tri_eval.sample_offset + k];
+					weighted_mean += dunavant7_w[k] * u;
+					min_udf = std::min(min_udf, u);
+					max_udf = std::max(max_udf, u);
+				}
+
+				const Scalar tri_integral = tri_eval.area * weighted_mean;
+				const Scalar udf_range = max_udf - min_udf;
+				const Scalar refine_threshold =
+					std::max(adaptive_abs_range_tol, adaptive_rel_range_tol * std::max(weighted_mean, Scalar(0)));
+				const bool should_refine = (tri.depth < max_adaptive_depth) && (udf_range > refine_threshold);
+
+				if (should_refine)
+				{
+					subdivide_triangle(tri, next_tris);
+					++refined_triangle_count;
+				}
+				else
+				{
+					face_score_cache[tri.face_id] += tri_integral;
+					++accepted_triangle_count;
+				}
+			}
+			pending_tris.swap(next_tris);
+		}
+
+		std::cout << log_prefix << " face_score_sampling=root_triangles=" << root_triangle_count
+				  << " accepted_triangles=" << accepted_triangle_count
+				  << " refined_triangles=" << refined_triangle_count
+				  << " udf_points=" << total_udf_query_points
+				  << " udf_batches=" << udf_batch_passes
+				  << " max_depth=" << max_adaptive_depth << std::endl;
+		return true;
+	}
+
+	void visualize_skeleton_tet_face_udf(PointsParameters& p)
+	{
+		if (!p.neural_udf_loaded_)
+		{
+			std::cerr << "UDF face visualization requires a loaded neural UDF model." << std::endl;
+			return;
+		}
+		if (!p.skeleton_ || !p.incident_tets_ || !p.skeleton_face_udf_color_)
+		{
+			std::cerr << "Skeleton or face attributes are not initialized." << std::endl;
+			return;
+		}
+
+		std::unordered_map<uint32, Scalar> face_udf_integrals;
+		if (!compute_skeleton_face_udf_integrals_adaptive(p, face_udf_integrals, 2, Scalar(1e-4), Scalar(0.35),
+				"[UDFColormap]"))
+		{
+			std::cerr << "Failed to compute face UDF integrals for visualization." << std::endl;
+			return;
+		}
+
+		const Vec3 non_tet_face_color(0.2, 0.2, 0.2);
+		Scalar tri_min = std::numeric_limits<Scalar>::max();
+		Scalar tri_max = std::numeric_limits<Scalar>::lowest();
+		size_t tet_face_count = 0;
+		size_t non_tet_face_count = 0;
+
+		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			const uint32 idf = index_of(*p.skeleton_, f);
+			if (idf == INVALID_INDEX)
+				return true;
+			const auto& in_tets = (*p.incident_tets_)[idf];
+			if (in_tets.empty())
+			{
+				++non_tet_face_count;
+				return true;
+			}
+			++tet_face_count;
+			const auto it = face_udf_integrals.find(idf);
+			const Scalar v = (it != face_udf_integrals.end()) ? it->second : Scalar(0);
+			tri_min = std::min(tri_min, v);
+			tri_max = std::max(tri_max, v);
+			return true;
+		});
+
+		const bool has_tet_faces = (tet_face_count > 0);
+		const bool has_range = has_tet_faces && (tri_max > tri_min);
+		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			const uint32 idf = index_of(*p.skeleton_, f);
+			const auto& in_tets = (*p.incident_tets_)[idf];
+			Vec3 color = non_tet_face_color;
+			if (!in_tets.empty())
+			{
+				const auto it = face_udf_integrals.find(idf);
+				const Scalar v = (it != face_udf_integrals.end()) ? it->second : Scalar(0);
+				if (has_range)
+				{
+					const Scalar vc = std::clamp(v, tri_min, tri_max);
+					const Vec4 c = color_map(vc, tri_min, tri_max, 1.0f);
+					color = Vec3(c[0], c[1], c[2]);
+				}
+				else
+				{
+					const Vec4 c = color_map(Scalar(0.5), Scalar(0), Scalar(1), 1.0f);
+					color = Vec3(c[0], c[1], c[2]);
+				}
+			}
+			value<Vec3>(*p.skeleton_, p.skeleton_face_udf_color_, f) = color;
+			return true;
+		});
+
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_udf_color_.get());
+		std::cout << "[UDFColormap] tet_faces=" << tet_face_count << " non_tet_faces=" << non_tet_face_count;
+		if (has_tet_faces)
+			std::cout << " clamp_min=" << tri_min << " clamp_max=" << tri_max;
+		std::cout << std::endl;
+	}
+
+	void mark_boundary_tets_color(PointsParameters& p)
+	{
+		if (!p.skeleton_ || !p.skeleton_face_boundary_tet_color_ || !p.skeleton_edge_boundary_tet_color_)
+		{
+			std::cerr << "Boundary tet coloring requires skeleton face/edge color attributes." << std::endl;
+			return;
+		}
+
+		const Vec3 boundary_face_color(1.0, 0.85, 0.1);
+		const Vec3 non_boundary_face_color(0.12, 0.12, 0.12);
+		const Vec3 boundary_best_edge_color(1.0, 0.45, 0.05);
+		const Vec3 non_boundary_best_edge_color(0.1, 0.1, 0.1);
+		std::unordered_set<uint32> boundary_face_ids;
+		boundary_face_ids.reserve(nb_cells<NMFace>(*p.skeleton_));
+		std::unordered_set<uint32> boundary_best_edge_ids;
+		boundary_best_edge_ids.reserve(nb_cells<NMEdge>(*p.skeleton_));
+
+		uint32 boundary_tet_count = 0;
+		for (const auto& kv : p.skeleton_tets_)
+		{
+			const Tet& tet = kv.second;
+			bool is_boundary_tet = false;
+			std::unordered_set<uint32> tet_face_ids;
+			tet_face_ids.reserve(4);
+			for (uint32 i = 0; i < 4; ++i)
+			{
+				const NMFace f = tet.faces[i];
+				const uint32 idf = index_of(*p.skeleton_, f);
+
+				tet_face_ids.insert(idf);
+
+				uint32 deg2_edge_count = 0;
+				for (NMEdge e : incident_edges(*p.skeleton_, f))
+				{
+					if (incident_faces(*p.skeleton_, e).size() == 2)
+						++deg2_edge_count;
+				}
+				if (deg2_edge_count >= 2)
+				{
+					is_boundary_tet = true;
+					break;
+				}
+			}
+			if (!is_boundary_tet)
+				continue;
+
+			struct BoundaryEdgeChoice
+			{
+				NMEdge edge;
+				Scalar length = Scalar(-1);
+			};
+			BoundaryEdgeChoice best_choice;
+			std::unordered_set<uint32> seen_edges;
+			seen_edges.reserve(8);
+			for (uint32 i = 0; i < 4; ++i)
+			{
+				const NMFace f = tet.faces[i];
+				for (NMEdge e : incident_edges(*p.skeleton_, f))
+				{
+					const uint32 ide = index_of(*p.skeleton_, e);
+					if (!seen_edges.insert(ide).second)
+						continue;
+					const auto in_faces = incident_faces(*p.skeleton_, e);
+					if (in_faces.size() != 2)
+						continue;
+					const NMFace f0 = in_faces[0];
+					const NMFace f1 = in_faces[1];
+					const uint32 idf0 = index_of(*p.skeleton_, f0);
+					const uint32 idf1 = index_of(*p.skeleton_, f1);
+					const std::vector<NMVertex> edge_vertices = incident_vertices(*p.skeleton_, e);
+					const Vec3 p0 = value<Vec3>(*p.skeleton_, p.skeleton_position_, edge_vertices[0]);
+					const Vec3 p1 = value<Vec3>(*p.skeleton_, p.skeleton_position_, edge_vertices[1]);
+					const Scalar edge_len = (p1 - p0).norm();
+					if (edge_len > best_choice.length)
+					{
+						best_choice.edge = e;
+						best_choice.length = edge_len;
+					}
+				}
+			}
+			if (best_choice.length >= Scalar(0))
+			{
+				const uint32 ide = index_of(*p.skeleton_, best_choice.edge);
+				boundary_best_edge_ids.insert(ide);
+			}
+
+			++boundary_tet_count;
+			for (uint32 i = 0; i < 4; ++i)
+			{
+				const NMFace f = tet.faces[i];
+
+				const uint32 idf = index_of(*p.skeleton_, f);
+				boundary_face_ids.insert(idf);
+			}
+		}
+
+		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			const uint32 idf = index_of(*p.skeleton_, f);
+			const bool is_boundary_face = boundary_face_ids.find(idf) != boundary_face_ids.end();
+			const Vec3 c = is_boundary_face ? boundary_face_color : non_boundary_face_color;
+			value<Vec3>(*p.skeleton_, p.skeleton_face_boundary_tet_color_, f) = c;
+			return true;
+		});
+		foreach_cell(*p.skeleton_, [&](NMEdge e) -> bool {
+			const uint32 ide = index_of(*p.skeleton_, e);
+			const bool is_best_edge = boundary_best_edge_ids.find(ide) != boundary_best_edge_ids.end();
+			const Vec3 c = is_best_edge ? boundary_best_edge_color : non_boundary_best_edge_color;
+			value<Vec3>(*p.skeleton_, p.skeleton_edge_boundary_tet_color_, e) = c;
+			return true;
+		});
+
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_boundary_tet_color_.get());
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_boundary_tet_color_.get());
+
+		std::cout << "[BoundaryTetMask] boundary_tets=" << boundary_tet_count
+				  << " boundary_faces=" << boundary_face_ids.size()
+				  << " boundary_best_edges=" << boundary_best_edge_ids.size()
+				  << " total_faces=" << nb_cells<NMFace>(*p.skeleton_) << std::endl;
+	}
+
+	struct BoundaryTetPrepassStats
+	{
+		uint32 removed_faces = 0;
+		uint32 removed_tets = 0;
+		uint32 removed_edges = 0;
+		uint32 processed_tets = 0;
+		uint32 passes = 0;
+	};
+
+	BoundaryTetPrepassStats run_boundary_tet_face_deletion(
+		PointsParameters& p, const char* log_prefix = "[TopologyFilter]")
+	{
+		BoundaryTetPrepassStats stats;
+
+		struct BoundaryTetCandidate
+		{
+			std::size_t tet_id = std::size_t(-1);
+			NMEdge edge;
+			NMFace f0;
+			NMFace f1;
 		};
-		std::vector<bool> visited_face(face_count, false);
 
-		// Remove simple tet/face then remove simple face/edge iteratively
+		std::vector<std::size_t> tet_ids;
+		tet_ids.reserve(p.skeleton_tets_.size());
+		for (const auto& kv : p.skeleton_tets_)
+			tet_ids.push_back(kv.first);
 
-		// push all simple tets in queue
-		for (auto& [id, tet] : p.skeleton_tets_)
+		std::vector<BoundaryTetCandidate> candidates;
+		candidates.reserve(tet_ids.size());
+
+		// Phase 1: scan all current tets once and collect boundary-tet deletion candidates.
+		for (std::size_t tet_id : tet_ids)
 		{
-			if (is_simple_tet(p, tet))
-			{
-				auto tet_id = tet.tet_id;
-				visited_tet[tet_id] = true;
+			auto it_tet = p.skeleton_tets_.find(tet_id);
+			if (it_tet == p.skeleton_tets_.end())
+				continue;
+			const Tet tet = it_tet->second;
 
-				Q_tet.push(tet_id);
+			bool is_boundary_tet = false;
+			std::unordered_set<uint32> tet_face_ids;
+			tet_face_ids.reserve(4);
+			for (uint32 i = 0; i < 4; ++i)
+			{
+				const NMFace f = tet.faces[i];
+				const uint32 idf = index_of(*p.skeleton_, f);
+				tet_face_ids.insert(idf);
+
+				uint32 deg2_edge_count = 0;
+				for (NMEdge e : incident_edges(*p.skeleton_, f))
+				{
+					if (incident_faces(*p.skeleton_, e).size() == 2)
+						++deg2_edge_count;
+				}
+				if (deg2_edge_count >= 2)
+				{
+					is_boundary_tet = true;
+					break;
+				}
 			}
+			if (!is_boundary_tet || tet_face_ids.empty())
+				continue;
+
+			struct BoundaryEdgeChoice
+			{
+				NMEdge edge;
+				NMFace f0;
+				NMFace f1;
+				Scalar length = Scalar(-1);
+			};
+			BoundaryEdgeChoice best_choice;
+			std::unordered_set<uint32> seen_edges;
+			seen_edges.reserve(8);
+
+			for (uint32 i = 0; i < 4; ++i)
+			{
+				const NMFace f = tet.faces[i];
+				for (NMEdge e : incident_edges(*p.skeleton_, f))
+				{
+					const uint32 ide = index_of(*p.skeleton_, e);
+					if (!seen_edges.insert(ide).second)
+						continue;
+
+					const auto in_faces = incident_faces(*p.skeleton_, e);
+					if (in_faces.size() != 2)
+						continue;
+					const NMFace f0 = in_faces[0];
+					const NMFace f1 = in_faces[1];
+					const uint32 idf0 = index_of(*p.skeleton_, f0);
+					const uint32 idf1 = index_of(*p.skeleton_, f1);
+					const std::vector<NMVertex> edge_vertices = incident_vertices(*p.skeleton_, e);
+					if (edge_vertices.size() != 2)
+						continue;
+					const Vec3 p0 = value<Vec3>(*p.skeleton_, p.skeleton_position_, edge_vertices[0]);
+					const Vec3 p1 = value<Vec3>(*p.skeleton_, p.skeleton_position_, edge_vertices[1]);
+					const Scalar edge_len = (p1 - p0).norm();
+					if (edge_len > best_choice.length)
+					{
+						best_choice.edge = e;
+						best_choice.f0 = f0;
+						best_choice.f1 = f1;
+						best_choice.length = edge_len;
+					}
+				}
+			}
+
+			if (best_choice.length >= Scalar(0))
+				candidates.push_back({tet_id, best_choice.edge, best_choice.f0, best_choice.f1});
 		}
-		uint32 removed_face = 0;
-		uint32 removed_edge = 0;
-		while (!Q_tet.empty() || !Q_face.empty())
+
+		// Phase 2: delete using precomputed candidates only (no boundary re-check during deletion).
+		stats.passes = 1;
+		for (const BoundaryTetCandidate& cand : candidates)
 		{
-			if (!Q_tet.empty())
+			auto it_remove_tet = p.skeleton_tets_.find(cand.tet_id);
+			if (it_remove_tet == p.skeleton_tets_.end())
+				continue;
+			const Tet old_tet = it_remove_tet->second;
+
+			const std::array<NMFace, 2> faces_to_remove = {cand.f0, cand.f1};
+			for (const NMFace& f_del : faces_to_remove)
 			{
-				std::size_t current_tet_id = Q_tet.front();
-
-				Q_tet.pop();
-
-				auto it = p.skeleton_tets_.find(current_tet_id);
-				if (it == p.skeleton_tets_.end())
-					continue;
-				Tet& current_tet = it->second;
-				auto faces = current_tet.faces;
-
-				// current_tet.print_tet_info(p);
-
-				NMFace face_to_delete = find_simple_tet_face(p, current_tet);
-				std::size_t tet_id = current_tet.tet_id;
-
-				if (!face_to_delete.is_valid()) // should not happen
+				const uint32 idf_del = index_of(*p.skeleton_, f_del);
+				remove_face(*p.skeleton_, f_del);
+				++stats.removed_faces;
+			}
+			if (cand.edge.is_valid())
+			{
+				const auto edge_in_faces = incident_faces(*p.skeleton_, cand.edge);
+				if (edge_in_faces.empty())
 				{
-					std::cout << "Error: It is not a simple tet" << std::endl;
-					current_tet.print_tet_info(p);
-					continue;
-				}
-				auto in_edges = incident_edges(*p.skeleton_, face_to_delete);
-				remove_face(*p.skeleton_, face_to_delete);
-				removed_face++;
-				p.skeleton_tets_.erase(tet_id);
-				// update incident tet faces
-				for (uint32 i = 0; i < 4; ++i)
-				{
-					NMFace f = faces[i];
-					if (!f.is_valid())
-						continue;
-					uint32 idf = index_of(*p.skeleton_, f);
-					(*p.incident_tets_)[idf].erase(tet_id);
-					if ((*p.incident_tets_)[idf].size() == 1)
-					{
-						// push the other tet to the queue, now it is a simple tet
-						size_t other_tet_id = *(*p.incident_tets_)[idf].begin();
-						if (is_simple_tet(p, p.skeleton_tets_[other_tet_id]) && visited_tet[other_tet_id] == false)
-						{
-							visited_tet[other_tet_id] = true;
-							Q_tet.push(other_tet_id);
-						}
-					}
-				}
-
-				// update edge degrees
-				for (NMEdge e : in_edges)
-				{
-					uint32 ide = index_of(*p.skeleton_, e);
-					auto in_faces = incident_faces(*p.skeleton_, e);
-					auto degree = in_faces.size();
-					if (degree == 0) // should not happen
-					{
-						std::cout << "Error: edge degree is already zero" << std::endl;
-						remove_edge(*p.skeleton_, e);
-						continue;
-					}
-
-					for (NMFace f : in_faces)
-					{
-						uint32 idf = index_of(*p.skeleton_, f);
-						std::size_t id_vector = get_face_id(f);
-						if (is_simple_face_2d(p, f) && visited_face[idf] == false)
-						{
-							visited_face[idf] = true;
-							Q_face.push(f);
-						}
-					}
+					remove_edge(*p.skeleton_, cand.edge);
+					++stats.removed_edges;
 				}
 			}
-			else
+			p.skeleton_tets_.erase(it_remove_tet);
+			++stats.removed_tets;
+			for (uint32 i = 0; i < 4; ++i)
 			{
-				NMFace current_face = Q_face.front();
-				Q_face.pop();
-				if (!current_face.is_valid())
-				{
-					std::cout << "Warning: face to delete is not valid. This should not happen" << std::endl;
-				}
-				if (!is_simple_face_2d(p, current_face))
-				{
-					std::cout << "Warning: face to delete is not simple. This should not happen" << std::endl;
-					continue;
-				}
-				auto in_edges = incident_edges(*p.skeleton_, current_face);
-				auto in_tets = (*p.incident_tets_)[index_of(*p.skeleton_, current_face)];
-				remove_face(*p.skeleton_, current_face);
-				removed_face++;
-				for (NMEdge e : in_edges)
-				{
-					uint32 ide = index_of(*p.skeleton_, e);
-					auto in_faces = incident_faces(*p.skeleton_, e);
-					auto degre = in_faces.size();
-					/* auto in_faces = incident_faces(*p.skeleton_, e);
-				   for (NMFace f : in_faces)
-				   {
-					   if (is_simple_face_2d(p, f) &&f != current_face)
-						   Q_face.push(f);
-				   }*/
-					if (degre == 0)
-					{
-						remove_edge(*p.skeleton_, e);
-						removed_edge++;
-					}
-				}
+				const NMFace f = old_tet.faces[i];
+				const uint32 idf = index_of(*p.skeleton_, f);
+				(*p.incident_tets_)[idf].erase(cand.tet_id);
 			}
+			++stats.processed_tets;
 		}
-		std::cout << "Removed " << removed_face << " faces in skeleton post-processing." << std::endl;
-		std::cout << p.skeleton_tets_.size() << " tets remain after post-processing." << std::endl;
 
+		std::cout << log_prefix << " boundary_prepass_passes=" << stats.passes
+				  << " processed_boundary_tets=" << stats.processed_tets
+				  << " removed_faces=" << stats.removed_faces
+				  << " removed_edges=" << stats.removed_edges
+				  << " removed_tets=" << stats.removed_tets << std::endl;
+		return stats;
+	}
+
+	void refresh_skeleton_topology_colors(PointsParameters& p)
+	{
 		foreach_cell(*p.skeleton_, [&](NMEdge e) {
 			auto in_face = incident_faces(*p.skeleton_, e);
 			if (in_face.size() == 1)
@@ -4282,23 +4612,748 @@ protected:
 		parallel_foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
 			auto in_tets = (*p.incident_tets_)[index_of(*p.skeleton_, f)];
 			if (in_tets.size() == 1)
-			{
-				// std::cout << "Find simple face" << std::endl;
 				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(1.0, 0.0, 0.0);
-			}
 			else if (in_tets.size() > 1)
-			{
 				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.8, 0.5, 0.5);
-			}
 			else
-			{
 				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.0, 0.0, 0.0);
-			}
 			return true;
 		});
 		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
+	}
+
+	void refresh_skeleton_attribute_handles(PointsParameters& p)
+	{
+		p.skeleton_position_ = get_or_add_attribute<Vec3, NMVertex>(*p.skeleton_, "position");
+		p.skeleton_radius_ = get_or_add_attribute<Scalar, NMVertex>(*p.skeleton_, "radius");
+		p.incident_tets_ = get_or_add_attribute<std::set<std::size_t>, NMFace>(*p.skeleton_, "incident_tets");
+		p.edge_degree_ = get_or_add_attribute<uint32, NMEdge>(*p.skeleton_, "degree");
+		p.skeleton_face_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "color");
+		p.skeleton_face_udf_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "udf_color");
+		p.skeleton_face_boundary_tet_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "boundary_tet_color");
+		p.skeleton_edge_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "color");
+		p.skeleton_edge_boundary_tet_color_ =
+			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "boundary_tet_best_edge_color");
+	}
+
+	void invalidate_topology_stage_snapshot(PointsParameters& p)
+	{
+		p.topology_stage_snapshot_valid_ = false;
+		p.topology_stage_snapshot_faces_map_.clear();
+		p.topology_stage_snapshot_tets_.clear();
+	}
+
+	bool capture_topology_stage_snapshot(PointsParameters& p)
+	{
+		if (!p.skeleton_)
+		{
+			std::cerr << "[TopologyStage] cannot capture snapshot: skeleton is null." << std::endl;
+			return false;
+		}
+
+		if (!p.topology_stage_snapshot_mesh_)
+		{
+			const std::string snapshot_name = non_manifold_provider_->mesh_name(*p.skeleton_) + "_topology_stage_snapshot";
+			p.topology_stage_snapshot_mesh_ = non_manifold_provider_->has_mesh(snapshot_name)
+												  ? non_manifold_provider_->mesh(snapshot_name)
+												  : non_manifold_provider_->add_mesh(snapshot_name);
+		}
+		non_manifold_provider_->copy_mesh(*p.topology_stage_snapshot_mesh_, *p.skeleton_);
+		p.topology_stage_snapshot_faces_map_ = p.skeleton_faces_map_;
+		p.topology_stage_snapshot_tets_ = p.skeleton_tets_;
+		p.topology_stage_snapshot_valid_ = true;
+		std::cout << "[TopologyStage] snapshot captured: faces=" << nb_cells<NMFace>(*p.skeleton_)
+				  << " tets=" << p.skeleton_tets_.size() << std::endl;
+		return true;
+	}
+
+	bool restore_topology_stage_snapshot(PointsParameters& p)
+	{
+		if (!p.topology_stage_snapshot_valid_ || !p.topology_stage_snapshot_mesh_)
+		{
+			std::cerr << "[TopologyStage] snapshot not available." << std::endl;
+			return false;
+		}
+		non_manifold_provider_->copy_mesh(*p.skeleton_, *p.topology_stage_snapshot_mesh_);
+		refresh_skeleton_attribute_handles(p);
+		p.skeleton_faces_map_ = p.topology_stage_snapshot_faces_map_;
+		p.skeleton_tets_ = p.topology_stage_snapshot_tets_;
+		return true;
+	}
+
+	void boundary_tet_face_delete_only(PointsParameters& p)
+	{
+		if (!p.skeleton_ || !p.incident_tets_)
+		{
+			std::cerr << "Boundary tet delete requires a built skeleton." << std::endl;
+			return;
+		}
+		run_boundary_tet_face_deletion(p, "[BoundaryTetDelete]");
+		refresh_skeleton_topology_colors(p);
+		mark_boundary_tets_color(p);
+	}
+
+	void run_topology_stage_filter_from_snapshot(PointsParameters& p, bool run_edge_stage)
+	{
+		if (!p.skeleton_ || !p.incident_tets_)
+		{
+			std::cerr << "Topology stage filter requires a built skeleton." << std::endl;
+			return;
+		}
+		if (!p.topology_stage_snapshot_valid_)
+		{
+			if (!capture_topology_stage_snapshot(p))
+				return;
+		}
+		if (!restore_topology_stage_snapshot(p))
+			return;
+
+		std::cout << "[TopologyStage] run=" << (run_edge_stage ? "edge(face+edge)" : "face-only")
+				  << " from_snapshot=true"
+				  << " edge_diffuse=" << (p.topology_edge_stage_diffuse_ ? "on" : "off") << std::endl;
+		skeleton_post_pocessing(p, run_edge_stage, p.topology_edge_stage_diffuse_);
+	}
+
+	bool is_face_deg_pattern_2gt2_1eq1(PointsParameters& p, NMFace f) const
+	{
+		if (!f.is_valid())
+			return false;
+		const uint32 idf = index_of(*p.skeleton_, f);
+		if (idf == INVALID_INDEX)
+			return false;
+		const std::vector<NMEdge> in_edges = incident_edges(*p.skeleton_, f);
+		if (in_edges.size() < 3)
+			return false;
+		uint32 deg_eq_1 = 0;
+		uint32 deg_gt_2 = 0;
+		for (NMEdge e : in_edges)
+		{
+			if (!e.is_valid())
+				continue;
+			const uint32 deg = uint32(incident_faces(*p.skeleton_, e).size());
+			if (deg == 1)
+				++deg_eq_1;
+			else if (deg > 2)
+				++deg_gt_2;
+		}
+		return (deg_eq_1 == 1 && deg_gt_2 >= 2);
+	}
+
+	void delete_faces_with_edge_degree_pattern_after_nondiffuse_edge_stage(
+		PointsParameters& p, const char* log_prefix = "[TopologyStage]")
+	{
+		if (!p.skeleton_ || !p.incident_tets_)
+			return;
+
+		uint32 removed_faces = 0;
+		uint32 removed_tets = 0;
+		uint32 removed_edges = 0;
+		uint32 passes = 0;
+
+		while (true)
+		{
+			std::vector<NMFace> candidates;
+			candidates.reserve(nb_cells<NMFace>(*p.skeleton_));
+			foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+				if (is_face_deg_pattern_2gt2_1eq1(p, f))
+					candidates.push_back(f);
+				return true;
+			});
+			if (candidates.empty())
+				break;
+
+			++passes;
+			uint32 removed_this_pass = 0;
+			for (NMFace f : candidates)
+			{
+				if (!is_face_deg_pattern_2gt2_1eq1(p, f))
+					continue;
+				const uint32 idf = index_of(*p.skeleton_, f);
+				if (idf == INVALID_INDEX)
+					continue;
+
+				const std::set<std::size_t> in_tets = (*p.incident_tets_)[idf];
+				const std::vector<NMEdge> in_edges = incident_edges(*p.skeleton_, f);
+				remove_face(*p.skeleton_, f);
+				++removed_faces;
+				++removed_this_pass;
+
+				for (std::size_t tet_id : in_tets)
+				{
+					auto it_tet = p.skeleton_tets_.find(tet_id);
+					if (it_tet != p.skeleton_tets_.end())
+					{
+						const Tet old_tet = it_tet->second;
+						p.skeleton_tets_.erase(it_tet);
+						++removed_tets;
+						for (uint32 i = 0; i < 4; ++i)
+						{
+							const NMFace tf = old_tet.faces[i];
+							if (!tf.is_valid())
+								continue;
+							const uint32 idf_tf = index_of(*p.skeleton_, tf);
+							if (idf_tf == INVALID_INDEX)
+								continue;
+							(*p.incident_tets_)[idf_tf].erase(tet_id);
+						}
+					}
+					else
+					{
+						foreach_cell(*p.skeleton_, [&](NMFace tf) -> bool {
+							const uint32 idf_tf = index_of(*p.skeleton_, tf);
+							if (idf_tf != INVALID_INDEX)
+								(*p.incident_tets_)[idf_tf].erase(tet_id);
+							return true;
+						});
+					}
+				}
+
+				for (NMEdge e : in_edges)
+				{
+					if (!e.is_valid())
+						continue;
+					if (incident_faces(*p.skeleton_, e).empty())
+					{
+						remove_edge(*p.skeleton_, e);
+						++removed_edges;
+					}
+				}
+			}
+
+			std::cout << log_prefix << " deg_pattern_pass=" << passes
+					  << " removed_faces_this_pass=" << removed_this_pass
+					  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
+			if (removed_this_pass == 0)
+				break;
+		}
+
+		std::cout << log_prefix << " deg_pattern_done passes=" << passes
+				  << " removed_faces=" << removed_faces
+				  << " removed_edges=" << removed_edges
+				  << " removed_tets=" << removed_tets
+				  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
+
+		refresh_skeleton_topology_colors(p);
+		mark_boundary_tets_color(p);
+	}
+
+	void run_edge_stage_nondiffuse_and_deg_pattern_from_snapshot(PointsParameters& p)
+	{
+		if (!p.skeleton_ || !p.incident_tets_)
+		{
+			std::cerr << "Topology stage filter requires a built skeleton." << std::endl;
+			return;
+		}
+		if (!p.topology_stage_snapshot_valid_)
+		{
+			if (!capture_topology_stage_snapshot(p))
+				return;
+		}
+		if (!restore_topology_stage_snapshot(p))
+			return;
+
+		std::cout << "[TopologyStage] run=edge(face+edge)+deg_pattern from_snapshot=true edge_diffuse=off" << std::endl;
+		skeleton_post_pocessing(p, true, false);
+		delete_faces_with_edge_degree_pattern_after_nondiffuse_edge_stage(p, "[TopologyStage]");
+	}
+
+	void skeleton_post_pocessing(PointsParameters& p, bool run_edge_stage = true, bool edge_stage_diffuse = true)
+	{
+		if (!p.neural_udf_loaded_)
+		{
+			std::cerr << "Topology filter requires a loaded neural UDF model." << std::endl;
+			return;
+		}
+		std::unordered_map<uint32, Scalar> face_score_cache;
+		if (!compute_skeleton_face_udf_integrals_adaptive(
+				p, face_score_cache, 2, Scalar(1e-4), Scalar(0.35), "[TopologyFilter]"))
+		{
+			std::cerr << "[TopologyFilter] Face scores may be incomplete due to UDF evaluation failure." << std::endl;
+		}
+
+		std::unordered_set<uint32> protected_face_ids;
+		protected_face_ids.reserve(nb_cells<NMFace>(*p.skeleton_));
+
+		const BoundaryTetPrepassStats boundary_prepass = run_boundary_tet_face_deletion(p, "[TopologyFilter]");
+		std::unordered_set<uint32> edge_whitelist_face_ids;
+		edge_whitelist_face_ids.reserve(nb_cells<NMFace>(*p.skeleton_));
+		for (const auto& kv : p.skeleton_tets_)
+		{
+			const Tet& tet = kv.second;
+			for (uint32 i = 0; i < 4; ++i)
+			{
+				const NMFace f = tet.faces[i];
+				const uint32 idf = index_of(*p.skeleton_, f);
+				if (idf != INVALID_INDEX)
+					edge_whitelist_face_ids.insert(idf);
+			}
+		}
+
+		struct FaceQueueItem
+		{
+			Scalar score = Scalar(0);
+			NMFace face;
+			uint32 face_id = INVALID_INDEX;
+		};
+		auto cmp = [](const FaceQueueItem& a, const FaceQueueItem& b) { return a.score < b.score; };
+		std::priority_queue<FaceQueueItem, std::vector<FaceQueueItem>, decltype(cmp)> simple_queue(cmp);
+		std::priority_queue<FaceQueueItem, std::vector<FaceQueueItem>, decltype(cmp)> nonsimple_queue(cmp);
+		std::unordered_set<uint32> simple_face_ids;
+		std::unordered_set<uint32> nonsimple_face_ids;
+		simple_face_ids.reserve(nb_cells<NMFace>(*p.skeleton_));
+		nonsimple_face_ids.reserve(nb_cells<NMFace>(*p.skeleton_));
+		size_t total_pushes_simple = 0;
+		size_t total_pushes_nonsimple = 0;
+
+		auto push_face_by_type = [&](NMFace f) {
+			const uint32 idf = index_of(*p.skeleton_, f);
+			if (protected_face_ids.find(idf) != protected_face_ids.end())
+			{
+				simple_face_ids.erase(idf);
+				nonsimple_face_ids.erase(idf);
+				return;
+			}
+			const size_t tet_count = (*p.incident_tets_)[idf].size();
+			if (tet_count == 0)
+			{
+				simple_face_ids.erase(idf);
+				nonsimple_face_ids.erase(idf);
+				return;
+			}
+			auto it = face_score_cache.find(idf);
+			const Scalar score = (it != face_score_cache.end()) ? it->second : Scalar(0);
+			if (it == face_score_cache.end())
+				face_score_cache[idf] = Scalar(0);
+
+			if (tet_count == 1)
+			{
+				nonsimple_face_ids.erase(idf);
+				if (simple_face_ids.insert(idf).second)
+				{
+					simple_queue.push({score, f, idf});
+					++total_pushes_simple;
+				}
+			}
+			else
+			{
+				simple_face_ids.erase(idf);
+				if (nonsimple_face_ids.insert(idf).second)
+				{
+					nonsimple_queue.push({score, f, idf});
+					++total_pushes_nonsimple;
+				}
+			}
+		};
+
+		size_t initial_simple_faces = 0;
+		size_t initial_nonsimple_faces = 0;
+		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			const uint32 idf = index_of(*p.skeleton_, f);
+			const size_t tet_count = (*p.incident_tets_)[idf].size();
+			if (tet_count == 1)
+				++initial_simple_faces;
+			else if (tet_count > 1)
+				++initial_nonsimple_faces;
+			push_face_by_type(f);
+			return true;
+		});
+		std::cout << "[TopologyFilter] initial_faces=" << nb_cells<NMFace>(*p.skeleton_)
+				  << " initial_tets=" << p.skeleton_tets_.size()
+				  << " initial_simple_faces=" << initial_simple_faces
+				  << " initial_nonsimple_faces=" << initial_nonsimple_faces
+				  << " initial_simple_queue_size=" << simple_queue.size()
+				  << " initial_nonsimple_queue_size=" << nonsimple_queue.size() << std::endl;
+		std::cout << "[TopologyFilter] edge_whitelist_faces=" << edge_whitelist_face_ids.size()
+				  << " protected_faces=" << protected_face_ids.size() << std::endl;
+
+		// Edge-stage-only budget: each tet can lose at most two faces in edge phase.
+		std::unordered_map<uint32, std::vector<std::size_t>> edge_stage_face_owner_tets;
+		edge_stage_face_owner_tets.reserve(nb_cells<NMFace>(*p.skeleton_));
+		std::unordered_map<std::size_t, uint32> edge_stage_deleted_face_count;
+		edge_stage_deleted_face_count.reserve(p.skeleton_tets_.size());
+		for (const auto& kv : p.skeleton_tets_)
+		{
+			const std::size_t tet_id = kv.first;
+			const Tet& tet = kv.second;
+			edge_stage_deleted_face_count[tet_id] = 0;
+			for (uint32 i = 0; i < 4; ++i)
+			{
+				const NMFace f = tet.faces[i];
+				if (!f.is_valid())
+					continue;
+				const uint32 idf = index_of(*p.skeleton_, f);
+				if (idf == INVALID_INDEX)
+					continue;
+				edge_stage_face_owner_tets[idf].push_back(tet_id);
+			}
+		}
+
+		uint32 removed_face = boundary_prepass.removed_faces;
+		uint32 removed_simple_face = 0;
+		uint32 removed_nonsimple_face = 0;
+		uint32 removed_tets = boundary_prepass.removed_tets;
+		size_t pop_count = 0;
+		size_t skipped_invalid = 0;
+		size_t skipped_not_simple = 0;
+		size_t skipped_not_single_tet = 0;
+		size_t skipped_not_nonsimple = 0;
+		size_t skipped_protected_face = 0;
+		size_t skipped_edge_tet_face_cap = 0;
+		std::vector<NMEdge> edge_candidates_from_simple_face;
+		edge_candidates_from_simple_face.reserve(nb_cells<NMEdge>(*p.skeleton_));
+		std::unordered_set<uint32> edge_candidate_ids;
+		edge_candidate_ids.reserve(nb_cells<NMEdge>(*p.skeleton_));
+		auto remove_incident_tets_from_face = [&](const std::set<std::size_t>& in_tets, const NMFace& removed_face,
+												  bool update_face_queues) -> uint32 {
+			uint32 removed_tets_local = 0;
+			for (std::size_t tet_id : in_tets)
+			{
+				auto it_tet = p.skeleton_tets_.find(tet_id);
+				if (it_tet != p.skeleton_tets_.end())
+				{
+					const Tet old_tet = it_tet->second;
+					p.skeleton_tets_.erase(it_tet);
+					++removed_tets_local;
+					for (uint32 i = 0; i < 4; ++i)
+					{
+						const NMFace f = old_tet.faces[i];
+						if (!f.is_valid() || f == removed_face)
+							continue;
+						const uint32 idf = index_of(*p.skeleton_, f);
+						if (idf == INVALID_INDEX)
+							continue;
+						(*p.incident_tets_)[idf].erase(tet_id);
+						if (update_face_queues)
+							push_face_by_type(f);
+					}
+				}
+				else
+				{
+					foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+						const uint32 idf = index_of(*p.skeleton_, f);
+						if (idf != INVALID_INDEX)
+						{
+							(*p.incident_tets_)[idf].erase(tet_id);
+							if (update_face_queues)
+								push_face_by_type(f);
+						}
+						return true;
+					});
+				}
+			}
+			return removed_tets_local;
+		};
+		auto pop_next_valid = [&](bool want_simple, FaceQueueItem& out) -> bool {
+			auto& q = want_simple ? simple_queue : nonsimple_queue;
+			auto& id_set = want_simple ? simple_face_ids : nonsimple_face_ids;
+			while (!q.empty())
+			{
+				FaceQueueItem item = q.top();
+				q.pop();
+				++pop_count;
+
+				const auto itid = id_set.find(item.face_id);
+				if (itid == id_set.end())
+					continue;
+				id_set.erase(itid);
+
+				if (!item.face.is_valid())
+				{
+					++skipped_invalid;
+					continue;
+				}
+				const uint32 idf = index_of(*p.skeleton_, item.face);
+				if (idf == INVALID_INDEX || idf != item.face_id)
+				{
+					++skipped_invalid;
+					continue;
+				}
+				if (protected_face_ids.find(idf) != protected_face_ids.end())
+				{
+					++skipped_protected_face;
+					continue;
+				}
+				const size_t tet_count = (*p.incident_tets_)[idf].size();
+				if (want_simple)
+				{
+					if (tet_count != 1)
+					{
+						++skipped_not_simple;
+						continue;
+					}
+				}
+				else
+				{
+					if (tet_count <= 1)
+					{
+						++skipped_not_nonsimple;
+						continue;
+					}
+					if (!simple_face_ids.empty())
+						continue;
+				}
+				out = item;
+				return true;
+			}
+			return false;
+		};
+
+		while (true)
+		{
+			FaceQueueItem current_item;
+			bool from_simple = false;
+			if (!simple_face_ids.empty())
+			{
+				from_simple = true;
+				if (!pop_next_valid(true, current_item))
+				{
+					if (simple_face_ids.empty() && nonsimple_face_ids.empty())
+						break;
+					continue;
+				}
+			}
+			else
+			{
+				from_simple = false;
+				if (!pop_next_valid(false, current_item))
+				{
+					if (simple_face_ids.empty() && nonsimple_face_ids.empty())
+						break;
+					continue;
+				}
+			}
+
+			const NMFace current_face = current_item.face;
+			const uint32 idf_current = index_of(*p.skeleton_, current_face);
+			if (protected_face_ids.find(idf_current) != protected_face_ids.end())
+			{
+				++skipped_protected_face;
+				continue;
+			}
+			std::set<std::size_t> in_tets = (*p.incident_tets_)[idf_current];
+			if (from_simple && in_tets.size() != 1)
+			{
+				++skipped_not_single_tet;
+				continue;
+			}
+			if (!from_simple && in_tets.size() <= 1)
+			{
+				++skipped_not_nonsimple;
+				continue;
+			}
+			const std::vector<NMEdge> in_edges = incident_edges(*p.skeleton_, current_face);
+			remove_face(*p.skeleton_, current_face);
+			++removed_face;
+			if (from_simple)
+				++removed_simple_face;
+			else
+				++removed_nonsimple_face;
+			simple_face_ids.erase(idf_current);
+			nonsimple_face_ids.erase(idf_current);
+
+			uint32 removed_tets_this_step = remove_incident_tets_from_face(in_tets, current_face, true);
+			removed_tets += removed_tets_this_step;
+
+			if (from_simple)
+			{
+				for (NMEdge e : in_edges)
+				{
+					if (!e.is_valid())
+						continue;
+					const uint32 ide = index_of(*p.skeleton_, e);
+					if (ide == INVALID_INDEX)
+						continue;
+					if (edge_candidate_ids.insert(ide).second)
+						edge_candidates_from_simple_face.push_back(e);
+				}
+			}
+
+			size_t newly_pushed = 0;
+			for (NMEdge e : in_edges)
+			{
+				if (!e.is_valid())
+					continue;
+				for (NMFace f : incident_faces(*p.skeleton_, e))
+				{
+					const size_t before_simple = simple_face_ids.size();
+					const size_t before_nonsimple = nonsimple_face_ids.size();
+					push_face_by_type(f);
+					if (simple_face_ids.size() > before_simple || nonsimple_face_ids.size() > before_nonsimple)
+						++newly_pushed;
+				}
+			}
+			std::cout << "[TopologyFilter] remove#" << removed_face << " type="
+					  << (from_simple ? "simple" : "non_simple") << " face=" << idf_current
+					  << " score=" << current_item.score << " incident_tets_removed=" << removed_tets_this_step
+					  << " newly_pushed=" << newly_pushed
+					  << " simple_queue_size=" << simple_queue.size()
+					  << " nonsimple_queue_size=" << nonsimple_queue.size()
+					  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
+		}
+
+		uint32 removed_edges = boundary_prepass.removed_edges;
+		uint32 removed_faces_by_edge = 0;
+		size_t edge_pop_count = 0;
+		if (run_edge_stage)
+		{
+			std::queue<NMEdge> edge_queue;
+			std::unordered_set<uint32> edge_ids_in_queue;
+			edge_ids_in_queue.reserve(nb_cells<NMEdge>(*p.skeleton_));
+			auto enqueue_simple_edge = [&](NMEdge e) -> bool {
+				if (!e.is_valid())
+					return false;
+				const uint32 ide = index_of(*p.skeleton_, e);
+				if (ide == INVALID_INDEX)
+					return false;
+				const auto in_faces = incident_faces(*p.skeleton_, e);
+				if (in_faces.size() != 1)
+					return false;
+				const NMFace f = in_faces[0];
+				if (!f.is_valid())
+					return false;
+				const uint32 idf = index_of(*p.skeleton_, f);
+				if (idf == INVALID_INDEX)
+					return false;
+				if (edge_whitelist_face_ids.find(idf) == edge_whitelist_face_ids.end())
+					return false;
+				if (protected_face_ids.find(idf) != protected_face_ids.end())
+					return false;
+				if (!edge_ids_in_queue.insert(ide).second)
+					return false;
+				edge_queue.push(e);
+				return true;
+			};
+			for (NMEdge e : edge_candidates_from_simple_face)
+				enqueue_simple_edge(e);
+			std::cout << "[TopologyFilter] initial_edge_queue_size=" << edge_queue.size()
+					  << " edge_diffuse=" << (edge_stage_diffuse ? "on" : "off") << std::endl;
+
+			while (!edge_queue.empty())
+			{
+				NMEdge e = edge_queue.front();
+				edge_queue.pop();
+				++edge_pop_count;
+				if (!e.is_valid())
+					continue;
+
+				const uint32 ide = index_of(*p.skeleton_, e);
+				if (ide == INVALID_INDEX)
+					continue;
+				edge_ids_in_queue.erase(ide);
+				const auto in_faces = incident_faces(*p.skeleton_, e);
+				if (in_faces.size() != 1)
+					continue;
+				const NMFace f = in_faces[0];
+				if (!f.is_valid())
+					continue;
+				const uint32 idf = index_of(*p.skeleton_, f);
+				if (idf == INVALID_INDEX)
+					continue;
+				if (edge_whitelist_face_ids.find(idf) == edge_whitelist_face_ids.end())
+					continue;
+				if (protected_face_ids.find(idf) != protected_face_ids.end())
+				{
+					++skipped_protected_face;
+					continue;
+				}
+				auto owner_it = edge_stage_face_owner_tets.find(idf);
+				bool blocked_by_tet_face_cap = false;
+				if (owner_it != edge_stage_face_owner_tets.end())
+				{
+					for (std::size_t owner_tet : owner_it->second)
+					{
+						auto it_count = edge_stage_deleted_face_count.find(owner_tet);
+						if (it_count != edge_stage_deleted_face_count.end() && it_count->second >= 2)
+						{
+							blocked_by_tet_face_cap = true;
+							break;
+						}
+					}
+				}
+				if (blocked_by_tet_face_cap)
+				{
+					++skipped_edge_tet_face_cap;
+					continue;
+				}
+
+				const std::set<std::size_t> in_tets = (*p.incident_tets_)[idf];
+				const std::vector<NMEdge> face_edges = incident_edges(*p.skeleton_, f);
+
+				remove_face(*p.skeleton_, f);
+				++removed_face;
+				++removed_faces_by_edge;
+				if (owner_it != edge_stage_face_owner_tets.end())
+				{
+					for (std::size_t owner_tet : owner_it->second)
+					{
+						auto it_count = edge_stage_deleted_face_count.find(owner_tet);
+						if (it_count != edge_stage_deleted_face_count.end())
+							++(it_count->second);
+					}
+				}
+				if (in_tets.size() == 1)
+					++removed_simple_face;
+				else if (in_tets.size() > 1)
+					++removed_nonsimple_face;
+				simple_face_ids.erase(idf);
+				nonsimple_face_ids.erase(idf);
+
+				const uint32 removed_tets_this_step = remove_incident_tets_from_face(in_tets, f, false);
+				removed_tets += removed_tets_this_step;
+
+				if (e.is_valid() && incident_faces(*p.skeleton_, e).empty())
+				{
+					remove_edge(*p.skeleton_, e);
+					++removed_edges;
+				}
+
+				size_t edge_newly_pushed = 0;
+				if (edge_stage_diffuse)
+				{
+					for (NMEdge e_next : face_edges)
+					{
+						if (enqueue_simple_edge(e_next))
+							++edge_newly_pushed;
+					}
+				}
+
+				std::cout << "[TopologyFilter] edge_remove face=" << idf << " edge=" << ide
+						  << " incident_tets_removed=" << removed_tets_this_step
+						  << " edge_newly_pushed=" << edge_newly_pushed
+						  << " edge_queue_size=" << edge_queue.size()
+						  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
+			}
+		}
+		else
+		{
+			std::cout << "[TopologyFilter] edge_stage_skipped=true" << std::endl;
+		}
+
+		std::cout << "Removed " << removed_face << " faces in skeleton post-processing." << std::endl;
+		std::cout << "[TopologyFilter] pop_count=" << pop_count << " skipped_invalid=" << skipped_invalid
+				  << " skipped_not_simple=" << skipped_not_simple
+				  << " skipped_not_nonsimple=" << skipped_not_nonsimple
+				  << " skipped_not_single_tet=" << skipped_not_single_tet
+				  << " skipped_protected_face=" << skipped_protected_face
+				  << " skipped_edge_tet_face_cap=" << skipped_edge_tet_face_cap
+				  << " boundary_prepass_processed_tets=" << boundary_prepass.processed_tets
+				  << " boundary_prepass_removed_faces=" << boundary_prepass.removed_faces
+				  << " boundary_prepass_removed_edges=" << boundary_prepass.removed_edges
+				  << " boundary_prepass_removed_tets=" << boundary_prepass.removed_tets
+				  << " edge_pop_count=" << edge_pop_count
+				  << " removed_edges=" << removed_edges
+				  << " removed_faces_by_edge=" << removed_faces_by_edge
+				  << " removed_simple_faces=" << removed_simple_face
+				  << " removed_nonsimple_faces=" << removed_nonsimple_face
+				  << " removed_tets=" << removed_tets
+				  << " total_pushes_simple=" << total_pushes_simple
+				  << " total_pushes_nonsimple=" << total_pushes_nonsimple << std::endl;
+		std::cout << p.skeleton_tets_.size() << " tets remain after post-processing." << std::endl;
+
+		refresh_skeleton_topology_colors(p);
+		mark_boundary_tets_color(p);
 	}
 
 protected:
@@ -4362,12 +5417,17 @@ protected:
 
 	void start_spheres_update(PointsParameters& p)
 	{
+		const Scalar convergence_eps = Scalar(1e-10);
+		const uint32 max_post_convergence_iterations = 10;
 		p.running_ = true;
 		p.iteration_count_ = 0;
 		p.total_error_diff_ = 0.0;
 		p.last_total_error_ = std::numeric_limits<Scalar>::max();
 
-		launch_thread([&]() {
+		launch_thread([&, convergence_eps, max_post_convergence_iterations]() {
+			bool convergence_reached = false;
+			uint32 post_convergence_iterations = 0;
+			bool target_reached_reported = false;
 			auto start = std::chrono::high_resolution_clock::now();
 			while (true)
 			{
@@ -4383,19 +5443,55 @@ protected:
 
 				if (p.auto_stop_)
 				{
-					if (p.total_error_diff_ < 1e-10)
+					const bool converged = (p.total_error_diff_ < convergence_eps);
+					if (converged)
 					{
+						if (!convergence_reached)
+						{
+							convergence_reached = true;
+							post_convergence_iterations = 0;
+							std::cout << "Auto stop: error converged (Diff < " << convergence_eps
+									  << "), start post-convergence countdown (" << max_post_convergence_iterations
+									  << ")." << std::endl;
+						}
+						else
+						{
+							++post_convergence_iterations;
+						}
+
+						bool reached_target = false;
 						switch (p.auto_split_mode_)
 						{
 						case ERROR_THRESHOLD:
 							if (p.max_error_ < p.auto_split_error_threshold_)
-								p.stopping_ = true;
+								reached_target = true;
 							break;
 						case MAX_NB_SPHERES:
 							if (p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
-								p.stopping_ = true;
+								reached_target = true;
 							break;
 						}
+
+						if (reached_target)
+						{
+							if (!target_reached_reported)
+							{
+								std::cout << "Auto stop: target reached under current auto-split mode." << std::endl;
+								target_reached_reported = true;
+							}
+						}
+						if (post_convergence_iterations >= max_post_convergence_iterations)
+						{
+							std::cout << "Auto stop: reached max post-convergence iterations ("
+									  << max_post_convergence_iterations << ")." << std::endl;
+							p.stopping_ = true;
+						}
+					}
+					else if (convergence_reached)
+					{
+						convergence_reached = false;
+						post_convergence_iterations = 0;
+						target_reached_reported = false;
 					}
 				}
 
@@ -4895,12 +5991,66 @@ protected:
 						}
 					}
 					ImGui::SameLine();
-					if (ImGui::Button("Topology filter"))
+					if (ImGui::Button("Face stage filter"))
 					{
 						if (!p.running_)
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
-							skeleton_post_pocessing(p);
+							run_topology_stage_filter_from_snapshot(p, false);
+						}
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Edge stage filter"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							run_topology_stage_filter_from_snapshot(p, true);
+						}
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Edge no-diff + deg-face prune"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							run_edge_stage_nondiffuse_and_deg_pattern_from_snapshot(p);
+						}
+					}
+					ImGui::Checkbox("Edge stage diffuse", &p.topology_edge_stage_diffuse_);
+					if (ImGui::Button("Reset stage base (current skeleton)"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							capture_topology_stage_snapshot(p);
+						}
+					}
+					
+					if (ImGui::Button("Boundary tet delete"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							boundary_tet_face_delete_only(p);
+						}
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Tet face UDF colormap"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							visualize_skeleton_tet_face_udf(p);
+						}
+					}
+					
+					if (ImGui::Button("Boundary tet mask"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							mark_boundary_tets_color(p);
 						}
 					}
 
