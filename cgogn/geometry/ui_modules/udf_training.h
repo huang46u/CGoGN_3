@@ -208,6 +208,8 @@ private:
 
 		acc::KDTree<3, uint32>* samples_kdtree_ = nullptr; // KDTree of alpha-expanding samples
 		std::vector<PVertex> samples_kdtree_vertices_;	   // Vertices of alpha-expanding samples in KDTree order
+		acc::KDTree<3, uint32>* samples_ma_kdtree_ = nullptr; // KDTree of sample medial-axis positions
+		std::vector<PVertex> samples_ma_kdtree_vertices_;	   // Vertices in MA KDTree order
 
 		acc::KDTree<3, uint32>* input_kdtree_ = nullptr; // KDTree of input points
 		std::vector<PVertex> input_kdtree_vertices_;	 // Vertices of input points in KDTree order
@@ -286,13 +288,13 @@ private:
 		float alpha_ = 0.005f;
 		float sample_radius_ = 0.0025f;
 		int sample_iterations_ = 30; // Max attempts per point
-		int knn_k_ = 20;
+		int knn_k_ = 10;
 		int seed_ = 42;
 		int cluster_min_points_ = 20;
 		float grid_cell_size_ = 0.0025f;
 		// Neural UDF Sampling
-		int num_alpha_samples_ = 70000;
-		int batch_size_ = 131064;	   // sample batch
+		int num_alpha_samples_ = 200000;
+		int batch_size_ = 1310640;	   // sample batch
 		float tol_ = 1e-5f; // convergence tolerance
 
 		// Neural UDF ray sampling parameters
@@ -322,6 +324,8 @@ private:
 		{
 			if (samples_kdtree_)
 				delete samples_kdtree_;
+			if (samples_ma_kdtree_)
+				delete samples_ma_kdtree_;
 			if (input_kdtree_)
 				delete input_kdtree_;
 		}
@@ -1069,7 +1073,13 @@ public:
 				delete p.samples_kdtree_;
 				p.samples_kdtree_ = nullptr;
 			}
+			if (p.samples_ma_kdtree_)
+			{
+				delete p.samples_ma_kdtree_;
+				p.samples_ma_kdtree_ = nullptr;
+			}
 			p.samples_kdtree_vertices_.clear();
+			p.samples_ma_kdtree_vertices_.clear();
 			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
 			std::cout << "Sampling filtering applied: " << before << " -> 0 points." << std::endl;
 			return;
@@ -1603,20 +1613,39 @@ private:
 	{
 		if (p.samples_kdtree_)
 			delete p.samples_kdtree_;
+		if (p.samples_ma_kdtree_)
+			delete p.samples_ma_kdtree_;
 
 		std::vector<Vec3> points;
+		const uint32 sample_count = nb_cells<PVertex>(*p.samples_mesh_);
 		p.samples_kdtree_vertices_.clear();
-		points.reserve(nb_cells<PVertex>(*p.samples_mesh_));
-		p.samples_kdtree_vertices_.reserve(points.size());
+		p.samples_ma_kdtree_vertices_.clear();
+		points.reserve(sample_count);
+		p.samples_kdtree_vertices_.reserve(sample_count);
+		p.samples_ma_kdtree_vertices_.reserve(sample_count);
+		std::vector<Vec3> points_ma;
+		points_ma.reserve(sample_count);
 
 		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 			uint32 idx = index_of(*p.samples_mesh_, v);
 			points.push_back((*p.samples_position_)[idx]);
 			p.samples_kdtree_vertices_.push_back(v);
+			if (p.samples_ma_position_)
+			{
+				const Vec3& ma_pos = (*p.samples_ma_position_)[idx];
+				const bool ma_finite = ma_pos.allFinite();
+				const bool ma_radius_ok = (!p.samples_ma_radius_) || ((*p.samples_ma_radius_)[idx] > Scalar(0));
+				if (ma_finite && ma_radius_ok)
+				{
+					points_ma.push_back(ma_pos);
+					p.samples_ma_kdtree_vertices_.push_back(v);
+				}
+			}
 			return true;
 		});
 
-		p.samples_kdtree_ = new acc::KDTree<3, uint32>(points);
+		p.samples_kdtree_ = points.empty() ? nullptr : new acc::KDTree<3, uint32>(points);
+		p.samples_ma_kdtree_ = points_ma.empty() ? nullptr : new acc::KDTree<3, uint32>(points_ma);
 	}
 
 	// Generic PCA normal computation for any point cloud mesh
@@ -1759,6 +1788,8 @@ private:
 			(*p.samples_area_)[v_idx] = (sum_dist * sum_dist) / (2.0 * p.knn_k_); // Rough area estimate
 			return true;
 		});
+		// MA positions changed; keep MA-KDTree in sync for MF topology scoring.
+		build_kdtree(p);
 	}
 
 	void compute_winding_numbers(PointsParameters& p)
@@ -2312,11 +2343,15 @@ private:
 			return;
 
 		const Scalar fallback_radius = p.alpha_;
-		const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(1.5), Scalar(0));
+		const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(10), Scalar(0));
 		const Scalar min_norm = Scalar(1e-12);
 
-		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
+		auto run_shrinking_ball_for_vertex = [&](PVertex v) -> bool {
+			if (!v.is_valid())
+				return false;
+			const uint32 v_idx = index_of(*p.samples_mesh_, v);
+			if (v_idx == INVALID_INDEX)
+				return false;
 			const Vec3& pt = (*p.samples_position_)[v_idx];
 			Vec3 n = (*p.samples_normal_)[v_idx];
 
@@ -2340,20 +2375,225 @@ private:
 				}
 			}
 
-			if (!secondary.is_valid())
+			if (!secondary.is_valid() && p.samples_kdtree_ && !p.samples_kdtree_vertices_.empty())
 			{
 				const Vec3 q = c - n * r;
 				std::pair<uint32, Scalar> knn_res;
 				p.samples_kdtree_->find_nn(q, &knn_res);
-				secondary = p.samples_kdtree_vertices_[knn_res.first];
+				if (knn_res.first < p.samples_kdtree_vertices_.size())
+					secondary = p.samples_kdtree_vertices_[knn_res.first];
 			}
 
 			(*p.samples_ma_position_)[v_idx] = c;
-			(*p.samples_ma_radius_)[v_idx] = p.alpha_ * p.sqem_fix_radius_scale_;
+			const Scalar expected_radius = p.alpha_ * p.sqem_fix_radius_scale_;
+			(*p.samples_ma_radius_)[v_idx] = (r > expected_radius) ? r : expected_radius;
 			(*p.samples_ma_secondary_vertex_)[v_idx] = secondary;
-
 			return true;
-		});
+		};
+
+		auto run_shrinking_ball_for_all = [&]() {
+			parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
+				run_shrinking_ball_for_vertex(v);
+				return true;
+			});
+		};
+
+		run_shrinking_ball_for_all();
+
+		// Post-process on shrinking-ball centers:
+		// - UDF model: retry if udf(center) > alpha; still > alpha -> delete sample.
+		// - MF model: retry if sdf(center) > 0; still sdf > 0 -> delete sample.
+		uint32 flipped_normals = 0;
+		uint32 flip_triggered_points = 0;
+		uint32 deleted_samples = 0;
+		if (p.neural_udf_loaded_)
+		{
+			const bool mf_model = (p.input_mode_ == INPUT_NEURAL_UDF && p.neural_model_type_ == NEURAL_MODEL_MF);
+			auto eval_mf_values_sdf = [&](const std::vector<Vec3>& query_points, std::vector<Scalar>& out_values,
+										  std::vector<Scalar>& out_sdf) -> bool {
+				out_values.clear();
+				out_sdf.clear();
+				out_values.resize(query_points.size(), Scalar(0));
+				out_sdf.resize(query_points.size(), Scalar(0));
+				if (query_points.empty())
+					return true;
+				NeuralFieldForward udf = make_neural_field_forward(p);
+				if (!udf.is_loaded())
+					return false;
+				const size_t batch = std::max<size_t>(1, static_cast<size_t>(p.batch_size_));
+				for (size_t offset = 0; offset < query_points.size(); offset += batch)
+				{
+					const size_t count = std::min(batch, query_points.size() - offset);
+					auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+					if (device_.is_cuda())
+						cpu_opts = cpu_opts.pinned_memory(true);
+					torch::Tensor points_cpu = torch::empty({static_cast<long>(count), 3}, cpu_opts);
+					auto points_acc = points_cpu.accessor<float, 2>();
+					for (size_t i = 0; i < count; ++i)
+					{
+						const Vec3& pnt = query_points[offset + i];
+						points_acc[(long)i][0] = static_cast<float>(pnt.x());
+						points_acc[(long)i][1] = static_cast<float>(pnt.y());
+						points_acc[(long)i][2] = static_cast<float>(pnt.z());
+					}
+					auto [values_t, sdf_t] = udf.forward_values_sdf_gpu(points_cpu);
+					if (!values_t.defined() || !sdf_t.defined() || values_t.numel() != static_cast<long>(count) ||
+						sdf_t.numel() != static_cast<long>(count))
+						return false;
+					if (values_t.dim() == 2 && values_t.size(1) == 1)
+						values_t = values_t.squeeze(1);
+					if (sdf_t.dim() == 2 && sdf_t.size(1) == 1)
+						sdf_t = sdf_t.squeeze(1);
+					torch::Tensor values_cpu = values_t.to(torch::kCPU).contiguous();
+					torch::Tensor sdf_cpu = sdf_t.to(torch::kCPU).contiguous();
+					auto values_acc = values_cpu.accessor<float, 1>();
+					auto sdf_acc = sdf_cpu.accessor<float, 1>();
+					for (size_t i = 0; i < count; ++i)
+					{
+						out_values[offset + i] = static_cast<Scalar>(values_acc[(long)i]);
+						out_sdf[offset + i] = static_cast<Scalar>(sdf_acc[(long)i]);
+					}
+				}
+				return true;
+			};
+
+			std::vector<PVertex> vertices;
+			std::vector<Vec3> centers;
+			vertices.reserve(nb_cells<PVertex>(*p.samples_mesh_));
+			centers.reserve(nb_cells<PVertex>(*p.samples_mesh_));
+			foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
+				const uint32 vid = index_of(*p.samples_mesh_, v);
+				if (vid == INVALID_INDEX)
+					return true;
+				vertices.push_back(v);
+				centers.push_back((*p.samples_ma_position_)[vid]);
+				return true;
+			});
+
+			std::vector<Scalar> score_values;
+			std::vector<Scalar> sdf_values;
+			bool eval_ok = false;
+			if (mf_model)
+				eval_ok = eval_mf_values_sdf(centers, score_values, sdf_values);
+			else
+				eval_ok = eval_udf_values(p, centers, score_values);
+
+			if (eval_ok && score_values.size() == centers.size())
+			{
+				if (mf_model)
+				{
+					const size_t debug_n = std::min<size_t>(20, score_values.size());
+					for (size_t i = 0; i < debug_n; ++i)
+					{
+						const Scalar sdf_i = (i < sdf_values.size()) ? sdf_values[i] : Scalar(0);
+						std::cout << "[MAFlipPrune][MF] center_udf#" << i << " udf=" << score_values[i]
+								  << " sdf=" << sdf_i << std::endl;
+					}
+				}
+
+				std::vector<PVertex> need_retry;
+				need_retry.reserve(vertices.size() / 8 + 1);
+				for (size_t i = 0; i < vertices.size(); ++i)
+				{
+					const bool by_udf = (score_values[i] > p.alpha_);
+					const bool by_mf_sdf = mf_model && i < sdf_values.size() && (sdf_values[i] > Scalar(0));
+					const bool trigger_retry = mf_model ? (by_mf_sdf || by_udf) : by_udf;
+					if (trigger_retry)
+						need_retry.push_back(vertices[i]);
+				}
+				flip_triggered_points += static_cast<uint32>(need_retry.size());
+
+				for (PVertex v : need_retry)
+				{
+					const uint32 vid = index_of(*p.samples_mesh_, v);
+					if (vid == INVALID_INDEX)
+						continue;
+					Vec3 n = (*p.samples_normal_)[vid];
+					if (n.squaredNorm() > min_norm)
+					{
+						n.normalize();
+						(*p.samples_normal_)[vid] = -n;
+						++flipped_normals;
+					}
+					run_shrinking_ball_for_vertex(v);
+				}
+
+				std::vector<Vec3> retry_centers;
+				retry_centers.reserve(need_retry.size());
+				for (PVertex v : need_retry)
+				{
+					const uint32 vid = index_of(*p.samples_mesh_, v);
+					if (vid == INVALID_INDEX)
+					{
+						retry_centers.push_back(Vec3(0, 0, 0));
+						continue;
+					}
+					retry_centers.push_back((*p.samples_ma_position_)[vid]);
+				}
+
+				std::vector<Scalar> retry_score;
+				std::vector<Scalar> retry_sdf;
+				bool retry_eval_ok = false;
+				if (mf_model)
+					retry_eval_ok = eval_mf_values_sdf(retry_centers, retry_score, retry_sdf);
+				else
+					retry_eval_ok = eval_udf_values(p, retry_centers, retry_score);
+
+				if (retry_eval_ok && retry_score.size() == retry_centers.size())
+				{
+					std::unordered_set<uint32> deleted_ids;
+					deleted_ids.reserve(need_retry.size());
+					for (size_t i = 0; i < need_retry.size(); ++i)
+					{
+						bool should_delete = false;
+						if (mf_model)
+						{
+							if (i < retry_sdf.size() && retry_sdf[i] > Scalar(0))
+								should_delete = true;
+						}
+						else
+						{
+							if (retry_score[i] > p.alpha_)
+								should_delete = true;
+						}
+						if (!should_delete)
+							continue;
+						const uint32 vid = index_of(*p.samples_mesh_, need_retry[i]);
+						if (vid == INVALID_INDEX || !deleted_ids.insert(vid).second)
+							continue;
+						remove_vertex(*p.samples_mesh_, need_retry[i]);
+						++deleted_samples;
+					}
+				}
+			}
+		}
+
+		if (deleted_samples > 0)
+		{
+			std::cout << "[MAFlipPrune] flip_triggered_points=" << flip_triggered_points
+					  << " flipped_normals=" << flipped_normals
+					  << " deleted_samples=" << deleted_samples
+					  << " remaining_samples=" << nb_cells<PVertex>(*p.samples_mesh_) << std::endl;
+
+			// Keep fitting-dependent structures coherent after sample removals.
+			build_kdtree(p);
+			if (nb_cells<PVertex>(*p.samples_mesh_) > 0)
+			{
+				recompute_samples_normals_pca(p);
+				compute_samples_area(p);
+				compute_winding_numbers(p);
+				compute_quadrics(p);
+				run_shrinking_ball_for_all();
+			}
+		}
+		else if (flip_triggered_points > 0 || flipped_normals > 0)
+		{
+			std::cout << "[MAFlipPrune] flip_triggered_points=" << flip_triggered_points
+					  << " flipped_normals=" << flipped_normals << " deleted_samples=0" << std::endl;
+		}
+
+		// MA positions changed; keep MA-KDTree in sync for MF topology scoring.
+		build_kdtree(p);
 	}
 
 	// MF post-process: search along opposite normal direction for minimal mf-abs(sdf)
@@ -2991,6 +3231,50 @@ private:
 		return true;
 	}
 
+	bool eval_topology_score_values(PointsParameters& p, const std::vector<Vec3>& points,
+									std::vector<Scalar>& out_values)
+	{
+		out_values.clear();
+		out_values.resize(points.size(), Scalar(0));
+		if (points.empty())
+			return true;
+
+		const bool use_mf_ma_distance =
+			(p.input_mode_ == INPUT_NEURAL_UDF && p.neural_model_type_ == NEURAL_MODEL_MF);
+		if (!use_mf_ma_distance)
+			return eval_udf_values(p, points, out_values);
+
+		if (!p.samples_mesh_ || !p.samples_ma_position_)
+		{
+			std::cerr << "[TopologyScore][MF] missing sample/ma data for MF score evaluation." << std::endl;
+			return false;
+		}
+		if (!p.samples_ma_kdtree_ || p.samples_ma_kdtree_vertices_.empty())
+			build_kdtree(p);
+		if (!p.samples_ma_kdtree_ || p.samples_ma_kdtree_vertices_.empty())
+		{
+			std::cerr << "[TopologyScore][MF] MA KDTree unavailable (no valid ma_position / ma_radius). "
+					  << "Run fitting data computation first." << std::endl;
+			return false;
+		}
+
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			std::pair<uint32, Scalar> knn_res;
+			p.samples_ma_kdtree_->find_nn(points[i], &knn_res);
+			const uint32 nn_idx = knn_res.first;
+			if (nn_idx >= p.samples_ma_kdtree_vertices_.size())
+				continue;
+			const PVertex nearest_sample = p.samples_ma_kdtree_vertices_[nn_idx];
+			const uint32 sid = index_of(*p.samples_mesh_, nearest_sample);
+			if (sid == INVALID_INDEX)
+				continue;
+			const Vec3& ma_pos = (*p.samples_ma_position_)[sid];
+			out_values[i] = (points[i] - ma_pos).norm();
+		}
+		return true;
+	}
+
 	void update_sphere_line_quadric_distance_fix_radius(PointsParameters& p, PVertex sphere)
 	{
 		SphereFitData data;
@@ -3130,7 +3414,8 @@ private:
 		if (s[3] > Scalar(0) && s[3] <= p.alpha_)
 		{
 			(*p.spheres_position_)[sphere_index] = s.head<3>();
-			(*p.spheres_radius_)[sphere_index] = s[3];
+			Scalar expected_radius = p.alpha_ * p.sqem_fix_radius_scale_;
+			(*p.spheres_radius_)[sphere_index] = s[3] > expected_radius ? s[3] : expected_radius;
 			return;
 		}
 
@@ -4185,7 +4470,7 @@ protected:
 		uint32 max_adaptive_depth = 2, Scalar adaptive_abs_range_tol = Scalar(1e-4),
 		Scalar adaptive_rel_range_tol = Scalar(0.35), const char* log_prefix = "[FaceUDF]")
 	{
-		if (!p.skeleton_ || !p.skeleton_position_)
+		if (!p.skeleton_ || !p.skeleton_position_ || !p.incident_tets_)
 			return false;
 
 		struct AdaptiveTriangleTask
@@ -4229,6 +4514,10 @@ protected:
 		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
 			const uint32 idf = index_of(*p.skeleton_, f);
 			if (idf == INVALID_INDEX)
+				return true;
+			const auto& in_tets = (*p.incident_tets_)[idf];
+			// Only score faces that are currently adjacent to at least one tet.
+			if (in_tets.empty())
 				return true;
 			face_score_cache[idf] = Scalar(0);
 			if (!f.is_valid())
@@ -4288,10 +4577,10 @@ protected:
 				break;
 			}
 
-			std::vector<Scalar> udf_values;
-			if (!eval_udf_values(p, sample_points, udf_values))
+			std::vector<Scalar> score_values;
+			if (!eval_topology_score_values(p, sample_points, score_values))
 			{
-				std::cerr << log_prefix << " face score UDF evaluation failed." << std::endl;
+				std::cerr << log_prefix << " face score field evaluation failed." << std::endl;
 				return false;
 			}
 
@@ -4303,7 +4592,7 @@ protected:
 				Scalar max_udf = std::numeric_limits<Scalar>::lowest();
 				for (uint32 k = 0; k < 7; ++k)
 				{
-					const Scalar u = udf_values[tri_eval.sample_offset + k];
+					const Scalar u = score_values[tri_eval.sample_offset + k];
 					weighted_mean += dunavant7_w[k] * u;
 					min_udf = std::min(min_udf, u);
 					max_udf = std::max(max_udf, u);
@@ -4467,10 +4756,10 @@ protected:
 		if (sample_points.empty())
 			return true;
 
-		std::vector<Scalar> udf_values;
-		if (!eval_udf_values(p, sample_points, udf_values))
+		std::vector<Scalar> score_values;
+		if (!eval_topology_score_values(p, sample_points, score_values))
 		{
-			std::cerr << log_prefix << " edge score UDF evaluation failed." << std::endl;
+			std::cerr << log_prefix << " edge score field evaluation failed." << std::endl;
 			return false;
 		}
 
@@ -4478,7 +4767,7 @@ protected:
 		{
 			Scalar avg_udf = Scalar(0);
 			for (uint32 k = 0; k < 3; ++k)
-				avg_udf += gauss3_w_01[k] * udf_values[edge_eval.sample_offset + k];
+				avg_udf += gauss3_w_01[k] * score_values[edge_eval.sample_offset + k];
 			edge_scores[edge_eval.edge_id] = avg_udf;
 		}
 		std::cout << log_prefix << " scored_tet_edges=" << edge_scores.size()
@@ -6429,11 +6718,8 @@ protected:
 		mark_boundary_tets_color(p);
 
 		FaceStageCandidate next_candidate;
-		std::unordered_map<uint32, Scalar> next_face_score_cache;
 		bool has_next = false;
-		if (compute_skeleton_face_scores(
-				p, next_face_score_cache, p.skeleton_face_score_normalize_by_area_, "[TopologyStep]"))
-			has_next = pick_next_face_stage_candidate(p, next_face_score_cache, next_candidate);
+		has_next = pick_next_face_stage_candidate(p, face_score_cache, next_candidate);
 
 		if (has_next && next_candidate.face.is_valid() && p.skeleton_face_color_)
 		{
@@ -6851,15 +7137,20 @@ protected:
 	{
 		const Scalar convergence_eps = Scalar(1e-10);
 		const uint32 max_post_convergence_iterations = 10;
+		const uint32 max_iterations_without_autosplit = 300;
+		const uint32 max_iterations_after_reaching_max_spheres = 100;
 		p.running_ = true;
 		p.iteration_count_ = 0;
 		p.total_error_diff_ = 0.0;
 		p.last_total_error_ = std::numeric_limits<Scalar>::max();
 
-		launch_thread([&, convergence_eps, max_post_convergence_iterations]() {
+		launch_thread([&, convergence_eps, max_post_convergence_iterations, max_iterations_without_autosplit,
+						  max_iterations_after_reaching_max_spheres]() {
 			bool convergence_reached = false;
 			uint32 post_convergence_iterations = 0;
 			bool target_reached_reported = false;
+			bool max_spheres_reached_once = false;
+			uint32 post_max_spheres_iterations = 0;
 			auto start = std::chrono::high_resolution_clock::now();
 			while (true)
 			{
@@ -6925,6 +7216,38 @@ protected:
 						post_convergence_iterations = 0;
 						target_reached_reported = false;
 					}
+				}
+
+				if (p.auto_split_)
+				{
+					if (p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
+					{
+						if (!max_spheres_reached_once)
+						{
+							max_spheres_reached_once = true;
+							post_max_spheres_iterations = 0;
+							std::cout << "Auto split stop: reached max spheres (" << p.auto_split_max_nb_spheres_
+									  << "), start post-max countdown (" << max_iterations_after_reaching_max_spheres
+									  << ")." << std::endl;
+						}
+						else
+						{
+							++post_max_spheres_iterations;
+						}
+
+						if (post_max_spheres_iterations >= max_iterations_after_reaching_max_spheres)
+						{
+							std::cout << "Auto split stop: reached max post-max-sphere iterations ("
+									  << max_iterations_after_reaching_max_spheres << ")." << std::endl;
+							p.stopping_ = true;
+						}
+					}
+				}
+				else if (p.iteration_count_ >= max_iterations_without_autosplit)
+				{
+					std::cout << "Stop: reached max iterations without auto split ("
+							  << max_iterations_without_autosplit << ")." << std::endl;
+					p.stopping_ = true;
 				}
 
 				std::cout << "Iteration: " << p.iteration_count_ << " | Spheres: " << p.nb_spheres_
