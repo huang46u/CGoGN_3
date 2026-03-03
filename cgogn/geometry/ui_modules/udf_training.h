@@ -294,11 +294,13 @@ private:
 		float grid_cell_size_ = 0.0025f;
 		// Neural UDF Sampling
 		int num_alpha_samples_ = 200000;
-		int batch_size_ = 1310640;	   // sample batch
+		int poisson_eliminate_target_samples_ = 50000;
+		int batch_size_ = 1310640;	   // NN evaluation batch
+		int ray_sampler_batch_size_ = 4096; // Rays per sampling iteration
 		float tol_ = 1e-5f; // convergence tolerance
 
 		// Neural UDF ray sampling parameters
-		float udf_bbox_expand_ = 0.1f;
+		float udf_bbox_expand_ = 0.05f;
 		float udf_lipschitz_ = 4.0f;
 		float udf_delta_enter_ = 0.003f;
 		int udf_max_iterations_ = 3000;
@@ -453,9 +455,9 @@ public:
 		params.alpha = p.alpha_;
 		params.tol = p.tol_;
 		params.step_bound = Scalar(2.0);
-		params.batch_size = p.batch_size_;
+		params.batch_size = std::max(1, p.ray_sampler_batch_size_);
 		params.max_iterations = p.udf_max_iterations_;
-		params.max_outer_iterations = 500;
+		params.max_outer_iterations = 10;
 		params.seed = p.seed_;
 		return params;
 	}
@@ -562,7 +564,14 @@ public:
 			return;
 		}
 
-		p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+		const bool use_spatial_grid = (p.grid_cell_size_ > Scalar(0));
+		if (use_spatial_grid)
+			p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+		else
+		{
+			p.samples_spatial_grid_.reset();
+			std::cout << "Grid Cell Size <= 0: sampling without SpatialGrid deduplication." << std::endl;
+		}
 		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
 
 		RaySamplerParams ray_params = make_ray_params(p);
@@ -642,26 +651,67 @@ public:
 			return true;
 		});
 
-		auto apply_grad_normals = [&](const auto& grad_result) {
-			if (grad_result.ok && grad_result.gradients.size() == all_positions.size())
+		bool normals_ok = true;
+		std::vector<Vec3> gradients(all_positions.size(), Vec3(0, 0, 1));
+		const size_t grad_batch_cap = 131464;
+		const size_t grad_batch =
+			std::max<size_t>(1, std::min<size_t>(static_cast<size_t>(p.batch_size_), grad_batch_cap));
+		for (size_t offset = 0; offset < all_positions.size(); offset += grad_batch)
+		{
+			const size_t count = std::min(grad_batch, all_positions.size() - offset);
+			auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+			if (device_.is_cuda())
+				cpu_opts = cpu_opts.pinned_memory(true);
+			torch::Tensor pts_cpu = torch::empty({static_cast<int64_t>(count), 3}, cpu_opts);
+			auto pts_acc = pts_cpu.accessor<float, 2>();
+			for (size_t i = 0; i < count; ++i)
 			{
-				uint32 idx = 0;
-				foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-					uint32 v_idx = index_of(*p.samples_mesh_, v);
-					Vec3 normal = grad_result.gradients[idx].normalized();
-					(*p.samples_normal_)[v_idx] = normal;
-					(*p.samples_normal_color_)[v_idx] =
-						Vec4((normal.x() + 1.0) * 0.5, (normal.y() + 1.0) * 0.5, (normal.z() + 1.0) * 0.5, 1.0);
-					idx++;
-					return true;
-				});
-				return true;
+				const Vec3& pnt = all_positions[offset + i];
+				pts_acc[static_cast<long>(i)][0] = static_cast<float>(pnt.x());
+				pts_acc[static_cast<long>(i)][1] = static_cast<float>(pnt.y());
+				pts_acc[static_cast<long>(i)][2] = static_cast<float>(pnt.z());
 			}
-			return false;
-		};
 
-		BatchUDFResult grad_result = udf.forward_batch_with_grad(all_positions);
-		bool normals_ok = apply_grad_normals(grad_result);
+			auto [values_t, grad_t] = udf.forward_values_grad_gpu(pts_cpu);
+			if (!values_t.defined() || !grad_t.defined())
+			{
+				normals_ok = false;
+				break;
+			}
+			if (grad_t.dim() != 2 || grad_t.size(0) != static_cast<long>(count) || grad_t.size(1) != 3)
+			{
+				normals_ok = false;
+				break;
+			}
+
+			torch::Tensor grad_cpu = grad_t.to(torch::kCPU).contiguous();
+			auto grad_acc = grad_cpu.accessor<float, 2>();
+			for (size_t i = 0; i < count; ++i)
+			{
+				Vec3 normal(static_cast<Scalar>(grad_acc[static_cast<long>(i)][0]),
+							static_cast<Scalar>(grad_acc[static_cast<long>(i)][1]),
+							static_cast<Scalar>(grad_acc[static_cast<long>(i)][2]));
+				if (normal.squaredNorm() > Scalar(1e-12))
+					normal.normalize();
+				else
+					normal = Vec3(0, 0, 1);
+				gradients[offset + i] = normal;
+			}
+		}
+
+		if (normals_ok)
+		{
+			uint32 idx = 0;
+			foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+				uint32 v_idx = index_of(*p.samples_mesh_, v);
+				const Vec3& normal = gradients[idx];
+				(*p.samples_normal_)[v_idx] = normal;
+				(*p.samples_normal_color_)[v_idx] =
+					Vec4((normal.x() + 1.0) * 0.5, (normal.y() + 1.0) * 0.5, (normal.z() + 1.0) * 0.5, 1.0);
+				idx++;
+				return true;
+			});
+		}
 		if (!normals_ok)
 			std::cerr << "Failed to compute normals from UDF gradients." << std::endl;
 
@@ -687,7 +737,14 @@ public:
 			return;
 		}
 
-		p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+		const bool use_spatial_grid = (p.grid_cell_size_ > Scalar(0));
+		if (use_spatial_grid)
+			p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+		else
+		{
+			p.samples_spatial_grid_.reset();
+			std::cout << "Grid Cell Size <= 0: sampling without SpatialGrid deduplication." << std::endl;
+		}
 		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
 
 		RaySamplerParams ray_params = make_ray_params(p);
@@ -794,7 +851,14 @@ public:
 			return;
 		}
 
-		p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+		const bool use_spatial_grid = (p.grid_cell_size_ > Scalar(0));
+		if (use_spatial_grid)
+			p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+		else
+		{
+			p.samples_spatial_grid_.reset();
+			std::cout << "Grid Cell Size <= 0: sampling without SpatialGrid deduplication." << std::endl;
+		}
 		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
 
 		RaySamplerParams ray_params = make_ray_params(p);
@@ -912,13 +976,60 @@ public:
 				return true;
 			});
 			NeuralFieldForward udf = make_neural_field_forward(p);
-			BatchUDFResult grad_result = udf.forward_batch_with_grad(all_positions);
-			if (grad_result.ok && grad_result.gradients.size() == all_positions.size())
+			std::vector<Vec3> gradients(all_positions.size(), Vec3(0, 0, 1));
+			const size_t grad_batch_cap = 131464;
+			const size_t grad_batch =
+				std::max<size_t>(1, std::min<size_t>(static_cast<size_t>(p.batch_size_), grad_batch_cap));
+			bool grad_ok = true;
+			for (size_t offset = 0; offset < all_positions.size(); offset += grad_batch)
+			{
+				const size_t count = std::min(grad_batch, all_positions.size() - offset);
+				auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+				if (device_.is_cuda())
+					cpu_opts = cpu_opts.pinned_memory(true);
+				torch::Tensor pts_cpu = torch::empty({static_cast<int64_t>(count), 3}, cpu_opts);
+				auto pts_acc = pts_cpu.accessor<float, 2>();
+				for (size_t i = 0; i < count; ++i)
+				{
+					const Vec3& pnt = all_positions[offset + i];
+					pts_acc[static_cast<long>(i)][0] = static_cast<float>(pnt.x());
+					pts_acc[static_cast<long>(i)][1] = static_cast<float>(pnt.y());
+					pts_acc[static_cast<long>(i)][2] = static_cast<float>(pnt.z());
+				}
+
+				auto [values_t, grad_t] = udf.forward_values_grad_gpu(pts_cpu);
+				if (!values_t.defined() || !grad_t.defined())
+				{
+					grad_ok = false;
+					break;
+				}
+				if (grad_t.dim() != 2 || grad_t.size(0) != static_cast<long>(count) || grad_t.size(1) != 3)
+				{
+					grad_ok = false;
+					break;
+				}
+
+				torch::Tensor grad_cpu = grad_t.to(torch::kCPU).contiguous();
+				auto grad_acc = grad_cpu.accessor<float, 2>();
+				for (size_t i = 0; i < count; ++i)
+				{
+					Vec3 normal(static_cast<Scalar>(grad_acc[static_cast<long>(i)][0]),
+								static_cast<Scalar>(grad_acc[static_cast<long>(i)][1]),
+								static_cast<Scalar>(grad_acc[static_cast<long>(i)][2]));
+					if (normal.squaredNorm() > eps)
+						normal.normalize();
+					else
+						normal = Vec3(0, 0, 1);
+					gradients[offset + i] = normal;
+				}
+			}
+
+			if (grad_ok)
 			{
 				uint32 idx = 0;
 				foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 					uint32 v_idx = index_of(*p.samples_mesh_, v);
-					Vec3 normal = grad_result.gradients[idx].normalized();
+					const Vec3& normal = gradients[idx];
 					(*p.samples_normal_)[v_idx] = normal;
 					idx++;
 					return true;
@@ -1128,6 +1239,83 @@ public:
 			out.push_back(Vec3(p.x(), p.y(), p.z()));
 		}
 		return out;
+	}
+
+	void apply_poisson_eliminate_samples(PointsParameters& p, size_t target_num)
+	{
+		if (!p.samples_mesh_ || !p.samples_position_)
+			return;
+		if (p.running_)
+		{
+			std::cerr << "Stop spheres update before Poisson eliminate on sampled points." << std::endl;
+			return;
+		}
+
+		const uint32 count = nb_cells<PVertex>(*p.samples_mesh_);
+		if (count == 0)
+		{
+			std::cout << "No sampled points to downsample." << std::endl;
+			return;
+		}
+
+		std::vector<Vec3> input_points;
+		input_points.reserve(count);
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			const uint32 v_idx = index_of(*p.samples_mesh_, v);
+			input_points.push_back((*p.samples_position_)[v_idx]);
+			return true;
+		});
+
+		const size_t before = input_points.size();
+		const size_t clamped_target = std::max<size_t>(1, std::min(target_num, before));
+		if (clamped_target >= before)
+		{
+			std::cout << "Poisson eliminate skipped: target >= current (" << clamped_target << " >= " << before
+					  << ")." << std::endl;
+			return;
+		}
+
+		std::vector<Vec3> reduced_points = poisson_eliminate_points(input_points, clamped_target);
+		if (reduced_points.empty())
+		{
+			std::cerr << "Poisson eliminate failed: no points generated." << std::endl;
+			return;
+		}
+
+		clear_knn_hover(p);
+		p.knn_hover_locked_ = false;
+		p.fitting_data_computed_ = false;
+		p.samples_winding_number_.reset();
+		p.samples_wn_bvh_.reset();
+		p.samples_jitter_backup_valid_ = false;
+		p.samples_position_backup_.clear();
+		p.samples_normal_backup_.clear();
+		points_provider_->clear_mesh(*p.samples_mesh_);
+
+		for (const Vec3& pt : reduced_points)
+		{
+			PVertex v = add_vertex(*p.samples_mesh_);
+			const uint32 v_idx = index_of(*p.samples_mesh_, v);
+			(*p.samples_position_)[v_idx] = pt;
+			if (p.samples_color_)
+				(*p.samples_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
+			if (p.samples_knn_color_)
+				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
+		}
+
+		recompute_samples_normals_from_current_input(p);
+		build_kdtree(p);
+		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
+		if (p.samples_knn_color_)
+			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_knn_color_.get());
+		if (p.samples_color_)
+			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
+
+		std::cout << "Poisson eliminate applied: " << before << " -> " << reduced_points.size()
+				  << " points (target=" << clamped_target << ")." << std::endl;
 	}
 
 	std::pair<std::vector<Vec3>, std::vector<Vec3>> project_points_to_alpha_gpu_impl(PointsParameters& p,
@@ -1486,7 +1674,10 @@ private:
 		p.skeleton_edge_udf_score_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "edge_udf_score_color");
 		p.skeleton_edge_boundary_tet_color_ =
 			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "boundary_tet_best_edge_color");
-		p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+		if (p.grid_cell_size_ > Scalar(0))
+			p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+		else
+			p.samples_spatial_grid_.reset();
 
 		p.initialized_ = true;
 	}
@@ -1512,7 +1703,7 @@ private:
 		std::cout << "Computing Quadrics..." << std::endl;
 		compute_quadrics(p);
 		std::cout << "Computing Initial Medial Axis..." << std::endl;
-		compute_initial_medial_axis_shrinking_ball(p);
+		compute_initial_medial_axis(p);
 
 		if (p.neural_udf_loaded_ && p.samples_ma_position_)
 		{
@@ -1597,7 +1788,7 @@ private:
 			// Keep fitting-state attributes coherent after KNN changes.
 			compute_winding_numbers(p);
 			compute_quadrics(p);
-			compute_initial_medial_axis_shrinking_ball(p);
+			compute_initial_medial_axis(p);
 			std::cout << "[KNNRebuild] fitting-dependent attributes refreshed." << std::endl;
 		}
 
@@ -2334,17 +2525,61 @@ private:
 
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
 	}
-	// --- Shrinking Balls ---
+	// --- Initial Medial Axis ---
 
-	void compute_initial_medial_axis_shrinking_ball(PointsParameters& p)
+	void compute_initial_medial_axis(PointsParameters& p)
 	{
 		if (!p.samples_mesh_ || !p.samples_kdtree_ || !p.samples_position_ || !p.samples_normal_ ||
 			!p.samples_ma_position_ || !p.samples_ma_radius_ || !p.samples_ma_secondary_vertex_)
 			return;
 
 		const Scalar fallback_radius = p.alpha_;
-		const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(10), Scalar(0));
 		const Scalar min_norm = Scalar(1e-12);
+		const bool neural_input = (p.input_mode_ == INPUT_NEURAL_UDF && p.neural_udf_loaded_);
+		const bool mf_model = neural_input && (p.neural_model_type_ == NEURAL_MODEL_MF);
+		const bool udf_model = neural_input && (p.neural_model_type_ == NEURAL_MODEL_UDF);
+
+		// UDF model: direct MA initialization, no shrinking-ball refinement.
+		if (udf_model)
+		{
+			parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
+				if (!v.is_valid())
+					return true;
+				const uint32 v_idx = index_of(*p.samples_mesh_, v);
+				if (v_idx == INVALID_INDEX)
+					return true;
+
+				const Vec3& pt = (*p.samples_position_)[v_idx];
+				Vec3 n = (*p.samples_normal_)[v_idx];
+				if (n.squaredNorm() > min_norm)
+					n.normalize();
+				else
+					n = Vec3(0, 0, 1);
+
+				const Vec3 c = pt - n * fallback_radius;
+				PVertex secondary;
+				if (p.samples_kdtree_ && !p.samples_kdtree_vertices_.empty())
+				{
+					const Vec3 q = c - n * fallback_radius;
+					std::pair<uint32, Scalar> knn_res;
+					p.samples_kdtree_->find_nn(q, &knn_res);
+					if (knn_res.first < p.samples_kdtree_vertices_.size())
+						secondary = p.samples_kdtree_vertices_[knn_res.first];
+				}
+
+				(*p.samples_ma_position_)[v_idx] = c;
+				(*p.samples_ma_radius_)[v_idx] = fallback_radius;
+				(*p.samples_ma_secondary_vertex_)[v_idx] = secondary;
+				return true;
+			});
+
+			// Keep MA-KDTree in sync for MF/UDF topology scoring paths.
+			build_kdtree(p);
+			return;
+		}
+
+		// MF model (and non-neural fallback): shrinking-ball based MA initialization.
+		const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(10), Scalar(0));
 
 		auto run_shrinking_ball_for_vertex = [&](PVertex v) -> bool {
 			if (!v.is_valid())
@@ -2408,7 +2643,6 @@ private:
 		uint32 deleted_samples = 0;
 		if (p.neural_udf_loaded_)
 		{
-			const bool mf_model = (p.input_mode_ == INPUT_NEURAL_UDF && p.neural_model_type_ == NEURAL_MODEL_MF);
 			auto eval_mf_values_sdf = [&](const std::vector<Vec3>& query_points, std::vector<Scalar>& out_values,
 										  std::vector<Scalar>& out_sdf) -> bool {
 				out_values.clear();
@@ -2945,7 +3179,9 @@ private:
 				const Vec3& pos = all_projected[i];
 				const Vec3& normal = all_normals[i];
 				// Check if valid sample
-				if (p.samples_spatial_grid_->is_valid_sample(pos, p.grid_cell_size_, *p.samples_position_))
+				const bool accept_without_dedup = !p.samples_spatial_grid_ || (p.grid_cell_size_ <= Scalar(0));
+				if (accept_without_dedup ||
+					p.samples_spatial_grid_->is_valid_sample(pos, p.grid_cell_size_, *p.samples_position_))
 				{
 					PVertex new_vertex = add_vertex(*p.samples_mesh_);
 					uint32 new_idx = index_of(*p.samples_mesh_, new_vertex);
@@ -2955,7 +3191,8 @@ private:
 						Vec4((normal.x() + 1.0) * 0.5, (normal.y() + 1.0) * 0.5, (normal.z() + 1.0) * 0.5, 1.0);
 					cluster.push_back(new_vertex);
 					(*p.samples_sphere_)[new_idx] = sphere;
-					p.samples_spatial_grid_->insert(pos, new_idx);
+					if (p.samples_spatial_grid_)
+						p.samples_spatial_grid_->insert(pos, new_idx);
 					added++;
 					total_added++;
 				}
@@ -7517,14 +7754,23 @@ protected:
 			ImGui::InputFloat("Alpha", &p.alpha_, 0.001f, 0.1f, "%.4f");
 			ImGui::InputInt("Num Samples", &p.num_alpha_samples_, 1000, 10000);
 			ImGui::InputFloat("Grid Cell Size", &p.grid_cell_size_, 0.001f, 0.01f, "%.4f");
-			ImGui::InputInt("Batch Size", &p.batch_size_, 256, 1024);
+			ImGui::InputInt("Eval Batch Size", &p.batch_size_, 256, 1024);
+			ImGui::InputInt("Ray Batch Size", &p.ray_sampler_batch_size_, 256, 2048);
 			ImGui::InputInt("Max Iterations", &p.udf_max_iterations_, 1000, 8000);
 			ImGui::InputFloat("Tolerance", &p.tol_, 0.0f, 0.0f, "%.6f");
 			ImGui::InputInt("KNN K", &p.knn_k_, 1, 5);
+			ImGui::InputInt("Poisson Target", &p.poisson_eliminate_target_samples_, 1000, 10000);
 			if (ImGui::Button("Recompute Sample KNN"))
 			{
 				std::lock_guard<std::mutex> lock(p.mutex_);
 				recompute_sample_knn_graph(p, p.knn_k_);
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Poisson Eliminate Samples"))
+			{
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				const size_t target = static_cast<size_t>(std::max(1, p.poisson_eliminate_target_samples_));
+				apply_poisson_eliminate_samples(p, target);
 			}
 			if (ImGui::Button("Apply Sampling Filtering"))
 			{
