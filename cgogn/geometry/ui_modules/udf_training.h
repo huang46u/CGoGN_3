@@ -131,6 +131,12 @@ public:
 		NEURAL_MODEL_UDF,
 		NEURAL_MODEL_MF
 	};
+	enum InitialMAMode : uint32
+	{
+		INITIAL_MA_AUTO,
+		INITIAL_MA_DISPLACEMENT,
+		INITIAL_MA_SHRINKING_BALL
+	};
 
 private:
 	struct PointsParameters;
@@ -162,6 +168,7 @@ private:
 		torch::jit::Module neural_udf_model_;
 		std::string neural_udf_model_path_ = "";
 		NeuralModelType neural_model_type_ = NEURAL_MODEL_UDF;
+		InitialMAMode initial_ma_mode_override_ = INITIAL_MA_AUTO;
 		bool udf_input_normalized_ = false;
 		const void* udf_normalized_source_ = nullptr;
 
@@ -242,6 +249,7 @@ private:
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_udf_score_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_boundary_tet_color_ = nullptr;
+		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_non_manifold_color_ = nullptr;
 		std::shared_ptr<NMAttribute<uint32>> edge_degree_ = nullptr;
 
 		std::map<NMFaceKey, NMFace> skeleton_faces_map_;
@@ -319,6 +327,8 @@ private:
 		std::mutex mutex_;
 		bool running_ = false;
 		bool stopping_ = false;
+		bool manual_stop_requested_ = false;
+		bool pending_full_refresh_after_auto_stop_ = false;
 		bool slow_down_ = true;
 		uint32 update_rate_ = 20;
 
@@ -1493,7 +1503,13 @@ protected:
 			if (selected_points_)
 			{
 				PointsParameters& p = points_parameters_[selected_points_];
-				update_render_data(p);
+				if (p.running_)
+					update_render_data(p, true, false);
+				else if (p.pending_full_refresh_after_auto_stop_)
+				{
+					update_render_data(p);
+					p.pending_full_refresh_after_auto_stop_ = false;
+				}
 			}
 		});
 		// Initialize PyTorch device
@@ -1674,6 +1690,8 @@ private:
 		p.skeleton_edge_udf_score_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "edge_udf_score_color");
 		p.skeleton_edge_boundary_tet_color_ =
 			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "boundary_tet_best_edge_color");
+		p.skeleton_edge_non_manifold_color_ =
+			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "non_manifold_edge_color");
 		if (p.grid_cell_size_ > Scalar(0))
 			p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
 		else
@@ -1769,6 +1787,15 @@ private:
 		p.fitting_data_computed_ = true;
 	}
 
+	void compute_fitting_data_with_initial_ma_mode(PointsParameters& p, InitialMAMode mode, bool force_recompute)
+	{
+		const InitialMAMode prev_mode = p.initial_ma_mode_override_;
+		p.initial_ma_mode_override_ = mode;
+		if (force_recompute)
+			p.fitting_data_computed_ = false;
+		compute_fitting_data(p);
+		p.initial_ma_mode_override_ = prev_mode;
+	}
 	void recompute_sample_knn_graph(PointsParameters& p, int requested_k)
 	{
 		if (!p.samples_mesh_ || !p.samples_position_ || !p.samples_normal_ || !p.samples_knn_ || !p.samples_area_)
@@ -2538,9 +2565,12 @@ private:
 		const bool neural_input = (p.input_mode_ == INPUT_NEURAL_UDF && p.neural_udf_loaded_);
 		const bool mf_model = neural_input && (p.neural_model_type_ == NEURAL_MODEL_MF);
 		const bool udf_model = neural_input && (p.neural_model_type_ == NEURAL_MODEL_UDF);
+		const bool force_displacement = (p.initial_ma_mode_override_ == INITIAL_MA_DISPLACEMENT);
+		const bool force_shrinking_ball = (p.initial_ma_mode_override_ == INITIAL_MA_SHRINKING_BALL);
+		const bool use_displacement = force_displacement || (!force_shrinking_ball && udf_model);
 
-		// UDF model: direct MA initialization, no shrinking-ball refinement.
-		if (udf_model)
+		// UDF model (or forced displacement mode): direct MA initialization.
+		if (use_displacement)
 		{
 			parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
 				if (!v.is_valid())
@@ -4209,6 +4239,7 @@ private:
 
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_non_manifold_color_.get());
 		invalidate_topology_stage_snapshot(p);
 	}
 
@@ -4464,6 +4495,7 @@ private:
 
 		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_non_manifold_color_.get());
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
 		invalidate_topology_stage_snapshot(p);
 	}
@@ -4641,9 +4673,20 @@ protected:
 	{
 		parallel_foreach_cell(*p.skeleton_, [&](NMEdge e) {
 			auto in_face = incident_faces(*p.skeleton_, e);
+			const uint32 ide = index_of(*p.skeleton_, e);
+			const uint32 deg = static_cast<uint32>(in_face.size());
 
-			if (in_face.size() == 2)
+			if (ide != INVALID_INDEX && p.edge_degree_)
+				(*p.edge_degree_)[ide] = deg;
+
+			if (deg == 2)
 				value<Vec3>(*p.skeleton_, p.skeleton_edge_color_, e) = Vec3(0.0, 1.0, 0.0);
+			if (p.skeleton_edge_non_manifold_color_)
+			{
+				// Bright color for non-manifold edges, dim color for all others.
+				value<Vec3>(*p.skeleton_, p.skeleton_edge_non_manifold_color_, e) =
+					(deg > 2) ? Vec3(1.0, 0.2, 0.1) : Vec3(0.15, 0.15, 0.15);
+			}
 
 			return true;
 		});
@@ -6439,6 +6482,7 @@ protected:
 
 	void refresh_skeleton_topology_colors(PointsParameters& p)
 	{
+		compute_edge_degree(p);
 		foreach_cell(*p.skeleton_, [&](NMEdge e) {
 			auto in_face = incident_faces(*p.skeleton_, e);
 			if (in_face.size() == 1)
@@ -6457,6 +6501,7 @@ protected:
 		});
 		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_non_manifold_color_.get());
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
 	}
 
@@ -6473,6 +6518,8 @@ protected:
 		p.skeleton_edge_udf_score_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "edge_udf_score_color");
 		p.skeleton_edge_boundary_tet_color_ =
 			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "boundary_tet_best_edge_color");
+		p.skeleton_edge_non_manifold_color_ =
+			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "non_manifold_edge_color");
 	}
 
 	void invalidate_topology_stage_snapshot(PointsParameters& p)
@@ -7312,60 +7359,47 @@ protected:
 	}
 
 protected:
-	void update_render_data(PointsParameters& p)
+	void update_render_data(PointsParameters& p, bool non_blocking_running_lock = false, bool full_refresh = true)
 	{
+		std::unique_lock<std::mutex> lock(p.mutex_, std::defer_lock);
 		if (p.running_)
 		{
-			std::lock_guard<std::mutex> lock(p.mutex_);
-			points_provider_->emit_connectivity_changed(*p.spheres_);
-			points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_position_.get());
-			points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_radius_.get());
-
-			update_spheres_color(p);
-			points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_color_.get());
-
-			parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
-				uint32 v_index = index_of(*p.samples_mesh_, v);
-				PVertex sphere = (*p.samples_sphere_)[v_index];
-				if (sphere.is_valid())
-				{
-					Vec4 c = value<Vec4>(*p.spheres_, p.spheres_cluster_color_, sphere);
-					c[3] = p.spheres_transparency_;
-					(*p.samples_color_)[v_index] = c;
-				}
-				return true;
-			});
-			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
-			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
-
-			compute_skeleton(p);
-		}
-		else
-		{
-			points_provider_->emit_connectivity_changed(*p.spheres_);
-			points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_position_.get());
-			points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_radius_.get());
-
-			update_spheres_color(p);
-			points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_color_.get());
-
-			parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
-				uint32 v_index = index_of(*p.samples_mesh_, v);
-				PVertex sphere = (*p.samples_sphere_)[v_index];
-				if (sphere.is_valid())
-				{
-					Vec4 c = value<Vec4>(*p.spheres_, p.spheres_cluster_color_, sphere);
-					c[3] = p.spheres_transparency_;
-					(*p.samples_color_)[v_index] = c;
-				}
-				return true;
-			});
-			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
-			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
-
-			compute_skeleton(p);
+			if (non_blocking_running_lock)
+			{
+				if (!lock.try_lock())
+					return;
+			}
+			else
+			{
+				lock.lock();
+			}
 		}
 
+		points_provider_->emit_connectivity_changed(*p.spheres_);
+		points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_position_.get());
+		points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_radius_.get());
+
+		update_spheres_color(p);
+		points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_color_.get());
+
+		if (!full_refresh)
+			return;
+
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.samples_mesh_, v);
+			PVertex sphere = (*p.samples_sphere_)[v_index];
+			if (sphere.is_valid())
+			{
+				Vec4 c = value<Vec4>(*p.spheres_, p.spheres_cluster_color_, sphere);
+				c[3] = p.spheres_transparency_;
+				(*p.samples_color_)[v_index] = c;
+			}
+			return true;
+		});
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
+
+		compute_skeleton(p);
 		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
 	}
@@ -7380,10 +7414,13 @@ protected:
 		p.iteration_count_ = 0;
 		p.total_error_diff_ = 0.0;
 		p.last_total_error_ = std::numeric_limits<Scalar>::max();
+		p.manual_stop_requested_ = false;
+		p.pending_full_refresh_after_auto_stop_ = false;
 
 		launch_thread([&, convergence_eps, max_post_convergence_iterations, max_iterations_without_autosplit,
 						  max_iterations_after_reaching_max_spheres]() {
 			bool convergence_reached = false;
+			bool stopped_by_automatic_condition = false;
 			uint32 post_convergence_iterations = 0;
 			bool target_reached_reported = false;
 			bool max_spheres_reached_once = false;
@@ -7444,6 +7481,7 @@ protected:
 						{
 							std::cout << "Auto stop: reached max post-convergence iterations ("
 									  << max_post_convergence_iterations << ")." << std::endl;
+							stopped_by_automatic_condition = true;
 							p.stopping_ = true;
 						}
 					}
@@ -7476,6 +7514,7 @@ protected:
 						{
 							std::cout << "Auto split stop: reached max post-max-sphere iterations ("
 									  << max_iterations_after_reaching_max_spheres << ")." << std::endl;
+							stopped_by_automatic_condition = true;
 							p.stopping_ = true;
 						}
 					}
@@ -7484,6 +7523,7 @@ protected:
 				{
 					std::cout << "Stop: reached max iterations without auto split ("
 							  << max_iterations_without_autosplit << ")." << std::endl;
+					stopped_by_automatic_condition = true;
 					p.stopping_ = true;
 				}
 
@@ -7492,8 +7532,11 @@ protected:
 
 				if (p.stopping_)
 				{
+					const bool should_full_refresh = stopped_by_automatic_condition && !p.manual_stop_requested_;
 					p.stopping_ = false;
 					p.running_ = false;
+					p.manual_stop_requested_ = false;
+					p.pending_full_refresh_after_auto_stop_ = should_full_refresh;
 					break;
 				}
 			}
@@ -7503,11 +7546,12 @@ protected:
 			std::cout << "Nb iterations: " << p.iteration_count_ << std::endl;
 		});
 
-		app_.start_timer(100, [&]() -> bool { return !p.running_; });
+		app_.start_timer(100, [&]() -> bool { return !p.running_ && !p.pending_full_refresh_after_auto_stop_; });
 	}
 
 	void stop_spheres_update(PointsParameters& p)
 	{
+		p.manual_stop_requested_ = true;
 		p.stopping_ = true;
 	}
 
@@ -7869,9 +7913,18 @@ protected:
 		{
 			ImGui::Separator();
 			static uint32 init_max_nb_spheres = 1;
-			if (ImGui::Button("Compute Fitting Data"))
+			if (ImGui::Button("Compute Fitting Data (MA: Displacement)"))
 			{
-				compute_fitting_data(p);
+				compute_fitting_data_with_initial_ma_mode(p, INITIAL_MA_DISPLACEMENT, true);
+				{
+					std::lock_guard<std::mutex> lock(p.mutex_);
+					init_spheres(p, init_max_nb_spheres);
+				}
+				update_render_data(p);
+			}
+			if (ImGui::Button("Compute Fitting Data (MA: Shrinking Ball)"))
+			{
+				compute_fitting_data_with_initial_ma_mode(p, INITIAL_MA_SHRINKING_BALL, true);
 				{
 					std::lock_guard<std::mutex> lock(p.mutex_);
 					init_spheres(p, init_max_nb_spheres);
