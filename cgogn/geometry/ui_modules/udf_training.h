@@ -2907,6 +2907,7 @@ private:
 			const Vec3& vp = (*p.samples_ma_position_)[v_index];
 			Scalar vr = (*p.samples_ma_radius_)[v_index];
 			const Scalar dilation_radius = std::max<Scalar>(vr + Scalar(p.init_dilation_constant_), Scalar(0));
+			const Scalar dilation_radius_sq = dilation_radius * dilation_radius;
 
 			PVertex sphere = add_vertex(*p.spheres_);
 			p.nb_spheres_++;
@@ -2918,45 +2919,45 @@ private:
 				Vec4(0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0,
 					 0.5 + 0.5 * (rand() % 256) / 256.0, 1.0);
 
-			std::vector<PVertex> stack;
-			stack.push_back(v);
-			while (!stack.empty())
-			{
-				PVertex w = stack.back();
-				stack.pop_back();
-				uint32 w_idx = index_of(*p.samples_mesh_, w);
-				(*covered)[w_idx] = true;
+			auto flood_cover = [&](PVertex seed) {
+				if (!seed.is_valid())
+					return;
+				uint32 seed_idx = index_of(*p.samples_mesh_, seed);
+				if (seed_idx == INVALID_INDEX || (*covered)[seed_idx])
+					return;
 
-				// Use KNN for propagation on point cloud
-				for (PVertex u : (*p.samples_knn_)[w_idx])
-				{
-					uint32 u_idx = index_of(*p.samples_mesh_, u);
-					if (!(*covered)[u_idx] &&
-						((*p.samples_position_)[u_idx] - vp).norm() < dilation_radius)
-						stack.push_back(u);
-				}
-			}
-
-			// Also check secondary vertex logic if needed, but for now stick to KNN propagation
-			PVertex secondary = (*p.samples_ma_secondary_vertex_)[v_index];
-			if (secondary.is_valid())
-			{
-				stack.push_back(secondary);
+				std::vector<PVertex> stack;
+				stack.reserve(128);
+				// Mark when enqueued to avoid duplicate pushes through overlapping KNN neighborhoods.
+				(*covered)[seed_idx] = true;
+				stack.push_back(seed);
 				while (!stack.empty())
 				{
 					PVertex w = stack.back();
 					stack.pop_back();
 					uint32 w_idx = index_of(*p.samples_mesh_, w);
-					(*covered)[w_idx] = true;
 
+					// Use KNN for propagation on point cloud
 					for (PVertex u : (*p.samples_knn_)[w_idx])
 					{
 						uint32 u_idx = index_of(*p.samples_mesh_, u);
 						if (!(*covered)[u_idx] &&
-							((*p.samples_position_)[u_idx] - vp).norm() < dilation_radius)
+							((*p.samples_position_)[u_idx] - vp).squaredNorm() < dilation_radius_sq)
+						{
+							(*covered)[u_idx] = true;
 							stack.push_back(u);
+						}
 					}
 				}
+			};
+
+			flood_cover(v);
+
+			// Secondary seed can reach another lobe; skip if already covered to avoid redundant traversal.
+			PVertex secondary = (*p.samples_ma_secondary_vertex_)[v_index];
+			if (secondary.is_valid())
+			{
+				flood_cover(secondary);
 			}
 		}
 
