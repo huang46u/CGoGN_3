@@ -29,6 +29,7 @@
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
 #include <cgogn/rendering/ui_modules/surface_render.h>
 
+#include <atomic>
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 #include <Eigen/Sparse>
@@ -131,6 +132,12 @@ public:
 		NEURAL_MODEL_UDF,
 		NEURAL_MODEL_MF
 	};
+
+	enum ConnectivityMode : uint32
+	{
+		MODE_A_MIXED_KNN = 0,
+		MODE_B_INSIDE_POWER = 1
+	};
 	enum InitialMAMode : uint32
 	{
 		INITIAL_MA_AUTO,
@@ -200,23 +207,61 @@ private:
 		PVertex hovered_sample_;
 		std::vector<uint32> hovered_color_indices_;
 		std::vector<Vec4> hovered_color_backup_;
+		bool filter_positive_projection_ = false;
+		std::vector<uint8_t> last_projection_keep_mask_;
 		std::vector<Vec3> samples_position_backup_;
 		std::vector<Vec3> samples_normal_backup_;
 		bool samples_jitter_backup_valid_ = false;
 		float32 samples_jitter_pos_pct_ = 0.5f;
 		float32 samples_jitter_normal_sigma_ = 0.02f;
 
+		// Alpha-inside samples (inside space, plus cached projection to alpha level set)
+		POINTS* alpha_inside_mesh_ = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> alpha_inside_position_ = nullptr;
+		std::shared_ptr<PAttribute<Vec4>> alpha_inside_color_ = nullptr;
+		std::shared_ptr<PAttribute<PVertex>> alpha_inside_sphere_ = nullptr;
+		std::shared_ptr<PAttribute<std::vector<PVertex>>> alpha_inside_knn_ = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> alpha_inside_projected_position_ = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> alpha_inside_projected_normal_ = nullptr;
+		acc::KDTree<3, uint32>* alpha_inside_kdtree_ = nullptr;
+		std::vector<PVertex> alpha_inside_kdtree_vertices_;
+
 		std::unique_ptr<acc::BVHTreeSpheres<uint32, Vec3>> samples_wn_bvh_;
 		std::vector<Vec3> samples_wn_bvh_centers_;
 		std::vector<Scalar> samples_wn_bvh_radii_;
 		std::unique_ptr<PointFWN<3>> samples_winding_number_;
 		std::vector<PVertex> samples_wn_vertices_;
+		std::unique_ptr<acc::BVHTreeSpheres<uint32, Vec3>> opt_wn_bvh_;
+		std::vector<Vec3> opt_wn_bvh_centers_;
+		std::vector<Scalar> opt_wn_bvh_radii_;
+		std::unique_ptr<PointFWN<3>> opt_winding_number_;
+		std::vector<PVertex> opt_wn_vertices_;
 		Scalar beta_ = Scalar(2.0);
 
 		acc::KDTree<3, uint32>* samples_kdtree_ = nullptr; // KDTree of alpha-expanding samples
 		std::vector<PVertex> samples_kdtree_vertices_;	   // Vertices of alpha-expanding samples in KDTree order
 		acc::KDTree<3, uint32>* samples_ma_kdtree_ = nullptr; // KDTree of sample medial-axis positions
 		std::vector<PVertex> samples_ma_kdtree_vertices_;	   // Vertices in MA KDTree order
+		acc::KDTree<3, uint32>* opt_kdtree_ = nullptr;		 // KDTree of mixed optimization samples
+		std::vector<PVertex> opt_kdtree_vertices_;			   // Vertices in mixed KDTree order
+		acc::KDTree<3, uint32>* opt_ma_kdtree_ = nullptr;	   // KDTree of mixed medial-axis positions
+		std::vector<PVertex> opt_ma_kdtree_vertices_;		   // Vertices in mixed MA KDTree order
+
+		// Mixed optimization cloud (surface samples + projected inside samples)
+		POINTS* opt_mesh_ = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> opt_position_ = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> opt_normal_ = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> opt_area_ = nullptr;
+		std::shared_ptr<PAttribute<std::vector<PVertex>>> opt_knn_ = nullptr;
+		std::shared_ptr<PAttribute<Spherical_Quadric>> opt_quadric_ = nullptr;
+		std::shared_ptr<PAttribute<Line_Quadric>> opt_line_quadric_ = nullptr;
+		std::shared_ptr<PAttribute<PVertex>> opt_sphere_ = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> opt_error_ = nullptr;
+		std::shared_ptr<PAttribute<Vec4>> opt_color_ = nullptr;
+		std::shared_ptr<PAttribute<Vec4>> opt_normal_color_ = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> opt_ma_position_ = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> opt_ma_radius_ = nullptr;
+		std::shared_ptr<PAttribute<PVertex>> opt_ma_secondary_vertex_ = nullptr;
 
 		acc::KDTree<3, uint32>* input_kdtree_ = nullptr; // KDTree of input points
 		std::vector<PVertex> input_kdtree_vertices_;	 // Vertices of input points in KDTree order
@@ -231,6 +276,7 @@ private:
 		std::shared_ptr<PAttribute<std::vector<PVertex>>> spheres_cluster_ = nullptr; // Sample points in cluster
 		std::shared_ptr<PAttribute<Scalar>> spheres_cluster_area_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> spheres_cluster_color_ = nullptr;
+		std::shared_ptr<PAttribute<Vec4>> spheres_topup_zero_inside_color_ = nullptr;
 		std::shared_ptr<PAttribute<std::set<PVertex>>> spheres_neighbor_clusters_ = nullptr;
 		std::shared_ptr<PAttribute<PVertex>> spheres_parent_ = nullptr;
 		std::shared_ptr<PAttribute<bool>> spheres_do_not_split_ = nullptr;
@@ -267,6 +313,8 @@ private:
 		bool lock_skeleton_connectivity_ = false;
 		DistanceMode distance_mode_ = LINE_QUADRIC_DISTANCE;
 		bool use_local_clusters_ = false;
+		uint32 local_cluster_connectivity_refresh_interval_ = 10;
+		ConnectivityMode connectivity_mode_ = MODE_A_MIXED_KNN;
 		bool auto_stop_ = false;
 		bool auto_split_ = false;
 		AutoSplitMode auto_split_mode_ = ERROR_THRESHOLD;
@@ -297,15 +345,31 @@ private:
 		float sample_radius_ = 0.0025f;
 		int sample_iterations_ = 30; // Max attempts per point
 		int knn_k_ = 10;
+		int alpha_inside_knn_k_ = 10;
 		int seed_ = 42;
 		int cluster_min_points_ = 20;
 		float grid_cell_size_ = 0.0025f;
 		// Neural UDF Sampling
 		int num_alpha_samples_ = 200000;
+		int num_alpha_inside_samples_ = 200000;
 		int poisson_eliminate_target_samples_ = 50000;
 		int batch_size_ = 1310640;	   // NN evaluation batch
 		int ray_sampler_batch_size_ = 4096; // Rays per sampling iteration
 		float tol_ = 1e-5f; // convergence tolerance
+		float alpha_inside_poisson_radius_ = 0.0005f;
+		int alpha_inside_min_points_per_sphere_ = 100;
+		float alpha_inside_topup_bbox_expand_ = 0.001f;
+		bool topup_inside_before_reassign_in_loop_ = true;
+		bool inside_skeleton_build_topup_first_ = false;
+		std::vector<PVertex> spheres_pending_delete_;
+		uint32 pending_delete_count_ = 0;
+		bool force_full_refresh_on_stop_ = false;
+		std::string stop_reason_;
+		uint32 last_surface_count_ = 0;
+		uint32 last_inside_count_ = 0;
+		uint32 last_mixed_count_ = 0;
+		bool mixed_cloud_dirty_ = true;
+		std::string last_update_stage_ = "idle";
 
 		// Neural UDF ray sampling parameters
 		float udf_bbox_expand_ = 0.05f;
@@ -338,6 +402,12 @@ private:
 				delete samples_kdtree_;
 			if (samples_ma_kdtree_)
 				delete samples_ma_kdtree_;
+			if (opt_kdtree_)
+				delete opt_kdtree_;
+			if (opt_ma_kdtree_)
+				delete opt_ma_kdtree_;
+			if (alpha_inside_kdtree_)
+				delete alpha_inside_kdtree_;
 			if (input_kdtree_)
 				delete input_kdtree_;
 		}
@@ -472,6 +542,23 @@ public:
 		return params;
 	}
 
+	std::pair<Vec3, Vec3> model_domain_bbox(const PointsParameters& p) const
+	{
+		// Projection domain should follow the neural model's native normalization.
+		if (p.input_mode_ == INPUT_NEURAL_UDF)
+		{
+			switch (p.neural_model_type_)
+			{
+			case NEURAL_MODEL_UDF:
+				return {Vec3(-0.5, -0.5, -0.5), Vec3(0.5, 0.5, 0.5)};
+			case NEURAL_MODEL_MF:
+			default:
+				return {Vec3(0, 0, 0), Vec3(1, 1, 1)};
+			}
+		}
+		return {Vec3(0, 0, 0), Vec3(1, 1, 1)};
+	}
+
 	std::pair<Vec3, Vec3> compute_sampling_bbox(PointsParameters& p) const
 	{
 		Vec3 bbox_min(0, 0, 0);
@@ -566,6 +653,1357 @@ public:
 		p.udf_normalized_source_ = source;
 	}
 
+	void build_alpha_inside_kdtree(PointsParameters& p)
+	{
+		if (p.alpha_inside_kdtree_)
+		{
+			delete p.alpha_inside_kdtree_;
+			p.alpha_inside_kdtree_ = nullptr;
+		}
+		p.alpha_inside_kdtree_vertices_.clear();
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_)
+			return;
+		const uint32 n = nb_cells<PVertex>(*p.alpha_inside_mesh_);
+		if (n == 0)
+			return;
+		std::vector<Vec3> points;
+		points.reserve(n);
+		p.alpha_inside_kdtree_vertices_.reserve(n);
+		foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) -> bool {
+			const uint32 vid = index_of(*p.alpha_inside_mesh_, v);
+			points.push_back((*p.alpha_inside_position_)[vid]);
+			p.alpha_inside_kdtree_vertices_.push_back(v);
+			return true;
+		});
+		p.alpha_inside_kdtree_ = new acc::KDTree<3, uint32>(points);
+	}
+
+	void compute_alpha_inside_knn_graph(PointsParameters& p)
+	{
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_kdtree_ || !p.alpha_inside_position_ || !p.alpha_inside_knn_)
+			return;
+		const int k = std::max(1, p.alpha_inside_knn_k_);
+		parallel_foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) -> bool {
+			const uint32 vid = index_of(*p.alpha_inside_mesh_, v);
+			const Vec3& pt = (*p.alpha_inside_position_)[vid];
+			std::vector<std::pair<uint32, Scalar>> knn_res;
+			p.alpha_inside_kdtree_->find_nns(pt, k + 1, &knn_res);
+			auto& knn = (*p.alpha_inside_knn_)[vid];
+			knn.clear();
+			knn.reserve(static_cast<size_t>(k));
+			for (const auto& r : knn_res)
+			{
+				PVertex nb = p.alpha_inside_kdtree_vertices_[r.first];
+				if (nb == v)
+					continue;
+				knn.push_back(nb);
+				if (static_cast<int>(knn.size()) >= k)
+					break;
+			}
+			return true;
+		});
+	}
+
+	void mark_mixed_optimization_cloud_dirty(PointsParameters& p)
+	{
+		p.mixed_cloud_dirty_ = true;
+	}
+
+	void ensure_mixed_optimization_cloud_ready(PointsParameters& p)
+	{
+		if (!p.mixed_cloud_dirty_)
+			return;
+		rebuild_mixed_optimization_cloud(p);
+	}
+	void clear_alpha_inside_samples(PointsParameters& p)
+	{
+		mark_mixed_optimization_cloud_dirty(p);
+		if (p.alpha_inside_mesh_)
+			points_provider_->clear_mesh(*p.alpha_inside_mesh_);
+		if (p.alpha_inside_kdtree_)
+		{
+			delete p.alpha_inside_kdtree_;
+			p.alpha_inside_kdtree_ = nullptr;
+		}
+		p.alpha_inside_kdtree_vertices_.clear();
+		p.last_inside_count_ = 0;
+		if (p.alpha_inside_mesh_)
+			points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
+	}
+
+	void gather_alpha_inside_state(PointsParameters& p, std::vector<Vec3>& inside_points, std::vector<Vec3>& projected,
+								   std::vector<Vec3>& projected_normals, std::vector<PVertex>& owners)
+	{
+		inside_points.clear();
+		projected.clear();
+		projected_normals.clear();
+		owners.clear();
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_)
+			return;
+		const uint32 n = nb_cells<PVertex>(*p.alpha_inside_mesh_);
+		inside_points.reserve(n);
+		projected.reserve(n);
+		projected_normals.reserve(n);
+		owners.reserve(n);
+		foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) -> bool {
+			const uint32 vid = index_of(*p.alpha_inside_mesh_, v);
+			inside_points.push_back((*p.alpha_inside_position_)[vid]);
+			projected.push_back(p.alpha_inside_projected_position_ ? (*p.alpha_inside_projected_position_)[vid]
+																  : (*p.alpha_inside_position_)[vid]);
+			projected_normals.push_back(p.alpha_inside_projected_normal_ ? (*p.alpha_inside_projected_normal_)[vid]
+																		: Vec3(0, 0, 1));
+			owners.push_back(p.alpha_inside_sphere_ ? (*p.alpha_inside_sphere_)[vid] : PVertex());
+			return true;
+		});
+	}
+
+	void write_alpha_inside_samples(PointsParameters& p, const std::vector<Vec3>& inside_points,
+									const std::vector<Vec3>& projected_points,
+									const std::vector<Vec3>& projected_normals,
+									const std::vector<PVertex>* inside_owners = nullptr)
+	{
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_ || !p.alpha_inside_projected_position_ ||
+			!p.alpha_inside_projected_normal_)
+			return;
+		mark_mixed_optimization_cloud_dirty(p);
+		points_provider_->clear_mesh(*p.alpha_inside_mesh_);
+		const size_t n = inside_points.size();
+		for (size_t i = 0; i < n; ++i)
+		{
+			PVertex v = add_vertex(*p.alpha_inside_mesh_);
+			const uint32 vid = index_of(*p.alpha_inside_mesh_, v);
+			(*p.alpha_inside_position_)[vid] = inside_points[i];
+			(*p.alpha_inside_projected_position_)[vid] =
+				(i < projected_points.size()) ? projected_points[i] : inside_points[i];
+			Vec3 nrm = (i < projected_normals.size()) ? projected_normals[i] : Vec3(0, 0, 1);
+			if (!nrm.allFinite() || nrm.squaredNorm() < Scalar(1e-12))
+				nrm = Vec3(0, 0, 1);
+			else
+				nrm.normalize();
+			(*p.alpha_inside_projected_normal_)[vid] = nrm;
+
+			PVertex owner;
+			if (inside_owners && i < inside_owners->size())
+				owner = (*inside_owners)[i];
+			if (p.alpha_inside_sphere_)
+				(*p.alpha_inside_sphere_)[vid] = owner;
+			if (p.alpha_inside_knn_)
+				(*p.alpha_inside_knn_)[vid].clear();
+			if (p.alpha_inside_color_)
+			{
+				Vec4 c(0.15f, 0.55f, 0.95f, 1.0f);
+				if (owner.is_valid() && p.spheres_ && p.spheres_cluster_color_)
+				{
+					const uint32 sid = index_of(*p.spheres_, owner);
+					if (sid != INVALID_INDEX && sid < nb_cells<PVertex>(*p.spheres_))
+						c = (*p.spheres_cluster_color_)[sid];
+				}
+				(*p.alpha_inside_color_)[vid] = c;
+			}
+		}
+		build_alpha_inside_kdtree(p);
+		compute_alpha_inside_knn_graph(p);
+		p.last_inside_count_ = static_cast<uint32>(n);
+		points_provider_->emit_connectivity_changed(*p.alpha_inside_mesh_);
+		points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_position_.get());
+		points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_position_.get());
+		points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_projected_normal_.get());
+		if (p.alpha_inside_color_)
+			points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_color_.get());
+	}
+
+	void filter_alpha_inside_points_by_input_distance(PointsParameters& p, std::vector<Vec3>& inside_points,
+													  std::vector<Vec3>* projected_points = nullptr,
+													  std::vector<Vec3>* projected_normals = nullptr,
+													  std::vector<PVertex>* owners = nullptr)
+	{
+		if (inside_points.empty())
+			return;
+		const Scalar max_dist = std::max<Scalar>(Scalar(0), Scalar(p.alpha_));
+		if (max_dist <= Scalar(0))
+			return;
+		std::vector<uint8_t> keep(inside_points.size(), uint8_t(1));
+		if (p.input_kdtree_)
+		{
+			for (size_t i = 0; i < inside_points.size(); ++i)
+			{
+				std::pair<uint32, Scalar> nn;
+				if (!p.input_kdtree_->find_nn(inside_points[i], &nn, max_dist))
+					keep[i] = uint8_t(0);
+			}
+		}
+		else
+		{
+			build_surface_bvh();
+			if (!surface_bvh_)
+				return;
+			for (size_t i = 0; i < inside_points.size(); ++i)
+			{
+				std::pair<uint32, Vec3> cp;
+				if (!surface_bvh_->closest_point(inside_points[i], &cp, max_dist))
+					keep[i] = uint8_t(0);
+			}
+		}
+
+		auto compact_vec3 = [&](std::vector<Vec3>& v) {
+			std::vector<Vec3> out;
+			out.reserve(v.size());
+			for (size_t i = 0; i < v.size() && i < keep.size(); ++i)
+				if (keep[i])
+					out.push_back(v[i]);
+			v.swap(out);
+		};
+		compact_vec3(inside_points);
+		if (projected_points)
+			compact_vec3(*projected_points);
+		if (projected_normals)
+			compact_vec3(*projected_normals);
+		if (owners)
+		{
+			std::vector<PVertex> out;
+			out.reserve(owners->size());
+			for (size_t i = 0; i < owners->size() && i < keep.size(); ++i)
+				if (keep[i])
+					out.push_back((*owners)[i]);
+			owners->swap(out);
+		}
+	}
+
+	bool filter_alpha_inside_projected_by_model(PointsParameters& p, std::vector<Vec3>& inside_points,
+												std::vector<Vec3>& projected_points,
+												std::vector<Vec3>& projected_normals,
+												std::vector<PVertex>* owners = nullptr)
+	{
+		if (inside_points.empty())
+			return true;
+		if (projected_points.size() != inside_points.size() || projected_normals.size() != inside_points.size())
+		{
+			std::cerr << "[AlphaInsideProjectionFilter] skipped: size mismatch inside=" << inside_points.size()
+					  << " projected=" << projected_points.size() << " normals=" << projected_normals.size() << std::endl;
+			return false;
+		}
+		if (p.input_mode_ != INPUT_NEURAL_UDF)
+			return true;
+		if (!p.neural_udf_loaded_)
+		{
+			std::cerr << "[AlphaInsideProjectionFilter] skipped: neural model not loaded." << std::endl;
+			return false;
+		}
+
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		if (!udf.is_loaded())
+		{
+			std::cerr << "[AlphaInsideProjectionFilter] skipped: neural model not ready." << std::endl;
+			return false;
+		}
+
+		const size_t total = projected_points.size();
+		const size_t batch = std::max<size_t>(1, static_cast<size_t>(p.batch_size_));
+		const Scalar proj_tol = Scalar(1e-5);
+		std::vector<uint8_t> keep(total, uint8_t(1));
+		uint32 reject_value = 0;
+		uint32 reject_sdf = 0;
+
+		for (size_t offset = 0; offset < total; offset += batch)
+		{
+			const size_t count = std::min(batch, total - offset);
+			auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+			if (device_.is_cuda())
+				cpu_opts = cpu_opts.pinned_memory(true);
+			torch::Tensor pts_cpu = torch::empty({static_cast<int64_t>(count), 3}, cpu_opts);
+			auto pts_acc = pts_cpu.accessor<float, 2>();
+			for (size_t i = 0; i < count; ++i)
+			{
+				const Vec3& pnt = projected_points[offset + i];
+				pts_acc[static_cast<long>(i)][0] = static_cast<float>(pnt.x());
+				pts_acc[static_cast<long>(i)][1] = static_cast<float>(pnt.y());
+				pts_acc[static_cast<long>(i)][2] = static_cast<float>(pnt.z());
+			}
+
+			if (p.neural_model_type_ == NEURAL_MODEL_MF)
+			{
+				auto [values_t, sdf_t] = udf.forward_values_sdf_gpu(pts_cpu);
+				if (!values_t.defined() || !sdf_t.defined())
+				{
+					std::cerr << "[AlphaInsideProjectionFilter][MF] forward_values_sdf_gpu failed." << std::endl;
+					return false;
+				}
+				if (values_t.dim() == 2 && values_t.size(1) == 1)
+					values_t = values_t.squeeze(1);
+				if (sdf_t.dim() == 2 && sdf_t.size(1) == 1)
+					sdf_t = sdf_t.squeeze(1);
+				torch::Tensor values_cpu = values_t.to(torch::kCPU).contiguous();
+				torch::Tensor sdf_cpu = sdf_t.to(torch::kCPU).contiguous();
+				auto values_acc = values_cpu.accessor<float, 1>();
+				auto sdf_acc = sdf_cpu.accessor<float, 1>();
+				for (size_t i = 0; i < count; ++i)
+				{
+					const bool value_ok = static_cast<Scalar>(values_acc[static_cast<long>(i)]) <= p.alpha_;
+					const bool sdf_ok = static_cast<Scalar>(sdf_acc[static_cast<long>(i)]) < Scalar(0);
+					if (!value_ok || !sdf_ok)
+					{
+						keep[offset + i] = uint8_t(0);
+						if (!value_ok)
+							++reject_value;
+						if (!sdf_ok)
+							++reject_sdf;
+					}
+				}
+			}
+			else
+			{
+				torch::Tensor values_t = udf.forward_values_gpu(pts_cpu);
+				if (!values_t.defined())
+				{
+					std::cerr << "[AlphaInsideProjectionFilter][UDF] forward_values_gpu failed." << std::endl;
+					return false;
+				}
+				if (values_t.dim() == 2 && values_t.size(1) == 1)
+					values_t = values_t.squeeze(1);
+				torch::Tensor values_cpu = values_t.to(torch::kCPU).contiguous();
+				auto values_acc = values_cpu.accessor<float, 1>();
+				for (size_t i = 0; i < count; ++i)
+				{
+					const Scalar v = static_cast<Scalar>(values_acc[static_cast<long>(i)]);
+					if (std::abs(v - p.alpha_) > proj_tol)
+					{
+						keep[offset + i] = uint8_t(0);
+						++reject_value;
+					}
+				}
+			}
+		}
+
+		const size_t before = total;
+		auto compact_vec3 = [&](std::vector<Vec3>& vec) {
+			std::vector<Vec3> out;
+			out.reserve(vec.size());
+			for (size_t i = 0; i < vec.size() && i < keep.size(); ++i)
+				if (keep[i])
+					out.push_back(vec[i]);
+			vec.swap(out);
+		};
+		compact_vec3(inside_points);
+		compact_vec3(projected_points);
+		compact_vec3(projected_normals);
+		if (owners)
+		{
+			std::vector<PVertex> out;
+			out.reserve(owners->size());
+			for (size_t i = 0; i < owners->size() && i < keep.size(); ++i)
+				if (keep[i])
+					out.push_back((*owners)[i]);
+			owners->swap(out);
+		}
+		const size_t kept = projected_points.size();
+		if (p.neural_model_type_ == NEURAL_MODEL_MF)
+		{
+			std::cout << "[AlphaInsideProjectionFilter][MF] " << before << " -> " << kept
+					  << " kept, reject_value=" << reject_value << " reject_sdf=" << reject_sdf << std::endl;
+		}
+		else
+		{
+			std::cout << "[AlphaInsideProjectionFilter][UDF] " << before << " -> " << kept
+					  << " kept, reject_abs_udf=" << reject_value << " tol=" << proj_tol << std::endl;
+		}
+		return true;
+	}
+
+	struct PowerSphereSnapshot
+	{
+		std::vector<PVertex> spheres;
+		std::vector<uint32> sphere_indices;
+		std::vector<Vec3> centers;
+		std::vector<Scalar> radii;
+	};
+
+	bool build_power_sphere_snapshot(PointsParameters& p, PowerSphereSnapshot& snap)
+	{
+		snap.spheres.clear();
+		snap.sphere_indices.clear();
+		snap.centers.clear();
+		snap.radii.clear();
+		if (!p.spheres_ || !p.spheres_position_ || !p.spheres_radius_)
+			return false;
+		foreach_cell(*p.spheres_, [&](PVertex s) -> bool {
+			const uint32 sid = index_of(*p.spheres_, s);
+			snap.spheres.push_back(s);
+			snap.sphere_indices.push_back(sid);
+			snap.centers.push_back((*p.spheres_position_)[sid]);
+			snap.radii.push_back((*p.spheres_radius_)[sid]);
+			return true;
+		});
+		return !snap.spheres.empty();
+	}
+
+	int closest_power_sphere(const PowerSphereSnapshot& snap, const Vec3& pnt)
+	{
+		if (snap.spheres.empty())
+			return -1;
+		Scalar min_pd = std::numeric_limits<Scalar>::max();
+		int best = -1;
+		for (size_t i = 0; i < snap.spheres.size(); ++i)
+		{
+			const Vec3 d = pnt - snap.centers[i];
+			const Scalar pd = d.squaredNorm() - snap.radii[i] * snap.radii[i];
+			if (pd < min_pd)
+			{
+				min_pd = pd;
+				best = static_cast<int>(i);
+			}
+		}
+		return best;
+	}
+
+	void assign_alpha_inside_sphere_power(PointsParameters& p)
+	{
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_ || !p.alpha_inside_sphere_)
+			return;
+		PowerSphereSnapshot snap;
+		if (!build_power_sphere_snapshot(p, snap))
+		{
+			p.alpha_inside_sphere_->fill(PVertex());
+			return;
+		}
+		parallel_foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) -> bool {
+			const uint32 vid = index_of(*p.alpha_inside_mesh_, v);
+			const int best = closest_power_sphere(snap, (*p.alpha_inside_position_)[vid]);
+			PVertex owner = (best >= 0) ? snap.spheres[static_cast<size_t>(best)] : PVertex();
+			(*p.alpha_inside_sphere_)[vid] = owner;
+			if (p.alpha_inside_color_)
+			{
+				Vec4 c(0.15f, 0.55f, 0.95f, 1.0f);
+				if (owner.is_valid() && p.spheres_cluster_color_)
+				{
+					const uint32 sid = index_of(*p.spheres_, owner);
+					if (sid != INVALID_INDEX && sid < nb_cells<PVertex>(*p.spheres_))
+						c = (*p.spheres_cluster_color_)[sid];
+				}
+				(*p.alpha_inside_color_)[vid] = c;
+			}
+			return true;
+		});
+		if (p.alpha_inside_color_)
+			points_provider_->emit_attribute_changed(*p.alpha_inside_mesh_, p.alpha_inside_color_.get());
+	}
+
+	void set_alpha_inside_samples_with_projection(PointsParameters& p, std::vector<Vec3> inside_points)
+	{
+		filter_alpha_inside_points_by_input_distance(p, inside_points);
+		std::vector<Vec3> projected;
+		std::vector<Vec3> normals;
+		if (!inside_points.empty())
+		{
+			auto proj = project_points_to_alpha_gpu(p, inside_points);
+			projected = std::move(proj.first);
+			normals = std::move(proj.second);
+			if (projected.size() != inside_points.size() || normals.size() != inside_points.size())
+			{
+				projected.resize(inside_points.size());
+				normals.resize(inside_points.size(), Vec3(0, 0, 1));
+				for (size_t i = 0; i < inside_points.size(); ++i)
+					if (!projected[i].allFinite())
+						projected[i] = inside_points[i];
+			}
+			filter_alpha_inside_projected_by_model(p, inside_points, projected, normals, nullptr);
+		}
+		write_alpha_inside_samples(p, inside_points, projected, normals, nullptr);
+		if (p.spheres_ && nb_cells<PVertex>(*p.spheres_) > 0)
+			assign_alpha_inside_sphere_power(p);
+	}
+
+	void ensure_alpha_inside_min_points_per_sphere(PointsParameters& p, std::vector<Vec3>& inside_points,
+												   std::vector<PVertex>& inside_owners)
+	{
+		const int min_points = std::max(0, p.alpha_inside_min_points_per_sphere_);
+		if (min_points <= 0)
+		{
+			std::cout << "[AlphaInsideTopup] skipped: min_per_sphere<=0" << std::endl;
+			return;
+		}
+		PowerSphereSnapshot snap;
+		if (!build_power_sphere_snapshot(p, snap))
+		{
+			std::cout << "[AlphaInsideTopup] aborted: no valid spheres." << std::endl;
+			return;
+		}
+		if (snap.spheres.empty())
+			return;
+		std::unordered_map<uint32, std::size_t> sphere_to_snap;
+		sphere_to_snap.reserve(snap.sphere_indices.size());
+		for (std::size_t i = 0; i < snap.sphere_indices.size(); ++i)
+			sphere_to_snap.emplace(snap.sphere_indices[i], i);
+
+		inside_owners.resize(inside_points.size());
+		for (std::size_t i = 0; i < inside_points.size(); ++i)
+		{
+			const int owner = closest_power_sphere(snap, inside_points[i]);
+			inside_owners[i] = (owner >= 0) ? snap.spheres[static_cast<std::size_t>(owner)] : PVertex();
+		}
+
+		auto build_cluster_boxes = [&](std::vector<Vec3>& box_min, std::vector<Vec3>& box_max,
+									   std::vector<int>& cluster_sizes, Scalar expand, int& valid_boxes) {
+			box_min.assign(snap.spheres.size(), Vec3(0, 0, 0));
+			box_max.assign(snap.spheres.size(), Vec3(0, 0, 0));
+			cluster_sizes.assign(snap.spheres.size(), 0);
+			std::vector<bool> has_box(snap.spheres.size(), false);
+			valid_boxes = 0;
+
+			for (std::size_t pid = 0; pid < inside_points.size(); ++pid)
+			{
+				std::size_t i = static_cast<std::size_t>(-1);
+				if (pid < inside_owners.size() && inside_owners[pid].is_valid() && p.spheres_)
+				{
+					const uint32 sid = index_of(*p.spheres_, inside_owners[pid]);
+					auto it = sphere_to_snap.find(sid);
+					if (it != sphere_to_snap.end())
+						i = it->second;
+				}
+				else
+				{
+					const int owner = closest_power_sphere(snap, inside_points[pid]);
+					if (owner >= 0)
+						i = static_cast<std::size_t>(owner);
+				}
+				if (i == static_cast<std::size_t>(-1))
+					continue;
+				const Vec3& pt = inside_points[pid];
+				if (!has_box[i])
+				{
+					box_min[i] = pt;
+					box_max[i] = pt;
+					has_box[i] = true;
+				}
+				else
+				{
+					box_min[i] = box_min[i].cwiseMin(pt);
+					box_max[i] = box_max[i].cwiseMax(pt);
+				}
+				++cluster_sizes[i];
+			}
+
+			if (p.samples_mesh_ && p.samples_position_)
+			{
+				foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
+					const uint32 vid = index_of(*p.samples_mesh_, v);
+					if (vid == INVALID_INDEX)
+						return true;
+					const Vec3& pos = (*p.samples_position_)[vid];
+					const int owner = closest_power_sphere(snap, pos);
+					if (owner < 0)
+						return true;
+					const size_t i = static_cast<size_t>(owner);
+					if (!has_box[i])
+					{
+						box_min[i] = pos;
+						box_max[i] = pos;
+						has_box[i] = true;
+					}
+					else
+					{
+						box_min[i] = box_min[i].cwiseMin(pos);
+						box_max[i] = box_max[i].cwiseMax(pos);
+					}
+					++cluster_sizes[i];
+					return true;
+				});
+			}
+
+			for (size_t i = 0; i < snap.spheres.size(); ++i)
+			{
+				if (!has_box[i])
+					continue;
+				const Vec3 e(expand, expand, expand);
+				box_min[i] = box_min[i] - e;
+				box_max[i] = box_max[i] + e;
+				++valid_boxes;
+			}
+		};
+
+		std::vector<int> owned_counts(snap.spheres.size(), 0);
+		for (std::size_t pid = 0; pid < inside_points.size(); ++pid)
+		{
+			if (pid < inside_owners.size() && inside_owners[pid].is_valid() && p.spheres_)
+			{
+				const uint32 sid = index_of(*p.spheres_, inside_owners[pid]);
+				auto it = sphere_to_snap.find(sid);
+				if (it != sphere_to_snap.end())
+					++owned_counts[it->second];
+				continue;
+			}
+			const int owner = closest_power_sphere(snap, inside_points[pid]);
+			if (owner >= 0)
+				++owned_counts[static_cast<size_t>(owner)];
+		}
+		std::vector<int> deficits(snap.spheres.size(), 0);
+		std::vector<int> initial_deficits(snap.spheres.size(), 0);
+		for (size_t i = 0; i < snap.spheres.size(); ++i)
+		{
+			const int need = std::max(0, min_points - owned_counts[i]);
+			deficits[i] = need;
+			initial_deficits[i] = need;
+		}
+
+		int total_need = 0;
+		for (int d : deficits)
+			if (d > 0)
+				total_need += d;
+		if (total_need <= 0)
+		{
+			std::cout << "[AlphaInsideTopup] already satisfied: spheres=" << snap.spheres.size()
+					  << " min_per_sphere=" << min_points << " inside_points=" << inside_points.size() << std::endl;
+			return;
+		}
+
+		const Scalar poisson_r = (p.alpha_inside_poisson_radius_ > Scalar(0)) ? Scalar(p.alpha_inside_poisson_radius_)
+																				: Scalar(p.grid_cell_size_);
+		const Scalar expand = (p.alpha_inside_topup_bbox_expand_ > 0.0f) ? Scalar(p.alpha_inside_topup_bbox_expand_)
+																		 : std::max(poisson_r, Scalar(p.grid_cell_size_));
+		std::vector<Vec3> cluster_box_min;
+		std::vector<Vec3> cluster_box_max;
+		std::vector<int> cluster_sizes;
+		int valid_cluster_boxes = 0;
+		build_cluster_boxes(cluster_box_min, cluster_box_max, cluster_sizes, expand, valid_cluster_boxes);
+		std::vector<int> raw_cluster_sizes = cluster_sizes;
+		std::vector<uint8_t> zero_start_sphere(snap.spheres.size(), uint8_t(0));
+		std::vector<uint8_t> zero_start_bbox_fallback(snap.spheres.size(), uint8_t(0));
+		auto sphere_bbox_with_expand = [&](size_t i) {
+			const Scalar base_r = std::max(Scalar(0), snap.radii[i]);
+			const Scalar half = std::max(base_r, std::max(poisson_r, Scalar(p.grid_cell_size_))) + expand;
+			const Vec3 e(half, half, half);
+			return std::make_pair(snap.centers[i] - e, snap.centers[i] + e);
+		};
+		for (size_t i = 0; i < snap.spheres.size(); ++i)
+		{
+			if (owned_counts[i] != 0 || deficits[i] <= 0)
+				continue;
+			zero_start_sphere[i] = uint8_t(1);
+			zero_start_bbox_fallback[i] = uint8_t(1);
+			auto bb = sphere_bbox_with_expand(i);
+			cluster_box_min[i] = bb.first;
+			cluster_box_max[i] = bb.second;
+			if (cluster_sizes[i] <= 0)
+				cluster_sizes[i] = 1;
+		}
+		if (valid_cluster_boxes == 0)
+		{
+			std::cout << "[AlphaInsideTopup] aborted: no valid cluster bbox found. "
+					  << "Please compute clusters first." << std::endl;
+			return;
+		}
+
+		const bool use_udf_value_filter =
+			(p.input_mode_ == INPUT_NEURAL_UDF && p.neural_model_type_ == NEURAL_MODEL_UDF);
+		const bool skip_input_filter_for_mf =
+			(p.input_mode_ == INPUT_NEURAL_UDF && p.neural_model_type_ == NEURAL_MODEL_MF);
+		if (use_udf_value_filter && !p.neural_udf_loaded_)
+		{
+			std::cout << "[AlphaInsideTopup] aborted: neural UDF model not loaded for udf(x)<alpha input filter."
+					  << std::endl;
+			return;
+		}
+		const Scalar max_input_dist = std::max(Scalar(0), Scalar(p.alpha_));
+		const bool has_input_kdtree = (p.input_kdtree_ != nullptr && !p.input_kdtree_vertices_.empty());
+		if (!use_udf_value_filter && !skip_input_filter_for_mf && !has_input_kdtree)
+		{
+			build_surface_bvh();
+			if (!surface_bvh_)
+			{
+				std::cout << "[AlphaInsideTopup] aborted: no input distance source." << std::endl;
+				return;
+			}
+		}
+
+		auto pass_input_filter = [&](const Vec3& pos) -> bool {
+			if (use_udf_value_filter)
+			{
+				Scalar udf_value = Scalar(0);
+				Vec3 grad(0, 0, 0);
+				if (!eval_udf_and_grad(p, pos, udf_value, grad))
+					return false;
+				return udf_value < p.alpha_;
+			}
+			if (skip_input_filter_for_mf)
+				return true;
+			if (has_input_kdtree)
+			{
+				std::pair<uint32, Scalar> nn;
+				return p.input_kdtree_->find_nn(pos, &nn, max_input_dist);
+			}
+			std::pair<uint32, Vec3> cp;
+			return surface_bvh_->closest_point(pos, &cp, max_input_dist);
+		};
+
+		const char* input_filter_desc =
+			use_udf_value_filter ? "udf(x)<alpha"
+								 : (skip_input_filter_for_mf ? "deferred(MF-final-filter)" : "surface_distance<=alpha");
+		std::cout << "[AlphaInsideTopup] begin spheres=" << snap.spheres.size() << " min_per_sphere=" << min_points
+				  << " poisson_r=" << poisson_r << " bbox_expand=" << expand
+				  << " initial_inside_points=" << inside_points.size() << " valid_cluster_boxes=" << valid_cluster_boxes
+				  << " total_need=" << total_need
+				  << " input_filter=" << input_filter_desc << std::endl;
+		const int udf_input_filter_batch_size =
+			std::max(1, p.batch_size_);
+		constexpr std::size_t kTopupLogStride = 200;
+		for (size_t i = 0; i < snap.spheres.size(); ++i)
+		{
+			if ((i % kTopupLogStride) != 0)
+				continue;
+			std::cout << "[AlphaInsideTopup][SphereInit] sphere_rank=" << i
+					  << " sphere_mesh_index=" << snap.sphere_indices[i]
+					  << " existing=" << owned_counts[i] << " need=" << initial_deficits[i]
+					  << " cluster_points_raw=" << raw_cluster_sizes[i]
+					  << " cluster_points_effective=" << cluster_sizes[i]
+					  << " bbox_source=" << (zero_start_bbox_fallback[i] ? "sphere_fallback" : "cluster_box")
+					  << " has_bbox=" << (cluster_sizes[i] > 0 ? "yes" : "no") << std::endl;
+        }
+
+		SpatialGrid inside_grid(poisson_r);
+		for (size_t i = 0; i < inside_points.size(); ++i)
+			inside_grid.insert(inside_points[i], static_cast<uint32>(i));
+		std::mt19937 gen(static_cast<uint32>(p.seed_) + 24681357u);
+
+		int total_added = 0;
+		std::vector<int> attempts_per_sphere(snap.spheres.size(), 0);
+		std::vector<int> accepted_per_sphere(snap.spheres.size(), 0);
+		std::vector<int> zero_attempts_per_sphere(snap.spheres.size(), 0);
+		std::vector<int> zero_reject_input_per_sphere(snap.spheres.size(), 0);
+		std::vector<int> zero_reject_owner_per_sphere(snap.spheres.size(), 0);
+		std::vector<int> zero_reject_poisson_per_sphere(snap.spheres.size(), 0);
+		std::vector<int> zero_added_per_sphere(snap.spheres.size(), 0);
+
+		int zero_start_count = 0;
+		for (uint8_t f : zero_start_sphere)
+			zero_start_count += (f != 0) ? 1 : 0;
+		if (zero_start_count > 0)
+		{
+			const int max_zero_prepass_attempts = 2000000;
+			const int max_zero_per_sphere_attempts = 200000;
+			int zero_attempted = 0;
+			int zero_added = 0;
+			int zero_reject_input = 0;
+			int zero_reject_owner = 0;
+			int zero_reject_poisson = 0;
+			int zero_unresolved = 0;
+			std::vector<Vec3> zero_batch_points;
+			std::vector<size_t> zero_batch_spheres;
+			zero_batch_points.reserve(static_cast<size_t>(udf_input_filter_batch_size));
+			zero_batch_spheres.reserve(static_cast<size_t>(udf_input_filter_batch_size));
+
+			auto flush_zero_batch = [&]() {
+				if (zero_batch_points.empty())
+					return;
+				std::vector<Scalar> udf_values;
+				const bool batch_ok = use_udf_value_filter ? eval_udf_values(p, zero_batch_points, udf_values) : true;
+				for (size_t bi = 0; bi < zero_batch_points.size() && total_need > 0; ++bi)
+				{
+					const size_t si = zero_batch_spheres[bi];
+					if (si >= deficits.size() || deficits[si] <= 0)
+						continue;
+					const Vec3& pt = zero_batch_points[bi];
+					bool pass = false;
+					if (use_udf_value_filter)
+					{
+						if (batch_ok && bi < udf_values.size())
+						{
+							const Scalar v = udf_values[bi];
+							pass = std::isfinite(v) && (v < p.alpha_);
+						}
+						else
+						{
+							pass = pass_input_filter(pt);
+						}
+					}
+					else
+					{
+						pass = pass_input_filter(pt);
+					}
+					if (!pass)
+					{
+						++zero_reject_input;
+						++zero_reject_input_per_sphere[si];
+						continue;
+					}
+					const int owner = closest_power_sphere(snap, pt);
+					if (owner != static_cast<int>(si))
+					{
+						++zero_reject_owner;
+						++zero_reject_owner_per_sphere[si];
+						continue;
+					}
+					if (!inside_grid.is_valid_sample(pt, poisson_r, inside_points))
+					{
+						++zero_reject_poisson;
+						++zero_reject_poisson_per_sphere[si];
+						continue;
+					}
+					inside_points.push_back(pt);
+					inside_owners.push_back(snap.spheres[si]);
+					inside_grid.insert(pt, static_cast<uint32>(inside_points.size() - 1));
+					--deficits[si];
+					--total_need;
+					++zero_added;
+					++total_added;
+					++accepted_per_sphere[si];
+					++zero_added_per_sphere[si];
+				}
+				zero_batch_points.clear();
+				zero_batch_spheres.clear();
+			};
+
+			for (size_t i = 0; i < snap.spheres.size() && total_need > 0; ++i)
+			{
+				if (!zero_start_sphere[i] || deficits[i] <= 0)
+					continue;
+				const int per_sphere_budget =
+					std::min(max_zero_per_sphere_attempts, std::max(5000, deficits[i] * 2000));
+				int attempted_i = 0;
+				std::uniform_real_distribution<Scalar> ux(cluster_box_min[i].x(), cluster_box_max[i].x());
+				std::uniform_real_distribution<Scalar> uy(cluster_box_min[i].y(), cluster_box_max[i].y());
+				std::uniform_real_distribution<Scalar> uz(cluster_box_min[i].z(), cluster_box_max[i].z());
+				while (attempted_i < per_sphere_budget && deficits[i] > 0 && total_need > 0 &&
+					   zero_attempted < max_zero_prepass_attempts)
+				{
+					Vec3 pt(ux(gen), uy(gen), uz(gen));
+					++attempted_i;
+					++zero_attempted;
+					++attempts_per_sphere[i];
+					++zero_attempts_per_sphere[i];
+					if ((zero_attempted % 200000) == 0)
+					{
+						std::cout << "[AlphaInsideTopup][ZeroStartPrepass] progress attempted=" << zero_attempted
+								  << " added=" << zero_added << " remaining_need=" << total_need << std::endl;
+					}
+					if (use_udf_value_filter)
+					{
+						zero_batch_points.push_back(pt);
+						zero_batch_spheres.push_back(i);
+						if (static_cast<int>(zero_batch_points.size()) >= udf_input_filter_batch_size)
+							flush_zero_batch();
+						continue;
+					}
+					if (!pass_input_filter(pt))
+					{
+						++zero_reject_input;
+						++zero_reject_input_per_sphere[i];
+						continue;
+					}
+					const int owner = closest_power_sphere(snap, pt);
+					if (owner != static_cast<int>(i))
+					{
+						++zero_reject_owner;
+						++zero_reject_owner_per_sphere[i];
+						continue;
+					}
+					if (!inside_grid.is_valid_sample(pt, poisson_r, inside_points))
+					{
+						++zero_reject_poisson;
+						++zero_reject_poisson_per_sphere[i];
+						continue;
+					}
+					inside_points.push_back(pt);
+					inside_owners.push_back(snap.spheres[i]);
+					inside_grid.insert(pt, static_cast<uint32>(inside_points.size() - 1));
+					--deficits[i];
+					--total_need;
+					++zero_added;
+					++total_added;
+					++accepted_per_sphere[i];
+					++zero_added_per_sphere[i];
+				}
+				if (deficits[i] > 0)
+					++zero_unresolved;
+				if (zero_attempted >= max_zero_prepass_attempts)
+					break;
+			}
+			flush_zero_batch();
+			zero_unresolved = 0;
+			for (size_t i = 0; i < snap.spheres.size(); ++i)
+				if (zero_start_sphere[i] && deficits[i] > 0)
+					++zero_unresolved;
+			std::cout << "[AlphaInsideTopup][ZeroStartPrepass] spheres=" << zero_start_count
+					  << " attempted=" << zero_attempted << " added=" << zero_added
+					  << " reject_input=" << zero_reject_input
+					  << " reject_owner=" << zero_reject_owner
+					  << " reject_poisson=" << zero_reject_poisson
+					  << " unresolved_spheres=" << zero_unresolved
+					  << " remaining_need=" << total_need << std::endl;
+			for (size_t i = 0; i < snap.spheres.size(); ++i)
+			{
+				if (!zero_start_sphere[i])
+					continue;
+				const bool unresolved = deficits[i] > 0;
+				const bool failed_all = zero_added_per_sphere[i] == 0;
+				if (!unresolved && !failed_all)
+					continue;
+				const Vec3 bbox_extent = cluster_box_max[i] - cluster_box_min[i];
+				const Scalar bbox_diag = bbox_extent.norm();
+				const Scalar bbox_volume = bbox_extent.x() * bbox_extent.y() * bbox_extent.z();
+				const int post_input_candidates = std::max(0, zero_attempts_per_sphere[i] - zero_reject_input_per_sphere[i]);
+				const int owner_pass = std::max(0, post_input_candidates - zero_reject_owner_per_sphere[i]);
+				const bool prepass_reached = zero_attempts_per_sphere[i] > 0;
+				const bool skipped_due_budget = (!prepass_reached && zero_attempted >= max_zero_prepass_attempts);
+				std::cout << "[AlphaInsideTopup][ZeroStartPrepass][Sphere] sphere_rank=" << i
+						  << " sphere_mesh_index=" << snap.sphere_indices[i]
+						  << " existing_start=" << owned_counts[i]
+						  << " need_start=" << initial_deficits[i]
+						  << " cluster_points_raw=" << raw_cluster_sizes[i]
+						  << " cluster_points_effective=" << cluster_sizes[i]
+						  << " bbox_source=" << (zero_start_bbox_fallback[i] ? "sphere_fallback" : "cluster_box")
+						  << " prepass_reached=" << (prepass_reached ? "yes" : "no")
+						  << " skipped_due_budget=" << (skipped_due_budget ? "yes" : "no")
+						  << " attempted=" << zero_attempts_per_sphere[i]
+						  << " added=" << zero_added_per_sphere[i]
+						  << " reject_input=" << zero_reject_input_per_sphere[i]
+						  << " reject_owner=" << zero_reject_owner_per_sphere[i]
+						  << " reject_poisson=" << zero_reject_poisson_per_sphere[i]
+						  << " post_input_candidates=" << post_input_candidates
+						  << " owner_pass=" << owner_pass
+						  << " need_after_prepass=" << deficits[i] << std::endl;
+			}
+		}
+		int stalled_passes = 0;
+		const int max_passes = 10;
+		const int max_attempts_per_pass = 1000000;
+		for (int pass = 0; pass < max_passes && total_need > 0; ++pass)
+		{
+			std::vector<size_t> active_spheres;
+			active_spheres.reserve(snap.spheres.size());
+			int skipped_no_bbox = 0;
+			for (size_t i = 0; i < snap.spheres.size(); ++i)
+			{
+				if (deficits[i] <= 0)
+					continue;
+				if (cluster_sizes[i] <= 0)
+				{
+					++skipped_no_bbox;
+					continue;
+				}
+				active_spheres.push_back(i);
+			}
+			if (active_spheres.empty())
+			{
+				std::cout << "[AlphaInsideTopup][Pass " << (pass + 1)
+						  << "] no active spheres (all missing bbox or already satisfied), remaining_need=" << total_need
+						  << " skipped_no_bbox=" << skipped_no_bbox << std::endl;
+				break;
+			}
+			std::shuffle(active_spheres.begin(), active_spheres.end(), gen);
+
+			int added_this_pass = 0;
+			int attempted_this_pass = 0;
+			int rejected_input_pass = 0;
+			int rejected_owner_pass = 0;
+			int rejected_poisson_pass = 0;
+			std::vector<int> attempted_per_sphere_pass(snap.spheres.size(), 0);
+			std::vector<int> accepted_per_sphere_pass(snap.spheres.size(), 0);
+			std::vector<Vec3> pass_batch_points;
+			std::vector<size_t> pass_batch_spheres;
+			pass_batch_points.reserve(static_cast<size_t>(udf_input_filter_batch_size));
+			pass_batch_spheres.reserve(static_cast<size_t>(udf_input_filter_batch_size));
+			auto flush_pass_batch = [&]() {
+				if (pass_batch_points.empty())
+					return;
+				std::vector<Scalar> udf_values;
+				const bool batch_ok = use_udf_value_filter ? eval_udf_values(p, pass_batch_points, udf_values) : true;
+				for (size_t bi = 0; bi < pass_batch_points.size() && total_need > 0; ++bi)
+				{
+					const size_t si = pass_batch_spheres[bi];
+					if (si >= deficits.size() || deficits[si] <= 0)
+						continue;
+					const Vec3& pt = pass_batch_points[bi];
+					bool pass_ok = false;
+					if (use_udf_value_filter)
+					{
+						if (batch_ok && bi < udf_values.size())
+						{
+							const Scalar v = udf_values[bi];
+							pass_ok = std::isfinite(v) && (v < p.alpha_);
+						}
+						else
+						{
+							pass_ok = pass_input_filter(pt);
+						}
+					}
+					else
+					{
+						pass_ok = pass_input_filter(pt);
+					}
+					if (!pass_ok)
+					{
+						++rejected_input_pass;
+						continue;
+					}
+					const int owner = closest_power_sphere(snap, pt);
+					if (owner != static_cast<int>(si))
+					{
+						++rejected_owner_pass;
+						continue;
+					}
+					if (!inside_grid.is_valid_sample(pt, poisson_r, inside_points))
+					{
+						++rejected_poisson_pass;
+						continue;
+					}
+					inside_points.push_back(pt);
+					inside_owners.push_back(snap.spheres[si]);
+					inside_grid.insert(pt, static_cast<uint32>(inside_points.size() - 1));
+					--deficits[si];
+					--total_need;
+					++added_this_pass;
+					++total_added;
+					++accepted_per_sphere_pass[si];
+					++accepted_per_sphere[si];
+				}
+				pass_batch_points.clear();
+				pass_batch_spheres.clear();
+			};
+
+			const int fair_budget = std::max(16, max_attempts_per_pass / std::max(1, static_cast<int>(active_spheres.size())));
+			for (size_t idx = 0; idx < active_spheres.size() && total_need > 0; ++idx)
+			{
+				const size_t i = active_spheres[idx];
+				if (deficits[i] <= 0)
+					continue;
+				const int pass_budget_left = max_attempts_per_pass - attempted_this_pass;
+				if (pass_budget_left <= 0)
+					break;
+
+				const int need_i = deficits[i];
+				const int base_target = std::max(fair_budget, std::min(need_i * 20, fair_budget * 4));
+				const int attempts_target = std::min(pass_budget_left, base_target);
+				std::uniform_real_distribution<Scalar> ux(cluster_box_min[i].x(), cluster_box_max[i].x());
+				std::uniform_real_distribution<Scalar> uy(cluster_box_min[i].y(), cluster_box_max[i].y());
+				std::uniform_real_distribution<Scalar> uz(cluster_box_min[i].z(), cluster_box_max[i].z());
+
+				for (int a = 0; a < attempts_target && deficits[i] > 0 && total_need > 0; ++a)
+				{
+					Vec3 pt(ux(gen), uy(gen), uz(gen));
+					++attempted_this_pass;
+					++attempted_per_sphere_pass[i];
+					++attempts_per_sphere[i];
+					++zero_attempts_per_sphere[i];
+
+					if (use_udf_value_filter)
+					{
+						pass_batch_points.push_back(pt);
+						pass_batch_spheres.push_back(i);
+						if (static_cast<int>(pass_batch_points.size()) >= udf_input_filter_batch_size)
+							flush_pass_batch();
+						continue;
+					}
+
+					if (!pass_input_filter(pt))
+					{
+						++rejected_input_pass;
+						continue;
+					}
+
+					const int owner = closest_power_sphere(snap, pt);
+					if (owner != static_cast<int>(i))
+					{
+						++rejected_owner_pass;
+						continue;
+					}
+
+					if (!inside_grid.is_valid_sample(pt, poisson_r, inside_points))
+					{
+						++rejected_poisson_pass;
+						continue;
+					}
+
+					inside_points.push_back(pt);
+					inside_owners.push_back(snap.spheres[i]);
+					inside_grid.insert(pt, static_cast<uint32>(inside_points.size() - 1));
+					--deficits[i];
+					--total_need;
+					++added_this_pass;
+					++total_added;
+					++accepted_per_sphere_pass[i];
+					++accepted_per_sphere[i];
+				}
+				if (attempted_this_pass >= max_attempts_per_pass)
+					continue;
+			}
+			flush_pass_batch();
+			std::cout << "[AlphaInsideTopup][Pass " << (pass + 1) << "] active_spheres=" << active_spheres.size()
+					  << " fair_budget=" << fair_budget << " skipped_no_bbox=" << skipped_no_bbox
+					  << " attempted=" << attempted_this_pass << " added=" << added_this_pass
+					  << " reject_input=" << rejected_input_pass
+					  << " reject_owner=" << rejected_owner_pass
+					  << " reject_poisson=" << rejected_poisson_pass
+					  << " remaining_need=" << total_need << std::endl;
+
+			if (added_this_pass == 0)
+			{
+				++stalled_passes;
+				if (stalled_passes >= 2)
+					break;
+			}
+			else
+			{
+				stalled_passes = 0;
+			}
+		}
+		int remaining_need = 0;
+		for (int d : deficits)
+			if (d > 0)
+				remaining_need += d;
+		for (size_t i = 0; i < snap.spheres.size(); ++i)
+		{
+			if (deficits[i] <= 0)
+				continue;
+			std::cout << "[AlphaInsideTopup][SphereFinal] sphere_rank=" << i
+					  << " sphere_mesh_index=" << snap.sphere_indices[i]
+					  << " existing_start=" << owned_counts[i] << " need_start=" << initial_deficits[i]
+                      << " attempted_total=" << attempts_per_sphere[i]
+					  << " added_total=" << accepted_per_sphere[i]
+					  << " need_final=" << deficits[i] << std::endl;
+		}
+
+		std::cout << "[AlphaInsideTopup] min_per_sphere=" << min_points << " added=" << total_added
+				  << " remaining_need=" << remaining_need << " final_inside_points=" << inside_points.size()
+				  << std::endl;
+	}
+
+	void topup_alpha_inside_samples_from_current_mesh(PointsParameters& p, const char* source)
+	{
+		std::cout << "[AlphaInsideTopupSource] begin source=" << (source ? source : "unknown") << std::endl;
+		topup_alpha_inside_samples_from_current_mesh(p);
+		std::cout << "[AlphaInsideTopupSource] end source=" << (source ? source : "unknown") << std::endl;
+	}
+
+	void topup_alpha_inside_samples_from_current_mesh(PointsParameters& p)
+	{
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_)
+			return;
+		if (!p.spheres_ || nb_cells<PVertex>(*p.spheres_) == 0)
+		{
+			std::cout << "[AlphaInsideTopup] skipped: spheres not initialized." << std::endl;
+			return;
+		}
+		const uint32 inside_before =
+			(p.alpha_inside_mesh_ != nullptr) ? static_cast<uint32>(nb_cells<PVertex>(*p.alpha_inside_mesh_)) : uint32(0);
+		std::vector<Vec3> inside_points, projected_points, projected_normals;
+		std::vector<PVertex> owners;
+		assign_alpha_inside_sphere_power(p);
+		gather_alpha_inside_state(p, inside_points, projected_points, projected_normals, owners);
+		const size_t gathered_count = inside_points.size();
+		filter_alpha_inside_points_by_input_distance(p, inside_points, &projected_points, &projected_normals, &owners);
+		const size_t filtered_count = inside_points.size();
+		const size_t old_size = inside_points.size();
+		std::cout << "[AlphaInsideTopup] wrapper begin inside_before_mesh=" << inside_before
+				  << " gathered=" << gathered_count << " after_filter=" << filtered_count << std::endl;
+		ensure_alpha_inside_min_points_per_sphere(p, inside_points, owners);
+		const size_t added_inside = (inside_points.size() > old_size) ? (inside_points.size() - old_size) : size_t(0);
+		if (inside_points.size() > old_size)
+		{
+			std::vector<Vec3> new_points;
+			new_points.reserve(inside_points.size() - old_size);
+			for (size_t i = old_size; i < inside_points.size(); ++i)
+				new_points.push_back(inside_points[i]);
+			auto projected_new = project_points_to_alpha_gpu(p, new_points);
+			auto& new_proj = projected_new.first;
+			auto& new_normals = projected_new.second;
+			if (new_proj.size() != new_points.size() || new_normals.size() != new_points.size())
+			{
+				std::cout << "[AlphaInsideTopup] projection size mismatch: new=" << new_points.size()
+						  << " proj=" << new_proj.size() << " normal=" << new_normals.size() << " (fallback resize)"
+						  << std::endl;
+				new_proj.resize(new_points.size());
+				new_normals.resize(new_points.size(), Vec3(0, 0, 1));
+				for (size_t i = 0; i < new_points.size(); ++i)
+					if (!new_proj[i].allFinite())
+						new_proj[i] = new_points[i];
+			}
+			projected_points.insert(projected_points.end(), new_proj.begin(), new_proj.end());
+			projected_normals.insert(projected_normals.end(), new_normals.begin(), new_normals.end());
+		}
+		filter_alpha_inside_projected_by_model(p, inside_points, projected_points, projected_normals, &owners);
+		write_alpha_inside_samples(p, inside_points, projected_points, projected_normals, &owners);
+		update_spheres_topup_zero_inside_color(p);
+		if (p.spheres_topup_zero_inside_color_)
+			points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_topup_zero_inside_color_.get());
+		const uint32 inside_after =
+			(p.alpha_inside_mesh_ != nullptr) ? static_cast<uint32>(nb_cells<PVertex>(*p.alpha_inside_mesh_)) : uint32(0);
+		std::cout << "[AlphaInsideTopup] wrapper end added=" << added_inside << " mesh_inside_after=" << inside_after
+				  << " projected_inside=" << projected_points.size() << " owners=" << owners.size() << std::endl;
+	}
+	void recompute_opt_knn_area_quadrics(PointsParameters& p)
+	{
+		if (!p.opt_mesh_ || !p.opt_position_ || !p.opt_normal_ || !p.opt_area_ || !p.opt_knn_ || !p.opt_quadric_ ||
+			!p.opt_line_quadric_)
+			return;
+		const uint32 n = nb_cells<PVertex>(*p.opt_mesh_);
+		if (n == 0)
+			return;
+		std::vector<Vec3> points;
+		std::vector<PVertex> vertices;
+		points.reserve(n);
+		vertices.reserve(n);
+		foreach_cell(*p.opt_mesh_, [&](PVertex v) -> bool {
+			const uint32 vid = index_of(*p.opt_mesh_, v);
+			points.push_back((*p.opt_position_)[vid]);
+			vertices.push_back(v);
+			return true;
+		});
+		acc::KDTree<3, uint32> kdtree(points);
+		parallel_foreach_cell(*p.opt_mesh_, [&](PVertex v) -> bool {
+			const uint32 vid = index_of(*p.opt_mesh_, v);
+			const Vec3& pt = (*p.opt_position_)[vid];
+			std::vector<std::pair<uint32, Scalar>> knn_res;
+			kdtree.find_nns(pt, p.knn_k_ + 10, &knn_res);
+			(*p.opt_knn_)[vid].clear();
+			Scalar sum_dist = 0.0;
+			Vec3 nrm = (*p.opt_normal_)[vid];
+			if (nrm.squaredNorm() < Scalar(1e-12))
+				nrm = Vec3(0, 0, 1);
+			else
+				nrm.normalize();
+			int kept = 0;
+			for (const auto& res : knn_res)
+			{
+				PVertex nb = vertices[res.first];
+				if (nb == v)
+					continue;
+				const uint32 nb_idx = index_of(*p.opt_mesh_, nb);
+				const Vec3& q = (*p.opt_position_)[nb_idx];
+				if (std::abs((q - pt).dot(nrm)) > p.alpha_)
+					continue;
+				(*p.opt_knn_)[vid].push_back(nb);
+				sum_dist += res.second;
+				++kept;
+				if (kept >= p.knn_k_ + 1)
+					break;
+			}
+			if (kept == 0)
+			{
+				for (const auto& res : knn_res)
+				{
+					PVertex nb = vertices[res.first];
+					if (nb == v)
+						continue;
+					(*p.opt_knn_)[vid].push_back(nb);
+					sum_dist += res.second;
+				}
+			}
+			(*p.opt_area_)[vid] = (sum_dist * sum_dist) / (2.0 * p.knn_k_);
+			return true;
+		});
+
+		parallel_foreach_cell(*p.opt_mesh_, [&](PVertex v) -> bool {
+			const uint32 vid = index_of(*p.opt_mesh_, v);
+			Spherical_Quadric& q = (*p.opt_quadric_)[vid];
+			Line_Quadric& lq = (*p.opt_line_quadric_)[vid];
+			q.clear();
+			lq.clear();
+			const Vec3& pos = (*p.opt_position_)[vid];
+			Vec3 nrm = (*p.opt_normal_)[vid];
+			if (nrm.squaredNorm() < Scalar(1e-12))
+				nrm = Vec3(0, 0, 1);
+			else
+				nrm.normalize();
+			Scalar a = (*p.opt_area_)[vid] / (p.knn_k_ + 1.0);
+			q += Spherical_Quadric(Vec4(pos.x(), pos.y(), pos.z(), 0), Vec4(nrm.x(), nrm.y(), nrm.z(), 1)) * a;
+			lq += Line_Quadric(pos, nrm) * a;
+			for (PVertex vn : (*p.opt_knn_)[vid])
+			{
+				const uint32 vn_idx = index_of(*p.opt_mesh_, vn);
+				const Vec3& pn = (*p.opt_position_)[vn_idx];
+				Vec3 nn = (*p.opt_normal_)[vn_idx];
+				if (nn.squaredNorm() < Scalar(1e-12))
+					nn = Vec3(0, 0, 1);
+				else
+					nn.normalize();
+				Scalar an = (*p.opt_area_)[vn_idx] / (p.knn_k_ + 1.0);
+				q += Spherical_Quadric(Vec4(pn.x(), pn.y(), pn.z(), 0), Vec4(nn.x(), nn.y(), nn.z(), 1)) * an;
+				lq += Line_Quadric(pn, nn) * an;
+			}
+			return true;
+		});
+	}
+
+	void rebuild_mixed_optimization_cloud(PointsParameters& p)
+	{
+		if (!p.opt_mesh_ || !p.opt_position_ || !p.opt_normal_ || !p.samples_mesh_ || !p.samples_position_ ||
+			!p.samples_normal_)
+			return;
+		if (p.opt_kdtree_)
+		{
+			delete p.opt_kdtree_;
+			p.opt_kdtree_ = nullptr;
+		}
+		if (p.opt_ma_kdtree_)
+		{
+			delete p.opt_ma_kdtree_;
+			p.opt_ma_kdtree_ = nullptr;
+		}
+		p.opt_kdtree_vertices_.clear();
+		p.opt_ma_kdtree_vertices_.clear();
+		p.opt_winding_number_.reset();
+		p.opt_wn_bvh_.reset();
+		p.opt_wn_vertices_.clear();
+		p.opt_wn_bvh_centers_.clear();
+		p.opt_wn_bvh_radii_.clear();
+
+		points_provider_->clear_mesh(*p.opt_mesh_);
+
+		uint32 surface_count = 0;
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
+			const uint32 vid = index_of(*p.samples_mesh_, v);
+			PVertex ov = add_vertex(*p.opt_mesh_);
+			const uint32 oid = index_of(*p.opt_mesh_, ov);
+			(*p.opt_position_)[oid] = (*p.samples_position_)[vid];
+			(*p.opt_normal_)[oid] = (*p.samples_normal_)[vid];
+			if (p.opt_normal_color_)
+				(*p.opt_normal_color_)[oid] =
+					Vec4(((*p.opt_normal_)[oid].x() + 1.0) * 0.5, ((*p.opt_normal_)[oid].y() + 1.0) * 0.5,
+						 (((*p.opt_normal_)[oid].z() + 1.0) * 0.5), 1.0);
+			if (p.opt_color_)
+				(*p.opt_color_)[oid] = Vec4(0.2f, 0.8f, 0.2f, 1.0f);
+			++surface_count;
+			return true;
+		});
+
+		uint32 inside_count = 0;
+		if (p.alpha_inside_mesh_ && p.alpha_inside_projected_position_ && p.alpha_inside_projected_normal_)
+		{
+			foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) -> bool {
+				const uint32 vid = index_of(*p.alpha_inside_mesh_, v);
+				PVertex ov = add_vertex(*p.opt_mesh_);
+				const uint32 oid = index_of(*p.opt_mesh_, ov);
+				(*p.opt_position_)[oid] = (*p.alpha_inside_projected_position_)[vid];
+				Vec3 nrm = (*p.alpha_inside_projected_normal_)[vid];
+				if (!nrm.allFinite() || nrm.squaredNorm() < Scalar(1e-12))
+					nrm = Vec3(0, 0, 1);
+				else
+					nrm.normalize();
+				(*p.opt_normal_)[oid] = nrm;
+				if (p.opt_normal_color_)
+					(*p.opt_normal_color_)[oid] = Vec4((nrm.x() + 1.0) * 0.5, (nrm.y() + 1.0) * 0.5,
+									 (nrm.z() + 1.0) * 0.5, 1.0);
+				if (p.opt_color_)
+					(*p.opt_color_)[oid] = Vec4(0.95f, 0.45f, 0.15f, 1.0f);
+				++inside_count;
+				return true;
+			});
+		}
+
+		recompute_opt_knn_area_quadrics(p);
+		p.mixed_cloud_dirty_ = false;
+		p.last_surface_count_ = surface_count;
+		p.last_inside_count_ = inside_count;
+		p.last_mixed_count_ = surface_count + inside_count;
+		points_provider_->set_mesh_bb_vertex_position(*p.opt_mesh_, p.opt_position_);
+		points_provider_->emit_connectivity_changed(*p.opt_mesh_);
+		points_provider_->emit_attribute_changed(*p.opt_mesh_, p.opt_position_.get());
+		points_provider_->emit_attribute_changed(*p.opt_mesh_, p.opt_normal_.get());
+		if (p.opt_normal_color_)
+			points_provider_->emit_attribute_changed(*p.opt_mesh_, p.opt_normal_color_.get());
+		if (p.opt_color_)
+			points_provider_->emit_attribute_changed(*p.opt_mesh_, p.opt_color_.get());
+	}
+
 	void load_alpha_samples_to_mesh_impl(PointsParameters& p, size_t num_points, geometry::RaySamplerNeural)
 	{
 		if (!p.neural_udf_loaded_)
@@ -598,8 +2036,16 @@ public:
 				  << std::endl;
 		bool used_sdf_filter = false;
 		auto traits = RaySamplerConfig::make(udf);
-		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
-			traits, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max, &used_sdf_filter);
+		const size_t inside_target =
+			p.num_alpha_inside_samples_ > 0 ? static_cast<size_t>(p.num_alpha_inside_samples_) : size_t(0);
+		SpatialGrid inside_grid(
+			(p.alpha_inside_poisson_radius_ > Scalar(0)) ? Scalar(p.alpha_inside_poisson_radius_) : Scalar(p.grid_cell_size_));
+		auto sample_result = p.ray_sampler_->sample_alpha_level_set_rays_with_inside(
+			traits, num_points, inside_target, p.samples_spatial_grid_.get(), &inside_grid, p.grid_cell_size_, bbox_min,
+			bbox_max, &used_sdf_filter);
+		std::vector<Vec3> sampled_points = std::move(sample_result.surface_samples);
+		std::vector<Vec3> inside_points = std::move(sample_result.inside_samples);
+		set_alpha_inside_samples_with_projection(p, std::move(inside_points));
 
 		if (sampled_points.empty())
 		{
@@ -607,7 +2053,8 @@ public:
 			return;
 		}
 
-		std::cout << "Successfully sampled " << sampled_points.size() << " points." << std::endl;
+		std::cout << "Successfully sampled " << sampled_points.size() << " surface points and "
+				  << nb_cells<PVertex>(*p.alpha_inside_mesh_) << " inside points." << std::endl;
 		{
 			const size_t check_n = std::min<size_t>(30, sampled_points.size());
 			if (check_n > 0)
@@ -728,6 +2175,9 @@ public:
 		std::cout << "Building KDTree for sampled points..." << std::endl;
 		build_kdtree(p);
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		mark_mixed_optimization_cloud_dirty(p);
+		assign_alpha_inside_sphere_power(p);
+		ensure_mixed_optimization_cloud_ready(p);
 		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
 	}
 
@@ -771,8 +2221,16 @@ public:
 
 		auto traits =
 			RaySamplerConfig::make(*selected_surface_, s_pos.get(), surface_bvh_.get(), &surface_bvh_faces_);
-		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
-			traits, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max);
+		const size_t inside_target =
+			p.num_alpha_inside_samples_ > 0 ? static_cast<size_t>(p.num_alpha_inside_samples_) : size_t(0);
+		SpatialGrid inside_grid(
+			(p.alpha_inside_poisson_radius_ > Scalar(0)) ? Scalar(p.alpha_inside_poisson_radius_) : Scalar(p.grid_cell_size_));
+		auto sample_result = p.ray_sampler_->sample_alpha_level_set_rays_with_inside(
+			traits, num_points, inside_target, p.samples_spatial_grid_.get(), &inside_grid, p.grid_cell_size_, bbox_min,
+			bbox_max);
+		std::vector<Vec3> sampled_points = std::move(sample_result.surface_samples);
+		std::vector<Vec3> inside_points = std::move(sample_result.inside_samples);
+		set_alpha_inside_samples_with_projection(p, std::move(inside_points));
 
 		if (sampled_points.empty())
 		{
@@ -780,7 +2238,8 @@ public:
 			return;
 		}
 
-		std::cout << "Successfully sampled " << sampled_points.size() << " points." << std::endl;
+		std::cout << "Successfully sampled " << sampled_points.size() << " surface points and "
+				  << nb_cells<PVertex>(*p.alpha_inside_mesh_) << " inside points." << std::endl;
 		if (p.samples_mesh_)
 			points_provider_->clear_mesh(*p.samples_mesh_);
 		p.samples_jitter_backup_valid_ = false;
@@ -845,6 +2304,9 @@ public:
 		std::cout << "Building KDTree for sampled points..." << std::endl;
 		build_kdtree(p);
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		mark_mixed_optimization_cloud_dirty(p);
+		assign_alpha_inside_sphere_power(p);
+		ensure_mixed_optimization_cloud_ready(p);
 		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
 	}
 
@@ -885,8 +2347,16 @@ public:
 
 		auto traits = RaySamplerConfig::make(*p.points_, p.position_.get(), p.normal_.get(), p.knn_.get(),
 											 p.input_kdtree_, &p.input_kdtree_vertices_);
-		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
-			traits, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max);
+		const size_t inside_target =
+			p.num_alpha_inside_samples_ > 0 ? static_cast<size_t>(p.num_alpha_inside_samples_) : size_t(0);
+		SpatialGrid inside_grid(
+			(p.alpha_inside_poisson_radius_ > Scalar(0)) ? Scalar(p.alpha_inside_poisson_radius_) : Scalar(p.grid_cell_size_));
+		auto sample_result = p.ray_sampler_->sample_alpha_level_set_rays_with_inside(
+			traits, num_points, inside_target, p.samples_spatial_grid_.get(), &inside_grid, p.grid_cell_size_, bbox_min,
+			bbox_max);
+		std::vector<Vec3> sampled_points = std::move(sample_result.surface_samples);
+		std::vector<Vec3> inside_points = std::move(sample_result.inside_samples);
+		set_alpha_inside_samples_with_projection(p, std::move(inside_points));
 
 		if (sampled_points.empty())
 		{
@@ -894,7 +2364,8 @@ public:
 			return;
 		}
 
-		std::cout << "Successfully sampled " << sampled_points.size() << " points." << std::endl;
+		std::cout << "Successfully sampled " << sampled_points.size() << " surface points and "
+				  << nb_cells<PVertex>(*p.alpha_inside_mesh_) << " inside points." << std::endl;
 		if (p.samples_mesh_)
 			points_provider_->clear_mesh(*p.samples_mesh_);
 		p.samples_jitter_backup_valid_ = false;
@@ -932,6 +2403,9 @@ public:
 		std::cout << "Building KDTree for sampled points..." << std::endl;
 		build_kdtree(p);
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		mark_mixed_optimization_cloud_dirty(p);
+		assign_alpha_inside_sphere_power(p);
+		ensure_mixed_optimization_cloud_ready(p);
 		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
 	}
 
@@ -1168,66 +2642,96 @@ public:
 			pre_process_sampling_points_kdtree(p, filtered_points);
 		else
 			pre_process_sampling_points_bvh(p, filtered_points);
-
 		const size_t after = filtered_points.size();
-		if (after == before)
+		const bool sample_changed = (after != before);
+
+		std::vector<Vec3> inside_points;
+		std::vector<Vec3> inside_projected_points;
+		std::vector<Vec3> inside_projected_normals;
+		std::vector<PVertex> inside_owners;
+		gather_alpha_inside_state(
+			p, inside_points, inside_projected_points, inside_projected_normals, inside_owners);
+		const size_t inside_before = inside_points.size();
+		filter_alpha_inside_points_by_input_distance(
+			p, inside_points, &inside_projected_points, &inside_projected_normals, &inside_owners);
+		filter_alpha_inside_projected_by_model(
+			p, inside_points, inside_projected_points, inside_projected_normals, &inside_owners);
+		const size_t inside_after = inside_points.size();
+		const bool inside_changed = (inside_after != inside_before);
+
+		if (!sample_changed && !inside_changed)
 		{
-			std::cout << "Sampling filtering applied: no points removed (" << before << " -> " << after << ")."
-					  << std::endl;
+			std::cout << "Sampling filtering applied: no points removed (samples " << before << " -> " << after
+					  << ", inside " << inside_before << " -> " << inside_after << ")." << std::endl;
 			return;
 		}
 
-		clear_knn_hover(p);
-		p.knn_hover_locked_ = false;
-		p.fitting_data_computed_ = false;
-		p.samples_winding_number_.reset();
-		p.samples_wn_bvh_.reset();
-		p.samples_jitter_backup_valid_ = false;
-		p.samples_position_backup_.clear();
-		p.samples_normal_backup_.clear();
-		points_provider_->clear_mesh(*p.samples_mesh_);
-
-		if (filtered_points.empty())
+		if (sample_changed)
 		{
-			if (p.samples_kdtree_)
+			clear_knn_hover(p);
+			p.knn_hover_locked_ = false;
+			p.fitting_data_computed_ = false;
+			p.samples_winding_number_.reset();
+			p.samples_wn_bvh_.reset();
+			p.opt_winding_number_.reset();
+			p.opt_wn_bvh_.reset();
+			p.samples_jitter_backup_valid_ = false;
+			p.samples_position_backup_.clear();
+			p.samples_normal_backup_.clear();
+			points_provider_->clear_mesh(*p.samples_mesh_);
+
+			if (filtered_points.empty())
 			{
-				delete p.samples_kdtree_;
-				p.samples_kdtree_ = nullptr;
+				if (p.samples_kdtree_)
+				{
+					delete p.samples_kdtree_;
+					p.samples_kdtree_ = nullptr;
+				}
+				if (p.samples_ma_kdtree_)
+				{
+					delete p.samples_ma_kdtree_;
+					p.samples_ma_kdtree_ = nullptr;
+				}
+				p.samples_kdtree_vertices_.clear();
+				p.samples_ma_kdtree_vertices_.clear();
+				points_provider_->emit_connectivity_changed(*p.samples_mesh_);
 			}
-			if (p.samples_ma_kdtree_)
+			else
 			{
-				delete p.samples_ma_kdtree_;
-				p.samples_ma_kdtree_ = nullptr;
+				for (const Vec3& pt : filtered_points)
+				{
+					PVertex v = add_vertex(*p.samples_mesh_);
+					uint32 v_idx = index_of(*p.samples_mesh_, v);
+					(*p.samples_position_)[v_idx] = pt;
+					if (p.samples_color_)
+						(*p.samples_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
+					if (p.samples_knn_color_)
+						(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
+				}
+
+				recompute_samples_normals_from_current_input(p);
+				build_kdtree(p);
+				points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+				points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
+				points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
+				points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
+				if (p.samples_knn_color_)
+					points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_knn_color_.get());
+				if (p.samples_color_)
+					points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
 			}
-			p.samples_kdtree_vertices_.clear();
-			p.samples_ma_kdtree_vertices_.clear();
-			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-			std::cout << "Sampling filtering applied: " << before << " -> 0 points." << std::endl;
-			return;
 		}
 
-		for (const Vec3& pt : filtered_points)
-		{
-			PVertex v = add_vertex(*p.samples_mesh_);
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			(*p.samples_position_)[v_idx] = pt;
-			if (p.samples_color_)
-				(*p.samples_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
-			if (p.samples_knn_color_)
-				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
-		}
+		if (inside_changed)
+			write_alpha_inside_samples(
+				p, inside_points, inside_projected_points, inside_projected_normals, &inside_owners);
 
-		recompute_samples_normals_from_current_input(p);
-		build_kdtree(p);
-		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
-		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
-		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
-		if (p.samples_knn_color_)
-			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_knn_color_.get());
-		if (p.samples_color_)
-			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
-		std::cout << "Sampling filtering applied: " << before << " -> " << after << " points." << std::endl;
+		mark_mixed_optimization_cloud_dirty(p);
+		assign_alpha_inside_sphere_power(p);
+		ensure_mixed_optimization_cloud_ready(p);
+
+		std::cout << "Sampling filtering applied: samples " << before << " -> " << after << ", inside "
+				  << inside_before << " -> " << inside_after << "." << std::endl;
 	}
 
 	std::vector<Vec3> poisson_eliminate_points(const std::vector<Vec3>& points, size_t target_num)
@@ -1297,6 +2801,8 @@ public:
 		p.fitting_data_computed_ = false;
 		p.samples_winding_number_.reset();
 		p.samples_wn_bvh_.reset();
+		p.opt_winding_number_.reset();
+		p.opt_wn_bvh_.reset();
 		p.samples_jitter_backup_valid_ = false;
 		p.samples_position_backup_.clear();
 		p.samples_normal_backup_.clear();
@@ -1319,10 +2825,12 @@ public:
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
+
 		if (p.samples_knn_color_)
 			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_knn_color_.get());
 		if (p.samples_color_)
 			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
+		mark_mixed_optimization_cloud_dirty(p);
 
 		std::cout << "Poisson eliminate applied: " << before << " -> " << reduced_points.size()
 				  << " points (target=" << clamped_target << ")." << std::endl;
@@ -1338,6 +2846,7 @@ public:
 
 		try
 		{
+			const auto [bbox_min, bbox_max] = model_domain_bbox(p);
 			torch::Tensor X_cpu =
 				torch::empty({static_cast<int64_t>(nb_points), 3},
 							 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true));
@@ -1353,6 +2862,14 @@ public:
 			}
 			torch::Tensor X = X_cpu.to(device_);
 			torch::Tensor active = active_cpu.to(device_);
+			torch::Tensor bbox_min_t = torch::tensor(
+				{static_cast<float>(bbox_min.x()), static_cast<float>(bbox_min.y()), static_cast<float>(bbox_min.z())},
+				torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+			torch::Tensor bbox_max_t = torch::tensor(
+				{static_cast<float>(bbox_max.x()), static_cast<float>(bbox_max.y()), static_cast<float>(bbox_max.z())},
+				torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+			bbox_min_t = bbox_min_t.view({1, 3});
+			bbox_max_t = bbox_max_t.view({1, 3});
 
 			for (int iter = 0; iter < max_iters; ++iter)
 			{
@@ -1384,8 +2901,7 @@ public:
 				step = torch::where(active.unsqueeze(1), step, torch::zeros_like(step));
 
 				X = X - step * grad;
-
-				X = torch::clamp(X, 0.0f, 1.0f);
+				X = torch::minimum(torch::maximum(X, bbox_min_t), bbox_max_t);
 			}
 
 			auto [values, grad] = udf.forward_values_grad_gpu(X);
@@ -1655,6 +3171,42 @@ private:
 		p.samples_knn_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_mesh_, "knn_color");
 
 		// Init Alpha-Inside Mesh
+		std::string inside_name = points_provider_->mesh_name(*p.points_) + "_alpha_inside";
+		if (!p.alpha_inside_mesh_)
+			p.alpha_inside_mesh_ = points_provider_->has_mesh(inside_name) ? points_provider_->mesh(inside_name)
+																			: points_provider_->add_mesh(inside_name);
+		else
+			points_provider_->clear_mesh(*p.alpha_inside_mesh_);
+		p.alpha_inside_position_ = get_or_add_attribute<Vec3, PVertex>(*p.alpha_inside_mesh_, "position");
+		p.alpha_inside_color_ = get_or_add_attribute<Vec4, PVertex>(*p.alpha_inside_mesh_, "color");
+		p.alpha_inside_sphere_ = get_or_add_attribute<PVertex, PVertex>(*p.alpha_inside_mesh_, "sphere");
+		p.alpha_inside_knn_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.alpha_inside_mesh_, "knn");
+		p.alpha_inside_projected_position_ =
+			get_or_add_attribute<Vec3, PVertex>(*p.alpha_inside_mesh_, "projected_position");
+		p.alpha_inside_projected_normal_ =
+			get_or_add_attribute<Vec3, PVertex>(*p.alpha_inside_mesh_, "projected_normal");
+
+		// Init Mixed Optimization Mesh
+		std::string opt_name = points_provider_->mesh_name(*p.points_) + "_opt";
+		if (!p.opt_mesh_)
+			p.opt_mesh_ = points_provider_->has_mesh(opt_name) ? points_provider_->mesh(opt_name)
+															   : points_provider_->add_mesh(opt_name);
+		else
+			points_provider_->clear_mesh(*p.opt_mesh_);
+		p.opt_position_ = get_or_add_attribute<Vec3, PVertex>(*p.opt_mesh_, "position");
+		p.opt_normal_ = get_or_add_attribute<Vec3, PVertex>(*p.opt_mesh_, "normal");
+		p.opt_area_ = get_or_add_attribute<Scalar, PVertex>(*p.opt_mesh_, "area");
+		p.opt_knn_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.opt_mesh_, "knn");
+		p.opt_quadric_ = get_or_add_attribute<Spherical_Quadric, PVertex>(*p.opt_mesh_, "quadric");
+		p.opt_line_quadric_ = get_or_add_attribute<Line_Quadric, PVertex>(*p.opt_mesh_, "line_quadric");
+		p.opt_sphere_ = get_or_add_attribute<PVertex, PVertex>(*p.opt_mesh_, "sphere");
+		p.opt_error_ = get_or_add_attribute<Scalar, PVertex>(*p.opt_mesh_, "error");
+		p.opt_color_ = get_or_add_attribute<Vec4, PVertex>(*p.opt_mesh_, "color");
+		p.opt_normal_color_ = get_or_add_attribute<Vec4, PVertex>(*p.opt_mesh_, "normal_color");
+		p.opt_ma_position_ = get_or_add_attribute<Vec3, PVertex>(*p.opt_mesh_, "ma_position");
+		p.opt_ma_radius_ = get_or_add_attribute<Scalar, PVertex>(*p.opt_mesh_, "ma_radius");
+		p.opt_ma_secondary_vertex_ = get_or_add_attribute<PVertex, PVertex>(*p.opt_mesh_, "ma_secondary_vertex");
+
 		// Init Spheres Mesh
 		std::string sphere_name = points_provider_->mesh_name(m) + "_spheres";
 		if (!p.spheres_)
@@ -1666,6 +3218,7 @@ private:
 		p.spheres_color_ = get_or_add_attribute<Vec4, PVertex>(*p.spheres_, "color");
 		p.spheres_cluster_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.spheres_, "cluster");
 		p.spheres_cluster_color_ = get_or_add_attribute<Vec4, PVertex>(*p.spheres_, "cluster_color");
+		p.spheres_topup_zero_inside_color_ = get_or_add_attribute<Vec4, PVertex>(*p.spheres_, "topup_zero_inside_color");
 		p.spheres_cluster_area_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "cluster_area");
 		p.spheres_neighbor_clusters_ =
 			get_or_add_attribute<std::set<PVertex>, PVertex>(*p.spheres_, "neighbor_clusters");
@@ -1710,29 +3263,46 @@ private:
 			return;
 		}
 
-		std::cout << "Building KDTree..." << std::endl;
-		build_kdtree(p);
-		std::cout << "Recomputing Normals (PCA)..." << std::endl;
-		recompute_samples_normals_pca(p);
-		std::cout << "Computing KNN and Area..." << std::endl;
-		compute_samples_area(p); // Compute KNN and Area for samples
-		std::cout << "Computing Winding Numbers..." << std::endl;
-		compute_winding_numbers(p);
-		std::cout << "Computing Quadrics..." << std::endl;
-		compute_quadrics(p);
-		std::cout << "Computing Initial Medial Axis..." << std::endl;
-		compute_initial_medial_axis(p);
+		// Build mixed cloud first so fitting can run directly on (surface + projected-inside).
+		ensure_mixed_optimization_cloud_ready(p);
+		const bool use_mixed_fitting = p.opt_mesh_ && p.opt_position_ && p.opt_normal_ && p.opt_area_ && p.opt_knn_ &&
+									   p.opt_quadric_ && p.opt_line_quadric_ && p.opt_sphere_ && p.opt_error_ &&
+									   p.opt_ma_position_ && p.opt_ma_radius_ && p.opt_ma_secondary_vertex_ &&
+									   (nb_cells<PVertex>(*p.opt_mesh_) > 0);
+		POINTS* fit_mesh = use_mixed_fitting ? p.opt_mesh_ : p.samples_mesh_;
+		auto fit_position = use_mixed_fitting ? p.opt_position_ : p.samples_position_;
+		auto fit_ma_position = use_mixed_fitting ? p.opt_ma_position_ : p.samples_ma_position_;
 
-		if (p.neural_udf_loaded_ && p.samples_ma_position_)
+		if (use_mixed_fitting)
+		{
+			std::cout << "Compute fitting data on mixed cloud (surface + projected inside): "
+					  << nb_cells<PVertex>(*p.opt_mesh_) << " points." << std::endl;
+		}
+
+		std::cout << "Building KDTree..." << std::endl;
+		build_kdtree(p, use_mixed_fitting);
+		std::cout << "Recomputing Normals (PCA)..." << std::endl;
+		recompute_samples_normals_pca(p, use_mixed_fitting);
+		std::cout << "Computing KNN and Area..." << std::endl;
+		compute_samples_area(p, use_mixed_fitting);
+		std::cout << "Computing Winding Numbers..." << std::endl;
+		compute_winding_numbers(p, use_mixed_fitting);
+		std::cout << "Computing Quadrics..." << std::endl;
+		compute_quadrics(p, use_mixed_fitting);
+		std::cout << "Computing Initial Medial Axis..." << std::endl;
+		compute_initial_medial_axis(p, use_mixed_fitting);
+		std::cout << "Initial Medial Axis computed." << std::endl;
+
+		if (p.neural_udf_loaded_ && fit_ma_position && fit_mesh && fit_position)
 		{
 			NeuralFieldForward udf = make_neural_field_forward(p);
 			if (udf.is_loaded())
 			{
 				std::vector<Vec3> medial_positions;
-				medial_positions.reserve(nb_cells<PVertex>(*p.samples_mesh_));
-				foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-					uint32 v_idx = index_of(*p.samples_mesh_, v);
-					medial_positions.push_back((*p.samples_ma_position_)[v_idx]);
+				medial_positions.reserve(nb_cells<PVertex>(*fit_mesh));
+				foreach_cell(*fit_mesh, [&](PVertex v) {
+					uint32 v_idx = index_of(*fit_mesh, v);
+					medial_positions.push_back((*fit_ma_position)[v_idx]);
 					return true;
 				});
 
@@ -1752,7 +3322,7 @@ private:
 					{
 						size_t idx = indices[i];
 						check_medial_points.push_back(medial_positions[idx]);
-						check_sample_points.push_back((*p.samples_position_)[static_cast<uint32>(idx)]);
+						check_sample_points.push_back((*fit_position)[static_cast<uint32>(idx)]);
 					}
 
 					BatchUDFResult medial_res = udf.forward_batch_with_grad(check_medial_points);
@@ -1785,6 +3355,10 @@ private:
 		std::cout << "Fitting Data Computed." << std::endl;
 
 		p.fitting_data_computed_ = true;
+		assign_alpha_inside_sphere_power(p);
+		// Keep mixed cloud as fitting result source when we already computed fitting directly on it.
+		if (!use_mixed_fitting)
+			ensure_mixed_optimization_cloud_ready(p);
 	}
 
 	void compute_fitting_data_with_initial_ma_mode(PointsParameters& p, InitialMAMode mode, bool force_recompute)
@@ -1827,43 +3401,69 @@ private:
 				  << " k=" << p.knn_k_ << std::endl;
 	}
 
-	void build_kdtree(PointsParameters& p)
+	void build_kdtree(PointsParameters& p, bool use_mixed_cloud = false)
 	{
-		if (p.samples_kdtree_)
-			delete p.samples_kdtree_;
-		if (p.samples_ma_kdtree_)
-			delete p.samples_ma_kdtree_;
+		const bool fit_mixed = use_mixed_cloud && p.opt_mesh_ && p.opt_position_ && (nb_cells<PVertex>(*p.opt_mesh_) > 0);
+		POINTS* fit_mesh = p.samples_mesh_;
+		std::shared_ptr<PAttribute<Vec3>> fit_position = p.samples_position_;
+		std::shared_ptr<PAttribute<Vec3>> fit_ma_position = p.samples_ma_position_;
+		std::shared_ptr<PAttribute<Scalar>> fit_ma_radius = p.samples_ma_radius_;
+		if (fit_mixed)
+		{
+			fit_mesh = p.opt_mesh_;
+			fit_position = p.opt_position_;
+			fit_ma_position = p.opt_ma_position_;
+			fit_ma_radius = p.opt_ma_radius_;
+		}
+
+		acc::KDTree<3, uint32>*& fit_kdtree = fit_mixed ? p.opt_kdtree_ : p.samples_kdtree_;
+		acc::KDTree<3, uint32>*& fit_ma_kdtree = fit_mixed ? p.opt_ma_kdtree_ : p.samples_ma_kdtree_;
+		std::vector<PVertex>& fit_kdtree_vertices = fit_mixed ? p.opt_kdtree_vertices_ : p.samples_kdtree_vertices_;
+		std::vector<PVertex>& fit_ma_kdtree_vertices = fit_mixed ? p.opt_ma_kdtree_vertices_ : p.samples_ma_kdtree_vertices_;
+		if (fit_kdtree)
+			delete fit_kdtree;
+		if (fit_ma_kdtree)
+			delete fit_ma_kdtree;
+
+		if (!fit_mesh || !fit_position)
+		{
+			fit_kdtree = nullptr;
+			fit_ma_kdtree = nullptr;
+			fit_kdtree_vertices.clear();
+			fit_ma_kdtree_vertices.clear();
+			return;
+		}
 
 		std::vector<Vec3> points;
-		const uint32 sample_count = nb_cells<PVertex>(*p.samples_mesh_);
-		p.samples_kdtree_vertices_.clear();
-		p.samples_ma_kdtree_vertices_.clear();
+		const uint32 sample_count = nb_cells<PVertex>(*fit_mesh);
+		fit_kdtree_vertices.clear();
+		fit_ma_kdtree_vertices.clear();
 		points.reserve(sample_count);
-		p.samples_kdtree_vertices_.reserve(sample_count);
-		p.samples_ma_kdtree_vertices_.reserve(sample_count);
+		fit_kdtree_vertices.reserve(sample_count);
+		fit_ma_kdtree_vertices.reserve(sample_count);
 		std::vector<Vec3> points_ma;
 		points_ma.reserve(sample_count);
 
-		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 idx = index_of(*p.samples_mesh_, v);
-			points.push_back((*p.samples_position_)[idx]);
-			p.samples_kdtree_vertices_.push_back(v);
-			if (p.samples_ma_position_)
+		foreach_cell(*fit_mesh, [&](PVertex v) {
+			uint32 idx = index_of(*fit_mesh, v);
+			points.push_back((*fit_position)[idx]);
+			fit_kdtree_vertices.push_back(v);
+			if (fit_ma_position)
 			{
-				const Vec3& ma_pos = (*p.samples_ma_position_)[idx];
+				const Vec3& ma_pos = (*fit_ma_position)[idx];
 				const bool ma_finite = ma_pos.allFinite();
-				const bool ma_radius_ok = (!p.samples_ma_radius_) || ((*p.samples_ma_radius_)[idx] > Scalar(0));
+				const bool ma_radius_ok = (!fit_ma_radius) || ((*fit_ma_radius)[idx] > Scalar(0));
 				if (ma_finite && ma_radius_ok)
 				{
 					points_ma.push_back(ma_pos);
-					p.samples_ma_kdtree_vertices_.push_back(v);
+					fit_ma_kdtree_vertices.push_back(v);
 				}
 			}
 			return true;
 		});
 
-		p.samples_kdtree_ = points.empty() ? nullptr : new acc::KDTree<3, uint32>(points);
-		p.samples_ma_kdtree_ = points_ma.empty() ? nullptr : new acc::KDTree<3, uint32>(points_ma);
+		fit_kdtree = points.empty() ? nullptr : new acc::KDTree<3, uint32>(points);
+		fit_ma_kdtree = points_ma.empty() ? nullptr : new acc::KDTree<3, uint32>(points_ma);
 	}
 
 	// Generic PCA normal computation for any point cloud mesh
@@ -1948,23 +3548,42 @@ private:
 		}
 		return avg_n.normalized();
 	}
-	void compute_samples_area(PointsParameters& p)
+	void compute_samples_area(PointsParameters& p, bool use_mixed_cloud = false)
 	{
-		// Compute KNN and Area on samples_mesh_
-		if (!p.samples_mesh_ || !p.samples_kdtree_)
+		const bool fit_mixed =
+			use_mixed_cloud && p.opt_mesh_ && p.opt_position_ && p.opt_normal_ && p.opt_knn_ && p.opt_area_ &&
+			(nb_cells<PVertex>(*p.opt_mesh_) > 0);
+		POINTS* fit_mesh = p.samples_mesh_;
+		std::shared_ptr<PAttribute<Vec3>> fit_position = p.samples_position_;
+		std::shared_ptr<PAttribute<Vec3>> fit_normal = p.samples_normal_;
+		std::shared_ptr<PAttribute<std::vector<PVertex>>> fit_knn = p.samples_knn_;
+		std::shared_ptr<PAttribute<Scalar>> fit_area = p.samples_area_;
+		if (fit_mixed)
+		{
+			fit_mesh = p.opt_mesh_;
+			fit_position = p.opt_position_;
+			fit_normal = p.opt_normal_;
+			fit_knn = p.opt_knn_;
+			fit_area = p.opt_area_;
+		}
+
+		acc::KDTree<3, uint32>* fit_kdtree = fit_mixed ? p.opt_kdtree_ : p.samples_kdtree_;
+		const std::vector<PVertex>& fit_kdtree_vertices =
+			fit_mixed ? p.opt_kdtree_vertices_ : p.samples_kdtree_vertices_;
+		if (!fit_mesh || !fit_position || !fit_normal || !fit_knn || !fit_area || !fit_kdtree)
 			return;
 
-		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			const Vec3& pt = (*p.samples_position_)[v_idx];
+		parallel_foreach_cell(*fit_mesh, [&](PVertex v) {
+			uint32 v_idx = index_of(*fit_mesh, v);
+			const Vec3& pt = (*fit_position)[v_idx];
 			std::vector<std::pair<uint32, Scalar>> knn_res;
-			p.samples_kdtree_->find_nns(pt, p.knn_k_+10, &knn_res);
+			fit_kdtree->find_nns(pt, p.knn_k_ + 10, &knn_res);
 
-			(*p.samples_knn_)[v_idx].clear();
+			(*fit_knn)[v_idx].clear();
 			Scalar sum_dist = 0.0;
 			const Scalar eps = Scalar(1e-12);
 			float band = p.alpha_;
-			Vec3 n = (*p.samples_normal_)[v_idx];
+			Vec3 n = (*fit_normal)[v_idx];
 			const Scalar n2 = n.squaredNorm();
 			if (n2 > eps)
 				n /= std::sqrt(n2);
@@ -1973,15 +3592,15 @@ private:
 			int kept = 0;
 			for (auto& res : knn_res)
 			{
-				if (p.samples_kdtree_vertices_[res.first] != v)
+				if (fit_kdtree_vertices[res.first] != v)
 				{
-					PVertex nb = p.samples_kdtree_vertices_[res.first];
-					uint32 nb_idx = index_of(*p.samples_mesh_, nb);
-					const Vec3& q = (*p.samples_position_)[nb_idx];
+					PVertex nb = fit_kdtree_vertices[res.first];
+					uint32 nb_idx = index_of(*fit_mesh, nb);
+					const Vec3& q = (*fit_position)[nb_idx];
 					const Scalar dn = (q - pt).dot(n);
 					if (std::abs(dn) > band)
 						continue;
-					(*p.samples_knn_)[v_idx].push_back(nb);
+					(*fit_knn)[v_idx].push_back(nb);
 					sum_dist += res.second;
 					++kept;
 					if (kept >= p.knn_k_ +1)
@@ -1994,69 +3613,110 @@ private:
 			{
 				for (auto& res : knn_res)
 				{
-					if (p.samples_kdtree_vertices_[res.first] != v)
+					if (fit_kdtree_vertices[res.first] != v)
 					{
-						PVertex nb = p.samples_kdtree_vertices_[res.first];
-						(*p.samples_knn_)[v_idx].push_back(nb);
+						PVertex nb = fit_kdtree_vertices[res.first];
+						(*fit_knn)[v_idx].push_back(nb);
 						sum_dist += res.second;
 					}
 				}
 			}
 			// Normals are already computed/oriented in sample_points
-			(*p.samples_area_)[v_idx] = (sum_dist * sum_dist) / (2.0 * p.knn_k_); // Rough area estimate
+			(*fit_area)[v_idx] = (sum_dist * sum_dist) / (2.0 * p.knn_k_); // Rough area estimate
 			return true;
 		});
 		// MA positions changed; keep MA-KDTree in sync for MF topology scoring.
-		build_kdtree(p);
+		build_kdtree(p, fit_mixed);
 	}
 
-	void compute_winding_numbers(PointsParameters& p)
+	void compute_winding_numbers(PointsParameters& p, bool use_mixed_cloud = false)
 	{
-		uint32 nb_samples = nb_cells<PVertex>(*p.samples_mesh_);
-		p.samples_wn_bvh_centers_.clear();
-		p.samples_wn_bvh_radii_.clear();
-		p.samples_wn_vertices_.clear();
-		p.samples_wn_bvh_centers_.reserve(nb_samples);
-		p.samples_wn_bvh_radii_.reserve(nb_samples);
-		p.samples_wn_vertices_.reserve(nb_samples);
+		const bool fit_mixed = use_mixed_cloud && p.opt_mesh_ && p.opt_position_ && p.opt_normal_ && p.opt_area_ &&
+								(nb_cells<PVertex>(*p.opt_mesh_) > 0);
+		POINTS* fit_mesh = p.samples_mesh_;
+		std::shared_ptr<PAttribute<Vec3>> fit_position = p.samples_position_;
+		std::shared_ptr<PAttribute<Vec3>> fit_normal = p.samples_normal_;
+		std::shared_ptr<PAttribute<Scalar>> fit_area = p.samples_area_;
+		if (fit_mixed)
+		{
+			fit_mesh = p.opt_mesh_;
+			fit_position = p.opt_position_;
+			fit_normal = p.opt_normal_;
+			fit_area = p.opt_area_;
+		}
+		if (!fit_mesh || !fit_position || !fit_normal || !fit_area)
+			return;
 
-		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			p.samples_wn_vertices_.push_back(v);
-			p.samples_wn_bvh_centers_.push_back((*p.samples_position_)[v_idx]);
-			Scalar area = (*p.samples_area_)[v_idx];
+		std::vector<Vec3>& wn_centers = fit_mixed ? p.opt_wn_bvh_centers_ : p.samples_wn_bvh_centers_;
+		std::vector<Scalar>& wn_radii = fit_mixed ? p.opt_wn_bvh_radii_ : p.samples_wn_bvh_radii_;
+		std::vector<PVertex>& wn_vertices = fit_mixed ? p.opt_wn_vertices_ : p.samples_wn_vertices_;
+		std::unique_ptr<acc::BVHTreeSpheres<uint32, Vec3>>& wn_bvh = fit_mixed ? p.opt_wn_bvh_ : p.samples_wn_bvh_;
+		std::unique_ptr<PointFWN<3>>& winding_number = fit_mixed ? p.opt_winding_number_ : p.samples_winding_number_;
+		uint32 nb_samples = nb_cells<PVertex>(*fit_mesh);
+		wn_centers.clear();
+		wn_radii.clear();
+		wn_vertices.clear();
+		wn_centers.reserve(nb_samples);
+		wn_radii.reserve(nb_samples);
+		wn_vertices.reserve(nb_samples);
+
+		foreach_cell(*fit_mesh, [&](PVertex v) {
+			uint32 v_idx = index_of(*fit_mesh, v);
+			wn_vertices.push_back(v);
+			wn_centers.push_back((*fit_position)[v_idx]);
+			Scalar area = (*fit_area)[v_idx];
 			Scalar radius = std::sqrt(area / M_PI);
-			p.samples_wn_bvh_radii_.push_back(radius);
+			wn_radii.push_back(radius);
 			return true;
 		});
 
-		p.samples_wn_bvh_ = std::make_unique<acc::BVHTreeSpheres<uint32, Vec3>>(p.samples_wn_bvh_centers_, p.samples_wn_bvh_radii_);
+		wn_bvh = std::make_unique<acc::BVHTreeSpheres<uint32, Vec3>>(wn_centers, wn_radii);
 
-		PointTraits samples_wn_traits(*p.samples_mesh_, p.samples_wn_bvh_.get(), p.samples_wn_vertices_,
-								 p.samples_position_.get(), p.samples_normal_.get(),
-								 p.samples_area_.get());
-		p.samples_winding_number_ = std::make_unique<PointFWN<3>>(*p.samples_wn_bvh_, samples_wn_traits, p.beta_);
+		PointTraits samples_wn_traits(*fit_mesh, wn_bvh.get(), wn_vertices, fit_position.get(), fit_normal.get(),
+									  fit_area.get());
+		winding_number = std::make_unique<PointFWN<3>>(*wn_bvh, samples_wn_traits, p.beta_);
 	}
 
-	void compute_quadrics(PointsParameters& p)
+	void compute_quadrics(PointsParameters& p, bool use_mixed_cloud = false)
 	{
-		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			Spherical_Quadric& q = (*p.samples_quadric_)[v_idx];
-			Line_Quadric& lq = (*p.samples_line_quadric_)[v_idx];
+		POINTS* fit_mesh = p.samples_mesh_;
+		std::shared_ptr<PAttribute<Vec3>> fit_position = p.samples_position_;
+		std::shared_ptr<PAttribute<Vec3>> fit_normal = p.samples_normal_;
+		std::shared_ptr<PAttribute<Scalar>> fit_area = p.samples_area_;
+		std::shared_ptr<PAttribute<std::vector<PVertex>>> fit_knn = p.samples_knn_;
+		std::shared_ptr<PAttribute<Spherical_Quadric>> fit_quadric = p.samples_quadric_;
+		std::shared_ptr<PAttribute<Line_Quadric>> fit_line_quadric = p.samples_line_quadric_;
+		if (use_mixed_cloud && p.opt_mesh_ && p.opt_position_ && p.opt_normal_ && p.opt_area_ && p.opt_knn_ &&
+			p.opt_quadric_ && p.opt_line_quadric_ && nb_cells<PVertex>(*p.opt_mesh_) > 0)
+		{
+			fit_mesh = p.opt_mesh_;
+			fit_position = p.opt_position_;
+			fit_normal = p.opt_normal_;
+			fit_area = p.opt_area_;
+			fit_knn = p.opt_knn_;
+			fit_quadric = p.opt_quadric_;
+			fit_line_quadric = p.opt_line_quadric_;
+		}
+		if (!fit_mesh || !fit_position || !fit_normal || !fit_area || !fit_knn || !fit_quadric || !fit_line_quadric)
+			return;
+
+		parallel_foreach_cell(*fit_mesh, [&](PVertex v) {
+			uint32 v_idx = index_of(*fit_mesh, v);
+			Spherical_Quadric& q = (*fit_quadric)[v_idx];
+			Line_Quadric& lq = (*fit_line_quadric)[v_idx];
 			q.clear();
 			lq.clear();
-			const Vec3& pos = (*p.samples_position_)[v_idx];
-			const Vec3& n = (*p.samples_normal_)[v_idx];
-			Scalar a = (*p.samples_area_)[v_idx] / (p.knn_k_ + 1.0);
+			const Vec3& pos = (*fit_position)[v_idx];
+			const Vec3& n = (*fit_normal)[v_idx];
+			Scalar a = (*fit_area)[v_idx] / (p.knn_k_ + 1.0);
 			q += Spherical_Quadric(Vec4(pos.x(), pos.y(), pos.z(), 0), Vec4(n.x(), n.y(), n.z(), 1)) * a;
 			lq += Line_Quadric(pos, n) * a;
-			for (PVertex vn : (*p.samples_knn_)[v_idx])
+			for (PVertex vn : (*fit_knn)[v_idx])
 			{
-				uint32 vn_idx = index_of(*p.samples_mesh_, vn);
-				const Vec3& pn = (*p.samples_position_)[vn_idx];
-				const Vec3& nn = (*p.samples_normal_)[vn_idx];
-				Scalar an = (*p.samples_area_)[vn_idx] / (p.knn_k_ + 1.0);
+				uint32 vn_idx = index_of(*fit_mesh, vn);
+				const Vec3& pn = (*fit_position)[vn_idx];
+				const Vec3& nn = (*fit_normal)[vn_idx];
+				Scalar an = (*fit_area)[vn_idx] / (p.knn_k_ + 1.0);
 				q += Spherical_Quadric(Vec4(pn.x(), pn.y(), pn.z(), 0), Vec4(nn.x(), nn.y(), nn.z(), 1)) * an;
 				lq += Line_Quadric(pn, nn) * an;
 			}
@@ -2066,30 +3726,46 @@ private:
 
 	// --- Sampling ---
 
-	void recompute_samples_normals_pca(PointsParameters& p)
+	void recompute_samples_normals_pca(PointsParameters& p, bool use_mixed_cloud = false)
 	{
-		if (!p.samples_mesh_ || !p.samples_kdtree_ || !p.samples_position_ || !p.samples_normal_)
+		const bool fit_mixed = use_mixed_cloud && p.opt_mesh_ && p.opt_position_ && p.opt_normal_ && p.opt_normal_color_ &&
+								(nb_cells<PVertex>(*p.opt_mesh_) > 0);
+		POINTS* fit_mesh = p.samples_mesh_;
+		std::shared_ptr<PAttribute<Vec3>> fit_position = p.samples_position_;
+		std::shared_ptr<PAttribute<Vec3>> fit_normal = p.samples_normal_;
+		std::shared_ptr<PAttribute<Vec4>> fit_normal_color = p.samples_normal_color_;
+		if (fit_mixed)
+		{
+			fit_mesh = p.opt_mesh_;
+			fit_position = p.opt_position_;
+			fit_normal = p.opt_normal_;
+			fit_normal_color = p.opt_normal_color_;
+		}
+		acc::KDTree<3, uint32>* fit_kdtree = fit_mixed ? p.opt_kdtree_ : p.samples_kdtree_;
+		const std::vector<PVertex>& fit_kdtree_vertices =
+			fit_mixed ? p.opt_kdtree_vertices_ : p.samples_kdtree_vertices_;
+		if (!fit_mesh || !fit_kdtree || !fit_position || !fit_normal)
 			return;
 
 		const int k = std::max(3, p.knn_k_);
 		const Scalar eps = Scalar(1e-12);
 
-		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			const Vec3& center = (*p.samples_position_)[v_idx];
+		parallel_foreach_cell(*fit_mesh, [&](PVertex v) {
+			uint32 v_idx = index_of(*fit_mesh, v);
+			const Vec3& center = (*fit_position)[v_idx];
 
 			std::vector<std::pair<uint32, Scalar>> knn_res;
-			p.samples_kdtree_->find_nns(center, k + 1, &knn_res);
+			fit_kdtree->find_nns(center, k + 1, &knn_res);
 
 			std::vector<Vec3> neighbors;
 			neighbors.reserve(k);
 			for (const auto& res : knn_res)
 			{
-				PVertex nb = p.samples_kdtree_vertices_[res.first];
+				PVertex nb = fit_kdtree_vertices[res.first];
 				if (nb == v)
 					continue;
-				uint32 nb_idx = index_of(*p.samples_mesh_, nb);
-				neighbors.push_back((*p.samples_position_)[nb_idx]);
+				uint32 nb_idx = index_of(*fit_mesh, nb);
+				neighbors.push_back((*fit_position)[nb_idx]);
 				if (static_cast<int>(neighbors.size()) >= k)
 					break;
 			}
@@ -2126,17 +3802,26 @@ private:
 			if (n2 < eps)
 				return true;
 
-			Vec3 n0 = (*p.samples_normal_)[v_idx];
+			Vec3 n0 = (*fit_normal)[v_idx];
 			if (n0.squaredNorm() > eps && n.dot(n0) < Scalar(0))
 				n = -n;
 			n.normalize();
-			(*p.samples_normal_)[v_idx] = n;
+			(*fit_normal)[v_idx] = n;
 			return true;
 		});
 
-		refresh_sample_normals_color(p);
-		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
-		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
+		if (fit_normal_color)
+		{
+			parallel_foreach_cell(*fit_mesh, [&](PVertex v) -> bool {
+				uint32 v_idx = index_of(*fit_mesh, v);
+				const Vec3& n = (*fit_normal)[v_idx];
+				(*fit_normal_color)[v_idx] = Vec4((n.x() + 1.0) * 0.5, (n.y() + 1.0) * 0.5, (n.z() + 1.0) * 0.5, 1.0);
+				return true;
+			});
+		}
+		points_provider_->emit_attribute_changed(*fit_mesh, fit_normal.get());
+		if (fit_normal_color)
+			points_provider_->emit_attribute_changed(*fit_mesh, fit_normal_color.get());
 	}
 	Vec3 random_sample_around(const Vec3& p, const Scalar radius, std::uniform_real_distribution<Scalar>& uni,
 							  std::mt19937& rng)
@@ -2232,11 +3917,20 @@ private:
 		p.fitting_data_computed_ = false;
 		p.samples_winding_number_.reset();
 		p.samples_wn_bvh_.reset();
+		p.opt_winding_number_.reset();
+		p.opt_wn_bvh_.reset();
 		p.samples_jitter_backup_valid_ = false;
 		p.samples_position_backup_.clear();
 		p.samples_normal_backup_.clear();
 		if (p.samples_mesh_)
 			points_provider_->clear_mesh(*p.samples_mesh_);
+		clear_alpha_inside_samples(p);
+		if (p.opt_mesh_)
+			points_provider_->clear_mesh(*p.opt_mesh_);
+		p.last_surface_count_ = 0;
+		p.last_inside_count_ = 0;
+		p.last_mixed_count_ = 0;
+		p.mixed_cloud_dirty_ = true;
 	}
 
 	void backup_input_state(PointsParameters& p)
@@ -2341,6 +4035,9 @@ private:
 		p.fitting_data_computed_ = false;
 		p.samples_winding_number_.reset();
 		p.samples_wn_bvh_.reset();
+		p.opt_winding_number_.reset();
+		p.opt_wn_bvh_.reset();
+		mark_mixed_optimization_cloud_dirty(p);
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
 	}
 
@@ -2375,6 +4072,9 @@ private:
 		p.fitting_data_computed_ = false;
 		p.samples_winding_number_.reset();
 		p.samples_wn_bvh_.reset();
+		p.opt_winding_number_.reset();
+		p.opt_wn_bvh_.reset();
+		mark_mixed_optimization_cloud_dirty(p);
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
 	}
@@ -2400,6 +4100,9 @@ private:
 		p.fitting_data_computed_ = false;
 		p.samples_winding_number_.reset();
 		p.samples_wn_bvh_.reset();
+		p.opt_winding_number_.reset();
+		p.opt_wn_bvh_.reset();
+		mark_mixed_optimization_cloud_dirty(p);
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
@@ -2452,9 +4155,12 @@ private:
 		p.fitting_data_computed_ = false;
 		p.samples_winding_number_.reset();
 		p.samples_wn_bvh_.reset();
+		p.opt_winding_number_.reset();
+		p.opt_wn_bvh_.reset();
 		p.samples_jitter_backup_valid_ = false;
 		p.samples_position_backup_.clear();
 		p.samples_normal_backup_.clear();
+		mark_mixed_optimization_cloud_dirty(p);
 		if (p.samples_mesh_)
 			points_provider_->clear_mesh(*p.samples_mesh_);
 
@@ -2554,10 +4260,32 @@ private:
 	}
 	// --- Initial Medial Axis ---
 
-	void compute_initial_medial_axis(PointsParameters& p)
+	void compute_initial_medial_axis(PointsParameters& p, bool use_mixed_cloud = false)
 	{
-		if (!p.samples_mesh_ || !p.samples_kdtree_ || !p.samples_position_ || !p.samples_normal_ ||
-			!p.samples_ma_position_ || !p.samples_ma_radius_ || !p.samples_ma_secondary_vertex_)
+		const bool fit_mixed =
+			use_mixed_cloud && p.opt_mesh_ && p.opt_position_ && p.opt_normal_ && p.opt_ma_position_ &&
+			p.opt_ma_radius_ && p.opt_ma_secondary_vertex_ && (nb_cells<PVertex>(*p.opt_mesh_) > 0);
+		POINTS* fit_mesh = p.samples_mesh_;
+		std::shared_ptr<PAttribute<Vec3>> fit_position = p.samples_position_;
+		std::shared_ptr<PAttribute<Vec3>> fit_normal = p.samples_normal_;
+		std::shared_ptr<PAttribute<Vec3>> fit_ma_position = p.samples_ma_position_;
+		std::shared_ptr<PAttribute<Scalar>> fit_ma_radius = p.samples_ma_radius_;
+		std::shared_ptr<PAttribute<PVertex>> fit_ma_secondary = p.samples_ma_secondary_vertex_;
+		if (fit_mixed)
+		{
+			fit_mesh = p.opt_mesh_;
+			fit_position = p.opt_position_;
+			fit_normal = p.opt_normal_;
+			fit_ma_position = p.opt_ma_position_;
+			fit_ma_radius = p.opt_ma_radius_;
+			fit_ma_secondary = p.opt_ma_secondary_vertex_;
+		}
+		acc::KDTree<3, uint32>* fit_kdtree = fit_mixed ? p.opt_kdtree_ : p.samples_kdtree_;
+		const std::vector<PVertex>& fit_kdtree_vertices =
+			fit_mixed ? p.opt_kdtree_vertices_ : p.samples_kdtree_vertices_;
+
+		if (!fit_mesh || !fit_kdtree || !fit_position || !fit_normal || !fit_ma_position || !fit_ma_radius ||
+			!fit_ma_secondary)
 			return;
 
 		const Scalar fallback_radius = p.alpha_;
@@ -2572,15 +4300,15 @@ private:
 		// UDF model (or forced displacement mode): direct MA initialization.
 		if (use_displacement)
 		{
-			parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
+			parallel_foreach_cell(*fit_mesh, [&](PVertex v) -> bool {
 				if (!v.is_valid())
 					return true;
-				const uint32 v_idx = index_of(*p.samples_mesh_, v);
+				const uint32 v_idx = index_of(*fit_mesh, v);
 				if (v_idx == INVALID_INDEX)
 					return true;
 
-				const Vec3& pt = (*p.samples_position_)[v_idx];
-				Vec3 n = (*p.samples_normal_)[v_idx];
+				const Vec3& pt = (*fit_position)[v_idx];
+				Vec3 n = (*fit_normal)[v_idx];
 				if (n.squaredNorm() > min_norm)
 					n.normalize();
 				else
@@ -2588,23 +4316,23 @@ private:
 
 				const Vec3 c = pt - n * fallback_radius;
 				PVertex secondary;
-				if (p.samples_kdtree_ && !p.samples_kdtree_vertices_.empty())
+				if (fit_kdtree && !fit_kdtree_vertices.empty())
 				{
 					const Vec3 q = c - n * fallback_radius;
 					std::pair<uint32, Scalar> knn_res;
-					p.samples_kdtree_->find_nn(q, &knn_res);
-					if (knn_res.first < p.samples_kdtree_vertices_.size())
-						secondary = p.samples_kdtree_vertices_[knn_res.first];
+					fit_kdtree->find_nn(q, &knn_res);
+					if (knn_res.first < fit_kdtree_vertices.size())
+						secondary = fit_kdtree_vertices[knn_res.first];
 				}
 
-				(*p.samples_ma_position_)[v_idx] = c;
-				(*p.samples_ma_radius_)[v_idx] = fallback_radius;
-				(*p.samples_ma_secondary_vertex_)[v_idx] = secondary;
+				(*fit_ma_position)[v_idx] = c;
+				(*fit_ma_radius)[v_idx] = fallback_radius;
+				(*fit_ma_secondary)[v_idx] = secondary;
 				return true;
 			});
 
 			// Keep MA-KDTree in sync for MF/UDF topology scoring paths.
-			build_kdtree(p);
+			build_kdtree(p, fit_mixed);
 			return;
 		}
 
@@ -2614,11 +4342,11 @@ private:
 		auto run_shrinking_ball_for_vertex = [&](PVertex v) -> bool {
 			if (!v.is_valid())
 				return false;
-			const uint32 v_idx = index_of(*p.samples_mesh_, v);
+			const uint32 v_idx = index_of(*fit_mesh, v);
 			if (v_idx == INVALID_INDEX)
 				return false;
-			const Vec3& pt = (*p.samples_position_)[v_idx];
-			Vec3 n = (*p.samples_normal_)[v_idx];
+			const Vec3& pt = (*fit_position)[v_idx];
+			Vec3 n = (*fit_normal)[v_idx];
 
 			if (n.squaredNorm() > min_norm)
 				n.normalize();
@@ -2630,7 +4358,7 @@ private:
 			if (n.squaredNorm() > min_norm)
 			{
 				auto [c1, r1, q1] = geometry::shrinking_ball_center<PVertex>(
-					pt, n, p.samples_kdtree_, p.samples_kdtree_vertices_, initial_radius);
+					pt, n, fit_kdtree, fit_kdtree_vertices, initial_radius);
 
 				if (std::isfinite(static_cast<double>(r1)) && r1 > Scalar(0))
 				{
@@ -2640,24 +4368,24 @@ private:
 				}
 			}
 
-			if (!secondary.is_valid() && p.samples_kdtree_ && !p.samples_kdtree_vertices_.empty())
+			if (!secondary.is_valid() && fit_kdtree && !fit_kdtree_vertices.empty())
 			{
 				const Vec3 q = c - n * r;
 				std::pair<uint32, Scalar> knn_res;
-				p.samples_kdtree_->find_nn(q, &knn_res);
-				if (knn_res.first < p.samples_kdtree_vertices_.size())
-					secondary = p.samples_kdtree_vertices_[knn_res.first];
+				fit_kdtree->find_nn(q, &knn_res);
+				if (knn_res.first < fit_kdtree_vertices.size())
+					secondary = fit_kdtree_vertices[knn_res.first];
 			}
 
-			(*p.samples_ma_position_)[v_idx] = c;
+			(*fit_ma_position)[v_idx] = c;
 			const Scalar expected_radius = p.alpha_ * p.sqem_fix_radius_scale_;
-			(*p.samples_ma_radius_)[v_idx] = (r > expected_radius) ? r : expected_radius;
-			(*p.samples_ma_secondary_vertex_)[v_idx] = secondary;
+			(*fit_ma_radius)[v_idx] = (r > expected_radius) ? r : expected_radius;
+			(*fit_ma_secondary)[v_idx] = secondary;
 			return true;
 		};
 
 		auto run_shrinking_ball_for_all = [&]() {
-			parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
+			parallel_foreach_cell(*fit_mesh, [&](PVertex v) -> bool {
 				run_shrinking_ball_for_vertex(v);
 				return true;
 			});
@@ -2671,6 +4399,7 @@ private:
 		uint32 flipped_normals = 0;
 		uint32 flip_triggered_points = 0;
 		uint32 deleted_samples = 0;
+		uint32 suppressed_deletes = 0;
 		if (p.neural_udf_loaded_)
 		{
 			auto eval_mf_values_sdf = [&](const std::vector<Vec3>& query_points, std::vector<Scalar>& out_values,
@@ -2723,14 +4452,14 @@ private:
 
 			std::vector<PVertex> vertices;
 			std::vector<Vec3> centers;
-			vertices.reserve(nb_cells<PVertex>(*p.samples_mesh_));
-			centers.reserve(nb_cells<PVertex>(*p.samples_mesh_));
-			foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
-				const uint32 vid = index_of(*p.samples_mesh_, v);
+			vertices.reserve(nb_cells<PVertex>(*fit_mesh));
+			centers.reserve(nb_cells<PVertex>(*fit_mesh));
+			foreach_cell(*fit_mesh, [&](PVertex v) -> bool {
+				const uint32 vid = index_of(*fit_mesh, v);
 				if (vid == INVALID_INDEX)
 					return true;
 				vertices.push_back(v);
-				centers.push_back((*p.samples_ma_position_)[vid]);
+				centers.push_back((*fit_ma_position)[vid]);
 				return true;
 			});
 
@@ -2769,14 +4498,14 @@ private:
 
 				for (PVertex v : need_retry)
 				{
-					const uint32 vid = index_of(*p.samples_mesh_, v);
+					const uint32 vid = index_of(*fit_mesh, v);
 					if (vid == INVALID_INDEX)
 						continue;
-					Vec3 n = (*p.samples_normal_)[vid];
+					Vec3 n = (*fit_normal)[vid];
 					if (n.squaredNorm() > min_norm)
 					{
 						n.normalize();
-						(*p.samples_normal_)[vid] = -n;
+						(*fit_normal)[vid] = -n;
 						++flipped_normals;
 					}
 					run_shrinking_ball_for_vertex(v);
@@ -2786,13 +4515,13 @@ private:
 				retry_centers.reserve(need_retry.size());
 				for (PVertex v : need_retry)
 				{
-					const uint32 vid = index_of(*p.samples_mesh_, v);
+					const uint32 vid = index_of(*fit_mesh, v);
 					if (vid == INVALID_INDEX)
 					{
 						retry_centers.push_back(Vec3(0, 0, 0));
 						continue;
 					}
-					retry_centers.push_back((*p.samples_ma_position_)[vid]);
+					retry_centers.push_back((*fit_ma_position)[vid]);
 				}
 
 				std::vector<Scalar> retry_score;
@@ -2822,11 +4551,28 @@ private:
 						}
 						if (!should_delete)
 							continue;
-						const uint32 vid = index_of(*p.samples_mesh_, need_retry[i]);
+						const uint32 vid = index_of(*fit_mesh, need_retry[i]);
 						if (vid == INVALID_INDEX || !deleted_ids.insert(vid).second)
 							continue;
-						remove_vertex(*p.samples_mesh_, need_retry[i]);
-						++deleted_samples;
+						if (fit_mixed)
+						{
+							// Stability path for mixed cloud: avoid in-loop vertex deletion.
+							Vec3 n = (*fit_normal)[vid];
+							if (n.squaredNorm() > min_norm)
+								n.normalize();
+							else
+								n = Vec3(0, 0, 1);
+							(*fit_ma_position)[vid] = (*fit_position)[vid] - n * fallback_radius;
+							(*fit_ma_radius)[vid] =
+								std::max<Scalar>(fallback_radius, p.alpha_ * p.sqem_fix_radius_scale_);
+							(*fit_ma_secondary)[vid] = PVertex();
+							++suppressed_deletes;
+						}
+						else
+						{
+							remove_vertex(*fit_mesh, need_retry[i]);
+							++deleted_samples;
+						}
 					}
 				}
 			}
@@ -2837,27 +4583,29 @@ private:
 			std::cout << "[MAFlipPrune] flip_triggered_points=" << flip_triggered_points
 					  << " flipped_normals=" << flipped_normals
 					  << " deleted_samples=" << deleted_samples
-					  << " remaining_samples=" << nb_cells<PVertex>(*p.samples_mesh_) << std::endl;
+					  << " suppressed_deletes=" << suppressed_deletes
+					  << " remaining_samples=" << nb_cells<PVertex>(*fit_mesh) << std::endl;
 
 			// Keep fitting-dependent structures coherent after sample removals.
-			build_kdtree(p);
-			if (nb_cells<PVertex>(*p.samples_mesh_) > 0)
+			build_kdtree(p, fit_mixed);
+			if (nb_cells<PVertex>(*fit_mesh) > 0)
 			{
-				recompute_samples_normals_pca(p);
-				compute_samples_area(p);
-				compute_winding_numbers(p);
-				compute_quadrics(p);
+				recompute_samples_normals_pca(p, fit_mixed);
+				compute_samples_area(p, fit_mixed);
+				compute_winding_numbers(p, fit_mixed);
+				compute_quadrics(p, fit_mixed);
 				run_shrinking_ball_for_all();
 			}
 		}
 		else if (flip_triggered_points > 0 || flipped_normals > 0)
 		{
 			std::cout << "[MAFlipPrune] flip_triggered_points=" << flip_triggered_points
-					  << " flipped_normals=" << flipped_normals << " deleted_samples=0" << std::endl;
+					  << " flipped_normals=" << flipped_normals << " deleted_samples=0"
+					  << " suppressed_deletes=" << suppressed_deletes << std::endl;
 		}
 
 		// MA positions changed; keep MA-KDTree in sync for MF topology scoring.
-		build_kdtree(p);
+		build_kdtree(p, fit_mixed);
 	}
 
 	// MF post-process: search along opposite normal direction for minimal mf-abs(sdf)
@@ -2873,30 +4621,32 @@ private:
 
 	void init_spheres_from_samples(PointsParameters& p, uint32 max_nb_spheres)
 	{
-		if (!p.samples_mesh_ || !p.samples_position_ || !p.samples_knn_ || !p.samples_ma_position_ ||
-			!p.samples_ma_radius_ || !p.samples_ma_secondary_vertex_)
+		SphereFitData data;
+		if (!get_sphere_fit_data(p, data))
+			return;
+		if (!data.mesh || !data.position || !data.knn || !data.ma_position || !data.ma_radius)
 			return;
 
 		std::vector<PVertex> sorted_vertices;
-		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+		foreach_cell(*data.mesh, [&](PVertex v) {
 			sorted_vertices.push_back(v);
 			return true;
 		});
 		std::sort(sorted_vertices.begin(), sorted_vertices.end(), [&](PVertex a, PVertex b) {
 			// sort candidate spheres by decreasing radius
-			uint32 idx_a = index_of(*p.samples_mesh_, a);
-			uint32 idx_b = index_of(*p.samples_mesh_, b);
-			return (*p.samples_ma_radius_)[idx_a] > (*p.samples_ma_radius_)[idx_b];
+			uint32 idx_a = index_of(*data.mesh, a);
+			uint32 idx_b = index_of(*data.mesh, b);
+			return (*data.ma_radius)[idx_a] > (*data.ma_radius)[idx_b];
 		});
 
-		auto covered = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__covered");
+		auto covered = get_or_add_attribute<bool, PVertex>(*data.mesh, "__covered");
 		covered->fill(false);
 
 		p.nb_spheres_ = 0;
 
 		for (PVertex v : sorted_vertices)
 		{
-			uint32 v_index = index_of(*p.samples_mesh_, v);
+			uint32 v_index = index_of(*data.mesh, v);
 
 			if (p.nb_spheres_ >= max_nb_spheres)
 				break;
@@ -2904,8 +4654,8 @@ private:
 			if ((*covered)[v_index])
 				continue;
 
-			const Vec3& vp = (*p.samples_ma_position_)[v_index];
-			Scalar vr = (*p.samples_ma_radius_)[v_index];
+			const Vec3& vp = (*data.ma_position)[v_index];
+			Scalar vr = (*data.ma_radius)[v_index];
 			const Scalar dilation_radius = std::max<Scalar>(vr + Scalar(p.init_dilation_constant_), Scalar(0));
 			const Scalar dilation_radius_sq = dilation_radius * dilation_radius;
 
@@ -2922,7 +4672,7 @@ private:
 			auto flood_cover = [&](PVertex seed) {
 				if (!seed.is_valid())
 					return;
-				uint32 seed_idx = index_of(*p.samples_mesh_, seed);
+				uint32 seed_idx = index_of(*data.mesh, seed);
 				if (seed_idx == INVALID_INDEX || (*covered)[seed_idx])
 					return;
 
@@ -2935,14 +4685,14 @@ private:
 				{
 					PVertex w = stack.back();
 					stack.pop_back();
-					uint32 w_idx = index_of(*p.samples_mesh_, w);
+					uint32 w_idx = index_of(*data.mesh, w);
 
 					// Use KNN for propagation on point cloud
-					for (PVertex u : (*p.samples_knn_)[w_idx])
+					for (PVertex u : (*data.knn)[w_idx])
 					{
-						uint32 u_idx = index_of(*p.samples_mesh_, u);
+						uint32 u_idx = index_of(*data.mesh, u);
 						if (!(*covered)[u_idx] &&
-							((*p.samples_position_)[u_idx] - vp).squaredNorm() < dilation_radius_sq)
+							((*data.position)[u_idx] - vp).squaredNorm() < dilation_radius_sq)
 						{
 							(*covered)[u_idx] = true;
 							stack.push_back(u);
@@ -2954,14 +4704,16 @@ private:
 			flood_cover(v);
 
 			// Secondary seed can reach another lobe; skip if already covered to avoid redundant traversal.
-			PVertex secondary = (*p.samples_ma_secondary_vertex_)[v_index];
+			PVertex secondary;
+			if (data.ma_secondary)
+				secondary = (*data.ma_secondary)[v_index];
 			if (secondary.is_valid())
 			{
 				flood_cover(secondary);
 			}
 		}
 
-		remove_attribute<PVertex>(*p.samples_mesh_, covered);
+		remove_attribute<PVertex>(*data.mesh, covered);
 
 		compute_clusters_full(p);
 	}
@@ -2977,19 +4729,45 @@ private:
 		std::shared_ptr<PAttribute<Line_Quadric>> line_quadric = nullptr;
 		std::shared_ptr<PAttribute<PVertex>> sphere = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> error = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> ma_position = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> ma_radius = nullptr;
+		std::shared_ptr<PAttribute<PVertex>> ma_secondary = nullptr;
 	};
 
 	bool get_sphere_fit_data(PointsParameters& p, SphereFitData& data)
 	{
-		data.mesh = p.samples_mesh_;
-		data.position = p.samples_position_;
-		data.normal = p.samples_normal_;
-		data.area = p.samples_area_;
-		data.knn = p.samples_knn_;
-		data.quadric = p.samples_quadric_;
-		data.line_quadric = p.samples_line_quadric_;
-		data.sphere = p.samples_sphere_;
-		data.error = p.samples_error_;
+		const bool use_opt = !p.mixed_cloud_dirty_ && p.opt_mesh_ && p.opt_position_ && p.opt_area_ && p.opt_knn_ && p.opt_quadric_ &&
+							 p.opt_line_quadric_ && p.opt_sphere_ && (nb_cells<PVertex>(*p.opt_mesh_) > 0);
+		if (use_opt)
+		{
+			data.mesh = p.opt_mesh_;
+			data.position = p.opt_position_;
+			data.normal = p.opt_normal_;
+			data.area = p.opt_area_;
+			data.knn = p.opt_knn_;
+			data.quadric = p.opt_quadric_;
+			data.line_quadric = p.opt_line_quadric_;
+			data.sphere = p.opt_sphere_;
+			data.error = p.opt_error_;
+			data.ma_position = p.opt_ma_position_;
+			data.ma_radius = p.opt_ma_radius_;
+			data.ma_secondary = p.opt_ma_secondary_vertex_;
+		}
+		else
+		{
+			data.mesh = p.samples_mesh_;
+			data.position = p.samples_position_;
+			data.normal = p.samples_normal_;
+			data.area = p.samples_area_;
+			data.knn = p.samples_knn_;
+			data.quadric = p.samples_quadric_;
+			data.line_quadric = p.samples_line_quadric_;
+			data.sphere = p.samples_sphere_;
+			data.error = p.samples_error_;
+			data.ma_position = p.samples_ma_position_;
+			data.ma_radius = p.samples_ma_radius_;
+			data.ma_secondary = p.samples_ma_secondary_vertex_;
+		}
 
 		if (!data.mesh || !data.position || !data.area || !data.quadric || !data.line_quadric || !data.sphere)
 			return false;
@@ -3067,59 +4845,70 @@ private:
 
 		if (p.nb_spheres_ == 0)
 			return;
-		
+
+		std::atomic<uint32> fallback_global_search_points(0);
 		parallel_foreach_cell(*data.mesh, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*data.mesh, v);
 
 			Scalar a = (*data.area)[v_index];
 			PVertex cluster_sphere = (*data.sphere)[v_index];
-			if (!cluster_sphere.is_valid())
-			{
-				PVertex sphere = of_index<PVertex>(*p.spheres_, 0);
-				(*data.sphere)[v_index] = sphere;
-
-				std::lock_guard<std::mutex> lock(spheres_mutex_[0 % spheres_mutex_.size()]);
-				(*p.spheres_cluster_)[0].push_back(v);
-				(*p.spheres_cluster_area_)[0] += a;
-				return true;
-			}
-
-			uint32 cs_index = index_of(*p.spheres_, cluster_sphere);
-			auto neighbors_spheres = (*p.spheres_neighbor_clusters_)[cs_index];
-			neighbors_spheres.insert(cluster_sphere);
+			const uint32 cs_index = cluster_sphere.is_valid() ? index_of(*p.spheres_, cluster_sphere) : INVALID_INDEX;
+			const bool use_global_search = (!cluster_sphere.is_valid() || cs_index == INVALID_INDEX);
 
 			Scalar min_distance = std::numeric_limits<Scalar>::max();
 			PVertex closest_sphere;
 			uint32 closest_sphere_index = INVALID_INDEX;
 
-			for (PVertex pv : neighbors_spheres)
-			{
-				uint32 pv_index = index_of(*p.spheres_, pv);
-
+			auto eval_candidate = [&](PVertex pv) {
+				const uint32 pv_index = index_of(*p.spheres_, pv);
+				if (pv_index == INVALID_INDEX)
+					return;
 				const Vec3& center = (*p.spheres_position_)[pv_index];
-				Scalar radius = (*p.spheres_radius_)[pv_index];
-
-				Scalar dist_sqem = (*data.quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
-				Scalar dist_other = (*data.line_quadric)[v_index].eval(center);
-				Scalar dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
+				const Scalar radius = (*p.spheres_radius_)[pv_index];
+				const Scalar dist_sqem = (*data.quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
+				const Scalar dist_other = (*data.line_quadric)[v_index].eval(center);
+				const Scalar dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
 				if (dist < min_distance)
 				{
 					min_distance = dist;
 					closest_sphere = pv;
 					closest_sphere_index = pv_index;
 				}
+			};
+
+			if (use_global_search)
+			{
+				fallback_global_search_points.fetch_add(1, std::memory_order_relaxed);
+				foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
+					eval_candidate(pv);
+					return true;
+				});
+			}
+			else
+			{
+				auto neighbors_spheres = (*p.spheres_neighbor_clusters_)[cs_index];
+				neighbors_spheres.insert(cluster_sphere);
+				for (PVertex pv : neighbors_spheres)
+					eval_candidate(pv);
 			}
 
-			(*data.sphere)[v_index] = closest_sphere;
+			if (!closest_sphere.is_valid() || closest_sphere_index == INVALID_INDEX)
+				return true;
 
+			(*data.sphere)[v_index] = closest_sphere;
 			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
 			(*p.spheres_cluster_)[closest_sphere_index].push_back(v);
 			(*p.spheres_cluster_area_)[closest_sphere_index] += a;
-
 			return true;
 		});
-	}
 
+		const uint32 fallback_points = fallback_global_search_points.load(std::memory_order_relaxed);
+		if (fallback_points > 0)
+		{
+			std::cout << "[ComputeClustersLocal] fallback_global_search_points=" << fallback_points
+					  << " total_points=" << nb_cells<PVertex>(*data.mesh) << std::endl;
+		}
+	}
 	void compute_clusters(PointsParameters& p)
 	{
 		if (p.use_local_clusters_)
@@ -3332,13 +5121,12 @@ private:
 
 	// Power distance clustering for alpha-inside points (uses original alpha-inside positions).
 	// Power distance clustering for alpha-inside points into main clusters (uses original alpha-inside positions).
-	// Use power-based clusters to compute sphere neighbors and build skeleton
+	// Use power-based clusters to compute sphere neighbors and build skeleton.
 	void compute_skeleton_power(PointsParameters& p, bool only_neighbors = false)
 	{
-		// First compute power clusters
+		// First compute power clusters.
 		compute_power_cluster(p);
-
-		// Then build skeleton using the power-based cluster assignments
+		// Then build skeleton using the current cluster assignments.
 		compute_skeleton(p, only_neighbors);
 	}
 
@@ -3406,6 +5194,51 @@ private:
 		
 	}
 
+	void update_opt_mesh_colors(PointsParameters& p)
+	{
+		if (!p.opt_mesh_ || !p.opt_color_ || !p.opt_sphere_)
+			return;
+		parallel_foreach_cell(*p.opt_mesh_, [&](PVertex v) -> bool {
+			const uint32 v_index = index_of(*p.opt_mesh_, v);
+			Vec4 c(0.35f, 0.35f, 0.35f, 1.0f);
+			const PVertex sphere = (*p.opt_sphere_)[v_index];
+			if (sphere.is_valid() && p.spheres_ && p.spheres_cluster_color_)
+			{
+				const uint32 sid = index_of(*p.spheres_, sphere);
+				if (sid != INVALID_INDEX && sid < nb_cells<PVertex>(*p.spheres_))
+					c = (*p.spheres_cluster_color_)[sid];
+			}
+			(*p.opt_color_)[v_index] = c;
+			return true;
+		});
+	}
+	void update_spheres_topup_zero_inside_color(PointsParameters& p)
+	{
+		if (!p.spheres_ || !p.spheres_topup_zero_inside_color_)
+			return;
+		std::vector<uint32> inside_counts(nb_cells<PVertex>(*p.spheres_), uint32(0));
+		if (p.alpha_inside_mesh_ && p.alpha_inside_sphere_)
+		{
+			foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) -> bool {
+				const uint32 vid = index_of(*p.alpha_inside_mesh_, v);
+				const PVertex owner = (*p.alpha_inside_sphere_)[vid];
+				if (!owner.is_valid())
+					return true;
+				const uint32 sid = index_of(*p.spheres_, owner);
+				if (sid != INVALID_INDEX && sid < inside_counts.size())
+					++inside_counts[sid];
+				return true;
+			});
+		}
+		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			const uint32 sid = index_of(*p.spheres_, v);
+			const bool zero_inside = (sid >= inside_counts.size()) || (inside_counts[sid] == 0);
+			(*p.spheres_topup_zero_inside_color_)[sid] = zero_inside
+				? Vec4(1.0f, 0.15f, 0.15f, p.spheres_transparency_)
+				: Vec4(0.20f, 0.20f, 0.20f, p.spheres_transparency_);
+			return true;
+		});
+	}
 	void update_spheres_color(PointsParameters& p)
 	{
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
@@ -3512,14 +5345,22 @@ private:
 		if (!use_mf_ma_distance)
 			return eval_udf_values(p, points, out_values);
 
-		if (!p.samples_mesh_ || !p.samples_ma_position_)
+		SphereFitData data;
+		if (!get_sphere_fit_data(p, data))
 		{
 			std::cerr << "[TopologyScore][MF] missing sample/ma data for MF score evaluation." << std::endl;
 			return false;
 		}
-		if (!p.samples_ma_kdtree_ || p.samples_ma_kdtree_vertices_.empty())
-			build_kdtree(p);
-		if (!p.samples_ma_kdtree_ || p.samples_ma_kdtree_vertices_.empty())
+		const bool fit_mixed = (data.mesh == p.opt_mesh_);
+		acc::KDTree<3, uint32>* fit_ma_kdtree = fit_mixed ? p.opt_ma_kdtree_ : p.samples_ma_kdtree_;
+		const std::vector<PVertex>& fit_ma_vertices =
+			fit_mixed ? p.opt_ma_kdtree_vertices_ : p.samples_ma_kdtree_vertices_;
+		if (!fit_ma_kdtree || fit_ma_vertices.empty())
+			build_kdtree(p, fit_mixed);
+		fit_ma_kdtree = fit_mixed ? p.opt_ma_kdtree_ : p.samples_ma_kdtree_;
+		const std::vector<PVertex>& fit_ma_vertices_ref =
+			fit_mixed ? p.opt_ma_kdtree_vertices_ : p.samples_ma_kdtree_vertices_;
+		if (!fit_ma_kdtree || fit_ma_vertices_ref.empty() || !data.ma_position || !data.position)
 		{
 			std::cerr << "[TopologyScore][MF] MA KDTree unavailable (no valid ma_position / ma_radius). "
 					  << "Run fitting data computation first." << std::endl;
@@ -3529,15 +5370,15 @@ private:
 		for (size_t i = 0; i < points.size(); ++i)
 		{
 			std::pair<uint32, Scalar> knn_res;
-			p.samples_ma_kdtree_->find_nn(points[i], &knn_res);
+			fit_ma_kdtree->find_nn(points[i], &knn_res);
 			const uint32 nn_idx = knn_res.first;
-			if (nn_idx >= p.samples_ma_kdtree_vertices_.size())
+			if (nn_idx >= fit_ma_vertices_ref.size())
 				continue;
-			const PVertex nearest_sample = p.samples_ma_kdtree_vertices_[nn_idx];
-			const uint32 sid = index_of(*p.samples_mesh_, nearest_sample);
+			const PVertex nearest_sample = fit_ma_vertices_ref[nn_idx];
+			const uint32 sid = index_of(*data.mesh, nearest_sample);
 			if (sid == INVALID_INDEX)
 				continue;
-			const Vec3& ma_pos = (*p.samples_ma_position_)[sid];
+			const Vec3& ma_pos = (*data.ma_position)[sid];
 			out_values[i] = (points[i] - ma_pos).norm();
 		}
 		return true;
@@ -3691,17 +5532,32 @@ private:
 	}
 	void correct_sphere(PointsParameters& p, PVertex v)
 	{
+		SphereFitData data;
+		if (!get_sphere_fit_data(p, data))
+			return;
+		const bool fit_mixed = (data.mesh == p.opt_mesh_);
+		std::unique_ptr<PointFWN<3>>& winding_number = fit_mixed ? p.opt_winding_number_ : p.samples_winding_number_;
+		acc::KDTree<3, uint32>* fit_kdtree = fit_mixed ? p.opt_kdtree_ : p.samples_kdtree_;
+		const std::vector<PVertex>& fit_kdtree_vertices =
+			fit_mixed ? p.opt_kdtree_vertices_ : p.samples_kdtree_vertices_;
+		if (!winding_number || !fit_kdtree || fit_kdtree_vertices.empty() || !data.position)
+			return;
+
 		uint32 v_index = index_of(*p.spheres_, v);
 
 		Vec3& c = (*p.spheres_position_)[v_index];
 		Scalar& r = (*p.spheres_radius_)[v_index];
 
-		bool inside = p.samples_winding_number_->is_inside(c);
+		bool inside = winding_number->is_inside(c);
 
 		std::pair<uint32, Scalar> k_res;
-		p.samples_kdtree_->find_nn(c, &k_res);
-		uint32 k_idx = index_of(*p.samples_mesh_, p.samples_kdtree_vertices_[k_res.first]);
-		Vec3 closest_pos = (*p.samples_position_)[k_idx];
+		fit_kdtree->find_nn(c, &k_res);
+		if (k_res.first >= fit_kdtree_vertices.size())
+			return;
+		uint32 k_idx = index_of(*data.mesh, fit_kdtree_vertices[k_res.first]);
+		if (k_idx == INVALID_INDEX)
+			return;
+		Vec3 closest_pos = (*data.position)[k_idx];
 		Vec3 dir = (closest_pos - c).normalized();
 		if (!inside)
 			dir = -dir;
@@ -3890,10 +5746,122 @@ private:
 		});
 	}
 
+	void mark_empty_cluster_spheres_for_deletion(PointsParameters& p)
+	{
+		p.spheres_pending_delete_.clear();
+		p.pending_delete_count_ = 0;
+		if (!p.spheres_)
+			return;
+		const uint32 ns = nb_cells<PVertex>(*p.spheres_);
+		if (ns == 0)
+			return;
+		if (p.connectivity_mode_ == MODE_A_MIXED_KNN)
+		{
+			foreach_cell(*p.spheres_, [&](PVertex s) -> bool {
+				const uint32 sid = index_of(*p.spheres_, s);
+				if ((*p.spheres_cluster_)[sid].empty())
+					p.spheres_pending_delete_.push_back(s);
+				return true;
+			});
+			p.pending_delete_count_ = static_cast<uint32>(p.spheres_pending_delete_.size());
+			return;
+		}
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_sphere_)
+			return;
+		std::vector<uint32> inside_count(ns, 0);
+		foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) -> bool {
+			const uint32 vid = index_of(*p.alpha_inside_mesh_, v);
+			const PVertex owner = (*p.alpha_inside_sphere_)[vid];
+			if (!owner.is_valid())
+				return true;
+			const uint32 sid = index_of(*p.spheres_, owner);
+			if (sid != INVALID_INDEX && sid < ns)
+				++inside_count[sid];
+			return true;
+		});
+		foreach_cell(*p.spheres_, [&](PVertex s) -> bool {
+			const uint32 sid = index_of(*p.spheres_, s);
+			if (inside_count[sid] == 0)
+				p.spheres_pending_delete_.push_back(s);
+			return true;
+		});
+		p.pending_delete_count_ = static_cast<uint32>(p.spheres_pending_delete_.size());
+	}
+	void apply_pending_sphere_deletions(PointsParameters& p)
+	{
+		if (p.spheres_pending_delete_.empty())
+			return;
+		for (PVertex s : p.spheres_pending_delete_)
+		{
+			if (!s.is_valid())
+				continue;
+			const uint32 sid = index_of(*p.spheres_, s);
+			if (sid == INVALID_INDEX)
+				continue;
+			remove_sphere(p, s);
+		}
+		p.spheres_pending_delete_.clear();
+		p.pending_delete_count_ = 0;
+	}
+
+	void prepare_hybrid_iteration_data(PointsParameters& p, bool run_topup)
+	{
+		if (run_topup)
+			topup_alpha_inside_samples_from_current_mesh(p, "hybrid_prepare");
+		else if (p.connectivity_mode_ == MODE_B_INSIDE_POWER)
+			assign_alpha_inside_sphere_power(p);
+		ensure_mixed_optimization_cloud_ready(p);
+	}
+
+	bool should_refresh_local_connectivity(const PointsParameters& p)
+	{
+		if (!p.use_local_clusters_ || p.lock_skeleton_connectivity_)
+			return false;
+		const uint32 interval = std::max<uint32>(1, p.local_cluster_connectivity_refresh_interval_);
+		return (p.iteration_count_ % interval) == 0;
+	}
+
 	void update_spheres(PointsParameters& p)
 	{
-		compute_clusters(p);
+		auto set_stage = [&](const char* stage) {
+			p.last_update_stage_ = stage;
+			std::cout << "[UpdateSpheresStage] iter=" << (p.iteration_count_ + 1) << " stage=" << stage
+					  << " spheres=" << p.nb_spheres_ << std::endl;
+		};
+		const uint32 inside_before =
+			(p.alpha_inside_mesh_ != nullptr) ? static_cast<uint32>(nb_cells<PVertex>(*p.alpha_inside_mesh_)) : uint32(0);
+		set_stage("prepare_hybrid_iteration_data");
+		prepare_hybrid_iteration_data(p, p.topup_inside_before_reassign_in_loop_);
+		const uint32 inside_after_prepare =
+			(p.alpha_inside_mesh_ != nullptr) ? static_cast<uint32>(nb_cells<PVertex>(*p.alpha_inside_mesh_)) : uint32(0);
+		const uint32 topup_added =
+			(inside_after_prepare > inside_before) ? (inside_after_prepare - inside_before) : uint32(0);
+		if (p.nb_spheres_ == 0)
+		{
+			p.stop_reason_ = "No spheres available after hybrid iteration preparation.";
+			std::cerr << "[UpdateSpheresStage] " << p.stop_reason_ << std::endl;
+			p.force_full_refresh_on_stop_ = true;
+			p.stopping_ = true;
+			return;
+		}
+		if (should_refresh_local_connectivity(p))
+		{
+			set_stage("refresh_connectivity_interval");
+			compute_skeleton_current_mode(p, true);
+		}
 
+		set_stage("compute_clusters");
+		compute_clusters(p);
+		if (p.nb_spheres_ == 0)
+		{
+			p.stop_reason_ = "All spheres were removed during cluster computation.";
+			std::cerr << "[UpdateSpheresStage] " << p.stop_reason_ << std::endl;
+			p.force_full_refresh_on_stop_ = true;
+			p.stopping_ = true;
+			return;
+		}
+
+		set_stage("update_sphere_parameters");
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			if (p.distance_mode_ == LINE_QUADRIC_DISTANCE_FREE_RADIUS)
 				update_sphere_line_quadric_distance_free_radius(p, v);
@@ -3904,6 +5872,7 @@ private:
 
 		if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
 		{
+			set_stage("correct_spheres");
 			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 				correct_sphere(p, v);
 				return true;
@@ -3915,6 +5884,7 @@ private:
 			return true;
 		});
 
+		set_stage("compute_spheres_error");
 		compute_spheres_error(p);
 
 		if (p.auto_split_ && (p.total_error_diff_ < 1e-5 || p.iteration_count_ % 10 == 0))
@@ -3925,10 +5895,14 @@ private:
 				if (p.max_error_ > p.auto_split_error_threshold_)
 				{
 					if (!p.lock_skeleton_connectivity_)
-						compute_skeleton(p, true);
+					{
+						set_stage("compute_skeleton_for_split");
+						compute_skeleton_current_mode(p, true);
+					}
 
 					if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
 					{
+						set_stage("correct_spheres_on_split");
 						parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 							correct_sphere(p, v);
 							return true;
@@ -3969,10 +5943,14 @@ private:
 				if (p.nb_spheres_ < p.auto_split_max_nb_spheres_)
 				{
 					if (!p.lock_skeleton_connectivity_)
-						compute_skeleton(p, true);
+					{
+						set_stage("compute_skeleton_for_split");
+						compute_skeleton_current_mode(p, true);
+					}
 
 					if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
 					{
+						set_stage("correct_spheres_on_split");
 						parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 							correct_sphere(p, v);
 							return true;
@@ -3992,7 +5970,6 @@ private:
 
 					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)),
 												  p.auto_split_max_per_iter_max_);
-					//uint32 to_split_max = std::max(0.5 * p.nb_spheres_, 1.0);
 					for (PVertex sphere : sorted_spheres)
 					{
 						uint32 s_index = index_of(*p.spheres_, sphere);
@@ -4012,6 +5989,28 @@ private:
 			}
 		}
 
+		set_stage("cleanup_empty_clusters");
+		if (p.connectivity_mode_ == MODE_B_INSIDE_POWER)
+			assign_alpha_inside_sphere_power(p);
+		mark_empty_cluster_spheres_for_deletion(p);
+		const uint32 marked_for_delete = p.pending_delete_count_;
+		apply_pending_sphere_deletions(p);
+
+		std::cout << "[HybridLoop] iter=" << (p.iteration_count_ + 1)
+				  << " topup=" << (p.topup_inside_before_reassign_in_loop_ ? "on" : "off")
+				  << " topup_added=" << topup_added << " surface=" << p.last_surface_count_
+				  << " inside=" << p.last_inside_count_ << " mixed=" << p.last_mixed_count_
+				  << " marked_delete=" << marked_for_delete << " spheres=" << p.nb_spheres_ << std::endl;
+
+		if (p.nb_spheres_ == 0)
+		{
+			p.stop_reason_ = "No spheres left after empty-cluster cleanup.";
+			std::cerr << "[HybridLoop] " << p.stop_reason_ << std::endl;
+			p.force_full_refresh_on_stop_ = true;
+			p.stopping_ = true;
+		}
+		set_stage("done");
+
 		if (!p.running_)
 			update_render_data(p);
 	}
@@ -4027,6 +6026,15 @@ private:
 		{
 			uint32 s_idx = index_of(*data.mesh, s);
 			(*data.sphere)[s_idx] = PVertex();
+		}
+		if (p.alpha_inside_mesh_ && p.alpha_inside_sphere_)
+		{
+			parallel_foreach_cell(*p.alpha_inside_mesh_, [&](PVertex iv) -> bool {
+				const uint32 iid = index_of(*p.alpha_inside_mesh_, iv);
+				if ((*p.alpha_inside_sphere_)[iid] == v)
+					(*p.alpha_inside_sphere_)[iid] = PVertex();
+				return true;
+			});
 		}
 
 		// Keep neighbor lists consistent by removing the deleted sphere from adjacent sets.
@@ -4069,6 +6077,193 @@ private:
 		}
 	};
 
+	void compute_neighbors_from_alpha_inside_power(PointsParameters& p)
+	{
+		if (!p.spheres_ || !p.spheres_neighbor_clusters_)
+			return;
+		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			const uint32 sid = index_of(*p.spheres_, v);
+			(*p.spheres_neighbor_clusters_)[sid].clear();
+			return true;
+		});
+		if (!p.alpha_inside_mesh_ || !p.alpha_inside_position_ || !p.alpha_inside_sphere_ || !p.alpha_inside_knn_)
+			return;
+		if (nb_cells<PVertex>(*p.alpha_inside_mesh_) == 0)
+			return;
+		if (!p.alpha_inside_kdtree_)
+			build_alpha_inside_kdtree(p);
+		compute_alpha_inside_knn_graph(p);
+		assign_alpha_inside_sphere_power(p);
+		foreach_cell(*p.alpha_inside_mesh_, [&](PVertex v) -> bool {
+			const uint32 vid = index_of(*p.alpha_inside_mesh_, v);
+			const PVertex vs = (*p.alpha_inside_sphere_)[vid];
+			if (!vs.is_valid())
+				return true;
+			for (PVertex w : (*p.alpha_inside_knn_)[vid])
+			{
+				const uint32 wid = index_of(*p.alpha_inside_mesh_, w);
+				if (wid == INVALID_INDEX)
+					continue;
+				const PVertex ws = (*p.alpha_inside_sphere_)[wid];
+				if (!ws.is_valid() || ws == vs)
+					continue;
+				const uint32 sv = index_of(*p.spheres_, vs);
+				const uint32 sw = index_of(*p.spheres_, ws);
+				if (sv == INVALID_INDEX || sw == INVALID_INDEX)
+					continue;
+				(*p.spheres_neighbor_clusters_)[sv].insert(ws);
+				(*p.spheres_neighbor_clusters_)[sw].insert(vs);
+			}
+			return true;
+		});
+	}
+
+	void build_skeleton_from_neighbor_graph(PointsParameters& p)
+	{
+		clear(*p.skeleton_);
+		p.skeleton_faces_map_.clear();
+		auto get_face_key = [](uint32 i1, uint32 i2, uint32 i3) -> NMFaceKey {
+			std::array<uint32, 3> key = {i1, i2, i3};
+			std::sort(key.begin(), key.end());
+			return key;
+		};
+		auto spheres_skeleton_vertex_map =
+			add_attribute<NMVertex, PVertex>(*p.spheres_, "__spheres_skeleton_vertex_map");
+		std::vector<std::array<uint32, 4>> raw_tets;
+		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
+			uint32 pv_index = index_of(*p.spheres_, pv);
+			NMVertex nmv = add_vertex(*p.skeleton_);
+			(*p.skeleton_position_)[index_of(*p.skeleton_, nmv)] = (*p.spheres_position_)[pv_index];
+			(*spheres_skeleton_vertex_map)[pv_index] = nmv;
+			return true;
+		});
+
+		std::unordered_map<std::pair<uint32, uint32>, NMEdge, edge_hash, edge_equal> edge_indices;
+
+		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
+			uint32 pv_index = index_of(*p.spheres_, pv);
+			NMVertex nmv1 = (*spheres_skeleton_vertex_map)[pv_index];
+			const std::set<PVertex>& neighbors = (*p.spheres_neighbor_clusters_)[pv_index];
+			for (PVertex neighbor : neighbors)
+			{
+				uint32 n_index = index_of(*p.spheres_, neighbor);
+				NMVertex nmv2 = (*spheres_skeleton_vertex_map)[n_index];
+				std::vector<NMVertex> av = adjacent_vertices_through_edge(*p.skeleton_, nmv1);
+				if (std::find(av.begin(), av.end(), nmv2) == av.end())
+				{
+					NMEdge e = add_edge(*p.skeleton_, nmv1, nmv2);
+					edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv2)}] = e;
+				}
+			}
+			return true;
+		});
+
+		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
+			uint32 idx1 = index_of(*p.spheres_, pv);
+			NMVertex nmv1 = (*spheres_skeleton_vertex_map)[idx1];
+			const std::set<PVertex>& n_pv = (*p.spheres_neighbor_clusters_)[idx1];
+			for (const PVertex& ne1 : n_pv)
+			{
+				uint32 idx2 = index_of(*p.spheres_, ne1);
+				if (idx1 >= idx2)
+					continue;
+				NMVertex nmv2 = (*spheres_skeleton_vertex_map)[idx2];
+				const std::set<PVertex>& ne_ne1 = (*p.spheres_neighbor_clusters_)[idx2];
+				for (const PVertex& ne2 : ne_ne1)
+				{
+					if (n_pv.find(ne2) == n_pv.end())
+						continue;
+					uint32 idx3 = index_of(*p.spheres_, ne2);
+					if (idx2 >= idx3)
+						continue;
+
+					NMVertex nmv3 = (*spheres_skeleton_vertex_map)[idx3];
+
+					std::vector<NMEdge> edges;
+					edges.reserve(3);
+					edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv2)}]);
+					edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv2), index_of(*p.skeleton_, nmv3)}]);
+					edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv3)}]);
+					NMFace new_face = add_face(*p.skeleton_, edges);
+					p.skeleton_faces_map_[get_face_key(idx1, idx2, idx3)] = new_face;
+
+					const std::set<PVertex>& ne_ne2 = (*p.spheres_neighbor_clusters_)[idx3];
+					for (const PVertex& ne3 : ne_ne2)
+					{
+						uint32 idx4 = index_of(*p.spheres_, ne3);
+						if (idx3 >= idx4)
+							continue;
+						bool connected_v1 = (n_pv.find(ne3) != n_pv.end());
+						bool connected_v2 = (ne_ne1.find(ne3) != ne_ne1.end());
+						if (connected_v1 && connected_v2)
+							raw_tets.push_back({idx1, idx2, idx3, idx4});
+					}
+				}
+			}
+			return true;
+		});
+
+		p.skeleton_tets_.clear();
+		p.skeleton_tets_.reserve(raw_tets.size());
+		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			value<std::set<std::size_t>>(*p.skeleton_, p.incident_tets_, f).clear();
+			value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.0, 0.0, 0.0);
+			return true;
+		});
+		std::size_t tet_index = 0;
+		for (const auto& rt : raw_tets)
+		{
+			Tet new_tet;
+			uint32 v[4] = {rt[0], rt[1], rt[2], rt[3]};
+			NMFaceKey keys[4] = {get_face_key(v[1], v[2], v[3]), get_face_key(v[0], v[2], v[3]),
+								 get_face_key(v[0], v[1], v[3]), get_face_key(v[0], v[1], v[2])};
+			for (uint32 i = 0; i < 4; ++i)
+			{
+				auto it = p.skeleton_faces_map_.find(keys[i]);
+				if (it != p.skeleton_faces_map_.end())
+				{
+					NMFace f = it->second;
+					new_tet.faces[i] = f;
+					value<std::set<size_t>>(*p.skeleton_, p.incident_tets_, f).insert(tet_index);
+					value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.8, 0.5, 0.5);
+				}
+			}
+			new_tet.tet_id = tet_index;
+			p.skeleton_tets_.insert({tet_index, new_tet});
+			++tet_index;
+		}
+		parallel_foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			if (value<std::set<size_t>>(*p.skeleton_, p.incident_tets_, f).size() == 1)
+				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(1.0, 0.0, 0.0);
+			return true;
+		});
+
+		compute_edge_degree(p);
+		remove_attribute<PVertex>(*p.spheres_, spheres_skeleton_vertex_map);
+	}
+
+	void compute_skeleton_inside_connectivity(
+		PointsParameters& p, bool only_neighbors = false, bool run_topup_before_build = false)
+	{
+		if (run_topup_before_build)
+		{
+			topup_alpha_inside_samples_from_current_mesh(p, "skeleton_build");
+			ensure_mixed_optimization_cloud_ready(p);
+		}
+		compute_neighbors_from_alpha_inside_power(p);
+		if (!only_neighbors)
+			build_skeleton_from_neighbor_graph(p);
+	}
+
+	void compute_skeleton_current_mode(PointsParameters& p, bool only_neighbors = false)
+	{
+		if (p.connectivity_mode_ == MODE_B_INSIDE_POWER)
+		{
+			compute_skeleton_inside_connectivity(p, only_neighbors, false);
+			return;
+		}
+		compute_skeleton(p, only_neighbors);
+	}
 	void compute_skeleton(PointsParameters& p, bool only_neighbors = false)
 	{
 		SphereFitData data;
@@ -4252,7 +6447,7 @@ private:
 			return;
 		}
 
-		compute_skeleton(p, true);
+		compute_skeleton_current_mode(p, true);
 		if (!p.spheres_ || !p.spheres_position_ || !p.spheres_neighbor_clusters_ || !p.skeleton_)
 			return;
 
@@ -4654,8 +6849,16 @@ protected:
 		PVertex new_sphere = add_vertex(*p.spheres_);
 		uint32 new_s_index = index_of(*p.spheres_, new_sphere);
 
-		(*p.spheres_position_)[new_s_index] = (*p.samples_ma_position_)[max_err_v_idx];
-		(*p.spheres_radius_)[new_s_index] = (*p.samples_ma_radius_)[max_err_v_idx];
+		if (data.ma_position && data.ma_radius)
+		{
+			(*p.spheres_position_)[new_s_index] = (*data.ma_position)[max_err_v_idx];
+			(*p.spheres_radius_)[new_s_index] = (*data.ma_radius)[max_err_v_idx];
+		}
+		else
+		{
+			(*p.spheres_position_)[new_s_index] = c;
+			(*p.spheres_radius_)[new_s_index] = r;
+		}
 		(*p.spheres_parent_)[new_s_index] = sphere;
 		(*p.spheres_cluster_color_)[new_s_index] =
 			Vec4(0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0,
@@ -7381,7 +9584,10 @@ protected:
 		points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_radius_.get());
 
 		update_spheres_color(p);
+		update_spheres_topup_zero_inside_color(p);
 		points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_color_.get());
+		if (p.spheres_topup_zero_inside_color_)
+			points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_topup_zero_inside_color_.get());
 
 		if (!full_refresh)
 			return;
@@ -7400,7 +9606,16 @@ protected:
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
 
-		compute_skeleton(p);
+		update_opt_mesh_colors(p);
+		if (p.opt_mesh_)
+		{
+			points_provider_->emit_attribute_changed(*p.opt_mesh_, p.opt_color_.get());
+			points_provider_->emit_attribute_changed(*p.opt_mesh_, p.opt_normal_.get());
+			if (p.opt_normal_color_)
+				points_provider_->emit_attribute_changed(*p.opt_mesh_, p.opt_normal_color_.get());
+		}
+
+		compute_skeleton_current_mode(p);
 		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
 	}
@@ -7417,134 +9632,169 @@ protected:
 		p.last_total_error_ = std::numeric_limits<Scalar>::max();
 		p.manual_stop_requested_ = false;
 		p.pending_full_refresh_after_auto_stop_ = false;
+		p.force_full_refresh_on_stop_ = false;
+		p.stop_reason_.clear();
+		p.last_update_stage_ = "thread_start";
 
 		launch_thread([&, convergence_eps, max_post_convergence_iterations, max_iterations_without_autosplit,
 						  max_iterations_after_reaching_max_spheres]() {
-			bool convergence_reached = false;
-			bool stopped_by_automatic_condition = false;
-			uint32 post_convergence_iterations = 0;
-			bool target_reached_reported = false;
-			bool max_spheres_reached_once = false;
-			uint32 post_max_spheres_iterations = 0;
-			auto start = std::chrono::high_resolution_clock::now();
-			while (true)
+			try
 			{
+				bool convergence_reached = false;
+				bool stopped_by_automatic_condition = false;
+				uint32 post_convergence_iterations = 0;
+				bool target_reached_reported = false;
+				bool max_spheres_reached_once = false;
+				uint32 post_max_spheres_iterations = 0;
+				auto start = std::chrono::high_resolution_clock::now();
+				while (true)
 				{
-					std::lock_guard<std::mutex> lock(p.mutex_);
-					update_spheres(p);
-					p.iteration_count_++;
-				}
-				if (p.slow_down_)
-					std::this_thread::sleep_for(std::chrono::microseconds(1000000 / p.update_rate_));
-				else
-					std::this_thread::yield();
-
-				if (p.auto_stop_)
-				{
-					const bool converged = (p.total_error_diff_ < convergence_eps);
-					if (converged)
 					{
-						if (!convergence_reached)
-						{
-							convergence_reached = true;
-							post_convergence_iterations = 0;
-							std::cout << "Auto stop: error converged (Diff < " << convergence_eps
-									  << "), start post-convergence countdown (" << max_post_convergence_iterations
-									  << ")." << std::endl;
-						}
-						else
-						{
-							++post_convergence_iterations;
-						}
+						std::lock_guard<std::mutex> lock(p.mutex_);
+						p.last_update_stage_ = "update_spheres";
+						update_spheres(p);
+						p.iteration_count_++;
+					}
+					if (p.slow_down_)
+						std::this_thread::sleep_for(std::chrono::microseconds(1000000 / p.update_rate_));
+					else
+						std::this_thread::yield();
 
-						bool reached_target = false;
-						switch (p.auto_split_mode_)
+					if (p.auto_stop_)
+					{
+						const bool converged = (p.total_error_diff_ < convergence_eps);
+						if (converged)
 						{
-						case ERROR_THRESHOLD:
-							if (p.max_error_ < p.auto_split_error_threshold_)
-								reached_target = true;
-							break;
-						case MAX_NB_SPHERES:
-							if (p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
-								reached_target = true;
-							break;
-						}
-
-						if (reached_target)
-						{
-							if (!target_reached_reported)
+							if (!convergence_reached)
 							{
-								std::cout << "Auto stop: target reached under current auto-split mode." << std::endl;
-								target_reached_reported = true;
+								convergence_reached = true;
+								post_convergence_iterations = 0;
+								std::cout << "Auto stop: error converged (Diff < " << convergence_eps
+										  << "), start post-convergence countdown (" << max_post_convergence_iterations
+										  << ")." << std::endl;
+							}
+							else
+							{
+								++post_convergence_iterations;
+							}
+
+							bool reached_target = false;
+							switch (p.auto_split_mode_)
+							{
+							case ERROR_THRESHOLD:
+								if (p.max_error_ < p.auto_split_error_threshold_)
+									reached_target = true;
+								break;
+							case MAX_NB_SPHERES:
+								if (p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
+									reached_target = true;
+								break;
+							}
+
+							if (reached_target)
+							{
+								if (!target_reached_reported)
+								{
+									std::cout << "Auto stop: target reached under current auto-split mode." << std::endl;
+									target_reached_reported = true;
+								}
+							}
+							if (post_convergence_iterations >= max_post_convergence_iterations)
+							{
+								std::cout << "Auto stop: reached max post-convergence iterations ("
+										  << max_post_convergence_iterations << ")." << std::endl;
+								stopped_by_automatic_condition = true;
+								p.stopping_ = true;
 							}
 						}
-						if (post_convergence_iterations >= max_post_convergence_iterations)
+						else if (convergence_reached)
 						{
-							std::cout << "Auto stop: reached max post-convergence iterations ("
-									  << max_post_convergence_iterations << ")." << std::endl;
-							stopped_by_automatic_condition = true;
-							p.stopping_ = true;
+							convergence_reached = false;
+							post_convergence_iterations = 0;
+							target_reached_reported = false;
 						}
 					}
-					else if (convergence_reached)
+
+					if (p.auto_split_)
 					{
-						convergence_reached = false;
-						post_convergence_iterations = 0;
-						target_reached_reported = false;
-					}
-				}
+						if (p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
+						{
+							if (!max_spheres_reached_once)
+							{
+								max_spheres_reached_once = true;
+								post_max_spheres_iterations = 0;
+								std::cout << "Auto split stop: reached max spheres (" << p.auto_split_max_nb_spheres_
+										  << "), start post-max countdown (" << max_iterations_after_reaching_max_spheres
+										  << ")." << std::endl;
+							}
+							else
+							{
+								++post_max_spheres_iterations;
+							}
 
-				if (p.auto_split_)
-				{
-					if (p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
+							if (post_max_spheres_iterations >= max_iterations_after_reaching_max_spheres)
+							{
+								std::cout << "Auto split stop: reached max post-max-sphere iterations ("
+										  << max_iterations_after_reaching_max_spheres << ")." << std::endl;
+								stopped_by_automatic_condition = true;
+								p.stopping_ = true;
+							}
+						}
+					}
+					else if (p.iteration_count_ >= max_iterations_without_autosplit)
 					{
-						if (!max_spheres_reached_once)
-						{
-							max_spheres_reached_once = true;
-							post_max_spheres_iterations = 0;
-							std::cout << "Auto split stop: reached max spheres (" << p.auto_split_max_nb_spheres_
-									  << "), start post-max countdown (" << max_iterations_after_reaching_max_spheres
-									  << ")." << std::endl;
-						}
-						else
-						{
-							++post_max_spheres_iterations;
-						}
+						std::cout << "Stop: reached max iterations without auto split ("
+								  << max_iterations_without_autosplit << ")." << std::endl;
+						stopped_by_automatic_condition = true;
+						p.stopping_ = true;
+					}
 
-						if (post_max_spheres_iterations >= max_iterations_after_reaching_max_spheres)
-						{
-							std::cout << "Auto split stop: reached max post-max-sphere iterations ("
-									  << max_iterations_after_reaching_max_spheres << ")." << std::endl;
-							stopped_by_automatic_condition = true;
-							p.stopping_ = true;
-						}
+					std::cout << "Iteration: " << p.iteration_count_ << " | Spheres: " << p.nb_spheres_
+							  << " | Error: " << p.total_error_ << " | Diff: " << p.total_error_diff_ << std::endl;
+
+					if (p.stopping_)
+					{
+						if (!p.stop_reason_.empty())
+							std::cerr << "Stop reason: " << p.stop_reason_ << std::endl;
+						const bool should_full_refresh = p.force_full_refresh_on_stop_ ||
+														 (stopped_by_automatic_condition && !p.manual_stop_requested_);
+						p.stopping_ = false;
+						p.running_ = false;
+						p.manual_stop_requested_ = false;
+						p.pending_full_refresh_after_auto_stop_ = should_full_refresh;
+						p.force_full_refresh_on_stop_ = false;
+						break;
 					}
 				}
-				else if (p.iteration_count_ >= max_iterations_without_autosplit)
-				{
-					std::cout << "Stop: reached max iterations without auto split ("
-							  << max_iterations_without_autosplit << ")." << std::endl;
-					stopped_by_automatic_condition = true;
-					p.stopping_ = true;
-				}
-
-				std::cout << "Iteration: " << p.iteration_count_ << " | Spheres: " << p.nb_spheres_
-						  << " | Error: " << p.total_error_ << " | Diff: " << p.total_error_diff_ << std::endl;
-
-				if (p.stopping_)
-				{
-					const bool should_full_refresh = stopped_by_automatic_condition && !p.manual_stop_requested_;
-					p.stopping_ = false;
-					p.running_ = false;
-					p.manual_stop_requested_ = false;
-					p.pending_full_refresh_after_auto_stop_ = should_full_refresh;
-					break;
-				}
+				auto end = std::chrono::high_resolution_clock::now();
+				std::cout << "Sphere optimizations time: " << std::chrono::duration<Scalar>(end - start).count() << "s"
+						  << std::endl;
+				std::cout << "Nb iterations: " << p.iteration_count_ << std::endl;
 			}
-			auto end = std::chrono::high_resolution_clock::now();
-			std::cout << "Sphere optimizations time: " << std::chrono::duration<Scalar>(end - start).count() << "s"
-					  << std::endl;
-			std::cout << "Nb iterations: " << p.iteration_count_ << std::endl;
+			catch (const std::exception& e)
+			{
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				p.stop_reason_ =
+					std::string("Exception in sphere update thread at stage '") + p.last_update_stage_ + "': " + e.what();
+				p.running_ = false;
+				p.stopping_ = false;
+				p.manual_stop_requested_ = false;
+				p.pending_full_refresh_after_auto_stop_ = false;
+				p.force_full_refresh_on_stop_ = false;
+				std::cerr << "[SphereUpdateThread] " << p.stop_reason_ << std::endl;
+			}
+			catch (...)
+			{
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				p.stop_reason_ =
+					std::string("Unknown exception in sphere update thread at stage '") + p.last_update_stage_ + "'.";
+				p.running_ = false;
+				p.stopping_ = false;
+				p.manual_stop_requested_ = false;
+				p.pending_full_refresh_after_auto_stop_ = false;
+				p.force_full_refresh_on_stop_ = false;
+				std::cerr << "[SphereUpdateThread] " << p.stop_reason_ << std::endl;
+			}
 		});
 
 		app_.start_timer(100, [&]() -> bool { return !p.running_ && !p.pending_full_refresh_after_auto_stop_; });
@@ -7798,6 +10048,11 @@ protected:
 		{
 			ImGui::InputFloat("Alpha", &p.alpha_, 0.001f, 0.1f, "%.4f");
 			ImGui::InputInt("Num Samples", &p.num_alpha_samples_, 1000, 10000);
+			ImGui::InputInt("Num Inside Samples", &p.num_alpha_inside_samples_, 1000, 10000);
+			ImGui::InputInt("Inside KNN K", &p.alpha_inside_knn_k_, 1, 10);
+			ImGui::InputInt("Inside Min / Sphere", &p.alpha_inside_min_points_per_sphere_, 1, 50);
+			ImGui::InputFloat("Inside Poisson Radius", &p.alpha_inside_poisson_radius_, 0.0001f, 0.001f, "%.6f");
+			ImGui::InputFloat("Inside Topup BBox Expand", &p.alpha_inside_topup_bbox_expand_, 0.0001f, 0.001f, "%.6f");
 			ImGui::InputFloat("Grid Cell Size", &p.grid_cell_size_, 0.001f, 0.01f, "%.4f");
 			ImGui::InputInt("Eval Batch Size", &p.batch_size_, 256, 1024);
 			ImGui::InputInt("Ray Batch Size", &p.ray_sampler_batch_size_, 256, 2048);
@@ -7844,18 +10099,35 @@ protected:
 				p.fitting_data_computed_ = false;
 			}
 			ImGui::SameLine();
+			if (ImGui::Button("Top-up Inside"))
+			{
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				topup_alpha_inside_samples_from_current_mesh(p, "manual_button");
+				ensure_mixed_optimization_cloud_ready(p);
+			}
+			ImGui::SameLine();
 			if (ImGui::Button("Clear Samples"))
 			{
 				if (p.samples_mesh_)
 					points_provider_->clear_mesh(*p.samples_mesh_);
+				clear_alpha_inside_samples(p);
+				if (p.opt_mesh_)
+					points_provider_->clear_mesh(*p.opt_mesh_);
 				p.fitting_data_computed_ = false;
 				p.samples_jitter_backup_valid_ = false;
 				p.samples_position_backup_.clear();
 				p.samples_normal_backup_.clear();
+				p.last_surface_count_ = 0;
+				p.last_inside_count_ = 0;
+				p.last_mixed_count_ = 0;
 			}
 
 			if (p.samples_mesh_)
 				ImGui::Text("Number of samples: %zu", nb_cells<PVertex>(*p.samples_mesh_));
+			if (p.alpha_inside_mesh_)
+				ImGui::Text("Inside samples: %zu", nb_cells<PVertex>(*p.alpha_inside_mesh_));
+			if (p.opt_mesh_)
+				ImGui::Text("Mixed optimization points: %zu", nb_cells<PVertex>(*p.opt_mesh_));
 		}
 
 		bool has_samples = p.samples_mesh_ && nb_cells<PVertex>(*p.samples_mesh_) > 0;
@@ -7982,6 +10254,20 @@ protected:
 					ImGui::RadioButton("Line Quadric (free r)", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE_FREE_RADIUS);
 					if (ImGui::Button(p.lock_skeleton_connectivity_ ? "Skeleton: Locked" : "Skeleton: Unlocked"))
 						p.lock_skeleton_connectivity_ = !p.lock_skeleton_connectivity_;
+					int connectivity_mode_ui = static_cast<int>(p.connectivity_mode_);
+					const char* connectivity_labels[] = {"Mode A: Mixed KNN", "Mode B: Inside Power"};
+					if (ImGui::Combo("Connectivity Mode", &connectivity_mode_ui, connectivity_labels, 2))
+						p.connectivity_mode_ = static_cast<ConnectivityMode>(connectivity_mode_ui);
+					ImGui::Checkbox("Top-up in training loop", &p.topup_inside_before_reassign_in_loop_);
+					ImGui::Checkbox("Inside skeleton top-up first", &p.inside_skeleton_build_topup_first_);
+					const uint32 ui_surface_count =
+						p.samples_mesh_ ? static_cast<uint32>(nb_cells<PVertex>(*p.samples_mesh_)) : uint32(0);
+					const uint32 ui_inside_count =
+						p.alpha_inside_mesh_ ? static_cast<uint32>(nb_cells<PVertex>(*p.alpha_inside_mesh_)) : uint32(0);
+					const uint32 ui_mixed_count =
+						p.opt_mesh_ ? static_cast<uint32>(nb_cells<PVertex>(*p.opt_mesh_)) : uint32(0);
+					ImGui::Text("surface=%u inside=%u mixed=%u pending_delete=%u", ui_surface_count, ui_inside_count,
+								ui_mixed_count, p.pending_delete_count_);
 
 					if (ImGui::Button("Update spheres"))
 					{
@@ -7989,8 +10275,6 @@ protected:
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							update_spheres(p);
-							compute_spheres_error(p);
-							update_render_data(p);
 						}
 					}
 
@@ -7999,14 +10283,23 @@ protected:
 						if (!p.running_)
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
+							prepare_hybrid_iteration_data(p, p.topup_inside_before_reassign_in_loop_);
 							compute_clusters(p);
 							compute_spheres_error(p);
+							if (!p.lock_skeleton_connectivity_)
+								compute_skeleton_current_mode(p, true);
 							update_render_data(p);
 						}
 					}
 					ImGui::SameLine();
 					if (ImGui::Button(p.use_local_clusters_ ? "Cluster Mode: Neighbor" : "Cluster Mode: Global"))
 						p.use_local_clusters_ = !p.use_local_clusters_;
+					if (p.use_local_clusters_)
+					{
+						ImGui::InputScalar("Neighbor refresh/iter", ImGuiDataType_U32, &p.local_cluster_connectivity_refresh_interval_);
+						if (p.local_cluster_connectivity_refresh_interval_ < 1)
+							p.local_cluster_connectivity_refresh_interval_ = 1;
+					}
 					ImGui::SameLine();
 					if (ImGui::Button("Power Cluster"))
 					{
@@ -8019,23 +10312,23 @@ protected:
 						}
 					}
 
-					if (ImGui::Button("Build Skeleton"))
+					if (ImGui::Button("Build Skeleton (Current Mode)"))
 					{
 						if (!p.running_)
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
-							compute_skeleton(p);
+							compute_skeleton_current_mode(p);
 							update_render_data(p);
 							non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 						}
 					}
 					ImGui::SameLine();
-					if (ImGui::Button("Power Skeleton"))
+					if (ImGui::Button("Inside Connectivity Skeleton"))
 					{
 						if (!p.running_)
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
-							compute_skeleton_power(p);
+							compute_skeleton_inside_connectivity(p, false, p.inside_skeleton_build_topup_first_);
 							update_render_data(p);
 							non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 						}
@@ -8315,4 +10608,17 @@ private:
 } // namespace cgogn
 
 #endif // CGOGN_MODULE_UDF_TRAINING_H_
+
+
+
+
+
+
+
+
+
+
+
+
+
 
