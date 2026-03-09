@@ -267,6 +267,7 @@ private:
 		bool lock_skeleton_connectivity_ = false;
 		DistanceMode distance_mode_ = LINE_QUADRIC_DISTANCE;
 		bool use_local_clusters_ = false;
+		uint32 local_cluster_connectivity_refresh_interval_ = 10;
 		bool auto_stop_ = false;
 		bool auto_split_ = false;
 		AutoSplitMode auto_split_mode_ = ERROR_THRESHOLD;
@@ -3890,8 +3891,18 @@ private:
 		});
 	}
 
+	bool should_refresh_local_connectivity(const PointsParameters& p)
+	{
+		if (!p.use_local_clusters_ || p.lock_skeleton_connectivity_)
+			return false;
+		const uint32 interval = std::max<uint32>(1, p.local_cluster_connectivity_refresh_interval_);
+		return (p.iteration_count_ % interval) == 0;
+	}
+
 	void update_spheres(PointsParameters& p)
 	{
+		if (should_refresh_local_connectivity(p))
+			compute_skeleton(p, true);
 		compute_clusters(p);
 
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
@@ -8007,6 +8018,13 @@ protected:
 					ImGui::SameLine();
 					if (ImGui::Button(p.use_local_clusters_ ? "Cluster Mode: Neighbor" : "Cluster Mode: Global"))
 						p.use_local_clusters_ = !p.use_local_clusters_;
+					if (p.use_local_clusters_)
+					{
+						ImGui::InputScalar("Neighbor refresh/iter", ImGuiDataType_U32,
+							&p.local_cluster_connectivity_refresh_interval_);
+						if (p.local_cluster_connectivity_refresh_interval_ < 1)
+							p.local_cluster_connectivity_refresh_interval_ = 1;
+					}
 					ImGui::SameLine();
 					if (ImGui::Button("Power Cluster"))
 					{
