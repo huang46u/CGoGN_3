@@ -73,6 +73,7 @@ using geometry::Scalar;
 using geometry::Spherical_Quadric;
 using geometry::Quadric;
 using geometry::SQEM_CASE;
+using geometry::SQEM_Condition_Info;
 using geometry::SpatialGrid;
 using geometry::BatchUDFResult;
 using geometry::NeuralFieldForward;
@@ -82,7 +83,7 @@ using geometry::Vec4;
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
 class UDFTraining : public ViewModule
 {
-public:	
+public:
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
 	using NMVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
 	using SVertex = typename mesh_traits<SURFACE>::Vertex;
@@ -236,6 +237,7 @@ private:
 		std::shared_ptr<PAttribute<bool>> spheres_do_not_split_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_not_normalized_ = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> spheres_sqem_lambda_ = nullptr;
 
 		// Skeleton
 		NONMANIFOLD* skeleton_ = nullptr;
@@ -278,8 +280,8 @@ private:
 		uint32 auto_split_max_per_iter_max_ = 100;
 		bool error_as_spheres_color_ = false;
 		float32 spheres_transparency_ = 0.5f;
-		float32 sqem_update_lambda_ = 0.20f;
-		float32 sqem_clustering_lambda_ = 0.20f;
+		float32 sqem_update_lambda_full_ = 0.05f;
+		float32 sqem_update_lambda_line_plane_ = 0.20f;
 		float32 sqem_fix_radius_scale_ = 1.0f;
 		bool udf_center_enabled_ = false;
 		float32 udf_center_lambda_ = 0.10f;
@@ -292,7 +294,7 @@ private:
 		bool topology_edge_stage_diffuse_ = true;
 		bool skeleton_face_score_normalize_by_area_ = false;
 		float32 init_dilation_constant_ = 0.001f;
-
+		uint32 init_min_cover_points_ = 5;
 		// Sampling Parameters
 		float alpha_ = 0.005f;
 		float sample_radius_ = 0.0025f;
@@ -442,17 +444,102 @@ public:
 		if (p.neural_model_type_ == NEURAL_MODEL_MF)
 		{
 			p.sqem_fix_radius_scale_ = 2.0f;
-			p.sqem_update_lambda_ = 2.0f;
-			p.sqem_clustering_lambda_ = 2.0f;
+			p.sqem_update_lambda_full_ = 2.0f;
+			p.sqem_update_lambda_line_plane_ = 2.0f;
 		}
 		else
 		{
 			p.sqem_fix_radius_scale_ = 1.0f;
-			p.sqem_update_lambda_ = 0.2f;
-			p.sqem_clustering_lambda_ = 0.2f;
+			p.sqem_update_lambda_full_ = 0.05f;
+			p.sqem_update_lambda_line_plane_ = 0.2f;
 		}
 	}
-	
+
+	Scalar sqem_update_lambda_for_case(const PointsParameters& p, SQEM_CASE sqem_case) const
+	{
+		switch (sqem_case)
+		{
+		case SQEM_CASE::Case1_Full:
+			return Scalar(p.sqem_update_lambda_full_);
+		case SQEM_CASE::Case2_Line:
+		case SQEM_CASE::Case3_Plane:
+			return Scalar(p.sqem_update_lambda_line_plane_);
+		case SQEM_CASE::Case4_Degenerate:
+		default:
+			return Scalar(p.sqem_update_lambda_full_);
+		}
+	}
+
+	Scalar sqem_update_lambda_for_quadric(const PointsParameters& p, const Spherical_Quadric& q) const
+	{
+		Scalar sqem_r = Scalar(0);
+		return sqem_update_lambda_for_case(p, q.well_conditioned(sqem_r));
+	}
+
+	const char* sqem_case_label(SQEM_CASE sqem_case) const
+	{
+		switch (sqem_case)
+		{
+		case SQEM_CASE::Case1_Full:
+			return "Full";
+		case SQEM_CASE::Case2_Line:
+			return "Line";
+		case SQEM_CASE::Case3_Plane:
+			return "Plane";
+		case SQEM_CASE::Case4_Degenerate:
+		default:
+			return "Degenerate";
+		}
+	}
+
+	bool get_sphere_sqem_info(PointsParameters& p, PVertex sphere, SQEM_Condition_Info& sqem_info) const
+	{
+		if (!sphere.is_valid() || !p.samples_mesh_ || !p.samples_quadric_)
+			return false;
+
+		const uint32 sphere_index = index_of(*p.spheres_, sphere);
+		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+		if (cluster.empty())
+			return false;
+
+		Spherical_Quadric q_classify;
+		bool has_sample = false;
+		for (PVertex v : cluster)
+		{
+			const uint32 v_index = index_of(*p.samples_mesh_, v);
+			q_classify += (*p.samples_quadric_)[v_index];
+			has_sample = true;
+		}
+		if (!has_sample)
+			return false;
+
+		sqem_info = q_classify.condition_info();
+		return true;
+	}
+
+	Scalar sphere_sqem_lambda(const PointsParameters& p, uint32 sphere_index) const
+	{
+		if (!p.spheres_sqem_lambda_)
+			return Scalar(p.sqem_update_lambda_full_);
+		const Scalar lambda = (*p.spheres_sqem_lambda_)[sphere_index];
+		return lambda > Scalar(0) ? lambda : Scalar(p.sqem_update_lambda_full_);
+	}
+
+	void refresh_sphere_sqem_lambda_cache(PointsParameters& p)
+	{
+		if (!p.spheres_ || !p.spheres_sqem_lambda_)
+			return;
+		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			const uint32 v_index = index_of(*p.spheres_, v);
+			Scalar lambda = Scalar(p.sqem_update_lambda_full_);
+			SQEM_Condition_Info sqem_info;
+			if (get_sphere_sqem_info(p, v, sqem_info))
+				lambda = sqem_update_lambda_for_case(p, sqem_info.sqem_case);
+			(*p.spheres_sqem_lambda_)[v_index] = lambda;
+			return true;
+		});
+	}
+
 	template <typename Tag = RaySamplerTag>
 	void load_alpha_samples_to_mesh(PointsParameters& p, size_t num_points)
 	{
@@ -839,7 +926,7 @@ public:
 			(*p.samples_normal_)[v_idx] = n;
 			(*p.samples_normal_color_)[v_idx] =
 				Vec4((n.x() + 1.0) * 0.5, (n.y() + 1.0) * 0.5, (n.z() + 1.0) * 0.5, 1.0);
-	
+
 			return true;
 		});
 
@@ -917,7 +1004,7 @@ public:
 			const Vec3& pos = (*p.samples_position_)[v_idx];
 			std::pair<uint32, Scalar> knn_res;
 			p.input_kdtree_->find_nn(pos, &knn_res);
-			
+
 			uint32 idx = knn_res.first;
 			PVertex vn = p.input_kdtree_vertices_[idx];
 			uint32 vn_idx = index_of(*p.points_, vn);
@@ -926,7 +1013,7 @@ public:
 			(*p.samples_normal_)[v_idx] = n;
 			(*p.samples_normal_color_)[v_idx] =
 				Vec4((n.x() + 1.0) * 0.5, (n.y() + 1.0) * 0.5, (n.z() + 1.0) * 0.5, 1.0);
-		
+
 			return true;
 		});
 
@@ -1674,6 +1761,7 @@ private:
 		p.spheres_do_not_split_ = get_or_add_attribute<bool, PVertex>(*p.spheres_, "do_not_split");
 		p.spheres_error_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "error");
 		p.spheres_error_not_normalized_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "error_not_normalized");
+		p.spheres_sqem_lambda_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "sqem_lambda");
 
 		// Init Skeleton Mesh
 		std::string skel_name = points_provider_->mesh_name(m) + "_skeleton";
@@ -2892,6 +2980,9 @@ private:
 
 		auto covered = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__covered");
 		covered->fill(false);
+		const uint32 nb_samples = nb_cells<PVertex>(*p.samples_mesh_);
+		std::vector<uint32> candidate_marks(nb_samples, 0);
+		uint32 candidate_mark_token = 1;
 
 		p.nb_spheres_ = 0;
 
@@ -2909,28 +3000,26 @@ private:
 			Scalar vr = (*p.samples_ma_radius_)[v_index];
 			const Scalar dilation_radius = std::max<Scalar>(vr + Scalar(p.init_dilation_constant_), Scalar(0));
 			const Scalar dilation_radius_sq = dilation_radius * dilation_radius;
-
-			PVertex sphere = add_vertex(*p.spheres_);
-			p.nb_spheres_++;
-			uint32 sphere_index = index_of(*p.spheres_, sphere);
-
-			(*p.spheres_position_)[sphere_index] = vp;
-			(*p.spheres_radius_)[sphere_index] = vr;
-			(*p.spheres_cluster_color_)[sphere_index] =
-				Vec4(0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0,
-					 0.5 + 0.5 * (rand() % 256) / 256.0, 1.0);
+			if (candidate_mark_token == std::numeric_limits<uint32>::max())
+			{
+				std::fill(candidate_marks.begin(), candidate_marks.end(), 0u);
+				candidate_mark_token = 1;
+			}
+			const uint32 current_mark = candidate_mark_token++;
+			std::vector<PVertex> candidate_cover;
+			candidate_cover.reserve(128);
 
 			auto flood_cover = [&](PVertex seed) {
 				if (!seed.is_valid())
 					return;
 				uint32 seed_idx = index_of(*p.samples_mesh_, seed);
-				if (seed_idx == INVALID_INDEX || (*covered)[seed_idx])
+				if (seed_idx == INVALID_INDEX || (*covered)[seed_idx] || candidate_marks[seed_idx] == current_mark)
 					return;
 
 				std::vector<PVertex> stack;
 				stack.reserve(128);
-				// Mark when enqueued to avoid duplicate pushes through overlapping KNN neighborhoods.
-				(*covered)[seed_idx] = true;
+				candidate_marks[seed_idx] = current_mark;
+				candidate_cover.push_back(seed);
 				stack.push_back(seed);
 				while (!stack.empty())
 				{
@@ -2938,14 +3027,14 @@ private:
 					stack.pop_back();
 					uint32 w_idx = index_of(*p.samples_mesh_, w);
 
-					// Use KNN for propagation on point cloud
 					for (PVertex u : (*p.samples_knn_)[w_idx])
 					{
 						uint32 u_idx = index_of(*p.samples_mesh_, u);
-						if (!(*covered)[u_idx] &&
+						if (!(*covered)[u_idx] && candidate_marks[u_idx] != current_mark &&
 							((*p.samples_position_)[u_idx] - vp).squaredNorm() < dilation_radius_sq)
 						{
-							(*covered)[u_idx] = true;
+							candidate_marks[u_idx] = current_mark;
+							candidate_cover.push_back(u);
 							stack.push_back(u);
 						}
 					}
@@ -2960,6 +3049,27 @@ private:
 			{
 				flood_cover(secondary);
 			}
+
+			for (PVertex covered_vertex : candidate_cover)
+			{
+				uint32 covered_index = index_of(*p.samples_mesh_, covered_vertex);
+				(*covered)[covered_index] = true;
+			}
+
+			const bool keep_sphere =
+				(candidate_cover.size() >= p.init_min_cover_points_) || (p.nb_spheres_ == 0 && !candidate_cover.empty());
+			if (!keep_sphere)
+				continue;
+
+			PVertex sphere = add_vertex(*p.spheres_);
+			p.nb_spheres_++;
+			uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+			(*p.spheres_position_)[sphere_index] = vp;
+			(*p.spheres_radius_)[sphere_index] = vr;
+			(*p.spheres_cluster_color_)[sphere_index] =
+				Vec4(0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0,
+					 0.5 + 0.5 * (rand() % 256) / 256.0, 1.0);
 		}
 
 		remove_attribute<PVertex>(*p.samples_mesh_, covered);
@@ -3033,7 +3143,7 @@ private:
 
 				Scalar dist_sqem = (*data.quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 				Scalar dist_other = (*data.line_quadric)[v_index].eval(center);
-				Scalar dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
+				Scalar dist = dist_sqem + sphere_sqem_lambda(p, pv_index) * dist_other;
 				if (dist < min_distance)
 				{
 					min_distance = dist;
@@ -3068,7 +3178,7 @@ private:
 
 		if (p.nb_spheres_ == 0)
 			return;
-		
+
 		parallel_foreach_cell(*data.mesh, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*data.mesh, v);
 
@@ -3102,7 +3212,7 @@ private:
 
 				Scalar dist_sqem = (*data.quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 				Scalar dist_other = (*data.line_quadric)[v_index].eval(center);
-				Scalar dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
+				Scalar dist = dist_sqem + sphere_sqem_lambda(p, pv_index) * dist_other;
 				if (dist < min_distance)
 				{
 					min_distance = dist;
@@ -3128,6 +3238,7 @@ private:
 		else
 			compute_clusters_full(p);
 		prune_empty_clusters(p);
+		refresh_sphere_sqem_lambda_cache(p);
 	}
 
 	void prune_empty_clusters(PointsParameters& p)
@@ -3348,12 +3459,12 @@ private:
 		SphereFitData data;
 		if (!get_sphere_fit_data(p, data))
 			return;
-		parallel_foreach_cell(*p.spheres_, [&](PVertex v) {
+				parallel_foreach_cell(*p.spheres_, [&](PVertex v) {
 			uint32 v_index = index_of(*p.spheres_, v);
 
 			const Vec3& center = (*p.spheres_position_)[v_index];
 			Scalar radius = (*p.spheres_radius_)[v_index];
-			const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[v_index];
+						const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[v_index];
 
 			Scalar cluster_error = 0.0;
 			for (PVertex sv : cluster)
@@ -3363,7 +3474,7 @@ private:
 					(*data.quadric)[sv_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 				// Don't multiply by area here since line quadric already incorporates it
 				Scalar dist_other = (*data.line_quadric)[sv_index].eval(center);
-				Scalar dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
+				Scalar dist = dist_sqem + sphere_sqem_lambda(p, v_index) * dist_other;
 				if (data.error)
 					(*data.error)[sv_index] = dist;
 				cluster_error += dist;
@@ -3404,7 +3515,7 @@ private:
 
 		p.total_error_diff_ = std::abs(p.total_error_ - p.last_total_error_);
 		p.last_total_error_ = p.total_error_;
-		
+
 	}
 
 	void update_spheres_color(PointsParameters& p)
@@ -3585,8 +3696,8 @@ private:
 		Al_ext.block<3, 3>(0, 0) = Al;
 		Vec4 bl_ext = Vec4::Zero();
 		bl_ext.head<3>() = bl;
-		Mat4 A_c = A + p.sqem_update_lambda_ * Al_ext;
-		Vec4 b_c = b + p.sqem_update_lambda_ * bl_ext;
+		Mat4 A_c = A + sqem_update_lambda_for_quadric(p, q) * Al_ext;
+		Vec4 b_c = b + sqem_update_lambda_for_quadric(p, q) * bl_ext;
 		Vec4 s = A_c.ldlt().solve(b_c);
 		c = s.head<3>();
 		r = s[3];*/
@@ -3594,8 +3705,9 @@ private:
 		Vec3 bs = q._b.head<3>();
 		Vec3 Asr = q._A.block<3, 1>(0, 3);
 
-		Mat3 A = As + p.sqem_update_lambda_ * Al;
-		Vec3 b = (bs + p.sqem_update_lambda_ * bl) - Asr * p.alpha_;
+		const Scalar update_lambda = sqem_update_lambda_for_quadric(p, q);
+		Mat3 A = As + update_lambda * Al;
+		Vec3 b = (bs + update_lambda * bl) - Asr * p.alpha_;
 
 		if (p.udf_center_enabled_)
 		{
@@ -3656,8 +3768,9 @@ private:
 		Vec4 bl_ext = Vec4::Zero();
 		bl_ext.head<3>() = bl;
 
-		Mat4 A = q._A + p.sqem_update_lambda_ * Al_ext;
-		Vec4 b = q._b + p.sqem_update_lambda_ * bl_ext;
+		const Scalar update_lambda = sqem_update_lambda_for_quadric(p, q);
+		Mat4 A = q._A + update_lambda * Al_ext;
+		Vec4 b = q._b + update_lambda * bl_ext;
 		if (p.udf_center_enabled_)
 		{
 			const Vec3 c0 = (*p.spheres_position_)[sphere_index];
@@ -3680,11 +3793,15 @@ private:
 		if (!s.allFinite())
 			return;
 
-		if (s[3] > Scalar(0) && s[3] <= p.alpha_)
+		if (s[3] > Scalar(0))
 		{
 			(*p.spheres_position_)[sphere_index] = s.head<3>();
-			Scalar expected_radius = p.alpha_ * p.sqem_fix_radius_scale_;
-			(*p.spheres_radius_)[sphere_index] = s[3] > expected_radius ? s[3] : expected_radius;
+			// if (s[3] <= p.alpha_){
+			// 	Scalar expected_radius = p.alpha_ * p.sqem_fix_radius_scale_;
+			// 	(*p.spheres_radius_)[sphere_index] = expected_radius;
+			// }else
+				(*p.spheres_radius_)[sphere_index] = s[3];
+
 			return;
 		}
 
@@ -3940,7 +4057,7 @@ private:
 
 					if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
 					{
-						parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+				parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 							correct_sphere(p, v);
 							return true;
 						});
@@ -3984,7 +4101,7 @@ private:
 
 					if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
 					{
-						parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+				parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 							correct_sphere(p, v);
 							return true;
 						});
@@ -4580,6 +4697,7 @@ private:
 			}
 		}
 
+
 		for (PVertex sphere : candidate_spheres)
 		{
 			uint32 s_index = index_of(*p.spheres_, sphere);
@@ -4595,7 +4713,7 @@ private:
 			Scalar radius = (*p.spheres_radius_)[sphere_index];
 			Scalar dist_sqem = (*data.quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 			Scalar dist_other = (*data.line_quadric)[v_index].eval(center);
-			Scalar dist = dist_sqem + p.sqem_clustering_lambda_ * dist_other;
+			Scalar dist = dist_sqem + sphere_sqem_lambda(p, sphere_index) * dist_other;
 			return dist;
 		};
 
@@ -4625,6 +4743,7 @@ private:
 			(*p.spheres_cluster_)[closest_sphere_index].push_back(v);
 			(*p.spheres_cluster_area_)[closest_sphere_index] += a;
 		}
+		refresh_sphere_sqem_lambda_cache(p);
 	}
 
 protected:
@@ -7950,6 +8069,7 @@ protected:
 				if (ImGui::CollapsingHeader("Sphere Fitting", ImGuiTreeNodeFlags_DefaultOpen))
 				{
 					ImGui::SliderFloat("Init dilation constant", &p.init_dilation_constant_, 0.001f, 0.01f, "%.4f");
+					ImGui::InputScalar("Init min cover points", ImGuiDataType_U32, &p.init_min_cover_points_);
 					ImGui::InputScalar("Init nb spheres", ImGuiDataType_U32, &init_max_nb_spheres);
 					if (ImGui::Button("Init spheres"))
 					{
@@ -7958,18 +8078,9 @@ protected:
 						update_render_data(p);
 					}
 
-					static bool sync_lambda = true;
-					ImGui::Checkbox("Sync lambda", &sync_lambda);
-					if (ImGui::SliderFloat("update lambda", &p.sqem_update_lambda_, 0.0f, 4.0f, "%.6f"))
-					{
-						if (sync_lambda)
-							p.sqem_clustering_lambda_ = p.sqem_update_lambda_;
-					}
-					if (ImGui::SliderFloat("clustering lambda", &p.sqem_clustering_lambda_, 0.0f, 4.0f, "%.6f"))
-					{
-						if (sync_lambda)
-							p.sqem_update_lambda_ = p.sqem_clustering_lambda_;
-					}
+					ImGui::SliderFloat("update lambda (Full)", &p.sqem_update_lambda_full_, 0.0f, 4.0f, "%.6f");
+					ImGui::SliderFloat("update lambda (Line/Plane)", &p.sqem_update_lambda_line_plane_, 0.0f, 4.0f,
+								   "%.6f");
 					const bool fix_r_mode = (p.distance_mode_ == LINE_QUADRIC_DISTANCE);
 					if (!fix_r_mode)
 						ImGui::BeginDisabled();
@@ -8095,7 +8206,7 @@ protected:
 							capture_topology_stage_snapshot(p);
 						}
 					}
-					
+
 					if (ImGui::Button("Boundary tet delete"))
 					{
 						if (!p.running_)
@@ -8167,7 +8278,7 @@ protected:
 							run_edge_score_nonsimple_tet_topology_fix_single_step(p);
 						}
 					}
-					
+
 					if (ImGui::Button("Boundary tet mask"))
 					{
 						if (!p.running_)
@@ -8208,7 +8319,7 @@ protected:
 						if (!p.running_)
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
-							parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+					parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 								correct_sphere(p, v);
 								return true;
 							});
@@ -8290,9 +8401,23 @@ protected:
 					if (picked_sphere_.is_valid())
 					{
 						ImGui::Text("Picked sphere:");
-						const Vec3& sp = (*p.spheres_position_)[index_of(*p.spheres_, picked_sphere_)];
+						const uint32 picked_index = index_of(*p.spheres_, picked_sphere_);
+						const Vec3& sp = (*p.spheres_position_)[picked_index];
+						ImGui::Text("Index: %u", picked_index);
 						ImGui::Text("Center: (%f, %f, %f)", sp[0], sp[1], sp[2]);
-						ImGui::Text("Radius: %f", (*p.spheres_radius_)[index_of(*p.spheres_, picked_sphere_)]);
+						ImGui::Text("Radius: %f", (*p.spheres_radius_)[picked_index]);
+						if (p.spheres_error_)
+							ImGui::Text("Error: %f", (*p.spheres_error_)[picked_index]);
+						SQEM_Condition_Info sqem_info;
+						if (get_sphere_sqem_info(p, picked_sphere_, sqem_info))
+						{
+							ImGui::Text("SQEM: %s", sqem_case_label(sqem_info.sqem_case));
+							ImGui::Text("SQEM sv: [%.3e, %.3e, %.3e, %.3e], rank=%d",
+									sqem_info.singular_values[0], sqem_info.singular_values[1],
+									sqem_info.singular_values[2], sqem_info.singular_values[3], sqem_info.rank);
+						}
+						else
+							ImGui::Text("SQEM: Unavailable");
 					}
 				}
 
@@ -8333,4 +8458,3 @@ private:
 } // namespace cgogn
 
 #endif // CGOGN_MODULE_UDF_TRAINING_H_
-

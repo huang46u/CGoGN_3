@@ -26,6 +26,9 @@
 
 #include <cgogn/geometry/types/vector_traits.h>
 
+#include <algorithm>
+#include <array>
+
 namespace cgogn
 {
 
@@ -38,6 +41,15 @@ enum class SQEM_CASE
 	Case2_Line,
 	Case3_Plane,
 	Case4_Degenerate
+};
+
+struct SQEM_Condition_Info
+{
+	SQEM_CASE sqem_case = SQEM_CASE::Case4_Degenerate;
+	int rank = 0;
+	std::array<Scalar, 4> singular_values{{Scalar(0), Scalar(0), Scalar(0), Scalar(0)}};
+	Scalar tolerance = Scalar(0);
+	Scalar r = Scalar(0);
 };
 
 struct Spherical_Quadric
@@ -110,45 +122,61 @@ struct Spherical_Quadric
 		return _A * p - _b;
 	}
 
-	SQEM_CASE well_conditioned(Scalar& r_out) const
+	SQEM_Condition_Info condition_info() const
 	{
 		Eigen::JacobiSVD<Mat4> svd(_A, Eigen::ComputeFullU | Eigen::ComputeFullV);
 		Mat4 U = svd.matrixU();
 		Vec4 S = svd.singularValues();
 		Mat4 V = svd.matrixV();
-		std::vector<double> sorted_sv{S(0), S(1), S(2), S(3)};
+		SQEM_Condition_Info info;
+		info.singular_values = {S(0), S(1), S(2), S(3)};
 
-		std::sort(sorted_sv.begin(), sorted_sv.end(), std::greater<>());
-		int rank = 0;
+		std::sort(info.singular_values.begin(), info.singular_values.end(), std::greater<Scalar>());
+		const Scalar abs_tol = Scalar(1e-12);
+		const Scalar rel_tol = Scalar(1e-2);
+		const Scalar max_sv = info.singular_values[0];
+		info.tolerance = std::max(abs_tol, rel_tol * max_sv);
 		for (int i = 0; i < 4; ++i)
 		{
-			if (sorted_sv[i] > 1e-6)
-				rank++;
+			if (info.singular_values[i] > info.tolerance)
+				info.rank++;
 		}
-		if (rank > 1)
+		if (info.rank > 1)
 		{
 			Mat4 Sp = Mat4::Zero();
 			for (int i = 0; i < 4; ++i)
 			{
-				if (S(i) > 1e-6)
+				if (S(i) > info.tolerance)
 					Sp(i, i) = 1.0 / S(i);
 				else
 					Sp(i, i) = 0;
 			}
 			Vec4 m = V * Sp * U.transpose() * _b;
-			r_out = m(3);
+			info.r = m(3);
 		}
-		switch (rank)
+		switch (info.rank)
 		{
 		case 4:
-			return SQEM_CASE::Case1_Full;
+			info.sqem_case = SQEM_CASE::Case1_Full;
+			break;
 		case 3:
-			return SQEM_CASE::Case2_Line;
+			info.sqem_case = SQEM_CASE::Case2_Line;
+			break;
 		case 2:
-			return SQEM_CASE::Case3_Plane;
+			info.sqem_case = SQEM_CASE::Case3_Plane;
+			break;
 		default:
-			return SQEM_CASE::Case4_Degenerate;
+			info.sqem_case = SQEM_CASE::Case4_Degenerate;
+			break;
 		}
+		return info;
+	}
+
+	SQEM_CASE well_conditioned(Scalar& r_out) const
+	{
+		const SQEM_Condition_Info info = condition_info();
+		r_out = info.r;
+		return info.sqem_case;
 	}
 
 	bool optimized(Vec4& sphere)
