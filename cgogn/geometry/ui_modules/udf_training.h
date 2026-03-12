@@ -333,7 +333,8 @@ private:
 		bool running_ = false;
 		bool stopping_ = false;
 		bool manual_stop_requested_ = false;
-		bool pending_full_refresh_after_auto_stop_ = false;
+		bool preview_render_during_sphere_update_ = true;
+		bool pending_full_refresh_after_stop_ = false;
 		bool slow_down_ = true;
 		uint32 update_rate_ = 20;
 
@@ -1593,12 +1594,16 @@ protected:
 			if (selected_points_)
 			{
 				PointsParameters& p = points_parameters_[selected_points_];
-				if (p.running_)
-					update_render_data(p, true, false);
-				else if (p.pending_full_refresh_after_auto_stop_)
+				if (p.running_ && p.preview_render_during_sphere_update_)
+				{
+					update_render_data(p, false, true);
+					request_linked_views_update();
+				}
+				else if (p.pending_full_refresh_after_stop_)
 				{
 					update_render_data(p);
-					p.pending_full_refresh_after_auto_stop_ = false;
+					request_linked_views_update();
+					p.pending_full_refresh_after_stop_ = false;
 				}
 			}
 		});
@@ -7700,6 +7705,12 @@ protected:
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
 	}
 
+	void request_linked_views_update()
+	{
+		for (View* v : linked_views_)
+			v->request_update();
+	}
+
 	void start_spheres_update(PointsParameters& p)
 	{
 		const Scalar convergence_eps = Scalar(1e-10);
@@ -7711,12 +7722,11 @@ protected:
 		p.total_error_diff_ = 0.0;
 		p.last_total_error_ = std::numeric_limits<Scalar>::max();
 		p.manual_stop_requested_ = false;
-		p.pending_full_refresh_after_auto_stop_ = false;
+		p.pending_full_refresh_after_stop_ = false;
 
 		launch_thread([&, convergence_eps, max_post_convergence_iterations, max_iterations_without_autosplit,
 						  max_iterations_after_reaching_max_spheres]() {
 			bool convergence_reached = false;
-			bool stopped_by_automatic_condition = false;
 			uint32 post_convergence_iterations = 0;
 			bool target_reached_reported = false;
 			bool max_spheres_reached_once = false;
@@ -7777,7 +7787,6 @@ protected:
 						{
 							std::cout << "Auto stop: reached max post-convergence iterations ("
 									  << max_post_convergence_iterations << ")." << std::endl;
-							stopped_by_automatic_condition = true;
 							p.stopping_ = true;
 						}
 					}
@@ -7810,7 +7819,6 @@ protected:
 						{
 							std::cout << "Auto split stop: reached max post-max-sphere iterations ("
 									  << max_iterations_after_reaching_max_spheres << ")." << std::endl;
-							stopped_by_automatic_condition = true;
 							p.stopping_ = true;
 						}
 					}
@@ -7819,7 +7827,6 @@ protected:
 				{
 					std::cout << "Stop: reached max iterations without auto split ("
 							  << max_iterations_without_autosplit << ")." << std::endl;
-					stopped_by_automatic_condition = true;
 					p.stopping_ = true;
 				}
 
@@ -7828,11 +7835,10 @@ protected:
 
 				if (p.stopping_)
 				{
-					const bool should_full_refresh = stopped_by_automatic_condition && !p.manual_stop_requested_;
 					p.stopping_ = false;
 					p.running_ = false;
 					p.manual_stop_requested_ = false;
-					p.pending_full_refresh_after_auto_stop_ = should_full_refresh;
+					p.pending_full_refresh_after_stop_ = true;
 					break;
 				}
 			}
@@ -7842,7 +7848,7 @@ protected:
 			std::cout << "Nb iterations: " << p.iteration_count_ << std::endl;
 		});
 
-		app_.start_timer(100, [&]() -> bool { return !p.running_ && !p.pending_full_refresh_after_auto_stop_; });
+		app_.start_timer(100, [&]() -> bool { return !p.running_ && !p.pending_full_refresh_after_stop_; });
 	}
 
 	void stop_spheres_update(PointsParameters& p)
@@ -8496,6 +8502,7 @@ protected:
 					ImGui::Checkbox("Slow down", &p.slow_down_);
 					if (p.slow_down_)
 						ImGui::SliderInt("Update rate", (int*)&p.update_rate_, 1, 100);
+					ImGui::Checkbox("Preview during update", &p.preview_render_during_sphere_update_);
 					if (!p.running_)
 					{
 						if (ImGui::Button("Start spheres update"))
