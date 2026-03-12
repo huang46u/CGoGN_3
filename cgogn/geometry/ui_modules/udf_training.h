@@ -248,9 +248,11 @@ private:
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_udf_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_boundary_tet_color_ = nullptr;
+		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_k5_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_udf_score_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_boundary_tet_color_ = nullptr;
+		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_k5_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_non_manifold_color_ = nullptr;
 		std::shared_ptr<NMAttribute<uint32>> edge_degree_ = nullptr;
 
@@ -294,7 +296,7 @@ private:
 		bool topology_edge_stage_diffuse_ = true;
 		bool skeleton_face_score_normalize_by_area_ = false;
 		float32 init_dilation_constant_ = 0.001f;
-		uint32 init_min_cover_points_ = 5;
+		uint32 init_min_cover_points_ = 10;
 		// Sampling Parameters
 		float alpha_ = 0.005f;
 		float sample_radius_ = 0.0025f;
@@ -1775,10 +1777,12 @@ private:
 		p.skeleton_face_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "color");
 		p.skeleton_face_udf_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "udf_color");
 		p.skeleton_face_boundary_tet_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "boundary_tet_color");
+		p.skeleton_face_k5_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "k5_color");
 		p.skeleton_edge_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "color");
 		p.skeleton_edge_udf_score_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "edge_udf_score_color");
 		p.skeleton_edge_boundary_tet_color_ =
 			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "boundary_tet_best_edge_color");
+		p.skeleton_edge_k5_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "k5_edge_color");
 		p.skeleton_edge_non_manifold_color_ =
 			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "non_manifold_edge_color");
 		if (p.grid_cell_size_ > Scalar(0))
@@ -2708,26 +2712,35 @@ private:
 				return false;
 			const Vec3& pt = (*p.samples_position_)[v_idx];
 			Vec3 n = (*p.samples_normal_)[v_idx];
-
-			if (n.squaredNorm() > min_norm)
+			const bool normal_finite = n.allFinite();
+			const Scalar n2 = normal_finite ? n.squaredNorm() : Scalar(0);
+			const bool can_run_shrinking_ball = normal_finite && (n2 > min_norm);
+			if (can_run_shrinking_ball)
 				n.normalize();
+			else
+				n = Vec3(0, 0, 1);
 
 			Vec3 c = pt - n * fallback_radius;
 			Scalar r = fallback_radius;
 			PVertex secondary;
 
-			if (n.squaredNorm() > min_norm)
+			if (can_run_shrinking_ball)
 			{
 				auto [c1, r1, q1] = geometry::shrinking_ball_center<PVertex>(
 					pt, n, p.samples_kdtree_, p.samples_kdtree_vertices_, initial_radius);
 
-				if (std::isfinite(static_cast<double>(r1)) && r1 > Scalar(0))
+				if (c1.allFinite() && std::isfinite(static_cast<double>(r1)) && r1 > Scalar(0))
 				{
 					c = c1;
 					r = r1;
 					secondary = q1;
 				}
 			}
+
+			if (!c.allFinite())
+				c = pt - n * fallback_radius;
+			if (!std::isfinite(static_cast<double>(r)) || r <= Scalar(0))
+				r = fallback_radius;
 
 			if (!secondary.is_valid() && p.samples_kdtree_ && !p.samples_kdtree_vertices_.empty())
 			{
@@ -2927,7 +2940,7 @@ private:
 					  << " flipped_normals=" << flipped_normals
 					  << " deleted_samples=" << deleted_samples
 					  << " remaining_samples=" << nb_cells<PVertex>(*p.samples_mesh_) << std::endl;
-
+			
 			// Keep fitting-dependent structures coherent after sample removals.
 			build_kdtree(p);
 			if (nb_cells<PVertex>(*p.samples_mesh_) > 0)
@@ -2938,6 +2951,7 @@ private:
 				compute_quadrics(p);
 				run_shrinking_ball_for_all();
 			}
+			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
 		}
 		else if (flip_triggered_points > 0 || flipped_normals > 0)
 		{
@@ -2967,28 +2981,41 @@ private:
 			return;
 
 		std::vector<PVertex> sorted_vertices;
+		uint32 max_sample_index = 0;
 		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 			sorted_vertices.push_back(v);
+			const uint32 idx = index_of(*p.samples_mesh_, v);
+			if (idx != INVALID_INDEX)
+				max_sample_index = std::max(max_sample_index, idx);
 			return true;
 		});
 		std::sort(sorted_vertices.begin(), sorted_vertices.end(), [&](PVertex a, PVertex b) {
 			// sort candidate spheres by decreasing radius
 			uint32 idx_a = index_of(*p.samples_mesh_, a);
 			uint32 idx_b = index_of(*p.samples_mesh_, b);
-			return (*p.samples_ma_radius_)[idx_a] > (*p.samples_ma_radius_)[idx_b];
+			const Scalar ra = (idx_a != INVALID_INDEX) ? (*p.samples_ma_radius_)[idx_a] : Scalar(-1);
+			const Scalar rb = (idx_b != INVALID_INDEX) ? (*p.samples_ma_radius_)[idx_b] : Scalar(-1);
+			const Scalar safe_ra = std::isfinite(static_cast<double>(ra)) ? ra : Scalar(-1);
+			const Scalar safe_rb = std::isfinite(static_cast<double>(rb)) ? rb : Scalar(-1);
+			return safe_ra > safe_rb;
 		});
 
 		auto covered = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__covered");
 		covered->fill(false);
 		const uint32 nb_samples = nb_cells<PVertex>(*p.samples_mesh_);
-		std::vector<uint32> candidate_marks(nb_samples, 0);
+		const std::size_t candidate_marks_size =
+			sorted_vertices.empty() ? std::size_t(0) : (static_cast<std::size_t>(max_sample_index) + 1);
+		std::vector<uint32> candidate_marks(candidate_marks_size, 0);
 		uint32 candidate_mark_token = 1;
 
 		p.nb_spheres_ = 0;
+		uint32 skipped_invalid_ma_seeds = 0;
 
 		for (PVertex v : sorted_vertices)
 		{
 			uint32 v_index = index_of(*p.samples_mesh_, v);
+			if (v_index == INVALID_INDEX)
+				continue;
 
 			if (p.nb_spheres_ >= max_nb_spheres)
 				break;
@@ -2998,6 +3025,11 @@ private:
 
 			const Vec3& vp = (*p.samples_ma_position_)[v_index];
 			Scalar vr = (*p.samples_ma_radius_)[v_index];
+			if (!vp.allFinite() || !std::isfinite(static_cast<double>(vr)) || vr <= Scalar(0))
+			{
+				++skipped_invalid_ma_seeds;
+				continue;
+			}
 			const Scalar dilation_radius = std::max<Scalar>(vr + Scalar(p.init_dilation_constant_), Scalar(0));
 			const Scalar dilation_radius_sq = dilation_radius * dilation_radius;
 			if (candidate_mark_token == std::numeric_limits<uint32>::max())
@@ -3013,7 +3045,8 @@ private:
 				if (!seed.is_valid())
 					return;
 				uint32 seed_idx = index_of(*p.samples_mesh_, seed);
-				if (seed_idx == INVALID_INDEX || (*covered)[seed_idx] || candidate_marks[seed_idx] == current_mark)
+				if (seed_idx == INVALID_INDEX || seed_idx >= candidate_marks.size() || (*covered)[seed_idx] ||
+					candidate_marks[seed_idx] == current_mark)
 					return;
 
 				std::vector<PVertex> stack;
@@ -3026,10 +3059,14 @@ private:
 					PVertex w = stack.back();
 					stack.pop_back();
 					uint32 w_idx = index_of(*p.samples_mesh_, w);
+					if (w_idx == INVALID_INDEX)
+						continue;
 
 					for (PVertex u : (*p.samples_knn_)[w_idx])
 					{
 						uint32 u_idx = index_of(*p.samples_mesh_, u);
+						if (u_idx == INVALID_INDEX || u_idx >= candidate_marks.size())
+							continue;
 						if (!(*covered)[u_idx] && candidate_marks[u_idx] != current_mark &&
 							((*p.samples_position_)[u_idx] - vp).squaredNorm() < dilation_radius_sq)
 						{
@@ -3053,6 +3090,8 @@ private:
 			for (PVertex covered_vertex : candidate_cover)
 			{
 				uint32 covered_index = index_of(*p.samples_mesh_, covered_vertex);
+				if (covered_index == INVALID_INDEX)
+					continue;
 				(*covered)[covered_index] = true;
 			}
 
@@ -3073,6 +3112,8 @@ private:
 		}
 
 		remove_attribute<PVertex>(*p.samples_mesh_, covered);
+		if (skipped_invalid_ma_seeds > 0)
+			std::cout << "[InitSpheres] skipped_invalid_ma_seeds=" << skipped_invalid_ma_seeds << std::endl;
 
 		compute_clusters_full(p);
 	}
@@ -3133,11 +3174,10 @@ private:
 
 			Scalar min_distance = std::numeric_limits<Scalar>::max();
 			PVertex closest_sphere;
-			uint32 closest_sphere_index;
+			uint32 closest_sphere_index = INVALID_INDEX;
 
 			foreach_cell(*p.spheres_, [&](PVertex pv) {
 				uint32 pv_index = index_of(*p.spheres_, pv);
-
 				const Vec3& center = (*p.spheres_position_)[pv_index];
 				Scalar radius = (*p.spheres_radius_)[pv_index];
 
@@ -3206,7 +3246,6 @@ private:
 			for (PVertex pv : neighbors_spheres)
 			{
 				uint32 pv_index = index_of(*p.spheres_, pv);
-
 				const Vec3& center = (*p.spheres_position_)[pv_index];
 				Scalar radius = (*p.spheres_radius_)[pv_index];
 
@@ -3395,7 +3434,7 @@ private:
 
 			Scalar min_power_distance = std::numeric_limits<Scalar>::max();
 			PVertex closest_sphere;
-			uint32 closest_sphere_index = 0;
+			uint32 closest_sphere_index = INVALID_INDEX;
 
 			foreach_cell(*p.spheres_, [&](PVertex pv) {
 				uint32 pv_index = index_of(*p.spheres_, pv);
@@ -4861,19 +4900,40 @@ protected:
 		return false;
 	}
 
-	uint32 remove_orphan_edges_from_removed_face_edges(PointsParameters& p, const std::vector<NMEdge>& face_edges)
+	uint32 remove_orphan_edges_from_removed_face_edges(PointsParameters& p, const std::vector<NMEdge>& face_edges,
+													   uint32* out_removed_vertices = nullptr)
 	{
 		uint32 removed_edges = 0;
+		std::vector<NMVertex> candidate_vertices;
+		candidate_vertices.reserve(face_edges.size() * 2);
 		for (NMEdge e : face_edges)
 		{
 			if (!e.is_valid())
 				continue;
+			const std::vector<NMVertex> edge_vertices = incident_vertices(*p.skeleton_, e);
+			for (const NMVertex& v : edge_vertices)
+				candidate_vertices.push_back(v);
 			if (incident_faces(*p.skeleton_, e).empty())
 			{
 				remove_edge(*p.skeleton_, e);
 				++removed_edges;
 			}
 		}
+		uint32 removed_vertices = 0;
+		for (const NMVertex& v : candidate_vertices)
+		{
+			if (!v.is_valid())
+				continue;
+			const uint32 idv = index_of(*p.skeleton_, v);
+			if (idv == INVALID_INDEX)
+				continue;
+			if (!incident_edges(*p.skeleton_, v).empty())
+				continue;
+			remove_vertex(*p.skeleton_, v);
+			++removed_vertices;
+		}
+		if (out_removed_vertices)
+			*out_removed_vertices = removed_vertices;
 		return removed_edges;
 	}
 
@@ -6069,6 +6129,85 @@ protected:
 		return result;
 	}
 
+	struct FaceEdgeDegreeStats
+	{
+		uint32 deg1_count = 0;
+		uint32 deg2_count = 0;
+		uint32 gt2_count = 0;
+	};
+
+	FaceEdgeDegreeStats compute_face_edge_degree_stats(PointsParameters& p, const NMFace& f)
+	{
+		FaceEdgeDegreeStats stats;
+		if (!p.skeleton_ || !f.is_valid())
+			return stats;
+		for (NMEdge e : incident_edges(*p.skeleton_, f))
+		{
+			if (!e.is_valid())
+				continue;
+			const size_t edge_degree = incident_faces(*p.skeleton_, e).size();
+			if (edge_degree == 1)
+				++stats.deg1_count;
+			else if (edge_degree == 2)
+				++stats.deg2_count;
+			else if (edge_degree > 2)
+				++stats.gt2_count;
+		}
+		return stats;
+	}
+
+	void mark_k5_color(PointsParameters& p)
+	{
+		if (!p.skeleton_ || !p.skeleton_face_k5_color_ || !p.skeleton_edge_k5_color_)
+		{
+			std::cerr << "K5 coloring requires skeleton K5 color attributes." << std::endl;
+			return;
+		}
+
+		const K5DetectionResult k5_info = detect_k5_cells(p);
+		const Vec3 default_face_color(0.08, 0.08, 0.08);
+		const Vec3 k5_face_color(0.05, 0.85, 0.95);
+		const Vec3 k5_deg2_face_color(1.0, 0.55, 0.15);
+		const Vec3 default_edge_color(0.08, 0.08, 0.08);
+		const Vec3 k5_edge_color(0.0, 0.9, 0.75);
+		uint32 deg2eq2_face_count = 0;
+
+		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			Vec3 c = default_face_color;
+			const uint32 idf = index_of(*p.skeleton_, f);
+			if (idf != INVALID_INDEX && k5_info.face_ids.find(idf) != k5_info.face_ids.end())
+			{
+				const FaceEdgeDegreeStats stats = compute_face_edge_degree_stats(p, f);
+				if (stats.deg2_count == 2)
+				{
+					c = k5_deg2_face_color;
+					++deg2eq2_face_count;
+				}
+				else
+				{
+					c = k5_face_color;
+				}
+			}
+			value<Vec3>(*p.skeleton_, p.skeleton_face_k5_color_, f) = c;
+			return true;
+		});
+		foreach_cell(*p.skeleton_, [&](NMEdge e) -> bool {
+			Vec3 c = default_edge_color;
+			const uint32 ide = index_of(*p.skeleton_, e);
+			if (ide != INVALID_INDEX && k5_info.edge_ids.find(ide) != k5_info.edge_ids.end())
+				c = k5_edge_color;
+			value<Vec3>(*p.skeleton_, p.skeleton_edge_k5_color_, e) = c;
+			return true;
+		});
+
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_k5_color_.get());
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_k5_color_.get());
+
+		std::cout << "[K5Mask] k5_count=" << k5_info.cliques.size() << " k5_faces=" << k5_info.face_ids.size()
+				  << " k5_edges=" << k5_info.edge_ids.size() << " deg2eq2_faces=" << deg2eq2_face_count
+				  << std::endl;
+	}
+
 	void mark_boundary_tets_color(PointsParameters& p)
 	{
 		if (!p.skeleton_ || !p.skeleton_face_boundary_tet_color_ || !p.skeleton_edge_boundary_tet_color_)
@@ -6222,17 +6361,10 @@ protected:
 			return;
 		}
 
-		std::unordered_map<uint32, Scalar> face_score_cache;
-		if (!compute_skeleton_face_scores(
-				p, face_score_cache, p.skeleton_face_score_normalize_by_area_, "[K5Delete]"))
-		{
-			std::cerr << "[K5Delete] failed to compute face scores." << std::endl;
-			return;
-		}
-
 		const K5DetectionResult k5_info = detect_k5_cells(p);
 		if (k5_info.cliques.empty())
 		{
+			mark_k5_color(p);
 			std::cout << "[K5Delete] no K5 detected." << std::endl;
 			return;
 		}
@@ -6243,51 +6375,42 @@ protected:
 			return key;
 		};
 
-		std::map<std::array<uint32, 3>, NMFace> face_key_to_face;
-		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
-			const std::vector<NMVertex> fv = incident_vertices(*p.skeleton_, f);
-			if (fv.size() != 3)
-				return true;
-			const uint32 a = index_of(*p.skeleton_, fv[0]);
-			const uint32 b = index_of(*p.skeleton_, fv[1]);
-			const uint32 c = index_of(*p.skeleton_, fv[2]);
-			if (a == INVALID_INDEX || b == INVALID_INDEX || c == INVALID_INDEX)
-				return true;
-			face_key_to_face[make_face_key(a, b, c)] = f;
-			return true;
-		});
-
+		uint32 detected_k5 = static_cast<uint32>(k5_info.cliques.size());
 		uint32 processed_k5 = 0;
 		uint32 removed_faces = 0;
 		uint32 removed_edges = 0;
+		uint32 removed_vertices = 0;
 		uint32 removed_tets = 0;
+		uint32 skipped_no_deg2_pair = 0;
+		uint32 skipped_no_followup_pair = 0;
 
-		for (const auto& clique : k5_info.cliques)
+		while (true)
 		{
-			std::unordered_set<uint32> clique_face_ids;
-			clique_face_ids.reserve(16);
-			std::vector<NMFace> clique_faces;
-			clique_faces.reserve(10);
-			for (uint32 i = 0; i < 5; ++i)
+			const K5DetectionResult current_k5_info = detect_k5_cells(p);
+			if (current_k5_info.cliques.empty())
+				break;
+
+			std::unordered_map<uint32, Scalar> face_score_cache;
+			if (!compute_skeleton_face_scores(
+					p, face_score_cache, p.skeleton_face_score_normalize_by_area_, "[K5Delete]"))
 			{
-				for (uint32 j = i + 1; j < 5; ++j)
-				{
-					for (uint32 k = j + 1; k < 5; ++k)
-					{
-						const auto it_f = face_key_to_face.find(make_face_key(clique[i], clique[j], clique[k]));
-						if (it_f == face_key_to_face.end())
-							continue;
-						const NMFace f = it_f->second;
-						const uint32 idf = index_of(*p.skeleton_, f);
-						if (idf == INVALID_INDEX)
-							continue;
-						clique_face_ids.insert(idf);
-						clique_faces.push_back(f);
-					}
-				}
+				std::cerr << "[K5Delete] failed to compute face scores." << std::endl;
+				break;
 			}
-			if (clique_faces.empty())
-				continue;
+
+			std::map<std::array<uint32, 3>, NMFace> face_key_to_face;
+			foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+				const std::vector<NMVertex> fv = incident_vertices(*p.skeleton_, f);
+				if (fv.size() != 3)
+					return true;
+				const uint32 a = index_of(*p.skeleton_, fv[0]);
+				const uint32 b = index_of(*p.skeleton_, fv[1]);
+				const uint32 c = index_of(*p.skeleton_, fv[2]);
+				if (a == INVALID_INDEX || b == INVALID_INDEX || c == INVALID_INDEX)
+					return true;
+				face_key_to_face[make_face_key(a, b, c)] = f;
+				return true;
+			});
 
 			struct FaceCand
 			{
@@ -6297,161 +6420,190 @@ protected:
 				std::vector<NMEdge> deg2_edges;
 			};
 
-			bool has_best = false;
-			FaceCand best;
-			for (NMFace f : clique_faces)
+			bool processed_current_k5 = false;
+			for (const auto& clique : current_k5_info.cliques)
 			{
-				if (!f.is_valid())
+				std::unordered_set<uint32> seen_face_ids;
+				seen_face_ids.reserve(16);
+				std::vector<FaceCand> deg2_face_candidates;
+				deg2_face_candidates.reserve(4);
+
+				for (uint32 i = 0; i < 5; ++i)
+				{
+					for (uint32 j = i + 1; j < 5; ++j)
+					{
+						for (uint32 k = j + 1; k < 5; ++k)
+						{
+							const auto it_f = face_key_to_face.find(make_face_key(clique[i], clique[j], clique[k]));
+							if (it_f == face_key_to_face.end())
+								continue;
+							const NMFace f = it_f->second;
+							const uint32 idf = index_of(*p.skeleton_, f);
+							if (idf == INVALID_INDEX || !seen_face_ids.insert(idf).second)
+								continue;
+
+							const FaceEdgeDegreeStats stats = compute_face_edge_degree_stats(p, f);
+							if (stats.deg2_count != 2)
+								continue;
+
+							std::vector<NMEdge> deg2_edges;
+							deg2_edges.reserve(2);
+							for (NMEdge e : incident_edges(*p.skeleton_, f))
+								if (e.is_valid() && incident_faces(*p.skeleton_, e).size() == 2)
+									deg2_edges.push_back(e);
+							if (deg2_edges.size() != 2)
+								continue;
+
+							const auto it_score = face_score_cache.find(idf);
+							const Scalar score = (it_score != face_score_cache.end()) ? it_score->second : Scalar(0);
+							deg2_face_candidates.push_back({f, idf, score, deg2_edges});
+						}
+					}
+				}
+
+				if (deg2_face_candidates.size() < 2)
+				{
+					++skipped_no_deg2_pair;
 					continue;
-				const uint32 idf = index_of(*p.skeleton_, f);
-				if (idf == INVALID_INDEX)
-					continue;
-				std::vector<NMEdge> deg2_edges;
-				deg2_edges.reserve(3);
-				for (NMEdge e : incident_edges(*p.skeleton_, f))
+				}
+
+				std::sort(deg2_face_candidates.begin(), deg2_face_candidates.end(),
+						  [](const FaceCand& a, const FaceCand& b) {
+							  if (a.score != b.score)
+								  return a.score > b.score;
+							  return a.idf < b.idf;
+						  });
+				const FaceCand& seed = deg2_face_candidates[0];
+
+				std::unordered_map<uint32, NMFace> followup_faces;
+				followup_faces.reserve(2);
+				for (NMEdge e : seed.deg2_edges)
 				{
 					if (!e.is_valid())
 						continue;
-					if (incident_faces(*p.skeleton_, e).size() == 2)
-						deg2_edges.push_back(e);
-				}
-				if (deg2_edges.size() < 2)
-					continue;
-				const auto it_score = face_score_cache.find(idf);
-				const Scalar score = (it_score != face_score_cache.end()) ? it_score->second : Scalar(0);
-				if (!has_best || score > best.score)
-				{
-					has_best = true;
-					best.f = f;
-					best.idf = idf;
-					best.score = score;
-					best.deg2_edges = std::move(deg2_edges);
-				}
-			}
-			if (!has_best)
-				continue;
-
-			struct NeighborFace
-			{
-				NMFace f;
-				uint32 idf = INVALID_INDEX;
-				Scalar score = Scalar(0);
-			};
-			std::unordered_map<uint32, NeighborFace> neighbor_faces;
-			neighbor_faces.reserve(8);
-			for (NMEdge e : best.deg2_edges)
-			{
-				if (!e.is_valid())
-					continue;
-				const auto in_faces = incident_faces(*p.skeleton_, e);
-				if (in_faces.size() != 2)
-					continue;
-				NMFace nf = in_faces[0];
-				if (nf == best.f)
-					nf = in_faces[1];
-				if (!nf.is_valid() || nf == best.f)
-					continue;
-				const uint32 idn = index_of(*p.skeleton_, nf);
-				if (idn == INVALID_INDEX || idn == best.idf)
-					continue;
-				if (clique_face_ids.find(idn) == clique_face_ids.end())
-					continue;
-				const auto it_score = face_score_cache.find(idn);
-				const Scalar score = (it_score != face_score_cache.end()) ? it_score->second : Scalar(0);
-				auto itn = neighbor_faces.find(idn);
-				if (itn == neighbor_faces.end() || score > itn->second.score)
-					neighbor_faces[idn] = {nf, idn, score};
-			}
-
-			std::vector<NeighborFace> neighbors;
-			neighbors.reserve(neighbor_faces.size());
-			for (const auto& kvn : neighbor_faces)
-				neighbors.push_back(kvn.second);
-			std::sort(neighbors.begin(), neighbors.end(),
-					  [](const NeighborFace& a, const NeighborFace& b) { return a.score > b.score; });
-			if (neighbors.size() < 2)
-				continue;
-
-			std::vector<NMFace> faces_to_remove = {best.f, neighbors[0].f, neighbors[1].f};
-			std::unordered_set<uint32> unique_face_ids;
-			unique_face_ids.reserve(4);
-			std::unordered_set<std::size_t> tets_to_erase;
-			std::vector<NMEdge> affected_edges;
-			affected_edges.reserve(9);
-			for (NMFace f : faces_to_remove)
-			{
-				if (!f.is_valid())
-					continue;
-				const uint32 idf = index_of(*p.skeleton_, f);
-				if (idf == INVALID_INDEX)
-					continue;
-				if (!unique_face_ids.insert(idf).second)
-					continue;
-				for (std::size_t tet_id : (*p.incident_tets_)[idf])
-					if (p.skeleton_tets_.find(tet_id) != p.skeleton_tets_.end())
-						tets_to_erase.insert(tet_id);
-				for (NMEdge e : incident_edges(*p.skeleton_, f))
-					affected_edges.push_back(e);
-			}
-			if (unique_face_ids.size() < 3)
-				continue;
-
-			uint32 removed_faces_this_k5 = 0;
-			for (NMFace f : faces_to_remove)
-			{
-				if (!f.is_valid())
-					continue;
-				const uint32 idf = index_of(*p.skeleton_, f);
-				if (idf == INVALID_INDEX)
-					continue;
-				remove_face(*p.skeleton_, f);
-				++removed_faces_this_k5;
-			}
-			if (removed_faces_this_k5 == 0)
-				continue;
-
-			const uint32 removed_edges_this_k5 = remove_orphan_edges_from_removed_face_edges(p, affected_edges);
-			uint32 removed_tets_this_k5 = 0;
-			for (std::size_t tet_id : tets_to_erase)
-			{
-				auto it_tet = p.skeleton_tets_.find(tet_id);
-				if (it_tet == p.skeleton_tets_.end())
-					continue;
-				const Tet old_tet = it_tet->second;
-				for (uint32 i = 0; i < 4; ++i)
-				{
-					const NMFace tf = old_tet.faces[i];
-					if (!tf.is_valid())
+					const auto in_faces = incident_faces(*p.skeleton_, e);
+					if (in_faces.size() != 2)
 						continue;
-					const uint32 idtf = index_of(*p.skeleton_, tf);
-					if (idtf == INVALID_INDEX)
+					NMFace other = in_faces[0];
+					if (other == seed.f)
+						other = in_faces[1];
+					if (!other.is_valid() || other == seed.f)
 						continue;
-					(*p.incident_tets_)[idtf].erase(tet_id);
+					const uint32 id_other = index_of(*p.skeleton_, other);
+					if (id_other == INVALID_INDEX)
+						continue;
+					followup_faces[id_other] = other;
 				}
-				p.skeleton_tets_.erase(it_tet);
-				++removed_tets_this_k5;
+
+				if (followup_faces.size() != 2)
+				{
+					++skipped_no_followup_pair;
+					continue;
+				}
+
+				std::vector<NMFace> faces_to_remove;
+				faces_to_remove.reserve(3);
+				faces_to_remove.push_back(seed.f);
+				for (const auto& kv : followup_faces)
+					faces_to_remove.push_back(kv.second);
+
+				std::unordered_set<uint32> unique_face_ids;
+				unique_face_ids.reserve(4);
+				std::unordered_set<std::size_t> tets_to_erase;
+				std::vector<NMEdge> affected_edges;
+				affected_edges.reserve(9);
+				for (const NMFace& f : faces_to_remove)
+				{
+					if (!f.is_valid())
+						continue;
+					const uint32 idf = index_of(*p.skeleton_, f);
+					if (idf == INVALID_INDEX || !unique_face_ids.insert(idf).second)
+						continue;
+					for (std::size_t tet_id : (*p.incident_tets_)[idf])
+						if (p.skeleton_tets_.find(tet_id) != p.skeleton_tets_.end())
+							tets_to_erase.insert(tet_id);
+					for (NMEdge e : incident_edges(*p.skeleton_, f))
+						affected_edges.push_back(e);
+				}
+
+				if (unique_face_ids.size() != 3)
+				{
+					++skipped_no_followup_pair;
+					continue;
+				}
+
+				uint32 removed_faces_this_k5 = 0;
+				for (const NMFace& f : faces_to_remove)
+				{
+					if (!f.is_valid())
+						continue;
+					const uint32 idf = index_of(*p.skeleton_, f);
+					if (idf == INVALID_INDEX)
+						continue;
+					remove_face(*p.skeleton_, f);
+					++removed_faces_this_k5;
+				}
+				if (removed_faces_this_k5 != 3)
+				{
+					std::cout << "[K5Delete] skip seed_face=" << seed.idf
+							  << " reason=unexpected_removed_face_count count=" << removed_faces_this_k5 << std::endl;
+					continue;
+				}
+
+				uint32 removed_vertices_this_k5 = 0;
+				const uint32 removed_edges_this_k5 =
+					remove_orphan_edges_from_removed_face_edges(p, affected_edges, &removed_vertices_this_k5);
+				uint32 removed_tets_this_k5 = 0;
+				for (std::size_t tet_id : tets_to_erase)
+				{
+					auto it_tet = p.skeleton_tets_.find(tet_id);
+					if (it_tet == p.skeleton_tets_.end())
+						continue;
+					const Tet old_tet = it_tet->second;
+					for (uint32 i = 0; i < 4; ++i)
+					{
+						const NMFace tf = old_tet.faces[i];
+						if (!tf.is_valid())
+							continue;
+						const uint32 idtf = index_of(*p.skeleton_, tf);
+						if (idtf == INVALID_INDEX)
+							continue;
+						(*p.incident_tets_)[idtf].erase(tet_id);
+					}
+					p.skeleton_tets_.erase(it_tet);
+					++removed_tets_this_k5;
+				}
+
+				++processed_k5;
+				removed_faces += removed_faces_this_k5;
+				removed_edges += removed_edges_this_k5;
+				removed_vertices += removed_vertices_this_k5;
+				removed_tets += removed_tets_this_k5;
+
+				std::cout << "[K5Delete] remove#" << processed_k5 << " seed_face=" << seed.idf
+						  << " seed_score=" << seed.score << " removed_faces=" << removed_faces_this_k5
+						  << " removed_edges=" << removed_edges_this_k5
+						  << " removed_vertices=" << removed_vertices_this_k5
+						  << " removed_tets=" << removed_tets_this_k5
+						  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
+				processed_current_k5 = true;
+				break;
 			}
 
-			++processed_k5;
-			removed_faces += removed_faces_this_k5;
-			removed_edges += removed_edges_this_k5;
-			removed_tets += removed_tets_this_k5;
-
-			std::cout << "[K5Delete] remove#" << processed_k5
-					  << " seed_face=" << best.idf
-					  << " seed_score=" << best.score
-					  << " removed_faces=" << removed_faces_this_k5
-					  << " removed_edges=" << removed_edges_this_k5
-					  << " removed_tets=" << removed_tets_this_k5
-					  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
+			if (!processed_current_k5)
+				break;
 		}
 
+		mark_k5_color(p);
 		std::cout << "[K5Delete] done"
-				  << " detected_k5=" << k5_info.cliques.size()
+				  << " detected_k5=" << detected_k5
 				  << " processed_k5=" << processed_k5
 				  << " removed_faces=" << removed_faces
 				  << " removed_edges=" << removed_edges
+				  << " removed_vertices=" << removed_vertices
 				  << " removed_tets=" << removed_tets
+				  << " skipped_no_deg2_pair=" << skipped_no_deg2_pair
+				  << " skipped_no_followup_pair=" << skipped_no_followup_pair
 				  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
 
 		refresh_skeleton_topology_colors(p);
@@ -6645,10 +6797,12 @@ protected:
 		p.skeleton_face_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "color");
 		p.skeleton_face_udf_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "udf_color");
 		p.skeleton_face_boundary_tet_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "boundary_tet_color");
+		p.skeleton_face_k5_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "k5_color");
 		p.skeleton_edge_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "color");
 		p.skeleton_edge_udf_score_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "edge_udf_score_color");
 		p.skeleton_edge_boundary_tet_color_ =
 			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "boundary_tet_best_edge_color");
+		p.skeleton_edge_k5_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "k5_edge_color");
 		p.skeleton_edge_non_manifold_color_ =
 			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "non_manifold_edge_color");
 	}
@@ -6760,11 +6914,14 @@ protected:
 				else if (edge_degree > 2)
 					++gt2_count;
 			}
-			return (deg1_count == 1 && gt2_count == 2);
+			const bool pattern_a = (deg1_count == 1 && gt2_count == 2);
+			const bool pattern_b = (deg1_count == 2 && gt2_count == 1);
+			return pattern_a || pattern_b;
 		};
 
 		uint32 total_removed_faces = 0;
 		uint32 total_removed_edges = 0;
+		uint32 total_removed_vertices = 0;
 		uint32 total_removed_tets = 0;
 		uint32 total_passes = 0;
 
@@ -6803,7 +6960,9 @@ protected:
 				++removed_faces_this_pass;
 			}
 
-			uint32 removed_edges_this_pass = remove_orphan_edges_from_removed_face_edges(p, affected_edges);
+			uint32 removed_vertices_this_pass = 0;
+			uint32 removed_edges_this_pass =
+				remove_orphan_edges_from_removed_face_edges(p, affected_edges, &removed_vertices_this_pass);
 			uint32 removed_tets_this_pass = 0;
 			for (std::size_t tet_id : tets_to_erase)
 			{
@@ -6827,11 +6986,13 @@ protected:
 
 			total_removed_faces += removed_faces_this_pass;
 			total_removed_edges += removed_edges_this_pass;
+			total_removed_vertices += removed_vertices_this_pass;
 			total_removed_tets += removed_tets_this_pass;
 
 			std::cout << log_prefix << " pass=" << total_passes
 					  << " removed_deg_faces=" << removed_faces_this_pass
 					  << " removed_orphan_edges=" << removed_edges_this_pass
+					  << " removed_orphan_vertices=" << removed_vertices_this_pass
 					  << " removed_tets=" << removed_tets_this_pass
 					  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
 		}
@@ -6840,6 +7001,7 @@ protected:
 				  << " passes=" << total_passes
 				  << " removed_deg_faces=" << total_removed_faces
 				  << " removed_orphan_edges=" << total_removed_edges
+				  << " removed_orphan_vertices=" << total_removed_vertices
 				  << " removed_tets=" << total_removed_tets
 				  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
 	}
@@ -6851,6 +7013,8 @@ protected:
 			std::cerr << "[TopologyFull] requires a built skeleton." << std::endl;
 			return;
 		}
+
+		run_k5_face_deletion(p);
 
 		const std::unordered_set<uint32> tet_face_whitelist = collect_current_tet_face_id_whitelist(p);
 		std::cout << "[TopologyFull] start"
@@ -6879,6 +7043,7 @@ protected:
 		prune_deg_faces_from_whitelist_and_orphan_edges(p, tet_face_whitelist, "[TopologyFullDeg]");
 
 		refresh_skeleton_topology_colors(p);
+		mark_k5_color(p);
 		mark_boundary_tets_color(p);
 		visualize_skeleton_edge_udf_scores(p);
 		std::cout << "[TopologyFull] done remaining_tets=" << p.skeleton_tets_.size() << std::endl;
