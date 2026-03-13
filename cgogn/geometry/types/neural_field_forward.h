@@ -148,6 +148,34 @@ public:
 		}
 	}
 
+	// Forward points in GPU tensor while preserving the autograd graph
+	torch::Tensor forward_values_autograd_gpu(const torch::Tensor& points_gpu) const
+	{
+		if (!is_loaded())
+			return torch::Tensor();
+		try
+		{
+			ModuleDeviceScope module_scope(module_, device_, device_);
+			torch::Tensor x = points_gpu;
+			if (x.device() != device_)
+				x = x.to(device_);
+
+			torch::IValue output = module_->forward({x});
+			ParsedOutput parsed;
+			OutputKind kind = OutputKind::Unknown;
+			if (!parse_output(output, parsed, kind))
+				return torch::Tensor();
+			if (kind != OutputKind::Unknown)
+				output_kind_ = kind;
+			return parsed.values;
+		}
+		catch (const c10::Error& e)
+		{
+			std::cerr << "NeuralField forward (values+autograd) failed: " << e.what() << std::endl;
+			return torch::Tensor();
+		}
+	}
+
 	// Forward points in GPU tensor and return UDF values + optional SDF values
 	std::pair<torch::Tensor, torch::Tensor> forward_values_sdf_gpu(const torch::Tensor& points_gpu) const
 	{

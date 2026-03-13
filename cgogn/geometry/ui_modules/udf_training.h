@@ -138,6 +138,11 @@ public:
 		INITIAL_MA_DISPLACEMENT,
 		INITIAL_MA_SHRINKING_BALL
 	};
+	enum FreeRadiusOptimizerType : uint32
+	{
+		FREE_RADIUS_OPTIM_LBFGS,
+		FREE_RADIUS_OPTIM_ADAM
+	};
 
 private:
 	struct PointsParameters;
@@ -287,6 +292,18 @@ private:
 		float32 sqem_fix_radius_scale_ = 1.0f;
 		bool udf_center_enabled_ = false;
 		float32 udf_center_lambda_ = 0.10f;
+		bool free_radius_inside_penalty_enabled_ = true;
+		float32 free_radius_inside_lambda_ = 1.0f;
+		float32 free_radius_inside_delta_ = 0.0f;
+		float32 free_radius_radius_min_ = 1e-6f;
+		FreeRadiusOptimizerType free_radius_optimizer_ = FREE_RADIUS_OPTIM_LBFGS;
+		int free_radius_max_iterations_ = 32;
+		float32 free_radius_learning_rate_ = 0.05f;
+		float32 free_radius_lbfgs_learning_rate_ = 1.0f;
+		int free_radius_lbfgs_history_size_ = 10;
+		float32 free_radius_lbfgs_tolerance_grad_ = 1e-7f;
+		float32 free_radius_lbfgs_tolerance_change_ = 1e-9f;
+		bool free_radius_debug_log_ = false;
 
 		// Filtering
 		float32 target_radius_ = 0.1f;
@@ -3790,6 +3807,7 @@ private:
 		Spherical_Quadric q;
 		Line_Quadric lq;
 		Scalar weight_sum = Scalar(0);
+		Vec3 weighted_center = Vec3::Zero();
 		for (PVertex v : cluster)
 		{
 			uint32 v_index = index_of(*data.mesh, v);
@@ -3798,58 +3816,274 @@ private:
 				continue;
 			q += (*data.quadric)[v_index] * weight;
 			lq += (*data.line_quadric)[v_index] * weight;
+			weighted_center += weight * (*data.position)[v_index];
 			weight_sum += weight;
 		}
 		if (weight_sum <= Scalar(0))
 			return;
+		weighted_center /= weight_sum;
 
-		Mat4 Ql = lq.get_quadric().matrix();
-		Mat3 Al = Ql.block<3, 3>(0, 0);
-		Vec3 bl = -Ql.block<3, 1>(0, 3);
+		const Mat4 line_quadric_matrix = lq.get_quadric().matrix();
+		const Scalar lambda_line = sqem_update_lambda_for_quadric(p, q);
+		const Scalar radius_min_scalar = std::max(Scalar(0), Scalar(p.free_radius_radius_min_));
+		const bool want_inside_penalty = p.free_radius_inside_penalty_enabled_ && p.neural_udf_loaded_;
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		bool inside_penalty_active = want_inside_penalty && udf.is_loaded();
+		const torch::Device optim_device = inside_penalty_active ? device_ : torch::Device(torch::kCPU);
+		const auto tensor_opts = torch::TensorOptions().dtype(torch::kFloat32).device(optim_device);
+		const auto tensor_opts_cpu = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
 
-		Mat4 Al_ext = Mat4::Zero();
-		Al_ext.block<3, 3>(0, 0) = Al;
-		Vec4 bl_ext = Vec4::Zero();
-		bl_ext.head<3>() = bl;
+		auto make_vec3_tensor = [&](const Vec3& v) {
+			torch::Tensor t = torch::empty({3}, tensor_opts_cpu);
+			auto acc = t.accessor<float, 1>();
+			for (int i = 0; i < 3; ++i)
+				acc[i] = static_cast<float>(v[i]);
+			return t.to(optim_device);
+		};
+		auto make_vec4_tensor = [&](const Vec4& v) {
+			torch::Tensor t = torch::empty({4}, tensor_opts_cpu);
+			auto acc = t.accessor<float, 1>();
+			for (int i = 0; i < 4; ++i)
+				acc[i] = static_cast<float>(v[i]);
+			return t.to(optim_device);
+		};
+		auto make_mat4_tensor = [&](const Mat4& m) {
+			torch::Tensor t = torch::empty({4, 4}, tensor_opts_cpu);
+			auto acc = t.accessor<float, 2>();
+			for (int i = 0; i < 4; ++i)
+				for (int j = 0; j < 4; ++j)
+					acc[i][j] = static_cast<float>(m(i, j));
+			return t.to(optim_device);
+		};
+		auto inverse_softplus = [](Scalar y) {
+			const Scalar clamped = std::max(y, Scalar(1e-6));
+			if (clamped > Scalar(20))
+				return clamped;
+			return std::log(std::expm1(clamped));
+		};
 
-		const Scalar update_lambda = sqem_update_lambda_for_quadric(p, q);
-		Mat4 A = q._A + update_lambda * Al_ext;
-		Vec4 b = q._b + update_lambda * bl_ext;
-		if (p.udf_center_enabled_)
+		Vec3 init_center = (*p.spheres_position_)[sphere_index];
+		if (!init_center.allFinite())
+			init_center = weighted_center;
+		Scalar init_radius = (*p.spheres_radius_)[sphere_index];
+		if (!std::isfinite(init_radius) || init_radius <= radius_min_scalar)
+			init_radius = std::max(Scalar(p.alpha_), radius_min_scalar + Scalar(1e-4));
+
+		const torch::Tensor sqem_A_t = make_mat4_tensor(q._A);
+		const torch::Tensor sqem_b_t = make_vec4_tensor(q._b);
+		const torch::Tensor sqem_c_t = torch::tensor(static_cast<float>(q._c), tensor_opts);
+		const torch::Tensor line_Q_t = make_mat4_tensor(line_quadric_matrix);
+		const torch::Tensor lambda_line_t = torch::tensor(static_cast<float>(lambda_line), tensor_opts);
+		const torch::Tensor lambda_inside_t =
+			torch::tensor(static_cast<float>(std::max(0.0f, p.free_radius_inside_lambda_)), tensor_opts);
+		const torch::Tensor inside_delta_t = torch::tensor(static_cast<float>(p.free_radius_inside_delta_), tensor_opts);
+		const torch::Tensor radius_min_t = torch::tensor(static_cast<float>(radius_min_scalar), tensor_opts);
+		const torch::Tensor one_t = torch::ones({1}, tensor_opts);
+
+		if (inside_penalty_active)
 		{
-			const Vec3 c0 = (*p.spheres_position_)[sphere_index];
-			Scalar f0;
-			Vec3 g;
-			if (eval_udf_and_grad(p, c0, f0, g))
+			torch::NoGradGuard no_grad;
+			torch::Tensor init_values = udf.forward_values_gpu(make_vec3_tensor(init_center).unsqueeze(0));
+			if (!init_values.defined() || init_values.numel() != 1 || !torch::isfinite(init_values).all().item<bool>())
+				inside_penalty_active = false;
+		}
+
+		torch::Tensor center_param;
+		torch::Tensor rho_param;
+		const torch::Tensor center_init_t = make_vec3_tensor(init_center);
+		const torch::Tensor rho_init_t =
+			torch::tensor({static_cast<float>(inverse_softplus(std::max(init_radius - radius_min_scalar, Scalar(1e-6))))},
+						  tensor_opts);
+		auto reset_params = [&]() {
+			center_param = center_init_t.clone().detach();
+			center_param.set_requires_grad(true);
+			rho_param = rho_init_t.clone().detach();
+			rho_param.set_requires_grad(true);
+		};
+		reset_params();
+
+		struct FreeRadiusEnergyTerms
+		{
+			torch::Tensor total;
+			torch::Tensor total_raw;
+			torch::Tensor sqem;
+			torch::Tensor line;
+			torch::Tensor inside;
+			torch::Tensor radius;
+			torch::Tensor udf_value;
+		};
+
+		auto evaluate_terms_raw = [&]() {
+			FreeRadiusEnergyTerms terms;
+			const torch::Tensor radius = torch::softplus(rho_param).squeeze(0) + radius_min_t;
+			const torch::Tensor sphere_state = torch::cat({center_param, radius.unsqueeze(0)}, 0);
+			const torch::Tensor center_h = torch::cat({center_param, one_t}, 0);
+
+			terms.radius = radius;
+			terms.sqem =
+				Scalar(0.5) * torch::dot(sphere_state, torch::matmul(sqem_A_t, sphere_state)) - torch::dot(sqem_b_t, sphere_state) +
+				sqem_c_t;
+			terms.line = torch::dot(center_h, torch::matmul(line_Q_t, center_h));
+			terms.inside = torch::zeros({1}, tensor_opts).squeeze(0);
+			terms.udf_value = torch::zeros({1}, tensor_opts).squeeze(0);
+			if (inside_penalty_active)
 			{
-				const Scalar g2 = g.squaredNorm();
-				const Scalar eps = Scalar(1e-12);
-				if (g2 > eps)
+				torch::Tensor udf_values = udf.forward_values_autograd_gpu(center_param.unsqueeze(0));
+				if (udf_values.defined() && udf_values.numel() == 1)
 				{
-					const Scalar mu = Scalar(p.udf_center_lambda_) /** weight_sum*/;
-					const Scalar t = g.dot(c0) - f0;
-					A.block<3, 3>(0, 0).noalias() += mu * (g * g.transpose());
-					b.head<3>().noalias() += mu * t * g;
+					terms.udf_value = udf_values.squeeze(0);
+					const torch::Tensor violation = torch::relu(radius - terms.udf_value + inside_delta_t);
+					terms.inside = violation * violation;
 				}
 			}
-		}
-		Vec4 s = A.completeOrthogonalDecomposition().solve(b);
-		if (!s.allFinite())
-			return;
+			terms.total_raw = terms.sqem + lambda_line_t * terms.line + lambda_inside_t * terms.inside;
+			terms.total = terms.total_raw;
+			return terms;
+		};
 
-		if (s[3] > Scalar(0))
+		Scalar objective_scale_scalar = Scalar(1);
 		{
-			(*p.spheres_position_)[sphere_index] = s.head<3>();
-			// if (s[3] <= p.alpha_){
-			// 	Scalar expected_radius = p.alpha_ * p.sqem_fix_radius_scale_;
-			// 	(*p.spheres_radius_)[sphere_index] = expected_radius;
-			// }else
-				(*p.spheres_radius_)[sphere_index] = s[3];
+			FreeRadiusEnergyTerms init_terms = evaluate_terms_raw();
+			if (init_terms.total_raw.defined() && torch::isfinite(init_terms.total_raw).all().item<bool>())
+			{
+				const Scalar init_total_abs =
+					std::abs(static_cast<Scalar>(init_terms.total_raw.detach().to(torch::kCPU).item<float>()));
+				if (std::isfinite(static_cast<double>(init_total_abs)) && init_total_abs > Scalar(1e-20))
+					objective_scale_scalar = std::min(Scalar(1e12), Scalar(1) / init_total_abs);
+			}
+		}
+		const torch::Tensor objective_scale_t =
+			torch::tensor(static_cast<float>(objective_scale_scalar), tensor_opts);
 
+		auto evaluate_terms = [&]() {
+			FreeRadiusEnergyTerms terms = evaluate_terms_raw();
+			terms.total = terms.total_raw * objective_scale_t;
+			return terms;
+		};
+
+		auto final_state_failure_reason = [&]() -> std::string {
+			FreeRadiusEnergyTerms final_terms = evaluate_terms_raw();
+			if (!final_terms.total_raw.defined() || !final_terms.radius.defined())
+				return "undefined_terms";
+			if (!torch::isfinite(center_param).all().item<bool>())
+				return "nonfinite_center";
+			if (!torch::isfinite(final_terms.total_raw).all().item<bool>())
+				return "nonfinite_energy";
+			if (!torch::isfinite(final_terms.radius).all().item<bool>())
+				return "nonfinite_radius";
+			if (final_terms.radius.detach().to(torch::kCPU).item<float>() <= static_cast<float>(radius_min_scalar))
+				return "radius_below_min";
+			return "";
+		};
+
+		auto final_state_is_valid = [&]() {
+			return final_state_failure_reason().empty();
+		};
+
+		std::string optimizer_used =
+			(p.free_radius_optimizer_ == FREE_RADIUS_OPTIM_ADAM) ? std::string("Adam") : std::string("LBFGS");
+		bool optimizer_fallback = false;
+		int optimizer_iterations = 0;
+		bool optimizer_ok = false;
+		std::string optimizer_fallback_reason;
+
+		auto run_adam = [&]() {
+			torch::optim::AdamOptions options(static_cast<double>(std::max(1e-6f, p.free_radius_learning_rate_)));
+			torch::optim::Adam optimizer({center_param, rho_param}, options);
+			for (int iter = 0; iter < std::max(1, p.free_radius_max_iterations_); ++iter)
+			{
+				optimizer.zero_grad();
+				FreeRadiusEnergyTerms terms = evaluate_terms();
+				if (!terms.total.defined() || !torch::isfinite(terms.total).all().item<bool>())
+					return false;
+				terms.total.backward();
+				optimizer.step();
+				optimizer_iterations = iter + 1;
+			}
+			return final_state_is_valid();
+		};
+
+		auto run_lbfgs = [&]() {
+			try
+			{
+				torch::optim::LBFGSOptions options(static_cast<double>(std::max(1e-6f, p.free_radius_lbfgs_learning_rate_)));
+				options.max_iter(std::max(1, p.free_radius_max_iterations_));
+				options.history_size(std::max(1, p.free_radius_lbfgs_history_size_));
+				options.tolerance_grad(static_cast<double>(std::max(0.0f, p.free_radius_lbfgs_tolerance_grad_)));
+				options.tolerance_change(static_cast<double>(std::max(0.0f, p.free_radius_lbfgs_tolerance_change_)));
+				torch::optim::LBFGS optimizer({center_param, rho_param}, options);
+				optimizer.step([&]() {
+					optimizer.zero_grad();
+					FreeRadiusEnergyTerms terms = evaluate_terms();
+					++optimizer_iterations;
+					terms.total.backward();
+					return terms.total;
+				});
+			}
+			catch (const c10::Error&)
+			{
+				optimizer_fallback_reason = "lbfgs_exception";
+				return false;
+			}
+			optimizer_fallback_reason = final_state_failure_reason();
+			return optimizer_fallback_reason.empty();
+		};
+
+		if (p.free_radius_optimizer_ == FREE_RADIUS_OPTIM_ADAM)
+		{
+			optimizer_ok = run_adam();
+		}
+		else
+		{
+			optimizer_ok = run_lbfgs();
+			if (!optimizer_ok)
+			{
+				optimizer_used = "Adam";
+				optimizer_fallback = true;
+				optimizer_iterations = 0;
+				reset_params();
+				optimizer_ok = run_adam();
+			}
+		}
+
+		if (!optimizer_ok)
+		{
+			if (p.free_radius_debug_log_)
+			{
+				std::cout << "[SphereFreeRadiusOpt] sphere=" << sphere_index << " optimizer=" << optimizer_used
+						  << " fallback=" << optimizer_fallback << " fallback_reason="
+						  << (optimizer_fallback_reason.empty() ? "none" : optimizer_fallback_reason)
+						  << " status=fixed_radius_fallback" << std::endl;
+			}
+			update_sphere_line_quadric_distance_fix_radius(p, sphere);
 			return;
 		}
 
-		update_sphere_line_quadric_distance_fix_radius(p, sphere);
+		FreeRadiusEnergyTerms final_terms = evaluate_terms();
+		torch::Tensor final_center_cpu = center_param.detach().to(torch::kCPU);
+		const auto final_center_acc = final_center_cpu.accessor<float, 1>();
+		const Scalar final_radius = static_cast<Scalar>(final_terms.radius.detach().to(torch::kCPU).item<float>());
+		const Vec3 final_center(final_center_acc[0], final_center_acc[1], final_center_acc[2]);
+
+		(*p.spheres_position_)[sphere_index] = final_center;
+		(*p.spheres_radius_)[sphere_index] = final_radius;
+
+		if (p.free_radius_debug_log_)
+		{
+			const Scalar sqem_energy = static_cast<Scalar>(final_terms.sqem.detach().to(torch::kCPU).item<float>());
+			const Scalar line_energy = static_cast<Scalar>(final_terms.line.detach().to(torch::kCPU).item<float>());
+			const Scalar inside_energy = static_cast<Scalar>(final_terms.inside.detach().to(torch::kCPU).item<float>());
+			const Scalar total_energy = static_cast<Scalar>(final_terms.total_raw.detach().to(torch::kCPU).item<float>());
+			std::cout << "[SphereFreeRadiusOpt] sphere=" << sphere_index << " optimizer=" << optimizer_used
+					  << " fallback=" << optimizer_fallback << " fallback_reason="
+					  << (optimizer_fallback_reason.empty() ? "none" : optimizer_fallback_reason)
+					  << " inside_active=" << inside_penalty_active
+					  << " iterations=" << optimizer_iterations << " center=(" << final_center.x() << ", "
+					  << final_center.y() << ", " << final_center.z() << ")"
+					  << " radius=" << final_radius << " objective_scale=" << objective_scale_scalar
+					  << " E_sqem=" << sqem_energy << " E_line=" << line_energy
+					  << " E_inside=" << inside_energy << " E_total=" << total_energy << std::endl;
+		}
 	}
 	void correct_sphere(PointsParameters& p, PVertex v)
 	{
@@ -7714,6 +7948,7 @@ protected:
 	void start_spheres_update(PointsParameters& p)
 	{
 		const Scalar convergence_eps = Scalar(1e-10);
+		const Scalar convergence_reset_eps = convergence_eps * Scalar(100);
 		const uint32 max_post_convergence_iterations = 10;
 		const uint32 max_iterations_without_autosplit = 300;
 		const uint32 max_iterations_after_reaching_max_spheres = 100;
@@ -7724,7 +7959,7 @@ protected:
 		p.manual_stop_requested_ = false;
 		p.pending_full_refresh_after_stop_ = false;
 
-		launch_thread([&, convergence_eps, max_post_convergence_iterations, max_iterations_without_autosplit,
+		launch_thread([&, convergence_eps, convergence_reset_eps, max_post_convergence_iterations, max_iterations_without_autosplit,
 						  max_iterations_after_reaching_max_spheres]() {
 			bool convergence_reached = false;
 			uint32 post_convergence_iterations = 0;
@@ -7747,6 +7982,7 @@ protected:
 				if (p.auto_stop_)
 				{
 					const bool converged = (p.total_error_diff_ < convergence_eps);
+					const bool diverged_after_convergence = (p.total_error_diff_ > convergence_reset_eps);
 					if (converged)
 					{
 						if (!convergence_reached)
@@ -7756,10 +7992,6 @@ protected:
 							std::cout << "Auto stop: error converged (Diff < " << convergence_eps
 									  << "), start post-convergence countdown (" << max_post_convergence_iterations
 									  << ")." << std::endl;
-						}
-						else
-						{
-							++post_convergence_iterations;
 						}
 
 						bool reached_target = false;
@@ -7783,18 +8015,25 @@ protected:
 								target_reached_reported = true;
 							}
 						}
-						if (post_convergence_iterations >= max_post_convergence_iterations)
-						{
-							std::cout << "Auto stop: reached max post-convergence iterations ("
-									  << max_post_convergence_iterations << ")." << std::endl;
-							p.stopping_ = true;
-						}
 					}
-					else if (convergence_reached)
+					if (convergence_reached)
 					{
-						convergence_reached = false;
-						post_convergence_iterations = 0;
-						target_reached_reported = false;
+						if (diverged_after_convergence)
+						{
+							convergence_reached = false;
+							post_convergence_iterations = 0;
+							target_reached_reported = false;
+						}
+						else
+						{
+							++post_convergence_iterations;
+							if (post_convergence_iterations >= max_post_convergence_iterations)
+							{
+								std::cout << "Auto stop: reached max post-convergence iterations ("
+										  << max_post_convergence_iterations << ")." << std::endl;
+								p.stopping_ = true;
+							}
+						}
 					}
 				}
 
@@ -8253,6 +8492,7 @@ protected:
 					ImGui::SliderFloat("update lambda (Line/Plane)", &p.sqem_update_lambda_line_plane_, 0.0f, 4.0f,
 								   "%.6f");
 					const bool fix_r_mode = (p.distance_mode_ == LINE_QUADRIC_DISTANCE);
+					const bool free_r_mode = (p.distance_mode_ == LINE_QUADRIC_DISTANCE_FREE_RADIUS);
 					if (!fix_r_mode)
 						ImGui::BeginDisabled();
 					ImGui::SliderFloat("fix radius scale", &p.sqem_fix_radius_scale_, 1.0f, 5.0f, "%.3f");
@@ -8273,6 +8513,38 @@ protected:
 					ImGui::RadioButton("Line Quadric (fix r)", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE);
 					ImGui::SameLine();
 					ImGui::RadioButton("Line Quadric (free r)", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE_FREE_RADIUS);
+					if (free_r_mode)
+					{
+						const char* free_radius_optimizers[] = {"LBFGS", "Adam"};
+						int optimizer_idx = static_cast<int>(p.free_radius_optimizer_);
+						ImGui::Combo("Free-r optimizer", &optimizer_idx, free_radius_optimizers,
+									 IM_ARRAYSIZE(free_radius_optimizers));
+						p.free_radius_optimizer_ = static_cast<FreeRadiusOptimizerType>(optimizer_idx);
+						ImGui::InputInt("Free-r max iter", &p.free_radius_max_iterations_, 1, 10);
+						ImGui::InputFloat("Radius min", &p.free_radius_radius_min_, 0.0f, 0.0f, "%.6f");
+						ImGui::Checkbox("Inside penalty", &p.free_radius_inside_penalty_enabled_);
+						if (p.free_radius_inside_penalty_enabled_)
+						{
+							ImGui::SliderFloat("Inside lambda", &p.free_radius_inside_lambda_, 0.0f, 10.0f, "%.6f");
+							ImGui::InputFloat("Inside delta", &p.free_radius_inside_delta_, 0.0f, 0.0f, "%.6f");
+						}
+						if (p.free_radius_optimizer_ == FREE_RADIUS_OPTIM_LBFGS)
+						{
+							ImGui::InputFloat("LBFGS lr", &p.free_radius_lbfgs_learning_rate_, 0.0f, 0.0f, "%.6f");
+							ImGui::InputInt("LBFGS history", &p.free_radius_lbfgs_history_size_, 1, 5);
+							ImGui::InputFloat("LBFGS tol grad", &p.free_radius_lbfgs_tolerance_grad_, 0.0f, 0.0f,
+											  "%.15f");
+							ImGui::InputFloat("LBFGS tol change", &p.free_radius_lbfgs_tolerance_change_, 0.0f, 0.0f,
+											  "%.15f");
+						}
+						else
+						{
+							ImGui::InputFloat("Adam lr", &p.free_radius_learning_rate_, 0.0f, 0.0f, "%.6f");
+						}
+						ImGui::Checkbox("Free-r debug log", &p.free_radius_debug_log_);
+						if (p.udf_center_enabled_)
+							ImGui::TextColored(ImVec4(1, 1, 0, 1), "Free-r path ignores UDF center term.");
+					}
 					if (ImGui::Button(p.lock_skeleton_connectivity_ ? "Skeleton: Locked" : "Skeleton: Unlocked"))
 						p.lock_skeleton_connectivity_ = !p.lock_skeleton_connectivity_;
 
