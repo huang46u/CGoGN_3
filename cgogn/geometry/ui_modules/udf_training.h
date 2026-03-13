@@ -3275,9 +3275,14 @@ private:
 		});
 	}
 
-	void compute_clusters(PointsParameters& p)
+	bool should_use_local_clusters(const PointsParameters& p, bool force_local = false)
 	{
-		if (p.use_local_clusters_)
+		return force_local || p.use_local_clusters_ || p.auto_split_;
+	}
+
+	void compute_clusters(PointsParameters& p, bool force_local = false)
+	{
+		if (should_use_local_clusters(p, force_local))
 			compute_clusters_local(p);
 		else
 			compute_clusters_full(p);
@@ -4156,7 +4161,7 @@ private:
 
 	bool should_refresh_local_connectivity(const PointsParameters& p)
 	{
-		if (!p.use_local_clusters_ || p.lock_skeleton_connectivity_)
+		if (!should_use_local_clusters(p) || p.lock_skeleton_connectivity_)
 			return false;
 		const uint32 interval = std::max<uint32>(1, p.local_cluster_connectivity_refresh_interval_);
 		return (p.iteration_count_ % interval) == 0;
@@ -4222,6 +4227,8 @@ private:
 
 					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)),
 												  p.auto_split_max_per_iter_error_);
+					std::vector<PVertex> split_centers;
+					split_centers.reserve(to_split_max);
 					for (PVertex sphere : sorted_spheres)
 					{
 						uint32 s_index = index_of(*p.spheres_, sphere);
@@ -4232,10 +4239,16 @@ private:
 						{
 							for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[s_index])
 								(*p.spheres_do_not_split_)[index_of(*p.spheres_, neighbor)] = true;
-							split_sphere(p, sphere);
-							--to_split_max;
+							PVertex new_sphere = split_sphere(p, sphere, true);
+							if (new_sphere.is_valid())
+							{
+								split_centers.push_back(new_sphere);
+								--to_split_max;
+							}
 						}
 					}
+					if (!split_centers.empty())
+						recompute_clusters_local_neighborhoods(p, split_centers);
 				}
 			}
 			break;
@@ -4267,6 +4280,8 @@ private:
 					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)),
 												  p.auto_split_max_per_iter_max_);
 					//uint32 to_split_max = std::max(0.5 * p.nb_spheres_, 1.0);
+					std::vector<PVertex> split_centers;
+					split_centers.reserve(to_split_max);
 					for (PVertex sphere : sorted_spheres)
 					{
 						uint32 s_index = index_of(*p.spheres_, sphere);
@@ -4276,10 +4291,16 @@ private:
 						{
 							for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[s_index])
 								(*p.spheres_do_not_split_)[index_of(*p.spheres_, neighbor)] = true;
-							split_sphere(p, sphere);
-							--to_split_max;
+							PVertex new_sphere = split_sphere(p, sphere, true);
+							if (new_sphere.is_valid())
+							{
+								split_centers.push_back(new_sphere);
+								--to_split_max;
+							}
 						}
 					}
+					if (!split_centers.empty())
+						recompute_clusters_local_neighborhoods(p, split_centers);
 				}
 			}
 			break;
@@ -4807,7 +4828,16 @@ private:
 
 	void recompute_clusters_local_neighborhood(PointsParameters& p, PVertex center_sphere)
 	{
-		if (!center_sphere.is_valid() || p.nb_spheres_ == 0)
+		if (!center_sphere.is_valid())
+			return;
+
+		std::vector<PVertex> center_spheres = {center_sphere};
+		recompute_clusters_local_neighborhoods(p, center_spheres);
+	}
+
+	void recompute_clusters_local_neighborhoods(PointsParameters& p, const std::vector<PVertex>& center_spheres)
+	{
+		if (center_spheres.empty() || p.nb_spheres_ == 0)
 			return;
 
 		SphereFitData data;
@@ -4817,15 +4847,34 @@ private:
 		if (nb_samples == 0)
 			return;
 
-		uint32 center_index = index_of(*p.spheres_, center_sphere);
-
 		std::vector<PVertex> candidate_spheres;
-		candidate_spheres.push_back(center_sphere);
-		for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[center_index])
+		std::unordered_set<uint32> candidate_indices;
+		candidate_spheres.reserve(center_spheres.size() * 8);
+
+		auto try_add_candidate = [&](PVertex sphere) {
+			if (!sphere.is_valid())
+				return;
+			const uint32 s_index = index_of(*p.spheres_, sphere);
+			if (s_index == INVALID_INDEX)
+				return;
+			if (candidate_indices.insert(s_index).second)
+				candidate_spheres.push_back(sphere);
+		};
+
+		for (PVertex center_sphere : center_spheres)
 		{
-			if (neighbor.is_valid())
-				candidate_spheres.push_back(neighbor);
+			if (!center_sphere.is_valid())
+				continue;
+			const uint32 center_index = index_of(*p.spheres_, center_sphere);
+			if (center_index == INVALID_INDEX)
+				continue;
+
+			try_add_candidate(center_sphere);
+			for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[center_index])
+				try_add_candidate(neighbor);
 		}
+		if (candidate_spheres.empty())
+			return;
 
 		std::vector<PVertex> samples;
 		samples.reserve(nb_samples);
@@ -4893,21 +4942,19 @@ private:
 	}
 
 protected:
-	void split_sphere(PointsParameters& p, PVertex sphere)
+	PVertex split_sphere(PointsParameters& p, PVertex sphere, bool defer_local_recluster = false)
 	{
 		if (!sphere.is_valid())
-			return;
+			return PVertex();
 		SphereFitData data;
 		if (!get_sphere_fit_data(p, data))
-			return;
+			return PVertex();
 		uint32 s_index = index_of(*p.spheres_, sphere);
-		Vec3 c = (*p.spheres_position_)[s_index];
-		Scalar r = (*p.spheres_radius_)[s_index];
 
 		// find the point in the cluster with the max error
 		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[s_index];
 		if (cluster.empty())
-			return;
+			return PVertex();
 
 		Scalar max_err = -1.0;
 		PVertex max_err_v;
@@ -4923,7 +4970,7 @@ protected:
 		}
 
 		if (!max_err_v.is_valid())
-			return;
+			return PVertex();
 
 		uint32 max_err_v_idx = index_of(*data.mesh, max_err_v);
 
@@ -4939,7 +4986,9 @@ protected:
 
 		p.nb_spheres_++;
 		inherit_sphere_neighbors(p, sphere, new_sphere);
-		recompute_clusters_local_neighborhood(p, new_sphere);
+		if (!defer_local_recluster)
+			recompute_clusters_local_neighborhood(p, new_sphere);
+		return new_sphere;
 	}
 
 	//------------------------------//
@@ -7121,7 +7170,8 @@ protected:
 			return;
 		}
 
-		run_k5_face_deletion(p);
+		// Temporarily disable K5-specific handling in the full topology-fix pipeline.
+		// run_k5_face_deletion(p);
 
 		const std::unordered_set<uint32> tet_face_whitelist = collect_current_tet_face_id_whitelist(p);
 		std::cout << "[TopologyFull] start"
@@ -7150,7 +7200,7 @@ protected:
 		prune_deg_faces_from_whitelist_and_orphan_edges(p, tet_face_whitelist, "[TopologyFullDeg]");
 
 		refresh_skeleton_topology_colors(p);
-		mark_k5_color(p);
+		// mark_k5_color(p);
 		mark_boundary_tets_color(p);
 		visualize_skeleton_edge_udf_scores(p);
 		std::cout << "[TopologyFull] done remaining_tets=" << p.skeleton_tets_.size() << std::endl;
@@ -7837,6 +7887,7 @@ protected:
 			while (true)
 			{
 				{
+					std::cout << "Start Sphere update" << std::endl;
 					std::lock_guard<std::mutex> lock(p.mutex_);
 					update_spheres(p);
 					p.iteration_count_++;
@@ -8030,7 +8081,7 @@ protected:
 			{
 				std::lock_guard<std::mutex> lock(p.mutex_);
 				split_sphere(p, picked_sphere_);
-				compute_clusters(p);
+				compute_clusters(p, true);
 				compute_spheres_error(p);
 				if (!p.running_)
 					update_render_data(p);
@@ -8657,7 +8708,7 @@ protected:
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
 						split_sphere(p, p.max_error_sphere_);
-						compute_clusters(p);
+						compute_clusters(p, true);
 						compute_spheres_error(p);
 						if (!p.running_)
 							update_render_data(p);
