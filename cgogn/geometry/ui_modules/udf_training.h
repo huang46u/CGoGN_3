@@ -3777,6 +3777,101 @@ private:
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
 
+	bool try_get_nearest_sample_ma_radius(PointsParameters& p, const Vec3& query, Scalar& out_radius)
+	{
+		if (!p.samples_mesh_ || !p.samples_ma_radius_)
+			return false;
+		if (!p.samples_kdtree_ || p.samples_kdtree_vertices_.empty())
+			build_kdtree(p);
+		if (!p.samples_kdtree_ || p.samples_kdtree_vertices_.empty())
+			return false;
+
+		std::pair<uint32, Scalar> knn_res;
+		p.samples_kdtree_->find_nn(query, &knn_res);
+		if (knn_res.first >= p.samples_kdtree_vertices_.size())
+			return false;
+
+		const uint32 sample_index = index_of(*p.samples_mesh_, p.samples_kdtree_vertices_[knn_res.first]);
+		if (sample_index == INVALID_INDEX)
+			return false;
+
+		const Scalar ma_radius = (*p.samples_ma_radius_)[sample_index];
+		if (!std::isfinite(ma_radius) || ma_radius <= Scalar(0))
+			return false;
+
+		out_radius = ma_radius;
+		return true;
+	}
+
+	void update_sphere_line_quadric_distance_fix_current_radius(PointsParameters& p, PVertex sphere, Scalar fixed_radius)
+	{
+		if (!std::isfinite(fixed_radius) || fixed_radius <= Scalar(0))
+			return;
+
+		SphereFitData data;
+		if (!get_sphere_fit_data(p, data))
+			return;
+		uint32 sphere_index = index_of(*p.spheres_, sphere);
+
+		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+		if (cluster.empty())
+			return;
+		Vec3 c = (*p.spheres_position_)[sphere_index];
+		Spherical_Quadric q;
+		Line_Quadric lq;
+		Scalar area = Scalar(0);
+		for (PVertex v : cluster)
+		{
+			uint32 v_index = index_of(*data.mesh, v);
+			Scalar weight = value<Scalar>(*data.mesh, data.area, v);
+			if (weight <= Scalar(0))
+			{
+				std::cout << "Warning: sample with zero volume weight in sphere " << sphere_index << std::endl;
+				continue;
+			}
+			q += (*data.quadric)[v_index] * weight;
+			lq += (*data.line_quadric)[v_index] * weight;
+			area += weight;
+		}
+
+		Mat4 Ql = lq.get_quadric().matrix();
+		Mat3 Al = Ql.block<3, 3>(0, 0);
+		Vec3 bl = -Ql.block<3, 1>(0, 3);
+
+		Mat3 As = q._A.block<3, 3>(0, 0);
+		Vec3 bs = q._b.head<3>();
+		Vec3 Asr = q._A.block<3, 1>(0, 3);
+
+		const Scalar update_lambda = sqem_update_lambda_for_quadric(p, q);
+		Mat3 A = As + update_lambda * Al;
+		Vec3 b = (bs + update_lambda * bl) - Asr * fixed_radius;
+
+		if (p.udf_center_enabled_)
+		{
+			Scalar f0;
+			Vec3 g;
+			if (eval_udf_and_grad(p, c, f0, g))
+			{
+				const Scalar g2 = g.squaredNorm();
+				const Scalar eps = Scalar(1e-12);
+				if (g2 > eps && area > Scalar(0))
+				{
+					const Scalar mu = Scalar(p.udf_center_lambda_);
+					const Scalar t = g.dot(c) - f0;
+					A.noalias() += mu * (g * g.transpose());
+					b.noalias() += mu * t * g;
+				}
+			}
+		}
+
+		c = A.ldlt().solve(b);
+		if (!c.allFinite())
+			return;
+
+		(*p.spheres_position_)[sphere_index] = c;
+		(*p.spheres_radius_)[sphere_index] = fixed_radius;
+	}
+
 	void update_sphere_line_quadric_distance_free_radius(PointsParameters& p, PVertex sphere)
 	{
 		SphereFitData data;
@@ -3785,6 +3880,7 @@ private:
 		uint32 sphere_index = index_of(*p.spheres_, sphere);
 
 		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+		const Scalar radius = (*p.spheres_radius_)[sphere_index];
 		if (cluster.empty())
 			return;
 		Spherical_Quadric q;
@@ -3839,12 +3935,18 @@ private:
 
 		if (s[3] > Scalar(0))
 		{
+			Scalar nearest_ma_radius = Scalar(0);
+			const bool radius_too_large =
+				try_get_nearest_sample_ma_radius(p, s.head<3>(), nearest_ma_radius) &&
+				(s[3] > nearest_ma_radius * Scalar(1.5));
+			if (radius_too_large)
+			{
+				update_sphere_line_quadric_distance_fix_current_radius(p, sphere, radius);
+				return;
+			}
+
 			(*p.spheres_position_)[sphere_index] = s.head<3>();
-			// if (s[3] <= p.alpha_){
-			// 	Scalar expected_radius = p.alpha_ * p.sqem_fix_radius_scale_;
-			// 	(*p.spheres_radius_)[sphere_index] = expected_radius;
-			// }else
-				(*p.spheres_radius_)[sphere_index] = s[3];
+			(*p.spheres_radius_)[sphere_index] = s[3];
 
 			return;
 		}
