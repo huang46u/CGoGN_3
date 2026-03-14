@@ -3660,6 +3660,66 @@ private:
 		return true;
 	}
 
+	bool ensure_topology_score_backend(PointsParameters& p, const char* log_prefix = "[TopologyScore]")
+	{
+		const bool use_mf_ma_distance =
+			(p.input_mode_ == INPUT_NEURAL_UDF && p.neural_model_type_ == NEURAL_MODEL_MF);
+		if (use_mf_ma_distance)
+		{
+			if (!p.samples_mesh_ || !p.samples_ma_position_)
+			{
+				std::cerr << log_prefix << " missing sample/ma data for MF score evaluation." << std::endl;
+				return false;
+			}
+			if (!p.samples_ma_kdtree_ || p.samples_ma_kdtree_vertices_.empty())
+				build_kdtree(p);
+			if (!p.samples_ma_kdtree_ || p.samples_ma_kdtree_vertices_.empty())
+			{
+				std::cerr << log_prefix << " MA KDTree unavailable (no valid ma_position / ma_radius). "
+						  << "Run fitting data computation first." << std::endl;
+				return false;
+			}
+			return true;
+		}
+
+		if (p.input_mode_ == INPUT_NEURAL_UDF)
+		{
+			if (!p.neural_udf_loaded_)
+			{
+				std::cerr << log_prefix << " requires a loaded neural UDF model." << std::endl;
+				return false;
+			}
+			return true;
+		}
+
+		if (p.input_mode_ == INPUT_SURFACE_MESH)
+		{
+			build_surface_bvh();
+			if (!surface_bvh_)
+			{
+				std::cerr << log_prefix << " requires a valid surface BVH for mesh distance evaluation." << std::endl;
+				return false;
+			}
+			return true;
+		}
+
+		if (p.input_mode_ == INPUT_POINT_CLOUD)
+		{
+			if ((!p.input_kdtree_ || p.input_kdtree_vertices_.empty()) && p.points_ && p.position_)
+				rebuild_input_kdtree(p);
+			if (!p.input_kdtree_ || p.input_kdtree_vertices_.empty() || !p.points_ || !p.position_)
+			{
+				std::cerr << log_prefix << " requires a valid input KDTree for point-cloud distance evaluation."
+						  << std::endl;
+				return false;
+			}
+			return true;
+		}
+
+		std::cerr << log_prefix << " no supported topology-score backend for current input mode." << std::endl;
+		return false;
+	}
+
 	bool eval_topology_score_values(PointsParameters& p, const std::vector<Vec3>& points,
 									std::vector<Scalar>& out_values)
 	{
@@ -3667,30 +3727,53 @@ private:
 		out_values.resize(points.size(), Scalar(0));
 		if (points.empty())
 			return true;
+		if (!ensure_topology_score_backend(p))
+			return false;
 
 		const bool use_mf_ma_distance =
 			(p.input_mode_ == INPUT_NEURAL_UDF && p.neural_model_type_ == NEURAL_MODEL_MF);
 		if (!use_mf_ma_distance)
-			return eval_udf_values(p, points, out_values);
-
-		if (!p.samples_mesh_ || !p.samples_ma_position_)
 		{
-			std::cerr << "[TopologyScore][MF] missing sample/ma data for MF score evaluation." << std::endl;
-			return false;
-		}
-		if (!p.samples_ma_kdtree_ || p.samples_ma_kdtree_vertices_.empty())
-			build_kdtree(p);
-		if (!p.samples_ma_kdtree_ || p.samples_ma_kdtree_vertices_.empty())
-		{
-			std::cerr << "[TopologyScore][MF] MA KDTree unavailable (no valid ma_position / ma_radius). "
-					  << "Run fitting data computation first." << std::endl;
+			if (p.input_mode_ == INPUT_NEURAL_UDF)
+				return eval_udf_values(p, points, out_values);
+			if (p.input_mode_ == INPUT_SURFACE_MESH)
+			{
+				for (size_t i = 0; i < points.size(); ++i)
+				{
+					std::pair<uint32, Vec3> cp;
+					if (!surface_bvh_->closest_point(points[i], &cp))
+						continue;
+					out_values[i] = (points[i] - cp.second).norm();
+				}
+				return true;
+			}
+			if (p.input_mode_ == INPUT_POINT_CLOUD)
+			{
+				for (size_t i = 0; i < points.size(); ++i)
+				{
+					std::pair<uint32, Scalar> knn_res;
+					if (!p.input_kdtree_->find_nn(points[i], &knn_res))
+						continue;
+					const uint32 nn_idx = knn_res.first;
+					if (nn_idx >= p.input_kdtree_vertices_.size())
+						continue;
+					const PVertex nn = p.input_kdtree_vertices_[nn_idx];
+					const uint32 vid = index_of(*p.points_, nn);
+					if (vid == INVALID_INDEX)
+						continue;
+					out_values[i] = (points[i] - (*p.position_)[vid]).norm();
+				}
+				return true;
+			}
+			std::cerr << "[TopologyScore] unsupported backend during score evaluation." << std::endl;
 			return false;
 		}
 
 		for (size_t i = 0; i < points.size(); ++i)
 		{
 			std::pair<uint32, Scalar> knn_res;
-			p.samples_ma_kdtree_->find_nn(points[i], &knn_res);
+			if (!p.samples_ma_kdtree_->find_nn(points[i], &knn_res))
+				continue;
 			const uint32 nn_idx = knn_res.first;
 			if (nn_idx >= p.samples_ma_kdtree_vertices_.size())
 				continue;
@@ -4541,9 +4624,8 @@ private:
 
 	void skeleton_geometry_filter(PointsParameters& p)
 	{
-		if (!p.neural_udf_loaded_)
+		if (!ensure_topology_score_backend(p, "[GeometryFilter]"))
 		{
-			std::cerr << "Geometry filter requires a loaded neural UDF model." << std::endl;
 			return;
 		}
 
@@ -4582,9 +4664,9 @@ private:
 		});
 
 		std::vector<Scalar> edge_udf_values;
-		if (!edge_midpoints.empty() && !eval_udf_values(p, edge_midpoints, edge_udf_values))
+		if (!edge_midpoints.empty() && !eval_topology_score_values(p, edge_midpoints, edge_udf_values))
 		{
-			std::cerr << "Geometry filter failed: unable to evaluate UDF on edge midpoints." << std::endl;
+			std::cerr << "Geometry filter failed: unable to evaluate topology score on edge midpoints." << std::endl;
 			return;
 		}
 
@@ -4656,9 +4738,9 @@ private:
 		});
 
 		std::vector<Scalar> face_udf_values;
-		if (!face_centers.empty() && !eval_udf_values(p, face_centers, face_udf_values))
+		if (!face_centers.empty() && !eval_topology_score_values(p, face_centers, face_udf_values))
 		{
-			std::cerr << "Geometry filter failed: unable to evaluate UDF on face centers." << std::endl;
+			std::cerr << "Geometry filter failed: unable to evaluate topology score on face centers." << std::endl;
 			return;
 		}
 
@@ -5657,9 +5739,8 @@ protected:
 
 	void visualize_skeleton_edge_udf_scores(PointsParameters& p)
 	{
-		if (!p.neural_udf_loaded_)
+		if (!ensure_topology_score_backend(p, "[EdgeUDFColormap]"))
 		{
-			std::cerr << "Edge score visualization requires a loaded neural UDF model." << std::endl;
 			return;
 		}
 		if (!p.skeleton_ || !p.skeleton_edge_udf_score_color_)
@@ -5671,7 +5752,7 @@ protected:
 		std::unordered_map<uint32, Scalar> edge_scores;
 		if (!compute_skeleton_edge_scores_gauss3_normalized(p, edge_scores, "[EdgeUDFColormap]"))
 		{
-			std::cerr << "Failed to compute edge UDF scores." << std::endl;
+			std::cerr << "Failed to compute edge topology scores." << std::endl;
 			return;
 		}
 
@@ -5735,9 +5816,8 @@ protected:
 	void run_edge_score_tet_mode_topology_fix(PointsParameters& p, EdgeTetDeleteMode mode, bool single_step)
 	{
 		const char* log_tag = (mode == EdgeTetDeleteMode::SimpleTet) ? "[EdgeTetSimple]" : "[EdgeTetNonSimple]";
-		if (!p.neural_udf_loaded_)
+		if (!ensure_topology_score_backend(p, log_tag))
 		{
-			std::cerr << log_tag << " requires a loaded neural UDF model." << std::endl;
 			return;
 		}
 		if (!p.skeleton_ || !p.incident_tets_)
@@ -6315,9 +6395,8 @@ protected:
 
 	void visualize_skeleton_tet_face_udf(PointsParameters& p, bool normalize_by_area = false)
 	{
-		if (!p.neural_udf_loaded_)
+		if (!ensure_topology_score_backend(p, "[UDFColormap]"))
 		{
-			std::cerr << "UDF face visualization requires a loaded neural UDF model." << std::endl;
 			return;
 		}
 		if (!p.skeleton_ || !p.incident_tets_ || !p.skeleton_face_udf_color_)
@@ -6329,7 +6408,7 @@ protected:
 		std::unordered_map<uint32, Scalar> face_udf_integrals;
 		if (!compute_skeleton_face_scores(p, face_udf_integrals, normalize_by_area, "[UDFColormap]"))
 		{
-			std::cerr << "Failed to compute face UDF scores for visualization." << std::endl;
+			std::cerr << "Failed to compute face topology scores for visualization." << std::endl;
 			return;
 		}
 
@@ -6764,9 +6843,8 @@ protected:
 			std::cerr << "[K5Delete] requires a built skeleton." << std::endl;
 			return;
 		}
-		if (!p.neural_udf_loaded_)
+		if (!ensure_topology_score_backend(p, "[K5Delete]"))
 		{
-			std::cerr << "[K5Delete] requires a loaded neural UDF model for face score ranking." << std::endl;
 			return;
 		}
 
@@ -7590,9 +7668,8 @@ protected:
 
 	void run_non_manifold_deg1_face_postprocess(PointsParameters& p, const char* log_prefix = "[TopologyFullNM]")
 	{
-		if (!p.neural_udf_loaded_)
+		if (!ensure_topology_score_backend(p, log_prefix))
 		{
-			std::cerr << log_prefix << " requires a loaded neural UDF model." << std::endl;
 			return;
 		}
 		if (!p.skeleton_ || !p.incident_tets_)
@@ -7913,9 +7990,8 @@ protected:
 			std::cerr << "Face-stage single step requires a built skeleton." << std::endl;
 			return;
 		}
-		if (!p.neural_udf_loaded_)
+		if (!ensure_topology_score_backend(p, "[TopologyStep]"))
 		{
-			std::cerr << "Face-stage single step requires a loaded neural UDF model." << std::endl;
 			return;
 		}
 
@@ -8013,16 +8089,16 @@ protected:
 	void skeleton_post_pocessing(PointsParameters& p, bool run_edge_stage = true, bool edge_stage_diffuse = true)
 	{
 		(void)edge_stage_diffuse;
-		if (!p.neural_udf_loaded_)
+		if (!ensure_topology_score_backend(p, "[TopologyFilter]"))
 		{
-			std::cerr << "Topology filter requires a loaded neural UDF model." << std::endl;
 			return;
 		}
 		std::unordered_map<uint32, Scalar> face_score_cache;
 		if (!compute_skeleton_face_scores(
 				p, face_score_cache, p.skeleton_face_score_normalize_by_area_, "[TopologyFilter]"))
 		{
-			std::cerr << "[TopologyFilter] Face scores may be incomplete due to UDF evaluation failure." << std::endl;
+			std::cerr << "[TopologyFilter] Face scores may be incomplete due to topology-score evaluation failure."
+					  << std::endl;
 		}
 
 		const BoundaryTetPrepassStats boundary_prepass = run_boundary_tet_face_deletion(p, "[TopologyFilter]");
