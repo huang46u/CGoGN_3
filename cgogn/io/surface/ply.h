@@ -24,6 +24,7 @@
 #ifndef CGOGN_IO_SURFACE_PLY_H_
 #define CGOGN_IO_SURFACE_PLY_H_
 
+#include <cgogn/io/surface/export_options.h>
 #include <cgogn/io/surface/surface_import.h>
 #include <cgogn/io/utils.h>
 
@@ -32,11 +33,170 @@
 
 #include <thirdparty/happly/happly.h>
 
+#include <cctype>
+
 namespace cgogn
 {
 
 namespace io
 {
+
+namespace internal
+{
+
+inline std::string sanitize_ply_property_name(const std::string& name)
+{
+	std::string result = name;
+	for (char& c : result)
+	{
+		if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_'))
+			c = '_';
+	}
+	return result;
+}
+
+template <typename T>
+void add_scalar_ply_property(happly::Element& element, const std::string& name, const std::vector<T>& values)
+{
+	element.addProperty<T>(name, values);
+}
+
+template <typename VEC>
+void add_vector_ply_property_components(happly::Element& element, const std::string& name,
+										 const std::vector<VEC>& values, const char* const* suffixes, uint32 dim)
+{
+	std::vector<double> components[4];
+	for (uint32 i = 0; i < dim; ++i)
+		components[i].reserve(values.size());
+	for (const VEC& v : values)
+	{
+		for (uint32 i = 0; i < dim; ++i)
+			components[i].push_back(static_cast<double>(v[i]));
+	}
+	for (uint32 i = 0; i < dim; ++i)
+		element.addProperty<double>(name + suffixes[i], components[i]);
+}
+
+template <typename MESH, typename CELL, typename T>
+bool try_add_selected_ply_attribute(happly::Element& element, MESH& m,
+									 const std::shared_ptr<typename mesh_traits<MESH>::AttributeGen>& attribute_gen)
+{
+	using Attribute = typename mesh_traits<MESH>::template Attribute<T>;
+	auto attribute = std::dynamic_pointer_cast<Attribute>(attribute_gen);
+	if (!attribute)
+		return false;
+
+	std::vector<T> values;
+	values.reserve(nb_cells<CELL>(m));
+	foreach_cell(m, [&](CELL c) -> bool {
+		values.push_back(value<T>(m, attribute.get(), c));
+		return true;
+	});
+
+	const std::string property_name = sanitize_ply_property_name(attribute->name());
+	add_scalar_ply_property(element, property_name, values);
+	return true;
+}
+
+template <typename MESH, typename CELL>
+bool try_add_selected_ply_attribute(happly::Element& element, MESH& m,
+									 const std::shared_ptr<typename mesh_traits<MESH>::AttributeGen>& attribute_gen,
+									 std::integral_constant<uint32, 2>)
+{
+	using Vec2 = geometry::Vec2;
+	using Attribute = typename mesh_traits<MESH>::template Attribute<Vec2>;
+	auto attribute = std::dynamic_pointer_cast<Attribute>(attribute_gen);
+	if (!attribute)
+		return false;
+
+	std::vector<Vec2> values;
+	values.reserve(nb_cells<CELL>(m));
+	foreach_cell(m, [&](CELL c) -> bool {
+		values.push_back(value<Vec2>(m, attribute.get(), c));
+		return true;
+	});
+
+	static const char* suffixes[2] = {"_x", "_y"};
+	add_vector_ply_property_components(element, sanitize_ply_property_name(attribute->name()), values, suffixes, 2);
+	return true;
+}
+
+template <typename MESH, typename CELL>
+bool try_add_selected_ply_attribute(happly::Element& element, MESH& m,
+									 const std::shared_ptr<typename mesh_traits<MESH>::AttributeGen>& attribute_gen,
+									 std::integral_constant<uint32, 3>)
+{
+	using Vec3 = geometry::Vec3;
+	using Attribute = typename mesh_traits<MESH>::template Attribute<Vec3>;
+	auto attribute = std::dynamic_pointer_cast<Attribute>(attribute_gen);
+	if (!attribute)
+		return false;
+
+	std::vector<Vec3> values;
+	values.reserve(nb_cells<CELL>(m));
+	foreach_cell(m, [&](CELL c) -> bool {
+		values.push_back(value<Vec3>(m, attribute.get(), c));
+		return true;
+	});
+
+	static const char* suffixes[3] = {"_x", "_y", "_z"};
+	add_vector_ply_property_components(element, sanitize_ply_property_name(attribute->name()), values, suffixes, 3);
+	return true;
+}
+
+template <typename MESH, typename CELL>
+bool try_add_selected_ply_attribute(happly::Element& element, MESH& m,
+									 const std::shared_ptr<typename mesh_traits<MESH>::AttributeGen>& attribute_gen,
+									 std::integral_constant<uint32, 4>)
+{
+	using Vec4 = geometry::Vec4;
+	using Attribute = typename mesh_traits<MESH>::template Attribute<Vec4>;
+	auto attribute = std::dynamic_pointer_cast<Attribute>(attribute_gen);
+	if (!attribute)
+		return false;
+
+	std::vector<Vec4> values;
+	values.reserve(nb_cells<CELL>(m));
+	foreach_cell(m, [&](CELL c) -> bool {
+		values.push_back(value<Vec4>(m, attribute.get(), c));
+		return true;
+	});
+
+	static const char* suffixes[4] = {"_x", "_y", "_z", "_w"};
+	add_vector_ply_property_components(element, sanitize_ply_property_name(attribute->name()), values, suffixes, 4);
+	return true;
+}
+
+template <typename MESH, typename CELL>
+void add_selected_ply_attributes(happly::Element& element, MESH& m,
+								 const std::vector<std::shared_ptr<typename mesh_traits<MESH>::AttributeGen>>& attributes)
+{
+	for (const auto& attribute_gen : attributes)
+	{
+		if (!attribute_gen)
+			continue;
+
+		bool exported = false;
+		exported = try_add_selected_ply_attribute<MESH, CELL, int32>(element, m, attribute_gen);
+		if (!exported)
+			exported = try_add_selected_ply_attribute<MESH, CELL, uint32>(element, m, attribute_gen);
+		if (!exported)
+			exported = try_add_selected_ply_attribute<MESH, CELL, float32>(element, m, attribute_gen);
+		if (!exported)
+			exported = try_add_selected_ply_attribute<MESH, CELL, float64>(element, m, attribute_gen);
+		if (!exported)
+			exported =
+				try_add_selected_ply_attribute<MESH, CELL>(element, m, attribute_gen, std::integral_constant<uint32, 2>{});
+		if (!exported)
+			exported =
+				try_add_selected_ply_attribute<MESH, CELL>(element, m, attribute_gen, std::integral_constant<uint32, 3>{});
+		if (!exported)
+			exported =
+				try_add_selected_ply_attribute<MESH, CELL>(element, m, attribute_gen, std::integral_constant<uint32, 4>{});
+	}
+}
+
+} // namespace internal
 
 template <typename MESH>
 typename std::enable_if<mesh_traits<MESH>::dimension == 2, bool>::type import_PLY(MESH& m, const std::string& filename)
@@ -88,7 +248,7 @@ typename std::enable_if<mesh_traits<MESH>::dimension == 2, bool>::type import_PL
 template <typename MESH>
 typename std::enable_if<mesh_traits<MESH>::dimension == 2, void>::type export_PLY(
 	MESH& m, const typename mesh_traits<MESH>::template Attribute<geometry::Vec3>* vertex_position,
-	const std::string& filename)
+	const std::string& filename, const SurfaceExportAttributeSelection<MESH>* export_attributes = nullptr)
 {
 	static_assert(mesh_traits<MESH>::dimension == 2, "MESH dimension should be 2");
 
@@ -139,6 +299,13 @@ typename std::enable_if<mesh_traits<MESH>::dimension == 2, void>::type export_PL
 	plyOut.addVertexPositions(position);
 	plyOut.addFaceIndices(face_indices);
 	plyOut.addEdgeIndices(edge_indices);
+	if (export_attributes)
+	{
+		internal::add_selected_ply_attributes<MESH, Vertex>(
+			plyOut.getElement("vertex"), m, export_attributes->vertex_attributes);
+		internal::add_selected_ply_attributes<MESH, Face>(
+			plyOut.getElement("face"), m, export_attributes->face_attributes);
+	}
 	plyOut.write(filename);
 
 	remove_attribute<Vertex>(m, vertex_id);

@@ -38,6 +38,7 @@
 #include <cgogn/io/graph/cgr.h>
 #include <cgogn/io/graph/skel.h>
 #include <cgogn/io/incidence_graph/ig.h>
+#include <cgogn/io/surface/export_options.h>
 #include <cgogn/io/surface/obj.h>
 #include <cgogn/io/surface/off.h>
 #include <cgogn/io/surface/ply.h>
@@ -50,9 +51,12 @@
 
 #include <boost/synapse/emit.hpp>
 
+#include <algorithm>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace cgogn
 {
@@ -313,6 +317,16 @@ public:
 		}
 	}
 
+	void save_surface_ply_to_file(MESH& m, const Attribute<Vec3>* vertex_position, const std::string& filename,
+								  const io::SurfaceExportAttributeSelection<MESH>& export_attributes)
+	{
+		if constexpr (mesh_traits<MESH>::dimension == 2)
+		{
+			const std::string filepath = ensure_extension(filename, "ply");
+			io::export_PLY(m, vertex_position, filepath, &export_attributes);
+		}
+	}
+
 	MESH* load_volume_from_file(const std::string& filename)
 	{
 		if constexpr (mesh_traits<MESH>::dimension == 3 && std::is_default_constructible_v<MESH>)
@@ -557,6 +571,83 @@ public:
 		}
 	}
 
+	template <typename CELL, typename T>
+	void collect_surface_exportable_attributes_of_type(
+		const MESH& m, std::vector<std::shared_ptr<AttributeGen>>& out,
+		std::unordered_set<AttributeGen*>& seen) const
+	{
+		foreach_attribute<T, CELL>(m, [&](const std::shared_ptr<Attribute<T>>& attribute) {
+			AttributeGen* gen = attribute.get();
+			if (seen.insert(gen).second)
+				out.push_back(std::static_pointer_cast<AttributeGen>(attribute));
+		});
+	}
+
+	template <typename CELL>
+	std::vector<std::shared_ptr<AttributeGen>> collect_surface_exportable_attributes(const MESH& m) const
+	{
+		std::vector<std::shared_ptr<AttributeGen>> attributes;
+		std::unordered_set<AttributeGen*> seen;
+		collect_surface_exportable_attributes_of_type<CELL, int32>(m, attributes, seen);
+		collect_surface_exportable_attributes_of_type<CELL, uint32>(m, attributes, seen);
+		collect_surface_exportable_attributes_of_type<CELL, float32>(m, attributes, seen);
+		collect_surface_exportable_attributes_of_type<CELL, float64>(m, attributes, seen);
+		collect_surface_exportable_attributes_of_type<CELL, geometry::Vec2>(m, attributes, seen);
+		collect_surface_exportable_attributes_of_type<CELL, geometry::Vec3>(m, attributes, seen);
+		collect_surface_exportable_attributes_of_type<CELL, geometry::Vec4>(m, attributes, seen);
+		return attributes;
+	}
+
+	static bool has_selected_export_attribute(const std::vector<std::shared_ptr<AttributeGen>>& selected,
+											 AttributeGen* target)
+	{
+		for (const auto& attribute : selected)
+			if (attribute.get() == target)
+				return true;
+		return false;
+	}
+
+	static void set_selected_export_attribute(std::vector<std::shared_ptr<AttributeGen>>& selected,
+											 const std::shared_ptr<AttributeGen>& attribute, bool enabled)
+	{
+		const auto it = std::find_if(selected.begin(), selected.end(),
+									 [&](const std::shared_ptr<AttributeGen>& current) { return current.get() == attribute.get(); });
+		if (enabled)
+		{
+			if (it == selected.end())
+				selected.push_back(attribute);
+		}
+		else if (it != selected.end())
+			selected.erase(it);
+	}
+
+	void draw_export_attribute_selector(const char* label, const std::vector<std::shared_ptr<AttributeGen>>& available,
+										std::vector<std::shared_ptr<AttributeGen>>& selected) const
+	{
+		if (ImGui::TreeNode(label))
+		{
+			if (available.empty())
+			{
+				ImGui::TextDisabled("No exportable attributes.");
+			}
+			else
+			{
+				for (const auto& attribute : available)
+				{
+					bool enabled = has_selected_export_attribute(selected, attribute.get());
+					if (ImGui::Checkbox((attribute->name() + "##" + label).c_str(), &enabled))
+						set_selected_export_attribute(selected, attribute, enabled);
+				}
+			}
+			ImGui::TreePop();
+		}
+	}
+
+	bool surface_filetype_supports_extra_attributes(const std::string& filetype) const
+	{
+		return filetype == "ply";
+	}
+
 	/////////////
 	// SIGNALS //
 	/////////////
@@ -645,28 +736,7 @@ protected:
 		{
 			const std::string result = save_file_dialog_->result();
 			if (!result.empty() && pending_save_)
-			{
-				if constexpr (mesh_traits<MESH>::dimension == 0)
-				{
-					save_points_to_file(*pending_save_->mesh, pending_save_->vertex_position.get(),
-										pending_save_->filetype, result);
-				}
-				if constexpr (mesh_traits<MESH>::dimension == 1)
-				{
-					save_graph_to_file(*pending_save_->mesh, pending_save_->vertex_position.get(),
-									   pending_save_->filetype, result);
-				}
-				if constexpr (mesh_traits<MESH>::dimension == 2)
-				{
-					save_surface_to_file(*pending_save_->mesh, pending_save_->vertex_position.get(),
-										 pending_save_->filetype, result);
-				}
-				if constexpr (mesh_traits<MESH>::dimension == 3)
-				{
-					save_volume_to_file(*pending_save_->mesh, pending_save_->vertex_position.get(),
-										pending_save_->filetype, result);
-				}
-			}
+				pending_save_->execute(result);
 			save_file_dialog_ = nullptr;
 			pending_save_.reset();
 		}
@@ -708,12 +778,20 @@ protected:
 		if (ImGui::BeginPopupModal("Save", NULL, ImGuiWindowFlags_AlwaysAutoResize))
 		{
 			static MESH* selected_mesh = nullptr;
+			static std::shared_ptr<Attribute<Vec3>> selected_vertex_position = nullptr;
+			static std::vector<std::shared_ptr<AttributeGen>> selected_export_vertex_attributes;
+			static std::vector<std::shared_ptr<AttributeGen>> selected_export_face_attributes;
 			static char filename[32] = "\0";
 			static std::string filetype = (*supported_formats_)[0];
 			static std::function<void()> cleanup = []() {};
 			bool close_popup = false;
 
-			imgui_mesh_selector(this, selected_mesh, "Mesh", [&](MESH& m) { selected_mesh = &m; });
+			imgui_mesh_selector(this, selected_mesh, "Mesh", [&](MESH& m) {
+				selected_mesh = &m;
+				selected_vertex_position = get_attribute<Vec3, Vertex>(m, "position");
+				selected_export_vertex_attributes.clear();
+				selected_export_face_attributes.clear();
+			});
 			if (ImGui::BeginCombo("Filetype", filetype.c_str()))
 			{
 				for (const std::string& t : *supported_formats_)
@@ -730,16 +808,62 @@ protected:
 
 			if (selected_mesh)
 			{
-				static std::shared_ptr<Attribute<Vec3>> selected_vertex_position = nullptr;
 				imgui_combo_attribute<Vertex, Vec3>(
 					*selected_mesh, selected_vertex_position, "Position",
 					[&](const std::shared_ptr<Attribute<Vec3>>& attribute) { selected_vertex_position = attribute; });
+				if constexpr (mesh_traits<MESH>::dimension == 2)
+				{
+					using Face = typename mesh_traits<MESH>::Face;
+					ImGui::Separator();
+					ImGui::TextUnformatted("Extra Export Attributes");
+					if (!surface_filetype_supports_extra_attributes(filetype))
+						ImGui::TextDisabled("Current filetype falls back to base export without extra attributes.");
+					const auto vertex_attributes = collect_surface_exportable_attributes<Vertex>(*selected_mesh);
+					const auto face_attributes = collect_surface_exportable_attributes<Face>(*selected_mesh);
+					draw_export_attribute_selector("Vertex Attributes", vertex_attributes, selected_export_vertex_attributes);
+					draw_export_attribute_selector("Face Attributes", face_attributes, selected_export_face_attributes);
+				}
 				if (selected_vertex_position)
 				{
 					ImGui::PushItemFlag(ImGuiItemFlags_Disabled, (bool)save_file_dialog_);
 					if (ImGui::Button("Save", ImVec2(120, 0)))
 					{
-						pending_save_ = PendingSave{selected_mesh, selected_vertex_position, filetype};
+						MESH* mesh_to_save = selected_mesh;
+						auto vertex_position_to_save = selected_vertex_position;
+						const std::string filetype_to_save = filetype;
+						const io::SurfaceExportAttributeSelection<MESH> export_attributes = {
+							selected_export_vertex_attributes, selected_export_face_attributes};
+						pending_save_ = PendingSave{
+							[this, mesh_to_save, vertex_position_to_save, filetype_to_save, export_attributes](
+								const std::string& filepath) {
+								if constexpr (mesh_traits<MESH>::dimension == 0)
+								{
+									save_points_to_file(*mesh_to_save, vertex_position_to_save.get(), filetype_to_save, filepath);
+								}
+								else if constexpr (mesh_traits<MESH>::dimension == 1)
+								{
+									save_graph_to_file(*mesh_to_save, vertex_position_to_save.get(), filetype_to_save, filepath);
+								}
+								else if constexpr (mesh_traits<MESH>::dimension == 2)
+								{
+									if (surface_filetype_supports_extra_attributes(filetype_to_save))
+										save_surface_ply_to_file(
+											*mesh_to_save, vertex_position_to_save.get(), filepath, export_attributes);
+									else
+									{
+										if (!export_attributes.vertex_attributes.empty() || !export_attributes.face_attributes.empty())
+											std::cout << "[MeshSave] filetype=" << filetype_to_save
+													  << " does not support extra attributes yet; fallback=base_export"
+													  << std::endl;
+										save_surface_to_file(
+											*mesh_to_save, vertex_position_to_save.get(), filetype_to_save, filepath);
+									}
+								}
+								else if constexpr (mesh_traits<MESH>::dimension == 3)
+								{
+									save_volume_to_file(*mesh_to_save, vertex_position_to_save.get(), filetype_to_save, filepath);
+								}
+							}};
 						std::string default_path = filename;
 						if (!default_path.empty())
 							default_path = ensure_extension(default_path, filetype);
@@ -749,7 +873,11 @@ protected:
 					}
 					ImGui::PopItemFlag();
 				}
-				cleanup = [&]() { selected_vertex_position = nullptr; };
+				cleanup = [&]() {
+					selected_vertex_position = nullptr;
+					selected_export_vertex_attributes.clear();
+					selected_export_face_attributes.clear();
+				};
 			}
 
 			if (ImGui::Button("Cancel", ImVec2(120, 0)))
@@ -847,9 +975,7 @@ protected:
 private:
 	struct PendingSave
 	{
-		MESH* mesh = nullptr;
-		std::shared_ptr<Attribute<Vec3>> vertex_position;
-		std::string filetype;
+		std::function<void(const std::string&)> execute;
 	};
 
 	std::string ensure_extension(const std::string& filename, const std::string& filetype) const
