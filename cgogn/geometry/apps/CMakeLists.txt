@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.7.2 FATAL_ERROR)
+﻿cmake_minimum_required(VERSION 3.7.2 FATAL_ERROR)
 
 project(cgogn_geometry_examples
 	LANGUAGES CXX
@@ -159,6 +159,14 @@ if (CGOGN_USE_CGAL)
     SOURCES udf_training_alpha_inside.cpp
     EXTRA_LIBS CGAL::CGAL
   )
+
+  cgogn_add_torch_executable(udf_benchmark
+    SOURCES
+      udf_benchmark.cpp
+      ../benchmark/benchmark_config.cpp
+      ../benchmark/skeleton_benchmark_runner.cpp
+    EXTRA_LIBS CGAL::CGAL
+  )
 endif()
 add_executable(filtering filtering.cpp)
 target_link_libraries(filtering
@@ -233,4 +241,5 @@ if(APPLE)
 		${CARBON}
 	)
 endif()
+
 

@@ -54,7 +54,7 @@ class CGOGN_UI_EXPORT App
 	friend class Module;
 
 public:
-	App();
+	explicit App(bool hidden_window = false);
 	~App();
 
 	void set_window_size(int32 w, int32 h);
@@ -135,6 +135,7 @@ private:
 
 	GLFWwindow* window_;
 	ImGuiContext* context_;
+	bool hidden_window_;
 
 	std::string window_name_;
 

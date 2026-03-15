@@ -1,4 +1,4 @@
-#ifndef CGOGN_MODULE_UDF_TRAINING_H_
+﻿#ifndef CGOGN_MODULE_UDF_TRAINING_H_
 #define CGOGN_MODULE_UDF_TRAINING_H_
 
 #include <cgogn/ui/app.h>
@@ -24,6 +24,8 @@
 #include <cgogn/geometry/types/vector_traits.h>
 #include <cgogn/geometry/types/fast_winding_number_traits.h>
 #include <cgogn/geometry/types/fast_winding_number.h>
+#include <cgogn/io/surface/export_options.h>
+#include <cgogn/io/surface/ply.h>
 
 
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
@@ -273,6 +275,8 @@ private:
 		bool use_local_clusters_ = false;
 		uint32 local_cluster_connectivity_refresh_interval_ = 10;
 		bool auto_stop_ = false;
+		uint32 max_iterations_without_autosplit_ = 300;
+		uint32 max_iterations_after_reaching_max_spheres_ = 100;
 		bool auto_split_ = false;
 		AutoSplitMode auto_split_mode_ = ERROR_THRESHOLD;
 		float32 auto_split_error_threshold_ = 0.00025f;
@@ -389,8 +393,543 @@ public:
 	{
 	}
 
+	struct HeadlessBenchmarkOptions
+	{
+		bool verbose_ = true;
+		uint32 initial_nb_spheres_ = 1;
+		InitialMAMode initial_ma_mode_override_ = INITIAL_MA_AUTO;
+		float32 filter_radius_threshold_ = 0.0f;
+		bool sphere_correction_ = false;
+		CorrectionMode sphere_correction_mode_ = CORRECT_ALWAYS;
+		bool lock_skeleton_connectivity_ = false;
+		DistanceMode distance_mode_ = LINE_QUADRIC_DISTANCE;
+		bool use_local_clusters_ = false;
+		uint32 local_cluster_connectivity_refresh_interval_ = 10;
+		bool auto_stop_ = false;
+		uint32 max_iterations_without_autosplit_ = 300;
+		uint32 max_iterations_after_reaching_max_spheres_ = 100;
+		bool auto_split_ = false;
+		AutoSplitMode auto_split_mode_ = ERROR_THRESHOLD;
+		float32 auto_split_error_threshold_ = 0.00025f;
+		uint32 auto_split_max_nb_spheres_ = 500;
+		float32 auto_split_ratio_ = 0.2f;
+		uint32 auto_split_max_per_iter_error_ = 10;
+		uint32 auto_split_max_per_iter_max_ = 100;
+		float32 sqem_update_lambda_full_ = 0.05f;
+		float32 sqem_update_lambda_line_plane_ = 0.20f;
+		float32 sqem_fix_radius_scale_ = 1.0f;
+		bool udf_center_enabled_ = false;
+		float32 udf_center_lambda_ = 0.10f;
+		float32 init_dilation_constant_ = 0.001f;
+		uint32 init_min_cover_points_ = 10;
+		float alpha_ = 0.005f;
+		float sample_radius_ = 0.0025f;
+		int sample_iterations_ = 30;
+		int knn_k_ = 10;
+		int seed_ = 42;
+		int cluster_min_points_ = 20;
+		float grid_cell_size_ = 0.0025f;
+		int num_alpha_samples_ = 200000;
+		int poisson_eliminate_target_samples_ = 0;
+		int batch_size_ = 1310640;
+		int ray_sampler_batch_size_ = 4096;
+		float tol_ = 1e-5f;
+		int udf_max_iterations_ = 3000;
+	};
+
+	struct HeadlessOptimizationStats
+	{
+		float64 optimization_total_ms_ = 0.0;
+		float64 cluster_total_ms_ = 0.0;
+		float64 sphere_update_total_ms_ = 0.0;
+		float64 error_total_ms_ = 0.0;
+		float64 split_total_ms_ = 0.0;
+		float64 average_iteration_ms_ = 0.0;
+		uint32 optimization_iterations_ = 0;
+	};
+
+	struct HeadlessCounts
+	{
+		uint32 input_vertices_ = 0;
+		uint32 input_points_ = 0;
+		uint32 sample_points_ = 0;
+		uint32 final_spheres_ = 0;
+		uint32 skeleton_vertices_ = 0;
+		uint32 skeleton_edges_ = 0;
+		uint32 skeleton_faces_ = 0;
+		uint32 optimization_iterations_ = 0;
+	};
+
+	void apply_headless_benchmark_options(POINTS& points, const HeadlessBenchmarkOptions& options)
+	{
+		init_points_data(points);
+		PointsParameters& p = points_parameters_[&points];
+		p.initial_ma_mode_override_ = options.initial_ma_mode_override_;
+		p.filter_radius_threshold_ = options.filter_radius_threshold_;
+		p.sphere_correction_ = options.sphere_correction_;
+		p.sphere_correction_mode_ = options.sphere_correction_mode_;
+		p.lock_skeleton_connectivity_ = options.lock_skeleton_connectivity_;
+		p.distance_mode_ = options.distance_mode_;
+		p.use_local_clusters_ = options.use_local_clusters_;
+		p.local_cluster_connectivity_refresh_interval_ = options.local_cluster_connectivity_refresh_interval_;
+		p.auto_stop_ = options.auto_stop_;
+		p.max_iterations_without_autosplit_ = options.max_iterations_without_autosplit_;
+		p.max_iterations_after_reaching_max_spheres_ = options.max_iterations_after_reaching_max_spheres_;
+		p.auto_split_ = options.auto_split_;
+		p.auto_split_mode_ = options.auto_split_mode_;
+		p.auto_split_error_threshold_ = options.auto_split_error_threshold_;
+		p.auto_split_max_nb_spheres_ = options.auto_split_max_nb_spheres_;
+		p.auto_split_ratio_ = options.auto_split_ratio_;
+		p.auto_split_max_per_iter_error_ = options.auto_split_max_per_iter_error_;
+		p.auto_split_max_per_iter_max_ = options.auto_split_max_per_iter_max_;
+		p.sqem_update_lambda_full_ = options.sqem_update_lambda_full_;
+		p.sqem_update_lambda_line_plane_ = options.sqem_update_lambda_line_plane_;
+		p.sqem_fix_radius_scale_ = options.sqem_fix_radius_scale_;
+		p.udf_center_enabled_ = options.udf_center_enabled_;
+		p.udf_center_lambda_ = options.udf_center_lambda_;
+		p.init_dilation_constant_ = options.init_dilation_constant_;
+		p.init_min_cover_points_ = options.init_min_cover_points_;
+		p.alpha_ = options.alpha_;
+		p.sample_radius_ = options.sample_radius_;
+		p.sample_iterations_ = options.sample_iterations_;
+		p.knn_k_ = options.knn_k_;
+		p.seed_ = options.seed_;
+		p.cluster_min_points_ = options.cluster_min_points_;
+		p.grid_cell_size_ = options.grid_cell_size_;
+		p.num_alpha_samples_ = options.num_alpha_samples_;
+		p.poisson_eliminate_target_samples_ = options.poisson_eliminate_target_samples_;
+		p.batch_size_ = options.batch_size_;
+		p.ray_sampler_batch_size_ = options.ray_sampler_batch_size_;
+		p.tol_ = options.tol_;
+		p.udf_max_iterations_ = options.udf_max_iterations_;
+		if (p.grid_cell_size_ > Scalar(0))
+			p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+		else
+			p.samples_spatial_grid_.reset();
+	}
+
+	void headless_sample_alpha_level_set(POINTS& points, const HeadlessBenchmarkOptions& options)
+	{
+		init_points_data(points);
+		load_alpha_samples_to_mesh(points_parameters_[&points], static_cast<size_t>(options.num_alpha_samples_));
+	}
+
+	void headless_apply_poisson_eliminate(POINTS& points, size_t target_num)
+	{
+		init_points_data(points);
+		if (target_num > 0)
+			apply_poisson_eliminate_samples(points_parameters_[&points], target_num);
+	}
+
+	void headless_apply_sampling_filtering(POINTS& points)
+	{
+		init_points_data(points);
+		apply_sampling_preprocess_filtering(points_parameters_[&points]);
+	}
+
+	void headless_build_sample_kdtree_and_normals(POINTS& points)
+	{
+		init_points_data(points);
+		PointsParameters& p = points_parameters_[&points];
+		std::cerr << "[BenchmarkKdtree] build_kdtree begin" << std::endl;
+		build_kdtree(p);
+		std::cerr << "[BenchmarkKdtree] build_kdtree end" << std::endl;
+		std::cerr << "[BenchmarkKdtree] recompute_samples_normals_pca begin" << std::endl;
+		recompute_samples_normals_pca(p);
+		std::cerr << "[BenchmarkKdtree] recompute_samples_normals_pca end" << std::endl;
+	}
+
+	void headless_compute_samples_area(POINTS& points)
+	{
+		init_points_data(points);
+		compute_samples_area(points_parameters_[&points]);
+	}
+
+	void headless_compute_winding_numbers(POINTS& points)
+	{
+		init_points_data(points);
+		compute_winding_numbers(points_parameters_[&points]);
+	}
+
+	void headless_compute_quadrics(POINTS& points)
+	{
+		init_points_data(points);
+		compute_quadrics(points_parameters_[&points]);
+	}
+
+	void headless_compute_initial_medial_axis(POINTS& points)
+	{
+		init_points_data(points);
+		PointsParameters& p = points_parameters_[&points];
+		compute_initial_medial_axis(p);
+		p.fitting_data_computed_ = true;
+	}
+
+	void headless_compute_fitting_data(POINTS& points, InitialMAMode mode = INITIAL_MA_AUTO)
+	{
+		init_points_data(points);
+		PointsParameters& p = points_parameters_[&points];
+		if (mode == INITIAL_MA_AUTO)
+			compute_fitting_data(p);
+		else
+			compute_fitting_data_with_initial_ma_mode(p, mode, true);
+	}
+
+	void headless_init_spheres(POINTS& points, uint32 max_nb_spheres)
+	{
+		init_points_data(points);
+		std::cerr << "[BenchmarkSphereInit] init_points_data returned" << std::endl;
+		PointsParameters& p = points_parameters_[&points];
+		std::cerr << "[BenchmarkSphereInit] clear spheres begin" << std::endl;
+		clear(*p.spheres_);
+		std::cerr << "[BenchmarkSphereInit] clear spheres end" << std::endl;
+		std::cerr << "[BenchmarkSphereInit] init_spheres_from_samples begin" << std::endl;
+		init_spheres_from_samples(p, max_nb_spheres);
+		std::cerr << "[BenchmarkSphereInit] init_spheres_from_samples end" << std::endl;
+	}
+
+	HeadlessOptimizationStats headless_optimize_spheres(POINTS& points, bool verbose = false)
+	{
+		init_points_data(points);
+		PointsParameters& p = points_parameters_[&points];
+		const Scalar convergence_eps = Scalar(1e-10);
+		const uint32 max_post_convergence_iterations = 10;
+		const uint32 max_iterations_without_autosplit = p.max_iterations_without_autosplit_;
+		const uint32 max_iterations_after_reaching_max_spheres = p.max_iterations_after_reaching_max_spheres_;
+		HeadlessOptimizationStats stats;
+		p.running_ = true;
+		p.stopping_ = false;
+		p.iteration_count_ = 0;
+		p.total_error_diff_ = 0.0;
+		p.last_total_error_ = std::numeric_limits<Scalar>::max();
+		p.manual_stop_requested_ = false;
+		p.pending_full_refresh_after_stop_ = false;
+
+		bool convergence_reached = false;
+		uint32 post_convergence_iterations = 0;
+		bool target_reached_reported = false;
+		bool max_spheres_reached_once = false;
+		uint32 post_max_spheres_iterations = 0;
+		auto optimization_start = std::chrono::high_resolution_clock::now();
+
+		while (true)
+		{
+			auto iteration_start = std::chrono::high_resolution_clock::now();
+
+			if (should_refresh_local_connectivity(p))
+			{
+				auto cluster_refresh_start = std::chrono::high_resolution_clock::now();
+				compute_skeleton(p, true);
+				auto cluster_refresh_end = std::chrono::high_resolution_clock::now();
+				stats.cluster_total_ms_ +=
+					std::chrono::duration<float64, std::milli>(cluster_refresh_end - cluster_refresh_start).count();
+			}
+
+			auto cluster_start = std::chrono::high_resolution_clock::now();
+			compute_clusters(p);
+			auto cluster_end = std::chrono::high_resolution_clock::now();
+			stats.cluster_total_ms_ += std::chrono::duration<float64, std::milli>(cluster_end - cluster_start).count();
+
+			auto update_start = std::chrono::high_resolution_clock::now();
+			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+				if (p.distance_mode_ == LINE_QUADRIC_DISTANCE_FREE_RADIUS)
+					update_sphere_line_quadric_distance_free_radius(p, v);
+				else
+					update_sphere_line_quadric_distance_fix_radius(p, v);
+				return true;
+			});
+			if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
+			{
+				parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+					correct_sphere(p, v);
+					return true;
+				});
+			}
+			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+				(*p.spheres_do_not_split_)[index_of(*p.spheres_, v)] = false;
+				return true;
+			});
+			auto update_end = std::chrono::high_resolution_clock::now();
+			stats.sphere_update_total_ms_ += std::chrono::duration<float64, std::milli>(update_end - update_start).count();
+
+			auto error_start = std::chrono::high_resolution_clock::now();
+			compute_spheres_error(p);
+			auto error_end = std::chrono::high_resolution_clock::now();
+			stats.error_total_ms_ += std::chrono::duration<float64, std::milli>(error_end - error_start).count();
+
+			auto split_start = std::chrono::high_resolution_clock::now();
+			if (p.auto_split_ && !p.lock_skeleton_connectivity_ &&
+				(p.total_error_diff_ < Scalar(1e-5) || p.iteration_count_ % 10 == 0))
+			{
+				switch (p.auto_split_mode_)
+				{
+				case ERROR_THRESHOLD: {
+					if (p.max_error_ > p.auto_split_error_threshold_)
+					{
+						compute_skeleton(p, true);
+						if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
+						{
+							parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+								correct_sphere(p, v);
+								return true;
+							});
+						}
+
+						std::vector<PVertex> sorted_spheres;
+						sorted_spheres.reserve(p.nb_spheres_);
+						foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+							sorted_spheres.push_back(v);
+							return true;
+						});
+						std::sort(sorted_spheres.begin(), sorted_spheres.end(), [&](PVertex a, PVertex b) {
+							return (*p.spheres_error_)[index_of(*p.spheres_, a)] >
+								   (*p.spheres_error_)[index_of(*p.spheres_, b)];
+						});
+
+						uint32 to_split_max = std::min(
+							uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)), p.auto_split_max_per_iter_error_);
+						std::vector<PVertex> split_centers;
+						split_centers.reserve(to_split_max);
+						for (PVertex sphere : sorted_spheres)
+						{
+							uint32 s_index = index_of(*p.spheres_, sphere);
+							Scalar error = (*p.spheres_error_)[s_index];
+							if (error < p.auto_split_error_threshold_)
+								break;
+							if (to_split_max > 0 && !(*p.spheres_do_not_split_)[s_index])
+							{
+								for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[s_index])
+									(*p.spheres_do_not_split_)[index_of(*p.spheres_, neighbor)] = true;
+								PVertex new_sphere = split_sphere(p, sphere, true);
+								if (new_sphere.is_valid())
+								{
+									split_centers.push_back(new_sphere);
+									--to_split_max;
+								}
+							}
+						}
+						if (!split_centers.empty())
+							recompute_clusters_local_neighborhoods(p, split_centers);
+					}
+				}
+				break;
+				case MAX_NB_SPHERES: {
+					if (p.nb_spheres_ < p.auto_split_max_nb_spheres_)
+					{
+						compute_skeleton(p, true);
+						if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
+						{
+							parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+								correct_sphere(p, v);
+								return true;
+							});
+						}
+
+						std::vector<PVertex> sorted_spheres;
+						sorted_spheres.reserve(p.nb_spheres_);
+						foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+							sorted_spheres.push_back(v);
+							return true;
+						});
+						std::sort(sorted_spheres.begin(), sorted_spheres.end(), [&](PVertex a, PVertex b) {
+							return (*p.spheres_error_)[index_of(*p.spheres_, a)] >
+								   (*p.spheres_error_)[index_of(*p.spheres_, b)];
+						});
+
+						uint32 to_split_max =
+							std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)),
+									 p.auto_split_max_per_iter_max_);
+						std::vector<PVertex> split_centers;
+						split_centers.reserve(to_split_max);
+						for (PVertex sphere : sorted_spheres)
+						{
+							uint32 s_index = index_of(*p.spheres_, sphere);
+							if (p.auto_split_max_nb_spheres_ - p.nb_spheres_ <= 0)
+								break;
+							if (to_split_max > 0 && !(*p.spheres_do_not_split_)[s_index])
+							{
+								for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[s_index])
+									(*p.spheres_do_not_split_)[index_of(*p.spheres_, neighbor)] = true;
+								PVertex new_sphere = split_sphere(p, sphere, true);
+								if (new_sphere.is_valid())
+								{
+									split_centers.push_back(new_sphere);
+									--to_split_max;
+								}
+							}
+						}
+						if (!split_centers.empty())
+							recompute_clusters_local_neighborhoods(p, split_centers);
+					}
+				}
+				break;
+				}
+			}
+			auto split_end = std::chrono::high_resolution_clock::now();
+			stats.split_total_ms_ += std::chrono::duration<float64, std::milli>(split_end - split_start).count();
+
+			++p.iteration_count_;
+			if (verbose)
+			{
+				std::cout << "[HeadlessOptimize] iteration=" << p.iteration_count_ << " spheres=" << p.nb_spheres_
+						  << " error=" << p.total_error_ << " diff=" << p.total_error_diff_ << std::endl;
+			}
+
+			if (p.auto_stop_)
+			{
+				const bool converged = (p.total_error_diff_ < convergence_eps);
+				if (converged)
+				{
+					if (!convergence_reached)
+					{
+						convergence_reached = true;
+						post_convergence_iterations = 0;
+						target_reached_reported = false;
+					}
+					else
+					{
+						++post_convergence_iterations;
+					}
+
+					bool reached_target = false;
+					switch (p.auto_split_mode_)
+					{
+					case ERROR_THRESHOLD:
+						reached_target = (p.max_error_ < p.auto_split_error_threshold_);
+						break;
+					case MAX_NB_SPHERES:
+						reached_target = (p.nb_spheres_ >= p.auto_split_max_nb_spheres_);
+						break;
+					}
+					if (reached_target)
+						target_reached_reported = true;
+					if (post_convergence_iterations >= max_post_convergence_iterations)
+						break;
+				}
+				else if (convergence_reached)
+				{
+					convergence_reached = false;
+					post_convergence_iterations = 0;
+					target_reached_reported = false;
+				}
+			}
+
+			if (p.auto_split_)
+			{
+				if (p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
+				{
+					if (!max_spheres_reached_once)
+					{
+						max_spheres_reached_once = true;
+						post_max_spheres_iterations = 0;
+					}
+					else
+					{
+						++post_max_spheres_iterations;
+					}
+					if (post_max_spheres_iterations >= max_iterations_after_reaching_max_spheres)
+						break;
+				}
+			}
+			else if (p.iteration_count_ >= max_iterations_without_autosplit)
+			{
+				break;
+			}
+
+			auto iteration_end = std::chrono::high_resolution_clock::now();
+			unused_parameters(iteration_start, iteration_end, target_reached_reported);
+		}
+
+		auto optimization_end = std::chrono::high_resolution_clock::now();
+		stats.optimization_total_ms_ =
+			std::chrono::duration<float64, std::milli>(optimization_end - optimization_start).count();
+		stats.optimization_iterations_ = p.iteration_count_;
+		stats.average_iteration_ms_ = (p.iteration_count_ > 0)
+										 ? stats.optimization_total_ms_ / static_cast<float64>(p.iteration_count_)
+										 : 0.0;
+		p.running_ = false;
+		p.stopping_ = false;
+		p.manual_stop_requested_ = false;
+		p.pending_full_refresh_after_stop_ = false;
+		return stats;
+	}
+	void headless_build_skeleton(POINTS& points)
+	{
+		init_points_data(points);
+		PointsParameters& p = points_parameters_[&points];
+		compute_skeleton(p);
+	}
+
+	void headless_run_topology_fix(POINTS& points, bool run_deg_face_deletion)
+	{
+		init_points_data(points);
+		PointsParameters& p = points_parameters_[&points];
+		run_topology_fix_pipeline(p, run_deg_face_deletion);
+	}
+
+	void headless_run_deg_face_deletion(POINTS& points)
+	{
+		init_points_data(points);
+		PointsParameters& p = points_parameters_[&points];
+		const std::unordered_set<uint32> tet_face_whitelist = collect_current_tet_face_id_whitelist(p);
+		prune_deg_faces_from_whitelist_and_orphan_edges(p, tet_face_whitelist, "[TopologyFullDeg]");
+		refresh_skeleton_topology_colors(p);
+		mark_boundary_tets_color(p);
+		visualize_skeleton_edge_udf_scores(p);
+	}
+
+	void headless_run_face_post_processing(POINTS& points)
+	{
+		init_points_data(points);
+		PointsParameters& p = points_parameters_[&points];
+		run_non_manifold_deg1_face_postprocess(p, "[TopologyFullNM]");
+	}
+
+
+	HeadlessCounts headless_collect_counts(const POINTS& points) const
+	{
+		HeadlessCounts counts;
+		auto it = points_parameters_.find(const_cast<POINTS*>(&points));
+		if (it == points_parameters_.end())
+			return counts;
+		const PointsParameters& p = it->second;
+		counts.input_points_ = p.points_ ? nb_cells<PVertex>(*p.points_) : 0;
+		counts.input_vertices_ = (selected_surface_ ? nb_cells<SVertex>(*selected_surface_) : counts.input_points_);
+		counts.sample_points_ = p.samples_mesh_ ? nb_cells<PVertex>(*p.samples_mesh_) : 0;
+		counts.final_spheres_ = p.spheres_ ? nb_cells<PVertex>(*p.spheres_) : 0;
+		counts.skeleton_vertices_ = p.skeleton_ ? nb_cells<NMVertex>(*p.skeleton_) : 0;
+		counts.skeleton_edges_ = p.skeleton_ ? nb_cells<NMEdge>(*p.skeleton_) : 0;
+		counts.skeleton_faces_ = p.skeleton_ ? nb_cells<NMFace>(*p.skeleton_) : 0;
+		counts.optimization_iterations_ = p.iteration_count_;
+		return counts;
+	}
+
+	void headless_export_skeleton_ply(POINTS& points, const std::string& filename)
+	{
+		init_points_data(points);
+		PointsParameters& p = points_parameters_[&points];
+		if (!p.skeleton_ || !p.skeleton_position_ || !p.skeleton_radius_ || !p.spheres_ || !p.spheres_radius_)
+			return;
+
+		if (!std::filesystem::path(filename).parent_path().empty())
+			std::filesystem::create_directories(std::filesystem::path(filename).parent_path());
+
+		foreach_cell(*p.skeleton_, [&](NMVertex v) -> bool {
+			const uint32 v_index = index_of(*p.skeleton_, v);
+			if (v_index < nb_cells<PVertex>(*p.spheres_))
+				(*p.skeleton_radius_)[v_index] = (*p.spheres_radius_)[v_index];
+			return true;
+		});
+
+		io::SurfaceExportAttributeSelection<NONMANIFOLD> export_attributes;
+		export_attributes.vertex_attributes.push_back(p.skeleton_radius_);
+		io::export_PLY(*p.skeleton_, p.skeleton_position_.get(), filename, &export_attributes);
+	}
+
 	void set_selected_surface(SURFACE& s)
 	{
+		if (!surface_provider_)
+			throw std::runtime_error("UDFTraining surface provider is not initialized before set_selected_surface().");
 		selected_surface_ = &s;
 		surface_bvh_dirty_ = true;
 		if (selected_points_)
@@ -402,6 +941,10 @@ public:
 
 	void set_selected_points(POINTS& p)
 	{
+		if (!points_provider_)
+			throw std::runtime_error("UDFTraining points provider is not initialized before set_selected_points().");
+		if (!non_manifold_provider_)
+			throw std::runtime_error("UDFTraining non-manifold provider is not initialized before set_selected_points().");
 		selected_points_ = &p;
 		init_points_data(p);
 		PointsParameters& params = points_parameters_[selected_points_];
@@ -1226,7 +1769,9 @@ public:
 			});
 		}
 
+		std::cerr << "[BenchmarkKdtree] refresh_sample_normals_color begin" << std::endl;
 		refresh_sample_normals_color(p);
+		std::cerr << "[BenchmarkKdtree] refresh_sample_normals_color end" << std::endl;
 	}
 
 	void apply_sampling_preprocess_filtering(PointsParameters& p)
@@ -1312,8 +1857,10 @@ public:
 		build_kdtree(p);
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
+		std::cerr << "[BenchmarkKdtree] emit normal attributes begin" << std::endl;
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
+		std::cerr << "[BenchmarkKdtree] emit normal attributes end" << std::endl;
 		if (p.samples_knn_color_)
 			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_knn_color_.get());
 		if (p.samples_color_)
@@ -1696,19 +2243,24 @@ private:
 
 	void init_points_data(POINTS& m)
 	{
-
+		std::cerr << "[BenchmarkInit] init_points_data begin" << std::endl;
 		PointsParameters& p = points_parameters_[&m];
 		if (p.initialized_)
+		{
+			std::cerr << "[BenchmarkInit] init_points_data already initialized" << std::endl;
 			return;
+		}
 
 		// Init Input Points
-
 		p.points_ = &m;
 		p.position_ = get_attribute<Vec3, PVertex>(m, "position");
 		p.normal_ = get_or_add_attribute<Vec3, PVertex>(m, "normal");
 		p.knn_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(m, "knn");
+		std::cerr << "[BenchmarkInit] input attributes resolved" << std::endl;
+
 		// Build KDTree for input points
 		uint32 nb_vertices = nb_cells<PVertex>(*p.points_);
+		std::cerr << "[BenchmarkInit] input_kdtree begin, nb_vertices=" << nb_vertices << std::endl;
 		if (nb_vertices > 0)
 		{
 			std::vector<Vec3> points;
@@ -1721,16 +2273,21 @@ private:
 				return true;
 			});
 			p.input_kdtree_ = new acc::KDTree<3, uint32>(points);
+			std::cerr << "[BenchmarkInit] input_kdtree built" << std::endl;
+			std::cerr << "[BenchmarkInit] compute_input_normals begin" << std::endl;
 			compute_input_normals(p);
+			std::cerr << "[BenchmarkInit] compute_input_normals end" << std::endl;
 		}
 
 		// Init Samples Mesh
+		std::cerr << "[BenchmarkInit] samples mesh init begin" << std::endl;
 		std::string sample_name = points_provider_->mesh_name(*p.points_) + "_samples";
 		if (!p.samples_mesh_)
 			p.samples_mesh_ = points_provider_->has_mesh(sample_name) ? points_provider_->mesh(sample_name)
-																	  : points_provider_->add_mesh(sample_name);
+																  : points_provider_->add_mesh(sample_name);
 		else
 			points_provider_->clear_mesh(*p.samples_mesh_);
+		std::cerr << "[BenchmarkInit] samples mesh init end" << std::endl;
 
 		// Initialize attributes for samples
 		p.samples_position_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_mesh_, "position");
@@ -1749,12 +2306,13 @@ private:
 		p.samples_normal_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_mesh_, "normal_color");
 		p.samples_knn_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_mesh_, "knn_color");
 
-		// Init Alpha-Inside Mesh
 		// Init Spheres Mesh
+		std::cerr << "[BenchmarkInit] spheres mesh init begin" << std::endl;
 		std::string sphere_name = points_provider_->mesh_name(m) + "_spheres";
 		if (!p.spheres_)
 			p.spheres_ = points_provider_->has_mesh(sphere_name) ? points_provider_->mesh(sphere_name)
-																 : points_provider_->add_mesh(sphere_name);
+														  : points_provider_->add_mesh(sphere_name);
+		std::cerr << "[BenchmarkInit] spheres mesh init end" << std::endl;
 
 		p.spheres_position_ = get_or_add_attribute<Vec3, PVertex>(*p.spheres_, "position");
 		p.spheres_radius_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "radius");
@@ -1771,14 +2329,17 @@ private:
 		p.spheres_sqem_lambda_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "sqem_lambda");
 
 		// Init Skeleton Mesh
+		std::cerr << "[BenchmarkInit] skeleton mesh init begin" << std::endl;
 		std::string skel_name = points_provider_->mesh_name(m) + "_skeleton";
 		if (!p.skeleton_)
 			p.skeleton_ = non_manifold_provider_->has_mesh(skel_name) ? non_manifold_provider_->mesh(skel_name)
-																	  : non_manifold_provider_->add_mesh(skel_name);
+															  : non_manifold_provider_->add_mesh(skel_name);
+		std::cerr << "[BenchmarkInit] skeleton mesh init end" << std::endl;
+
 		p.skeleton_position_ = get_or_add_attribute<Vec3, NMVertex>(*p.skeleton_, "position");
 		p.skeleton_radius_ = get_or_add_attribute<Scalar, NMVertex>(*p.skeleton_, "radius");
 		p.incident_tets_ = get_or_add_attribute<std::set<std::size_t>, NMFace>(*p.skeleton_, "incident_tets");
-		p.edge_degree_ = get_or_add_attribute<uint32, NMEdge>(*p.skeleton_, "degree"); // edge face degree
+		p.edge_degree_ = get_or_add_attribute<uint32, NMEdge>(*p.skeleton_, "degree");
 		p.skeleton_face_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "color");
 		p.skeleton_face_udf_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "udf_color");
 		p.skeleton_face_boundary_tet_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "boundary_tet_color");
@@ -1796,6 +2357,7 @@ private:
 			p.samples_spatial_grid_.reset();
 
 		p.initialized_ = true;
+		std::cerr << "[BenchmarkInit] init_points_data end" << std::endl;
 	}
 
 	void compute_fitting_data(PointsParameters& p)
@@ -2003,12 +2565,11 @@ private:
 		if (!p.input_kdtree_ || !p.points_ || !p.position_ || !p.normal_ || !p.knn_)
 			return;
 
-		// Compute normals
-		parallel_foreach_cell(*p.points_, [&](PVertex v) {
+		parallel_foreach_cell(*p.points_, [&](PVertex v) -> bool {
 			uint32 v_idx = index_of(*p.points_, v);
 			const Vec3& pt = (*p.position_)[v_idx];
 			std::vector<std::pair<uint32, Scalar>> knn_res;
-			p.input_kdtree_->find_nns(pt, p.knn_k_+1, &knn_res);
+			p.input_kdtree_->find_nns(pt, p.knn_k_ + 1, &knn_res);
 
 			std::vector<uint32> indices;
 			(*p.knn_)[v_idx].clear();
@@ -2021,7 +2582,6 @@ private:
 			(*p.normal_)[v_idx] = compute_pca_normal(*p.points_, *p.position_, indices, p.input_kdtree_vertices_);
 			return true;
 		});
-
 	}
 
 	Vec3 compute_avg_normal(PointsParameters& p, PVertex v, acc::KDTree<3, uint32>& kdtree,
@@ -2052,7 +2612,7 @@ private:
 		if (!p.samples_mesh_ || !p.samples_kdtree_)
 			return;
 
-		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			const Vec3& pt = (*p.samples_position_)[v_idx];
 			std::vector<std::pair<uint32, Scalar>> knn_res;
@@ -2138,7 +2698,7 @@ private:
 
 	void compute_quadrics(PointsParameters& p)
 	{
-		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			Spherical_Quadric& q = (*p.samples_quadric_)[v_idx];
 			Line_Quadric& lq = (*p.samples_line_quadric_)[v_idx];
@@ -2172,7 +2732,7 @@ private:
 		const int k = std::max(3, p.knn_k_);
 		const Scalar eps = Scalar(1e-12);
 
-		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			const Vec3& center = (*p.samples_position_)[v_idx];
 
@@ -2232,9 +2792,13 @@ private:
 			return true;
 		});
 
+		std::cerr << "[BenchmarkKdtree] refresh_sample_normals_color begin" << std::endl;
 		refresh_sample_normals_color(p);
+		std::cerr << "[BenchmarkKdtree] refresh_sample_normals_color end" << std::endl;
+		std::cerr << "[BenchmarkKdtree] emit sample normal attributes begin" << std::endl;
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
+		std::cerr << "[BenchmarkKdtree] emit sample normal attributes end" << std::endl;
 	}
 	Vec3 random_sample_around(const Vec3& p, const Scalar radius, std::uniform_real_distribution<Scalar>& uni,
 							  std::mt19937& rng)
@@ -2984,6 +3548,7 @@ private:
 		if (!p.samples_mesh_ || !p.samples_position_ || !p.samples_knn_ || !p.samples_ma_position_ ||
 			!p.samples_ma_radius_ || !p.samples_ma_secondary_vertex_)
 			return;
+		std::cerr << "[BenchmarkSphereInit] init_spheres_from_samples body begin" << std::endl;
 
 		std::vector<PVertex> sorted_vertices;
 		uint32 max_sample_index = 0;
@@ -3004,6 +3569,7 @@ private:
 			const Scalar safe_rb = std::isfinite(static_cast<double>(rb)) ? rb : Scalar(-1);
 			return safe_ra > safe_rb;
 		});
+		std::cerr << "[BenchmarkSphereInit] sorted_vertices ready, count=" << sorted_vertices.size() << std::endl;
 
 		auto covered = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__covered");
 		covered->fill(false);
@@ -3115,12 +3681,15 @@ private:
 				Vec4(0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0,
 					 0.5 + 0.5 * (rand() % 256) / 256.0, 1.0);
 		}
+		std::cerr << "[BenchmarkSphereInit] sphere seeds built, nb_spheres=" << p.nb_spheres_ << std::endl;
 
 		remove_attribute<PVertex>(*p.samples_mesh_, covered);
 		if (skipped_invalid_ma_seeds > 0)
 			std::cout << "[InitSpheres] skipped_invalid_ma_seeds=" << skipped_invalid_ma_seeds << std::endl;
 
+		std::cerr << "[BenchmarkSphereInit] compute_clusters_full begin" << std::endl;
 		compute_clusters_full(p);
+		std::cerr << "[BenchmarkSphereInit] compute_clusters_full end" << std::endl;
 	}
 
 	struct SphereFitData
@@ -7756,29 +8325,20 @@ protected:
 			}
 			removed_tets_total += removed_tets_this_step;
 
-			std::cout << log_prefix << " remove#" << removed_faces_total
-					  << " face=" << candidate.face_id
-					  << " edge=" << candidate.non_manifold_edge_id
-					  << " edge_score=" << candidate.edge_score
-					  << " face_score=" << candidate.face_score
-					  << " removed_edges=" << removed_edges_this_step
-					  << " removed_vertices=" << removed_vertices_this_step
-					  << " removed_tets=" << removed_tets_this_step
-					  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
+			refresh_skeleton_topology_colors(p);
+			mark_boundary_tets_color(p);
 		}
-
-		std::cout << log_prefix << " done"
-				  << " removed_faces=" << removed_faces_total
-				  << " removed_edges=" << removed_edges_total
-				  << " removed_vertices=" << removed_vertices_total
-				  << " removed_tets=" << removed_tets_total
-				  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
 
 		refresh_skeleton_topology_colors(p);
 		mark_boundary_tets_color(p);
+		visualize_skeleton_edge_udf_scores(p);
+		std::cout << log_prefix << " removed_faces=" << removed_faces_total
+				  << " removed_edges=" << removed_edges_total
+				  << " removed_vertices=" << removed_vertices_total
+				  << " removed_tets=" << removed_tets_total << std::endl;
 	}
 
-	void run_complete_topology_fix_pipeline(PointsParameters& p)
+	void run_topology_fix_pipeline(PointsParameters& p, bool run_deg_face_deletion)
 	{
 		if (!p.skeleton_ || !p.incident_tets_)
 		{
@@ -7792,35 +8352,36 @@ protected:
 		const std::unordered_set<uint32> tet_face_whitelist = collect_current_tet_face_id_whitelist(p);
 		std::cout << "[TopologyFull] start"
 				  << " whitelist_tet_faces=" << tet_face_whitelist.size()
-				  << " initial_tets=" << p.skeleton_tets_.size() << std::endl;
+				  << " initial_tets=" << p.skeleton_tets_.size()
+				  << " deg_face_deletion=" << (run_deg_face_deletion ? "on" : "off") << std::endl;
 
-		// 1) Boundary tet mask -> boundary tet delete
 		mark_boundary_tets_color(p);
 		run_boundary_tet_face_deletion(p, "[TopologyFull]");
 		refresh_skeleton_topology_colors(p);
 
-		// 2) Edge score simple tet delete
 		run_edge_score_simple_tet_topology_fix(p);
-		// 3) Edge score non-simple tet delete
 		run_edge_score_nonsimple_tet_topology_fix(p);
 
-		// 4) Boundary tet mask -> boundary tet delete
 		mark_boundary_tets_color(p);
 		run_boundary_tet_face_deletion(p, "[TopologyFull]");
 		refresh_skeleton_topology_colors(p);
 
-		// 5) Edge score simple tet delete
 		run_edge_score_simple_tet_topology_fix(p);
 
-		// 6) Deg-face prune + orphan-edge cleanup (faces that used to be tet faces only)
-		prune_deg_faces_from_whitelist_and_orphan_edges(p, tet_face_whitelist, "[TopologyFullDeg]");
+		if (run_deg_face_deletion)
+			prune_deg_faces_from_whitelist_and_orphan_edges(p, tet_face_whitelist, "[TopologyFullDeg]");
 
 		refresh_skeleton_topology_colors(p);
-		// mark_k5_color(p);
 		mark_boundary_tets_color(p);
 		visualize_skeleton_edge_udf_scores(p);
 		std::cout << "[TopologyFull] done remaining_tets=" << p.skeleton_tets_.size() << std::endl;
 	}
+
+	void run_complete_topology_fix_pipeline(PointsParameters& p)
+	{
+		run_topology_fix_pipeline(p, true);
+	}
+
 
 	void run_topology_stage_filter_from_snapshot(PointsParameters& p, bool run_edge_stage)
 	{
@@ -8497,8 +9058,8 @@ protected:
 	{
 		const Scalar convergence_eps = Scalar(1e-10);
 		const uint32 max_post_convergence_iterations = 10;
-		const uint32 max_iterations_without_autosplit = 300;
-		const uint32 max_iterations_after_reaching_max_spheres = 100;
+		const uint32 max_iterations_without_autosplit = p.max_iterations_without_autosplit_;
+		const uint32 max_iterations_after_reaching_max_spheres = p.max_iterations_after_reaching_max_spheres_;
 		p.running_ = true;
 		p.iteration_count_ = 0;
 		p.total_error_diff_ = 0.0;
@@ -9422,3 +9983,7 @@ private:
 } // namespace cgogn
 
 #endif // CGOGN_MODULE_UDF_TRAINING_H_
+
+
+
+
