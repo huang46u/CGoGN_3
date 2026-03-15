@@ -4279,7 +4279,8 @@ private:
 
 		compute_spheres_error(p);
 
-		if (p.auto_split_ && (p.total_error_diff_ < 1e-5 || p.iteration_count_ % 10 == 0))
+		if (p.auto_split_ && !p.lock_skeleton_connectivity_ &&
+			(p.total_error_diff_ < 1e-5 || p.iteration_count_ % 10 == 0))
 		{
 			switch (p.auto_split_mode_)
 			{
@@ -4453,31 +4454,36 @@ private:
 		if (!get_sphere_fit_data(p, data))
 			return;
 		auto knn_attr = data.knn;
-		if (!data.mesh || !knn_attr || !data.sphere)
+		const bool rebuild_neighbors = !p.lock_skeleton_connectivity_;
+		if (!data.mesh || !data.sphere)
 			return;
-		// clear graph
-		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*p.spheres_, v);
-			(*p.spheres_neighbor_clusters_)[v_index].clear();
-			return true;
-		});
+		if (rebuild_neighbors && !knn_attr)
+			return;
+		if (rebuild_neighbors)
+		{
+			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+				uint32 v_index = index_of(*p.spheres_, v);
+				(*p.spheres_neighbor_clusters_)[v_index].clear();
+				return true;
+			});
 
-		foreach_cell(*data.mesh, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*data.mesh, v);
-			PVertex v_sphere = (*data.sphere)[v_index];
-			for (PVertex w : (*knn_attr)[v_index])
-			{
-				PVertex w_sphere = (*data.sphere)[index_of(*data.mesh, w)];
-				if (v_sphere.is_valid() && w_sphere.is_valid() && v_sphere != w_sphere)
+			foreach_cell(*data.mesh, [&](PVertex v) -> bool {
+				uint32 v_index = index_of(*data.mesh, v);
+				PVertex v_sphere = (*data.sphere)[v_index];
+				for (PVertex w : (*knn_attr)[v_index])
 				{
-					uint32 v_index = index_of(*p.spheres_, v_sphere);
-					uint32 w_index = index_of(*p.spheres_, w_sphere);
-					(*p.spheres_neighbor_clusters_)[v_index].insert(w_sphere);
-					(*p.spheres_neighbor_clusters_)[w_index].insert(v_sphere);
+					PVertex w_sphere = (*data.sphere)[index_of(*data.mesh, w)];
+					if (v_sphere.is_valid() && w_sphere.is_valid() && v_sphere != w_sphere)
+					{
+						uint32 v_index = index_of(*p.spheres_, v_sphere);
+						uint32 w_index = index_of(*p.spheres_, w_sphere);
+						(*p.spheres_neighbor_clusters_)[v_index].insert(w_sphere);
+						(*p.spheres_neighbor_clusters_)[w_index].insert(v_sphere);
+					}
 				}
-			}
-			return true;
-		});
+				return true;
+			});
+		}
 
 		if (only_neighbors)
 			return;
@@ -8461,8 +8467,23 @@ protected:
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
 
-		compute_skeleton(p);
-		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
+		if (p.lock_skeleton_connectivity_ && p.skeleton_ && p.skeleton_position_ && p.spheres_ && p.spheres_position_ &&
+			nb_cells<NMVertex>(*p.skeleton_) == nb_cells<PVertex>(*p.spheres_))
+		{
+			foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
+				const uint32 sphere_index = index_of(*p.spheres_, pv);
+				const NMVertex nmv = of_index<NMVertex>(*p.skeleton_, sphere_index);
+				if (!nmv.is_valid())
+					return true;
+				(*p.skeleton_position_)[index_of(*p.skeleton_, nmv)] = (*p.spheres_position_)[sphere_index];
+				return true;
+			});
+		}
+		else
+		{
+			compute_skeleton(p);
+			non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
+		}
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
 	}
 
