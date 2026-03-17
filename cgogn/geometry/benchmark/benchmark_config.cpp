@@ -3,8 +3,10 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <stdexcept>
+#include <vector>
 
 namespace cgogn
 {
@@ -19,6 +21,7 @@ namespace
 {
 
 using boost::property_tree::ptree;
+namespace fs = std::filesystem;
 
 [[noreturn]] void fail_config(const std::string& message)
 {
@@ -52,6 +55,72 @@ std::string resolve_config_relative_path(const std::filesystem::path& config_dir
 	return std::filesystem::absolute(config_directory / path).lexically_normal().string();
 }
 
+bool has_matching_extension(const fs::path& path, const std::string& extension)
+{
+	if (extension.empty())
+		return true;
+	return path.extension().string() == extension;
+}
+
+std::vector<fs::path> collect_input_files(const fs::path& directory, const std::string& extension, bool recursive)
+{
+	std::vector<fs::path> files;
+	if (!fs::exists(directory))
+		fail_config("batch input directory does not exist: " + directory.string());
+	if (!fs::is_directory(directory))
+		fail_config("batch input directory is not a directory: " + directory.string());
+
+	if (recursive)
+	{
+		for (const auto& entry : fs::recursive_directory_iterator(directory))
+		{
+			if (entry.is_regular_file() && has_matching_extension(entry.path(), extension))
+				files.push_back(entry.path().lexically_normal());
+		}
+	}
+	else
+	{
+		for (const auto& entry : fs::directory_iterator(directory))
+		{
+			if (entry.is_regular_file() && has_matching_extension(entry.path(), extension))
+				files.push_back(entry.path().lexically_normal());
+		}
+	}
+
+	std::sort(files.begin(), files.end(), [](const fs::path& lhs, const fs::path& rhs) {
+		return lhs.filename().string() < rhs.filename().string();
+	});
+	return files;
+}
+
+fs::path find_surface_file_for_case(const BenchmarkBatchConfig& batch, const std::string& stem)
+{
+	if (batch.surface_directory.empty())
+		return {};
+
+	const fs::path surface_dir(batch.surface_directory);
+	if (!fs::exists(surface_dir))
+		fail_config("batch surface directory does not exist: " + surface_dir.string());
+
+	if (!batch.surface_extension.empty())
+	{
+		const fs::path candidate = surface_dir / (stem + batch.surface_extension);
+		if (!fs::exists(candidate))
+			fail_config("missing batch surface file for case `" + stem + "`: " + candidate.string());
+		return candidate.lexically_normal();
+	}
+
+	static const char* kDefaultSurfaceExtensions[] = {".obj", ".ply", ".off", ".stl"};
+	for (const char* ext : kDefaultSurfaceExtensions)
+	{
+		const fs::path candidate = surface_dir / (stem + ext);
+		if (fs::exists(candidate))
+			return candidate.lexically_normal();
+	}
+
+	fail_config("missing batch surface file for case `" + stem + "` in directory: " + surface_dir.string());
+}
+
 InputMode parse_input_mode(const std::string& value)
 {
 	if (value == "point_cloud")
@@ -74,9 +143,9 @@ NeuralModelType parse_neural_model_type(const std::string& value)
 
 DistanceMode parse_distance_mode(const std::string& value)
 {
-	if (value == "line_quadric_distance")
+	if (value == "line_quadric_distance_fix_r" || value == "line_quadric_distance")
 		return DistanceMode::LineQuadricDistance;
-	if (value == "line_quadric_distance_free_radius")
+	if (value == "line_quadric_distance_free_r" || value == "line_quadric_distance_free_radius")
 		return DistanceMode::LineQuadricDistanceFreeRadius;
 	fail_config("unsupported `optimization.distance_mode`: " + value);
 }
@@ -133,8 +202,8 @@ std::string to_string(NeuralModelType value)
 
 std::string to_string(DistanceMode value)
 {
-	return value == DistanceMode::LineQuadricDistanceFreeRadius ? "line_quadric_distance_free_radius"
-																 : "line_quadric_distance";
+	return value == DistanceMode::LineQuadricDistanceFreeRadius ? "line_quadric_distance_free_r"
+																 : "line_quadric_distance_fix_r";
 }
 
 std::string to_string(SphereCorrectionMode value)
@@ -163,13 +232,13 @@ std::string to_string(InitialMAMode value)
 
 BenchmarkConfig load_benchmark_config(const std::string& path)
 {
-	const std::filesystem::path config_path = std::filesystem::absolute(path).lexically_normal();
-	if (!std::filesystem::exists(config_path))
+	const fs::path config_path = fs::absolute(path).lexically_normal();
+	if (!fs::exists(config_path))
 		fail_config("config file does not exist: " + config_path.string());
 
 	ptree root;
 	boost::property_tree::read_json(config_path.string(), root);
-	const std::filesystem::path config_directory = config_path.parent_path();
+	const fs::path config_directory = config_path.parent_path();
 
 	BenchmarkConfig config;
 	config.config_path = config_path.string();
@@ -247,23 +316,56 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	config.benchmark.num_measure_runs = get_value<int>(benchmark_tree, "num_measure_runs", 1);
 	config.benchmark.verbose = get_value<bool>(benchmark_tree, "verbose", true);
 
+	if (auto batch = root.get_child_optional("batch"))
+	{
+		config.batch.enabled = get_value<bool>(*batch, "enabled", false);
+		config.batch.input_directory =
+			resolve_config_relative_path(config_directory, get_value<std::string>(*batch, "input_directory", ""));
+		config.batch.surface_directory =
+			resolve_config_relative_path(config_directory, get_value<std::string>(*batch, "surface_directory", ""));
+		config.batch.neural_udf_model_directory = resolve_config_relative_path(
+			config_directory, get_value<std::string>(*batch, "neural_udf_model_directory", ""));
+		config.batch.input_extension = get_value<std::string>(*batch, "input_extension", ".ply");
+		config.batch.surface_extension = get_value<std::string>(*batch, "surface_extension", "");
+		config.batch.neural_udf_model_extension =
+			get_value<std::string>(*batch, "neural_udf_model_extension", ".pt");
+		config.batch.recursive = get_value<bool>(*batch, "recursive", false);
+		config.batch.output_directory =
+			resolve_config_relative_path(config_directory, get_value<std::string>(*batch, "output_directory", ""));
+		config.batch.timing_directory =
+			resolve_config_relative_path(config_directory, get_value<std::string>(*batch, "timing_directory", ""));
+	}
+
 	const ptree& output = root.get_child("output");
-	config.output.skeleton_ply = resolve_config_relative_path(
-		config_directory, require_value<std::string>(output, "skeleton_ply"));
+	config.output.skeleton_ply =
+		resolve_config_relative_path(config_directory, get_value<std::string>(output, "skeleton_ply", ""));
 	config.output.timing_json =
 		resolve_config_relative_path(config_directory, get_value<std::string>(output, "timing_json", ""));
 
 	if (config.benchmark.num_measure_runs != 1)
 		fail_config("`benchmark.num_measure_runs` is reserved in v1 and must be `1`");
-	if (config.input.mode == InputMode::NeuralUDF)
+	if (config.input.mode == InputMode::NeuralUDF && !config.batch.enabled)
 	{
 		if (config.input.neural_udf_model_path.empty())
 			fail_config("`input.neural_udf_model_path` is required when `input.mode` is `neural_udf`");
-		if (!std::filesystem::exists(config.input.neural_udf_model_path))
+		if (!fs::exists(config.input.neural_udf_model_path))
 			fail_config("neural model does not exist: " + config.input.neural_udf_model_path);
 	}
-	if (config.input.input_path.empty() && config.input.surface_path.empty())
+	if (config.batch.enabled)
+	{
+		if (config.batch.input_directory.empty())
+			fail_config("`batch.input_directory` is required when `batch.enabled` is true");
+		if (config.batch.output_directory.empty())
+			fail_config("`batch.output_directory` is required when `batch.enabled` is true");
+		if (config.input.mode == InputMode::NeuralUDF && config.batch.neural_udf_model_directory.empty())
+			fail_config("`batch.neural_udf_model_directory` is required when `input.mode` is `neural_udf`");
+	}
+	else if (config.input.input_path.empty() && config.input.surface_path.empty())
+	{
 		fail_config("one of `input.input_path` or `input.surface_path` must be provided");
+	}
+	if (!config.batch.enabled && config.output.skeleton_ply.empty())
+		fail_config("`output.skeleton_ply` is required in single-run mode");
 	if (config.initialization.initial_nb_spheres == 0)
 		fail_config("`initialization.initial_nb_spheres` must be > 0");
 	if (config.optimization.max_iterations_without_autosplit == 0)
@@ -284,6 +386,63 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	}
 
 	return config;
+}
+
+bool is_batch_benchmark_config(const BenchmarkConfig& config)
+{
+	return config.batch.enabled;
+}
+
+std::vector<BenchmarkConfig> expand_batch_benchmark_configs(const BenchmarkConfig& base_config)
+{
+	if (!base_config.batch.enabled)
+		return {base_config};
+
+	const fs::path input_directory(base_config.batch.input_directory);
+	const auto input_files =
+		collect_input_files(input_directory, base_config.batch.input_extension, base_config.batch.recursive);
+	if (input_files.empty())
+		fail_config("no batch input files found in: " + input_directory.string());
+
+	std::vector<BenchmarkConfig> expanded_configs;
+	expanded_configs.reserve(input_files.size());
+
+	for (const fs::path& input_file : input_files)
+	{
+		BenchmarkConfig config = base_config;
+		const std::string stem = input_file.stem().string();
+		config.input.input_path = input_file.string();
+		config.input.surface_path.clear();
+		config.input.neural_udf_model_path.clear();
+
+		if (!config.batch.surface_directory.empty())
+			config.input.surface_path = find_surface_file_for_case(config.batch, stem).string();
+
+		if (config.input.mode == InputMode::NeuralUDF)
+		{
+			const fs::path model_path =
+				fs::path(config.batch.neural_udf_model_directory) / (stem + config.batch.neural_udf_model_extension);
+			if (!fs::exists(model_path))
+				fail_config("missing batch neural model for case `" + stem + "`: " + model_path.string());
+			config.input.neural_udf_model_path = model_path.lexically_normal().string();
+		}
+
+		config.output.skeleton_ply =
+			(fs::path(config.batch.output_directory) / (stem + ".ply")).lexically_normal().string();
+		if (!config.batch.timing_directory.empty())
+		{
+			config.output.timing_json =
+				(fs::path(config.batch.timing_directory) / (stem + "_timing.json")).lexically_normal().string();
+		}
+		else
+		{
+			config.output.timing_json.clear();
+		}
+
+		expanded_configs.push_back(std::move(config));
+	}
+
+	return expanded_configs;
 }
 
 } // namespace benchmark

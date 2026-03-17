@@ -9,6 +9,7 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 
 namespace cgogn
@@ -27,6 +28,32 @@ double seconds_from_milliseconds(double value_ms)
 {
 	return value_ms / 1000.0;
 }
+
+class ScopedStreamSilencer
+{
+public:
+	explicit ScopedStreamSilencer(bool enabled) : enabled_(enabled)
+	{
+		if (!enabled_)
+			return;
+		old_cout_ = std::cout.rdbuf(null_stream_.rdbuf());
+		old_cerr_ = std::cerr.rdbuf(null_stream_.rdbuf());
+	}
+
+	~ScopedStreamSilencer()
+	{
+		if (!enabled_)
+			return;
+		std::cout.rdbuf(old_cout_);
+		std::cerr.rdbuf(old_cerr_);
+	}
+
+private:
+	bool enabled_ = false;
+	std::streambuf* old_cout_ = nullptr;
+	std::streambuf* old_cerr_ = nullptr;
+	std::ostringstream null_stream_;
+};
 
 template <typename Training>
 typename Training::HeadlessBenchmarkOptions make_training_options(const BenchmarkConfig& config)
@@ -49,23 +76,21 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 	}
 	options.sphere_correction_ = config.optimization.sphere_correction;
 	options.sphere_correction_mode_ = (config.optimization.sphere_correction_mode == SphereCorrectionMode::OnSplit)
-									 ? Training::CORRECT_ON_SPLIT
-									 : Training::CORRECT_ALWAYS;
+										  ? Training::CORRECT_ON_SPLIT
+										  : Training::CORRECT_ALWAYS;
 	options.lock_skeleton_connectivity_ = config.optimization.lock_skeleton_connectivity;
 	options.distance_mode_ = (config.optimization.distance_mode == DistanceMode::LineQuadricDistanceFreeRadius)
-							 ? Training::LINE_QUADRIC_DISTANCE_FREE_RADIUS
-							 : Training::LINE_QUADRIC_DISTANCE;
+								 ? Training::LINE_QUADRIC_DISTANCE_FREE_RADIUS
+								 : Training::LINE_QUADRIC_DISTANCE;
 	options.use_local_clusters_ = config.optimization.use_local_clusters;
 	options.local_cluster_connectivity_refresh_interval_ =
 		config.optimization.local_cluster_connectivity_refresh_interval;
 	options.auto_stop_ = config.optimization.auto_stop;
 	options.max_iterations_without_autosplit_ = config.optimization.max_iterations_without_autosplit;
-	options.max_iterations_after_reaching_max_spheres_ =
-		config.optimization.max_iterations_after_reaching_max_spheres;
+	options.max_iterations_after_reaching_max_spheres_ = config.optimization.max_iterations_after_reaching_max_spheres;
 	options.auto_split_ = config.auto_split.enabled;
-	options.auto_split_mode_ = (config.auto_split.mode == AutoSplitMode::MaxNbSpheres)
-							 ? Training::MAX_NB_SPHERES
-							 : Training::ERROR_THRESHOLD;
+	options.auto_split_mode_ =
+		(config.auto_split.mode == AutoSplitMode::MaxNbSpheres) ? Training::MAX_NB_SPHERES : Training::ERROR_THRESHOLD;
 	options.auto_split_error_threshold_ = config.auto_split.error_threshold;
 	options.auto_split_max_nb_spheres_ = config.auto_split.max_nb_spheres;
 	options.auto_split_ratio_ = config.auto_split.ratio;
@@ -114,163 +139,167 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	result.seed = config.initialization.seed;
 
 	Points* points = nullptr;
-	log_stage("input_loading_begin");
 	{
-		ScopedBenchmarkTimer timer(result.timing.input_loading_ms);
-		const bool normalize_for_udf =
-			(config.input.mode == InputMode::NeuralUDF && config.input.neural_model_type == NeuralModelType::UDF);
-		switch (config.input.mode)
+		ScopedStreamSilencer silence_internal_output(!config.benchmark.verbose);
+
+		log_stage("input_loading_begin");
 		{
-		case InputMode::PointCloud:
-			points = &core.load_point_cloud_input(config.input.input_path, normalize_for_udf);
-			break;
-		case InputMode::SurfaceMesh:
-			core.load_surface_input(config.input.input_path, normalize_for_udf);
-			points = &core.create_empty_points_input("input_points");
-			break;
-		case InputMode::NeuralUDF:
-			if (!config.input.surface_path.empty())
+			ScopedBenchmarkTimer timer(result.timing.input_loading_ms);
+			const bool normalize_for_udf =
+				(config.input.mode == InputMode::NeuralUDF && config.input.neural_model_type == NeuralModelType::UDF);
+			switch (config.input.mode)
 			{
-				core.load_surface_input(config.input.surface_path, normalize_for_udf);
-				points = &core.create_empty_points_input("input_points");
-			}
-			else
-			{
+			case InputMode::PointCloud:
 				points = &core.load_point_cloud_input(config.input.input_path, normalize_for_udf);
+				break;
+			case InputMode::SurfaceMesh:
+				core.load_surface_input(config.input.input_path, normalize_for_udf);
+				points = &core.create_empty_points_input("input_points");
+				break;
+			case InputMode::NeuralUDF:
+				if (!config.input.surface_path.empty())
+				{
+					core.load_surface_input(config.input.surface_path, normalize_for_udf);
+					points = &core.create_empty_points_input("input_points");
+				}
+				else
+				{
+					points = &core.load_point_cloud_input(config.input.input_path, normalize_for_udf);
+				}
+				break;
 			}
-			break;
 		}
-	}
-	log_stage("input_loading_end");
+		log_stage("input_loading_end");
 
-	if (!points)
-		throw std::runtime_error("Benchmark pipeline did not initialize a valid point container.");
+		if (!points)
+			throw std::runtime_error("Benchmark pipeline did not initialize a valid point container.");
+		core.prepare_points(*points);
 
-	const auto options = make_training_options<Training>(config);
-	log_stage("preprocess_begin");
-	{
-		ScopedBenchmarkTimer timer(result.timing.preprocess_ms);
-		core.apply_options(*points, options);
-		if (config.input.mode == InputMode::NeuralUDF)
+		const auto options = make_training_options<Training>(config);
+		log_stage("preprocess_begin");
 		{
-			const auto model_type = (config.input.neural_model_type == NeuralModelType::MF)
-									? Training::NEURAL_MODEL_MF
-									: Training::NEURAL_MODEL_UDF;
-			core.load_neural_model(*points, config.input.neural_udf_model_path, model_type);
+			ScopedBenchmarkTimer timer(result.timing.preprocess_ms);
+			core.apply_options_prepared(*points, options);
+			if (config.input.mode == InputMode::NeuralUDF)
+			{
+				const auto model_type = (config.input.neural_model_type == NeuralModelType::MF)
+											? Training::NEURAL_MODEL_MF
+											: Training::NEURAL_MODEL_UDF;
+				core.load_neural_model(*points, config.input.neural_udf_model_path, model_type);
+			}
 		}
-	}
-	log_stage("preprocess_end");
+		log_stage("preprocess_end");
 
-	log_stage("sampling_begin");
-	{
-		ScopedBenchmarkTimer timer(result.timing.sampling_ms);
-		core.sample_alpha_level_set(*points, options);
-	}
-	log_stage("sampling_end");
+		log_stage("sampling_begin");
+		{
+			ScopedBenchmarkTimer timer(result.timing.sampling_ms);
+			core.sample_alpha_level_set_prepared(*points, options);
+		}
+		log_stage("sampling_end");
 
-	{
-		const auto sampled_counts = core.collect_counts(*points);
-		result.counts.sample_points_before_filtering = sampled_counts.sample_points_;
-	}
+		{
+			const auto sampled_counts = core.collect_counts(*points);
+			result.counts.sample_points_before_filtering = sampled_counts.sample_points_;
+		}
 
-	if (config.sampling.apply_filtering)
-	{
-		log_stage("sample_filtering_begin");
-		ScopedBenchmarkTimer timer(result.timing.sample_filtering_ms);
-		core.apply_sampling_filtering(*points);
-		log_stage("sample_filtering_end");
-	}
-	else
-	{
-		result.timing.sample_filtering_ms = 0.0;
-	}
+		if (config.sampling.apply_filtering)
+		{
+			log_stage("sample_filtering_begin");
+			ScopedBenchmarkTimer timer(result.timing.sample_filtering_ms);
+			core.apply_sampling_filtering_prepared(*points);
+			log_stage("sample_filtering_end");
+		}
+		else
+		{
+			result.timing.sample_filtering_ms = 0.0;
+		}
 
-	log_stage("kdtree_begin");
-	{
-		ScopedBenchmarkTimer timer(result.timing.kdtree_bvh_ms);
-		core.build_kdtree_and_normals(*points);
-	}
-	log_stage("kdtree_end");
+		log_stage("kdtree_begin");
+		{
+			ScopedBenchmarkTimer timer(result.timing.kdtree_bvh_ms);
+			core.build_kdtree_and_normals_prepared(*points);
+		}
+		log_stage("kdtree_end");
 
-	log_stage("fitting_begin");
-	{
-		ScopedBenchmarkTimer timer(result.timing.fitting_data_ms);
-		core.compute_samples_area(*points);
-		core.compute_winding_numbers(*points);
-		core.compute_quadrics(*points);
-	}
-	log_stage("fitting_end");
+		log_stage("fitting_begin");
+		{
+			ScopedBenchmarkTimer timer(result.timing.fitting_data_ms);
+			core.compute_fitting_primitives_prepared(*points);
+		}
+		log_stage("fitting_end");
 
-	log_stage("initial_ma_begin");
-	{
-		ScopedBenchmarkTimer timer(result.timing.initial_medial_axis_ms);
-		core.compute_initial_medial_axis(*points);
-	}
-	log_stage("initial_ma_end");
+		log_stage("initial_ma_begin");
+		{
+			ScopedBenchmarkTimer timer(result.timing.initial_medial_axis_ms);
+			core.compute_initial_medial_axis_prepared(*points);
+		}
+		log_stage("initial_ma_end");
 
-	log_stage("sphere_init_begin");
-	{
-		ScopedBenchmarkTimer timer(result.timing.sphere_initialization_ms);
-		core.init_spheres(*points, options.initial_nb_spheres_);
-	}
-	log_stage("sphere_init_end");
+		log_stage("sphere_init_begin");
+		{
+			ScopedBenchmarkTimer timer(result.timing.sphere_initialization_ms);
+			core.init_spheres_prepared(*points, options.initial_nb_spheres_);
+		}
+		log_stage("sphere_init_end");
 
-	log_stage("optimization_begin");
-	{
-		const auto stats = core.optimize(*points, config.benchmark.verbose);
-		result.timing.optimization_total_ms = stats.optimization_total_ms_;
-		result.timing.cluster_total_ms = stats.cluster_total_ms_;
-		result.timing.sphere_update_total_ms = stats.sphere_update_total_ms_;
-		result.timing.error_total_ms = stats.error_total_ms_;
-		result.timing.split_total_ms = stats.split_total_ms_;
-		result.timing.average_iteration_ms = stats.average_iteration_ms_;
-	}
-	log_stage("optimization_end");
+		log_stage("optimization_begin");
+		{
+			const auto stats = core.optimize_prepared(*points, config.benchmark.verbose);
+			result.timing.optimization_total_ms = stats.optimization_total_ms_;
+			result.timing.cluster_total_ms = stats.cluster_total_ms_;
+			result.timing.sphere_update_total_ms = stats.sphere_update_total_ms_;
+			result.timing.error_total_ms = stats.error_total_ms_;
+			result.timing.split_total_ms = stats.split_total_ms_;
+			result.timing.average_iteration_ms = stats.average_iteration_ms_;
+		}
+		log_stage("optimization_end");
 
-	log_stage("skeleton_begin");
-	{
-		ScopedBenchmarkTimer timer(result.timing.skeleton_construction_ms);
-		core.build_skeleton(*points);
-	}
-	log_stage("skeleton_end");
+		log_stage("skeleton_begin");
+		{
+			ScopedBenchmarkTimer timer(result.timing.skeleton_construction_ms);
+			core.build_skeleton_prepared(*points);
+		}
+		log_stage("skeleton_end");
 
-	if (config.postprocess.topology_fix || config.postprocess.deg_face_deletion || config.postprocess.face_post_processing)
-	{
-		log_stage("postprocess_begin");
-		ScopedBenchmarkTimer timer(result.timing.postprocess_ms);
-		if (config.postprocess.topology_fix)
-			core.run_topology_fix(*points, config.postprocess.deg_face_deletion);
-		else if (config.postprocess.deg_face_deletion)
-			core.run_deg_face_deletion(*points);
-		if (config.postprocess.face_post_processing)
-			core.run_face_post_processing(*points);
-		log_stage("postprocess_end");
-	}
-	else
-	{
-		result.timing.postprocess_ms = 0.0;
-	}
+		if (config.postprocess.topology_fix || config.postprocess.deg_face_deletion ||
+			config.postprocess.face_post_processing)
+		{
+			log_stage("postprocess_begin");
+			ScopedBenchmarkTimer timer(result.timing.postprocess_ms);
+			if (config.postprocess.topology_fix)
+				core.run_topology_fix_prepared(*points, config.postprocess.deg_face_deletion);
+			else if (config.postprocess.deg_face_deletion)
+				core.run_deg_face_deletion_prepared(*points);
+			if (config.postprocess.face_post_processing)
+				core.run_face_post_processing_prepared(*points);
+			log_stage("postprocess_end");
+		}
+		else
+		{
+			result.timing.postprocess_ms = 0.0;
+		}
 
-	log_stage("export_begin");
-	{
-		ScopedBenchmarkTimer timer(result.timing.export_ms);
-		core.export_skeleton_ply(*points, config.output.skeleton_ply);
-		if (!std::filesystem::exists(config.output.skeleton_ply))
-			throw std::runtime_error("Skeleton export did not create file: " + config.output.skeleton_ply);
-	}
-	log_stage("export_end");
+		log_stage("export_begin");
+		{
+			ScopedBenchmarkTimer timer(result.timing.export_ms);
+			core.export_skeleton_ply_prepared(*points, config.output.skeleton_ply);
+			if (!std::filesystem::exists(config.output.skeleton_ply))
+				throw std::runtime_error("Skeleton export did not create file: " + config.output.skeleton_ply);
+		}
+		log_stage("export_end");
 
-	const auto counts = core.collect_counts(*points);
-	result.counts.input_vertices = counts.input_vertices_;
-	result.counts.input_points = counts.input_points_;
-	result.counts.sample_points = counts.sample_points_;
-	if (result.counts.sample_points_before_filtering == 0)
-		result.counts.sample_points_before_filtering = counts.sample_points_;
-	result.counts.final_spheres = counts.final_spheres_;
-	result.counts.skeleton_vertices = counts.skeleton_vertices_;
-	result.counts.skeleton_edges = counts.skeleton_edges_;
-	result.counts.skeleton_faces = counts.skeleton_faces_;
-	result.counts.optimization_iterations = counts.optimization_iterations_;
+		const auto counts = core.collect_counts(*points);
+		result.counts.input_vertices = counts.input_vertices_;
+		result.counts.input_points = counts.input_points_;
+		result.counts.sample_points = counts.sample_points_;
+		if (result.counts.sample_points_before_filtering == 0)
+			result.counts.sample_points_before_filtering = counts.sample_points_;
+		result.counts.final_spheres = counts.final_spheres_;
+		result.counts.skeleton_vertices = counts.skeleton_vertices_;
+		result.counts.skeleton_edges = counts.skeleton_edges_;
+		result.counts.skeleton_faces = counts.skeleton_faces_;
+		result.counts.optimization_iterations = counts.optimization_iterations_;
+	}
 
 	std::cout << "Input mode: " << result.input_mode << std::endl;
 	std::cout << "Input path: " << result.input_path << std::endl;
@@ -282,8 +311,11 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	std::cout << "Samples: " << result.counts.sample_points_before_filtering << " -> " << result.counts.sample_points
 			  << std::endl;
 	std::cout << "Final spheres: " << result.counts.final_spheres << std::endl;
+	const long long euler_characteristic = static_cast<long long>(result.counts.skeleton_vertices) -
+		static_cast<long long>(result.counts.skeleton_edges) +
+		static_cast<long long>(result.counts.skeleton_faces);
 	std::cout << "Skeleton V/E/F: " << result.counts.skeleton_vertices << "/" << result.counts.skeleton_edges << "/"
-			  << result.counts.skeleton_faces << std::endl;
+			  << result.counts.skeleton_faces << "  Euler X=" << euler_characteristic << std::endl;
 	std::cout << "Optimization iterations: " << result.counts.optimization_iterations << std::endl;
 	return result;
 }
@@ -305,9 +337,9 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	benchmark_config.put("input.initial_ma_mode_override", to_string(config.input.initial_ma_mode_override));
 	benchmark_config.put("auto_split.enabled", config.auto_split.enabled);
 	benchmark_config.put("optimization.max_iterations_without_autosplit",
-		config.optimization.max_iterations_without_autosplit);
+						 config.optimization.max_iterations_without_autosplit);
 	benchmark_config.put("optimization.max_iterations_after_reaching_max_spheres",
-		config.optimization.max_iterations_after_reaching_max_spheres);
+						 config.optimization.max_iterations_after_reaching_max_spheres);
 	benchmark_config.put("postprocess.topology_fix", config.postprocess.topology_fix);
 	benchmark_config.put("postprocess.deg_face_deletion", config.postprocess.deg_face_deletion);
 	benchmark_config.put("postprocess.face_post_processing", config.postprocess.face_post_processing);

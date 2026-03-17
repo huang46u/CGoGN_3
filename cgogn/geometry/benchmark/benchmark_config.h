@@ -2,6 +2,7 @@
 #define CGOGN_GEOMETRY_BENCHMARK_CONFIG_H_
 
 #include <string>
+#include <vector>
 
 namespace cgogn
 {
@@ -129,6 +130,20 @@ struct BenchmarkOutputConfig
 	std::string timing_json;
 };
 
+struct BenchmarkBatchConfig
+{
+	bool enabled = false;
+	std::string input_directory;
+	std::string surface_directory;
+	std::string neural_udf_model_directory;
+	std::string input_extension = ".ply";
+	std::string surface_extension;
+	std::string neural_udf_model_extension = ".pt";
+	bool recursive = false;
+	std::string output_directory;
+	std::string timing_directory;
+};
+
 struct BenchmarkConfig
 {
 	std::string config_path;
@@ -140,9 +155,12 @@ struct BenchmarkConfig
 	BenchmarkPostprocessConfig postprocess;
 	BenchmarkRuntimeConfig benchmark;
 	BenchmarkOutputConfig output;
+	BenchmarkBatchConfig batch;
 };
 
 BenchmarkConfig load_benchmark_config(const std::string& path);
+std::vector<BenchmarkConfig> expand_batch_benchmark_configs(const BenchmarkConfig& base_config);
+bool is_batch_benchmark_config(const BenchmarkConfig& config);
 
 std::string to_string(InputMode value);
 std::string to_string(NeuralModelType value);

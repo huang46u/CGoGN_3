@@ -31,14 +31,11 @@ public:
 
 	Points& load_point_cloud_input(const std::string& input_path, bool normalize_for_udf)
 	{
-		std::cerr << "[BenchmarkInput] load_point_cloud_input begin: " << input_path << std::endl;
 		Points* points = context_.points_provider.load_points_from_file(input_path);
-		std::cerr << "[BenchmarkInput] load_points_from_file returned" << std::endl;
 		if (!points)
 			throw std::runtime_error("Failed to load point cloud: " + input_path);
 
 		auto position = get_attribute<Vec3, PVertex>(*points, "position");
-		std::cerr << "[BenchmarkInput] get_attribute(position) returned" << std::endl;
 		if (!position)
 			throw std::runtime_error("Point cloud has no `position` attribute: " + input_path);
 
@@ -48,13 +45,9 @@ public:
 			context_.points_provider.emit_attribute_changed(*points, position.get());
 		}
 
-		std::cerr << "[BenchmarkInput] set_mesh_bb_vertex_position begin" << std::endl;
 		context_.points_provider.set_mesh_bb_vertex_position(*points, position);
-		std::cerr << "[BenchmarkInput] set_mesh_bb_vertex_position end" << std::endl;
 		context_.selected_points = points;
-		std::cerr << "[BenchmarkInput] set_selected_points begin" << std::endl;
 		context_.udf_training.set_selected_points(*points);
-		std::cerr << "[BenchmarkInput] set_selected_points end" << std::endl;
 		return *points;
 	}
 
@@ -94,79 +87,69 @@ public:
 		context_.udf_training.load_neural_udf_model(points, model_path, model_type);
 	}
 
-	void apply_options(Points& points, const typename Training::HeadlessBenchmarkOptions& options)
+	void prepare_points(Points& points)
 	{
-		context_.udf_training.apply_headless_benchmark_options(points, options);
+		context_.udf_training.headless_prepare_points(points);
 	}
 
-	void sample_alpha_level_set(Points& points, const typename Training::HeadlessBenchmarkOptions& options)
+	void apply_options_prepared(Points& points, const typename Training::HeadlessBenchmarkOptions& options)
 	{
-		context_.udf_training.headless_sample_alpha_level_set(points, options);
+		context_.udf_training.apply_headless_benchmark_options_prepared(points, options);
 	}
 
-	void apply_poisson_eliminate(Points& points, size_t target_num)
+	void sample_alpha_level_set_prepared(Points& points, const typename Training::HeadlessBenchmarkOptions& options)
 	{
-		context_.udf_training.headless_apply_poisson_eliminate(points, target_num);
+		context_.udf_training.headless_sample_alpha_level_set_prepared(points, options);
 	}
 
-	void apply_sampling_filtering(Points& points)
+	void apply_sampling_filtering_prepared(Points& points)
 	{
-		context_.udf_training.headless_apply_sampling_filtering(points);
+		context_.udf_training.headless_apply_sampling_filtering_prepared(points);
 	}
 
-	void build_kdtree_and_normals(Points& points)
+	void build_kdtree_and_normals_prepared(Points& points)
 	{
-		context_.udf_training.headless_build_sample_kdtree_and_normals(points);
+		context_.udf_training.headless_build_sample_kdtree_and_normals_prepared(points);
 	}
 
-	void compute_samples_area(Points& points)
+	void compute_fitting_primitives_prepared(Points& points)
 	{
-		context_.udf_training.headless_compute_samples_area(points);
+		context_.udf_training.headless_compute_fitting_primitives_prepared(points);
 	}
 
-	void compute_winding_numbers(Points& points)
+	void compute_initial_medial_axis_prepared(Points& points)
 	{
-		context_.udf_training.headless_compute_winding_numbers(points);
+		context_.udf_training.headless_compute_initial_medial_axis_prepared(points);
 	}
 
-	void compute_quadrics(Points& points)
+	void init_spheres_prepared(Points& points, unsigned int max_nb_spheres)
 	{
-		context_.udf_training.headless_compute_quadrics(points);
+		context_.udf_training.headless_init_spheres_prepared(points, max_nb_spheres);
 	}
 
-	void compute_initial_medial_axis(Points& points)
+	typename Training::HeadlessOptimizationStats optimize_prepared(Points& points, bool verbose)
 	{
-		context_.udf_training.headless_compute_initial_medial_axis(points);
+		return context_.udf_training.headless_optimize_spheres_prepared(points, verbose);
 	}
 
-	void init_spheres(Points& points, unsigned int max_nb_spheres)
+	void build_skeleton_prepared(Points& points)
 	{
-		context_.udf_training.headless_init_spheres(points, max_nb_spheres);
+		context_.udf_training.headless_build_skeleton_prepared(points);
 	}
 
-	typename Training::HeadlessOptimizationStats optimize(Points& points, bool verbose)
+	void run_topology_fix_prepared(Points& points, bool run_deg_face_deletion)
 	{
-		return context_.udf_training.headless_optimize_spheres(points, verbose);
+		context_.udf_training.headless_run_topology_fix_prepared(points, run_deg_face_deletion);
 	}
 
-	void build_skeleton(Points& points)
+	void run_deg_face_deletion_prepared(Points& points)
 	{
-		context_.udf_training.headless_build_skeleton(points);
+		context_.udf_training.headless_run_deg_face_deletion_prepared(points);
 	}
 
-	void run_topology_fix(Points& points, bool run_deg_face_deletion)
+	void run_face_post_processing_prepared(Points& points)
 	{
-		context_.udf_training.headless_run_topology_fix(points, run_deg_face_deletion);
-	}
-
-	void run_deg_face_deletion(Points& points)
-	{
-		context_.udf_training.headless_run_deg_face_deletion(points);
-	}
-
-	void run_face_post_processing(Points& points)
-	{
-		context_.udf_training.headless_run_face_post_processing(points);
+		context_.udf_training.headless_run_face_post_processing_prepared(points);
 	}
 
 	typename Training::HeadlessCounts collect_counts(const Points& points) const
@@ -174,9 +157,9 @@ public:
 		return context_.udf_training.headless_collect_counts(points);
 	}
 
-	void export_skeleton_ply(Points& points, const std::string& filename)
+	void export_skeleton_ply_prepared(Points& points, const std::string& filename)
 	{
-		context_.udf_training.headless_export_skeleton_ply(points, filename);
+		context_.udf_training.headless_export_skeleton_ply_prepared(points, filename);
 	}
 
 private:
