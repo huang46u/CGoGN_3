@@ -9,7 +9,7 @@
   },
   "sampling": {
     "alpha": 0.005,
-    "grid_cell_size": 0.0018,
+    "grid_cell_size": 0.0015,
     "knn_k": 10,
     "num_alpha_samples": 500000,
     "apply_filtering": true,
@@ -24,9 +24,9 @@
     "local_cluster_connectivity_refresh_interval": 10,
     "max_iterations_without_autosplit": 150,
     "max_iterations_after_reaching_max_spheres": 100,
-    "sqem_update_lambda_full": 1.0,
-    "sqem_update_lambda_line_plane": 1.0,
-    "sqem_fix_radius_scale": 1.5,
+    "sqem_update_lambda_full": 0.2,
+    "sqem_update_lambda_line_plane": 0.2,
+    "sqem_fix_radius_scale": 1.0,
     "udf_center_enabled": false,
     "udf_center_lambda": 0.1,
     "sphere_correction": false,
@@ -49,9 +49,12 @@
     "init_min_cover_points": 1,
     "initial_nb_spheres": 100000
   },
-  "postprocess": {
+   "postprocess": {
     "topology_fix": true,
     "deg_face_deletion": false,
+    "nm_two_layer_prune": true,
+    "residual_prune": true,
+    "residual_prune_threshold": 0.0001,
     "face_post_processing": true
   },
   "benchmark": {
@@ -71,7 +74,7 @@
     "surface_extension": "",
     "neural_udf_model_extension": ".pt",
     "recursive": false,
-    "output_directory": "D:/Code/CGoGN_3/out/deepfashion_batch/skeleton",
-    "timing_directory": "D:/Code/CGoGN_3/out/deepfashion_batch/timing"
+    "output_directory": "D:/Code/CGoGN_3/out/deepfashion_free_r/skeleton",
+    "timing_directory": "D:/Code/CGoGN_3/out/deepfashion_free_r/timing"
   }
 }
