@@ -152,6 +152,16 @@ public:
 		context_.udf_training.headless_run_face_post_processing_prepared(points);
 	}
 
+	void run_nm_two_layer_prune_prepared(Points& points)
+	{
+		context_.udf_training.headless_run_nm_two_layer_prune_prepared(points);
+	}
+
+	void run_completion_residual_prune_prepared(Points& points, float threshold)
+	{
+		context_.udf_training.headless_run_completion_residual_prune_prepared(points, threshold);
+	}
+
 	typename Training::HeadlessCounts collect_counts(const Points& points) const
 	{
 		return context_.udf_training.headless_collect_counts(points);
