@@ -654,113 +654,7 @@ public:
 			stats.error_total_ms_ += std::chrono::duration<float64, std::milli>(error_end - error_start).count();
 
 			auto split_start = std::chrono::high_resolution_clock::now();
-			if (p.auto_split_ && !p.lock_skeleton_connectivity_ &&
-				(p.total_error_diff_ < Scalar(1e-5) || p.iteration_count_ % 10 == 0))
-			{
-				switch (p.auto_split_mode_)
-				{
-				case ERROR_THRESHOLD: {
-					if (p.max_error_ > p.auto_split_error_threshold_)
-					{
-						compute_skeleton(p, true);
-						if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
-						{
-							parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-								correct_sphere(p, v);
-								return true;
-							});
-						}
-
-						std::vector<PVertex> sorted_spheres;
-						sorted_spheres.reserve(p.nb_spheres_);
-						foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-							sorted_spheres.push_back(v);
-							return true;
-						});
-						std::sort(sorted_spheres.begin(), sorted_spheres.end(), [&](PVertex a, PVertex b) {
-							return (*p.spheres_error_)[index_of(*p.spheres_, a)] >
-								   (*p.spheres_error_)[index_of(*p.spheres_, b)];
-						});
-
-						uint32 to_split_max = std::min(
-							uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)), p.auto_split_max_per_iter_error_);
-						std::vector<PVertex> split_centers;
-						split_centers.reserve(to_split_max);
-						for (PVertex sphere : sorted_spheres)
-						{
-							uint32 s_index = index_of(*p.spheres_, sphere);
-							Scalar error = (*p.spheres_error_)[s_index];
-							if (error < p.auto_split_error_threshold_)
-								break;
-							if (to_split_max > 0 && !(*p.spheres_do_not_split_)[s_index])
-							{
-								for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[s_index])
-									(*p.spheres_do_not_split_)[index_of(*p.spheres_, neighbor)] = true;
-								PVertex new_sphere = split_sphere(p, sphere, true);
-								if (new_sphere.is_valid())
-								{
-									split_centers.push_back(new_sphere);
-									--to_split_max;
-								}
-							}
-						}
-						if (!split_centers.empty())
-							recompute_clusters_local_neighborhoods(p, split_centers);
-					}
-				}
-				break;
-				case MAX_NB_SPHERES: {
-					if (p.nb_spheres_ < p.auto_split_max_nb_spheres_)
-					{
-						compute_skeleton(p, true);
-						if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
-						{
-							parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-								correct_sphere(p, v);
-								return true;
-							});
-						}
-
-						std::vector<PVertex> sorted_spheres;
-						sorted_spheres.reserve(p.nb_spheres_);
-						foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-							sorted_spheres.push_back(v);
-							return true;
-						});
-						std::sort(sorted_spheres.begin(), sorted_spheres.end(), [&](PVertex a, PVertex b) {
-							return (*p.spheres_error_)[index_of(*p.spheres_, a)] >
-								   (*p.spheres_error_)[index_of(*p.spheres_, b)];
-						});
-
-						uint32 to_split_max =
-							std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)),
-									 p.auto_split_max_per_iter_max_);
-						std::vector<PVertex> split_centers;
-						split_centers.reserve(to_split_max);
-						for (PVertex sphere : sorted_spheres)
-						{
-							uint32 s_index = index_of(*p.spheres_, sphere);
-							if (p.auto_split_max_nb_spheres_ - p.nb_spheres_ <= 0)
-								break;
-							if (to_split_max > 0 && !(*p.spheres_do_not_split_)[s_index])
-							{
-								for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[s_index])
-									(*p.spheres_do_not_split_)[index_of(*p.spheres_, neighbor)] = true;
-								PVertex new_sphere = split_sphere(p, sphere, true);
-								if (new_sphere.is_valid())
-								{
-									split_centers.push_back(new_sphere);
-									--to_split_max;
-								}
-							}
-						}
-						if (!split_centers.empty())
-							recompute_clusters_local_neighborhoods(p, split_centers);
-					}
-				}
-				break;
-				}
-			}
+			run_auto_split_iteration(p);
 			auto split_end = std::chrono::high_resolution_clock::now();
 			stats.split_total_ms_ += std::chrono::duration<float64, std::milli>(split_end - split_start).count();
 
@@ -4739,6 +4633,167 @@ private:
 				// ??????|pos - center| = alpha
 				for (size_t i = 0; i < valid_projected.size(); ++i)
 				{
+	struct AutoSplitHeapEntry
+	{
+		Scalar error;
+		PVertex sphere;
+	};
+
+	struct AutoSplitHeapCompare
+	{
+		bool operator()(const AutoSplitHeapEntry& lhs, const AutoSplitHeapEntry& rhs) const
+		{
+			return lhs.error > rhs.error;
+		}
+	};
+
+	std::vector<PVertex> collect_auto_split_centers_with_heap(
+		PointsParameters& p,
+		uint32 max_split_count,
+		Scalar minimum_error,
+		bool enforce_minimum_error,
+		bool enforce_max_nb_spheres)
+	{
+		std::vector<PVertex> split_centers;
+		if (!p.spheres_ || !p.spheres_error_ || max_split_count == 0 || p.nb_spheres_ == 0)
+			return split_centers;
+
+		split_centers.reserve(max_split_count);
+		uint32 remaining_split_count = max_split_count;
+		while (remaining_split_count > 0)
+		{
+			if (enforce_max_nb_spheres && p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
+				break;
+
+			std::priority_queue<AutoSplitHeapEntry, std::vector<AutoSplitHeapEntry>, AutoSplitHeapCompare> candidate_heap;
+			foreach_cell(*p.spheres_, [&](PVertex sphere) -> bool {
+				const uint32 sphere_index = index_of(*p.spheres_, sphere);
+				if (sphere_index == INVALID_INDEX || (*p.spheres_do_not_split_)[sphere_index])
+					return true;
+
+				const Scalar error = (*p.spheres_error_)[sphere_index];
+				if (enforce_minimum_error && error < minimum_error)
+					return true;
+
+				if (candidate_heap.size() < remaining_split_count)
+				{
+					candidate_heap.push({error, sphere});
+				}
+				else if (error > candidate_heap.top().error)
+				{
+					candidate_heap.pop();
+					candidate_heap.push({error, sphere});
+				}
+				return true;
+			});
+
+			if (candidate_heap.empty())
+				break;
+
+			std::vector<AutoSplitHeapEntry> top_candidates;
+			top_candidates.reserve(candidate_heap.size());
+			while (!candidate_heap.empty())
+			{
+				top_candidates.push_back(candidate_heap.top());
+				candidate_heap.pop();
+			}
+			std::sort(top_candidates.begin(), top_candidates.end(), [&](const AutoSplitHeapEntry& lhs,
+															 const AutoSplitHeapEntry& rhs) {
+				return lhs.error > rhs.error;
+			});
+
+			bool made_progress = false;
+			for (const AutoSplitHeapEntry& entry : top_candidates)
+			{
+				if (remaining_split_count == 0)
+					break;
+				if (enforce_max_nb_spheres && p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
+					break;
+
+				const PVertex sphere = entry.sphere;
+				if (!sphere.is_valid())
+					continue;
+				const uint32 s_index = index_of(*p.spheres_, sphere);
+				if (s_index == INVALID_INDEX || (*p.spheres_do_not_split_)[s_index])
+					continue;
+
+				(*p.spheres_do_not_split_)[s_index] = true;
+				for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[s_index])
+				{
+					const uint32 neighbor_index = index_of(*p.spheres_, neighbor);
+					if (neighbor_index != INVALID_INDEX)
+						(*p.spheres_do_not_split_)[neighbor_index] = true;
+				}
+
+				PVertex new_sphere = split_sphere(p, sphere, true);
+				if (!new_sphere.is_valid())
+					continue;
+
+				split_centers.push_back(new_sphere);
+				--remaining_split_count;
+				made_progress = true;
+			}
+
+			if (!made_progress)
+				break;
+		}
+
+		return split_centers;
+	}
+
+	void run_auto_split_iteration(PointsParameters& p)
+	{
+		if (!(p.auto_split_ && !p.lock_skeleton_connectivity_ &&
+			  (p.total_error_diff_ < Scalar(1e-5) || p.iteration_count_ % 10 == 0)))
+		{
+			return;
+		}
+
+		auto correct_spheres_on_split_if_needed = [&]() {
+			if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
+			{
+				parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+					correct_sphere(p, v);
+					return true;
+				});
+			}
+		};
+
+		switch (p.auto_split_mode_)
+		{
+		case ERROR_THRESHOLD: {
+			if (p.max_error_ <= p.auto_split_error_threshold_)
+				break;
+
+			compute_skeleton(p, true);
+			correct_spheres_on_split_if_needed();
+
+			const uint32 to_split_max =
+				std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)), p.auto_split_max_per_iter_error_);
+			std::vector<PVertex> split_centers = collect_auto_split_centers_with_heap(
+				p, to_split_max, Scalar(p.auto_split_error_threshold_), true, false);
+			if (!split_centers.empty())
+				recompute_clusters_local_neighborhoods(p, split_centers);
+		}
+		break;
+		case MAX_NB_SPHERES: {
+			if (p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
+				break;
+
+			compute_skeleton(p, true);
+			correct_spheres_on_split_if_needed();
+
+			const uint32 to_split_max =
+				std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)), p.auto_split_max_per_iter_max_);
+			std::vector<PVertex> split_centers =
+				collect_auto_split_centers_with_heap(p, to_split_max, Scalar(0), false, true);
+			if (!split_centers.empty())
+				recompute_clusters_local_neighborhoods(p, split_centers);
+		}
+		break;
+		}
+	}
+
 					const Vec3& pos = valid_projected[i];
 
 					Vec3 d = pos - Vec3(center[0], center[1], center[2]);
@@ -4835,118 +4890,7 @@ private:
 		});
 
 		compute_spheres_error(p);
-
-		if (p.auto_split_ && !p.lock_skeleton_connectivity_ &&
-			(p.total_error_diff_ < 1e-5 || p.iteration_count_ % 10 == 0))
-		{
-			switch (p.auto_split_mode_)
-			{
-			case ERROR_THRESHOLD: {
-				if (p.max_error_ > p.auto_split_error_threshold_)
-				{
-					if (!p.lock_skeleton_connectivity_)
-						compute_skeleton(p, true);
-
-					if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
-					{
-				parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-							correct_sphere(p, v);
-							return true;
-						});
-					}
-
-					std::vector<PVertex> sorted_spheres;
-					sorted_spheres.reserve(p.nb_spheres_);
-					foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-						sorted_spheres.push_back(v);
-						return true;
-					});
-					std::sort(sorted_spheres.begin(), sorted_spheres.end(), [&](PVertex a, PVertex b) {
-						return (*p.spheres_error_)[index_of(*p.spheres_, a)] >
-							   (*p.spheres_error_)[index_of(*p.spheres_, b)];
-					});
-
-					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)),
-												  p.auto_split_max_per_iter_error_);
-					std::vector<PVertex> split_centers;
-					split_centers.reserve(to_split_max);
-					for (PVertex sphere : sorted_spheres)
-					{
-						uint32 s_index = index_of(*p.spheres_, sphere);
-						Scalar error = (*p.spheres_error_)[s_index];
-						if (error < p.auto_split_error_threshold_)
-							break;
-						if (to_split_max > 0 && !(*p.spheres_do_not_split_)[s_index])
-						{
-							for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[s_index])
-								(*p.spheres_do_not_split_)[index_of(*p.spheres_, neighbor)] = true;
-							PVertex new_sphere = split_sphere(p, sphere, true);
-							if (new_sphere.is_valid())
-							{
-								split_centers.push_back(new_sphere);
-								--to_split_max;
-							}
-						}
-					}
-					if (!split_centers.empty())
-						recompute_clusters_local_neighborhoods(p, split_centers);
-				}
-			}
-			break;
-			case MAX_NB_SPHERES: {
-				if (p.nb_spheres_ < p.auto_split_max_nb_spheres_)
-				{
-					if (!p.lock_skeleton_connectivity_)
-						compute_skeleton(p, true);
-
-					if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
-					{
-				parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-							correct_sphere(p, v);
-							return true;
-						});
-					}
-
-					std::vector<PVertex> sorted_spheres;
-					sorted_spheres.reserve(p.nb_spheres_);
-					foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-						sorted_spheres.push_back(v);
-						return true;
-					});
-					std::sort(sorted_spheres.begin(), sorted_spheres.end(), [&](PVertex a, PVertex b) {
-						return (*p.spheres_error_)[index_of(*p.spheres_, a)] >
-							   (*p.spheres_error_)[index_of(*p.spheres_, b)];
-					});
-
-					uint32 to_split_max = std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)),
-												  p.auto_split_max_per_iter_max_);
-					//uint32 to_split_max = std::max(0.5 * p.nb_spheres_, 1.0);
-					std::vector<PVertex> split_centers;
-					split_centers.reserve(to_split_max);
-					for (PVertex sphere : sorted_spheres)
-					{
-						uint32 s_index = index_of(*p.spheres_, sphere);
-						if (p.auto_split_max_nb_spheres_ - p.nb_spheres_ <= 0)
-							break;
-						if (to_split_max > 0 && !(*p.spheres_do_not_split_)[s_index])
-						{
-							for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[s_index])
-								(*p.spheres_do_not_split_)[index_of(*p.spheres_, neighbor)] = true;
-							PVertex new_sphere = split_sphere(p, sphere, true);
-							if (new_sphere.is_valid())
-							{
-								split_centers.push_back(new_sphere);
-								--to_split_max;
-							}
-						}
-					}
-					if (!split_centers.empty())
-						recompute_clusters_local_neighborhoods(p, split_centers);
-				}
-			}
-			break;
-			}
-		}
+		run_auto_split_iteration(p);
 
 		if (!p.running_)
 			update_render_data(p);
