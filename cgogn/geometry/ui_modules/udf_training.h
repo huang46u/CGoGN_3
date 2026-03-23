@@ -330,6 +330,7 @@ private:
 		int batch_size_ = 1310640;	   // NN evaluation batch
 		int ray_sampler_batch_size_ = 4096; // Rays per sampling iteration
 		float tol_ = 1e-5f; // convergence tolerance
+		bool recompute_sample_normals_after_sampling_ = false;
 
 		// Neural UDF ray sampling parameters
 		float udf_bbox_expand_ = 0.05f;
@@ -1012,6 +1013,13 @@ public:
 		return lambda > Scalar(0) ? lambda : Scalar(p.sqem_update_lambda_full_);
 	}
 
+	bool should_force_pca_normals_in_fitting(const PointsParameters& p) const
+	{
+		const bool is_udf_model =
+			(p.input_mode_ == INPUT_NEURAL_UDF && p.neural_udf_loaded_ && p.neural_model_type_ == NEURAL_MODEL_UDF);
+		return !is_udf_model;
+	}
+
 	void refresh_sphere_sqem_lambda_cache(PointsParameters& p)
 	{
 		if (!p.spheres_ || !p.spheres_sqem_lambda_)
@@ -1031,6 +1039,14 @@ public:
 	void load_alpha_samples_to_mesh(PointsParameters& p, size_t num_points)
 	{
 		load_alpha_samples_to_mesh_impl(p, num_points, Tag{});
+	}
+
+	void finalize_sample_mesh_after_sampling(PointsParameters& p)
+	{
+		std::cout << "Building KDTree for sampled points..." << std::endl;
+		build_kdtree(p);
+		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
 	}
 
 	RaySamplerParams make_ray_params(const PointsParameters& p) const
@@ -1300,10 +1316,7 @@ public:
 		if (!normals_ok)
 			std::cerr << "Failed to compute normals from UDF gradients." << std::endl;
 
-		std::cout << "Building KDTree for sampled points..." << std::endl;
-		build_kdtree(p);
-		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
+		finalize_sample_mesh_after_sampling(p);
 	}
 
 	void load_alpha_samples_to_mesh_impl(PointsParameters& p, size_t num_points, geometry::RaySamplerSurface)
@@ -1417,10 +1430,7 @@ public:
 			return true;
 		});
 
-		std::cout << "Building KDTree for sampled points..." << std::endl;
-		build_kdtree(p);
-		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
+		finalize_sample_mesh_after_sampling(p);
 	}
 
 	void load_alpha_samples_to_mesh_impl(PointsParameters& p, size_t num_points, geometry::RaySamplerPointCloud)
@@ -1504,10 +1514,7 @@ public:
 			return true;
 		});
 
-		std::cout << "Building KDTree for sampled points..." << std::endl;
-		build_kdtree(p);
-		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
+		finalize_sample_mesh_after_sampling(p);
 	}
 
 	void pre_process_sampling_points_kdtree(PointsParameters& p, std::vector<Vec3>& points)
@@ -2302,8 +2309,16 @@ private:
 
 		std::cout << "Building KDTree..." << std::endl;
 		build_kdtree(p);
-		std::cout << "Recomputing Normals (PCA)..." << std::endl;
-		recompute_samples_normals_pca(p);
+		const bool force_pca_normals = should_force_pca_normals_in_fitting(p);
+		const bool recompute_pca_normals = force_pca_normals || p.recompute_sample_normals_after_sampling_;
+		if (recompute_pca_normals)
+		{
+			if (force_pca_normals)
+				std::cout << "Recomputing Normals (PCA)... [forced for non-UDF-model input]" << std::endl;
+			else
+				std::cout << "Recomputing Normals (PCA)..." << std::endl;
+			recompute_samples_normals_pca(p);
+		}
 		std::cout << "Computing KNN and Area..." << std::endl;
 		compute_samples_area(p); // Compute KNN and Area for samples
 		std::cout << "Computing Winding Numbers..." << std::endl;
@@ -12577,6 +12592,7 @@ protected:
 			ImGui::InputInt("Max Iterations", &p.udf_max_iterations_, 1000, 8000);
 			ImGui::InputFloat("Tolerance", &p.tol_, 0.0f, 0.0f, "%.6f");
 			ImGui::InputInt("KNN K", &p.knn_k_, 1, 5);
+			ImGui::Checkbox("Recompute Normals In Fitting Data", &p.recompute_sample_normals_after_sampling_);
 			ImGui::InputInt("Poisson Target", &p.poisson_eliminate_target_samples_, 1000, 10000);
 			if (ImGui::Button("Recompute Sample KNN"))
 			{
@@ -13174,7 +13190,6 @@ private:
 } // namespace cgogn
 
 #endif // CGOGN_MODULE_UDF_TRAINING_H_
-
 
 
 
