@@ -2557,7 +2557,7 @@ private:
 		if (!p.samples_mesh_ || !p.samples_kdtree_)
 			return;
 
-		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			const Vec3& pt = (*p.samples_position_)[v_idx];
 			std::vector<std::pair<uint32, Scalar>> knn_res;
@@ -2643,7 +2643,7 @@ private:
 
 	void compute_quadrics(PointsParameters& p)
 	{
-		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			Spherical_Quadric& q = (*p.samples_quadric_)[v_idx];
 			Line_Quadric& lq = (*p.samples_line_quadric_)[v_idx];
