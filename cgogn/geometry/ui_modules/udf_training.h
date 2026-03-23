@@ -12778,19 +12778,11 @@ protected:
 			if (ImGui::Button("Compute Fitting Data (MA: Displacement)"))
 			{
 				compute_fitting_data_with_initial_ma_mode(p, INITIAL_MA_DISPLACEMENT, true);
-				{
-					std::lock_guard<std::mutex> lock(p.mutex_);
-					init_spheres(p, init_max_nb_spheres);
-				}
 				update_render_data(p);
 			}
 			if (ImGui::Button("Compute Fitting Data (MA: Shrinking Ball)"))
 			{
 				compute_fitting_data_with_initial_ma_mode(p, INITIAL_MA_SHRINKING_BALL, true);
-				{
-					std::lock_guard<std::mutex> lock(p.mutex_);
-					init_spheres(p, init_max_nb_spheres);
-				}
 				update_render_data(p);
 			}
 			const bool sphere_fit_ready = p.fitting_data_computed_;
@@ -13262,5 +13254,4 @@ private:
 } // namespace cgogn
 
 #endif // CGOGN_MODULE_UDF_TRAINING_H_
-
 
