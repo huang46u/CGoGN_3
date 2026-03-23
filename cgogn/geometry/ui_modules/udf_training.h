@@ -1004,6 +1004,15 @@ public:
 		return lambda > Scalar(0) ? lambda : Scalar(p.sqem_update_lambda_full_);
 	}
 
+	bool is_valid_sphere_for_clustering(const PointsParameters& p, uint32 sphere_index) const
+	{
+		if (!p.spheres_position_ || !p.spheres_radius_ || sphere_index == INVALID_INDEX)
+			return false;
+		const Vec3& center = (*p.spheres_position_)[sphere_index];
+		const Scalar radius = (*p.spheres_radius_)[sphere_index];
+		return center.allFinite() && std::isfinite(static_cast<double>(radius)) && radius > Scalar(0);
+	}
+
 	bool should_force_pca_normals_in_fitting(const PointsParameters& p) const
 	{
 		const bool is_udf_model =
@@ -3651,6 +3660,9 @@ private:
 		SphereFitData data;
 		if (!get_sphere_fit_data(p, data))
 			return;
+		std::atomic<uint64> invalid_sphere_candidates(0);
+		std::atomic<uint64> nonfinite_distance_candidates(0);
+		std::atomic<uint64> unassigned_samples(0);
 		// clean cluster affectation
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.spheres_, v);
@@ -3676,12 +3688,22 @@ private:
 
 			foreach_cell(*p.spheres_, [&](PVertex pv) {
 				uint32 pv_index = index_of(*p.spheres_, pv);
+				if (!is_valid_sphere_for_clustering(p, pv_index))
+				{
+					++invalid_sphere_candidates;
+					return true;
+				}
 				const Vec3& center = (*p.spheres_position_)[pv_index];
 				Scalar radius = (*p.spheres_radius_)[pv_index];
 
 				Scalar dist_sqem = (*data.quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 				Scalar dist_other = (*data.line_quadric)[v_index].eval(center);
 				Scalar dist = dist_sqem + sphere_sqem_lambda(p, pv_index) * dist_other;
+				if (!std::isfinite(static_cast<double>(dist)))
+				{
+					++nonfinite_distance_candidates;
+					return true;
+				}
 				if (dist < min_distance)
 				{
 					min_distance = dist;
@@ -3692,6 +3714,11 @@ private:
 			});
 
 			(*data.sphere)[v_index] = closest_sphere;
+			if (!closest_sphere.is_valid() || closest_sphere_index == INVALID_INDEX)
+			{
+				++unassigned_samples;
+				return true;
+			}
 
 			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
 			(*p.spheres_cluster_)[closest_sphere_index].push_back(v);
@@ -3699,6 +3726,12 @@ private:
 
 			return true;
 		});
+		if (invalid_sphere_candidates.load() > 0 || nonfinite_distance_candidates.load() > 0 || unassigned_samples.load() > 0)
+		{
+			std::cerr << "[ClusterFullGuard] invalid_sphere_candidates=" << invalid_sphere_candidates.load()
+					  << " nonfinite_distance_candidates=" << nonfinite_distance_candidates.load()
+					  << " unassigned_samples=" << unassigned_samples.load() << std::endl;
+		}
 		// augment_insufficient_clusters(p);
 	}
 
@@ -3707,6 +3740,9 @@ private:
 		SphereFitData data;
 		if (!get_sphere_fit_data(p, data))
 			return;
+		std::atomic<uint64> invalid_sphere_candidates(0);
+		std::atomic<uint64> nonfinite_distance_candidates(0);
+		std::atomic<uint64> unassigned_samples(0);
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.spheres_, v);
 			(*p.spheres_cluster_)[v_index].clear();
@@ -3746,12 +3782,22 @@ private:
 			for (PVertex pv : neighbors_spheres)
 			{
 				uint32 pv_index = index_of(*p.spheres_, pv);
+				if (!is_valid_sphere_for_clustering(p, pv_index))
+				{
+					++invalid_sphere_candidates;
+					continue;
+				}
 				const Vec3& center = (*p.spheres_position_)[pv_index];
 				Scalar radius = (*p.spheres_radius_)[pv_index];
 
 				Scalar dist_sqem = (*data.quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 				Scalar dist_other = (*data.line_quadric)[v_index].eval(center);
 				Scalar dist = dist_sqem + sphere_sqem_lambda(p, pv_index) * dist_other;
+				if (!std::isfinite(static_cast<double>(dist)))
+				{
+					++nonfinite_distance_candidates;
+					continue;
+				}
 				if (dist < min_distance)
 				{
 					min_distance = dist;
@@ -3761,6 +3807,11 @@ private:
 			}
 
 			(*data.sphere)[v_index] = closest_sphere;
+			if (!closest_sphere.is_valid() || closest_sphere_index == INVALID_INDEX)
+			{
+				++unassigned_samples;
+				return true;
+			}
 
 			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
 			(*p.spheres_cluster_)[closest_sphere_index].push_back(v);
@@ -3768,6 +3819,12 @@ private:
 
 			return true;
 		});
+		if (invalid_sphere_candidates.load() > 0 || nonfinite_distance_candidates.load() > 0 || unassigned_samples.load() > 0)
+		{
+			std::cerr << "[ClusterLocalGuard] invalid_sphere_candidates=" << invalid_sphere_candidates.load()
+					  << " nonfinite_distance_candidates=" << nonfinite_distance_candidates.load()
+					  << " unassigned_samples=" << unassigned_samples.load() << std::endl;
+		}
 	}
 
 	bool should_use_local_clusters(const PointsParameters& p, bool force_local = false)
@@ -3920,6 +3977,9 @@ private:
 		SphereFitData data;
 		if (!get_sphere_fit_data(p, data))
 			return;
+		std::atomic<uint64> invalid_sphere_candidates(0);
+		std::atomic<uint64> nonfinite_distance_candidates(0);
+		std::atomic<uint64> unassigned_samples(0);
 		// clean cluster affectation
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*p.spheres_, v);
@@ -3943,12 +4003,22 @@ private:
 
 			foreach_cell(*p.spheres_, [&](PVertex pv) {
 				uint32 pv_index = index_of(*p.spheres_, pv);
+				if (!is_valid_sphere_for_clustering(p, pv_index))
+				{
+					++invalid_sphere_candidates;
+					return true;
+				}
 				const Vec3& center = (*p.spheres_position_)[pv_index];
 				Scalar radius = (*p.spheres_radius_)[pv_index];
 
 				// Power distance: |p - center|^2 - radius^2
 				Scalar dist_sq = (vp - center).squaredNorm();
 				Scalar power_dist = dist_sq - radius * radius;
+				if (!std::isfinite(static_cast<double>(power_dist)))
+				{
+					++nonfinite_distance_candidates;
+					return true;
+				}
 
 				if (power_dist < min_power_distance)
 				{
@@ -3960,6 +4030,11 @@ private:
 			});
 
 			(*data.sphere)[v_index] = closest_sphere;
+			if (!closest_sphere.is_valid() || closest_sphere_index == INVALID_INDEX)
+			{
+				++unassigned_samples;
+				return true;
+			}
 
 			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
 			(*p.spheres_cluster_)[closest_sphere_index].push_back(v);
@@ -3967,6 +4042,12 @@ private:
 
 			return true;
 		});
+		if (invalid_sphere_candidates.load() > 0 || nonfinite_distance_candidates.load() > 0 || unassigned_samples.load() > 0)
+		{
+			std::cerr << "[PowerClusterGuard] invalid_sphere_candidates=" << invalid_sphere_candidates.load()
+					  << " nonfinite_distance_candidates=" << nonfinite_distance_candidates.load()
+					  << " unassigned_samples=" << unassigned_samples.load() << std::endl;
+		}
 		prune_empty_clusters(p);
 
 		//// remove small clusters
@@ -13181,6 +13262,5 @@ private:
 } // namespace cgogn
 
 #endif // CGOGN_MODULE_UDF_TRAINING_H_
-
 
 
