@@ -1496,7 +1496,7 @@ public:
 
 		std::cout << "Computing normals from input point cloud..." << std::endl;
 		const Scalar eps = Scalar(1e-12);
-		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			const Vec3& pos = (*p.samples_position_)[v_idx];
 			std::pair<uint32, Scalar> knn_res;
@@ -6084,10 +6084,6 @@ protected:
 			total_removed_edges += removed_edges_this_pass;
 			total_removed_vertices += removed_vertices_this_pass;
 
-			std::cout << log_prefix << " pass=" << total_passes
-					  << " removed_faces=" << removed_faces_this_pass
-					  << " removed_edges=" << removed_edges_this_pass
-					  << " removed_vertices=" << removed_vertices_this_pass << std::endl;
 		}
 
 		if (p.edge_degree_ && total_removed_faces > 0)
@@ -7519,61 +7515,6 @@ protected:
 
 			total_processed_sheets += processed_sheets_this_round;
 
-			for (uint32 sheet_label : sorted_sheet_labels)
-			{
-				const auto it_faces = label_to_faces.find(sheet_label);
-				const size_t face_count = (it_faces != label_to_faces.end()) ? it_faces->second.size() : size_t(0);
-				const Scalar sheet_area =
-					label_area_sum.count(sheet_label) ? label_area_sum.at(sheet_label) : Scalar(0);
-				const Scalar sheet_norm_err = label_area_normalized_error.count(sheet_label)
-												 ? label_area_normalized_error.at(sheet_label)
-												 : std::numeric_limits<Scalar>::infinity();
-				if (sheet_label == dominant_label)
-				{
-					std::cout << log_prefix << " round=" << round << " sheet=" << sheet_label
-							  << " role=dominant"
-							  << " face_count=" << face_count
-							  << " area=" << sheet_area
-							  << " normErr=" << sheet_norm_err << std::endl;
-					continue;
-				}
-
-				const auto it_decision = sheet_candidate_decisions.find(sheet_label);
-				if (it_decision == sheet_candidate_decisions.end())
-				{
-					std::cout << log_prefix << " round=" << round << " sheet=" << sheet_label
-							  << " role=regular"
-							  << " face_count=" << face_count
-							  << " area=" << sheet_area
-							  << " normErr=" << sheet_norm_err
-							  << " status=no_two_layer_candidate" << std::endl;
-					continue;
-				}
-
-				const SheetTwoLayerCandidateDecision& decision = it_decision->second;
-				const bool in_batch_delete = has_selected_decision && sheet_label == selected_decision.sheet_label;
-				const bool delete_label_selected =
-					has_selected_decision && decision.delete_label == selected_decision.delete_label;
-				std::cout << log_prefix << " round=" << round << " sheet=" << sheet_label
-						  << " role=regular"
-						  << " face_count=" << face_count
-						  << " area=" << sheet_area
-						  << " normErr=" << sheet_norm_err
-						  << " source_edge=" << decision.source_edge_id
-						  << " source_type="
-						  << (decision.source_is_completion_barrier ? "completion_barrier" : "non_manifold")
-						  << " edge_degree=" << decision.edge_degree
-						  << " unique_label_count=" << decision.unique_label_count
-						  << " two_layer_labels=(" << decision.label_a << "," << decision.label_b << ")"
-						  << " pair_area=(" << decision.area_sum_a << "," << decision.area_sum_b << ")"
-						  << " pair_normErr=(" << decision.norm_err_a << "," << decision.norm_err_b << ")"
-						  << " delete_label=" << decision.delete_label
-						  << " keep_label=" << decision.keep_label
-						  << " batch_delete=" << (in_batch_delete ? "yes" : "no")
-						  << " delete_label_selected=" << (delete_label_selected ? "yes" : "no")
-						  << std::endl;
-			}
-
 			if (!has_selected_decision)
 			{
 				std::cout << log_prefix << " round=" << round << " processed_sheets=" << processed_sheets_this_round
@@ -7646,20 +7587,6 @@ protected:
 				}
 			}
 
-			std::cout << log_prefix << " round=" << round << " selected_sheet=" << selected_decision.sheet_label
-					  << " dominant_label=" << dominant_label << " source_edge=" << selected_decision.source_edge_id
-					  << " source_type="
-					  << (selected_decision.source_is_completion_barrier ? "completion_barrier" : "non_manifold")
-					  << " edge_degree=" << selected_decision.edge_degree
-					  << " unique_label_count=" << selected_decision.unique_label_count
-					  << " two_layer_labels=(" << selected_decision.label_a << "," << selected_decision.label_b << ")"
-					  << " area=(" << selected_decision.area_sum_a << "," << selected_decision.area_sum_b << ")"
-					  << " normErr=(" << selected_decision.norm_err_a << "," << selected_decision.norm_err_b << ")"
-					  << " delete_label=" << selected_decision.delete_label
-					  << " keep_label=" << selected_decision.keep_label
-					  << " merged_keep_into_dominant=" << dominant_label
-					  << " merged_keep_faces=" << merged_keep_faces << std::endl;
-
 			SkeletonFaceDeletionStats deletion_stats;
 			if (!delete_skeleton_face_id_set(p, face_ids_to_delete, deletion_stats))
 			{
@@ -7687,6 +7614,16 @@ protected:
 					  << " resolvable_sheets=" << sheet_candidate_decisions.size()
 					  << " selected_sheet=" << selected_decision.sheet_label
 					  << " selected_delete_label=" << selected_decision.delete_label
+					  << " keep_label=" << selected_decision.keep_label
+					  << " source_edge=" << selected_decision.source_edge_id
+					  << " source_type="
+					  << (selected_decision.source_is_completion_barrier ? "completion_barrier" : "non_manifold")
+					  << " edge_degree=" << selected_decision.edge_degree
+					  << " unique_label_count=" << selected_decision.unique_label_count
+					  << " two_layer_labels=(" << selected_decision.label_a << "," << selected_decision.label_b << ")"
+					  << " pair_area=(" << selected_decision.area_sum_a << "," << selected_decision.area_sum_b << ")"
+					  << " pair_normErr=(" << selected_decision.norm_err_a << "," << selected_decision.norm_err_b << ")"
+					  << " merged_keep_faces=" << merged_keep_faces
 					  << " candidate_edges=" << sorted_candidate_edge_ids.size()
 					  << " removed_faces=" << deletion_stats.removed_faces
 					  << " removed_edges=" << deletion_stats.removed_edges
@@ -13254,4 +13191,3 @@ private:
 } // namespace cgogn
 
 #endif // CGOGN_MODULE_UDF_TRAINING_H_
-
