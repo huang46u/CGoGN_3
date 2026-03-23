@@ -301,7 +301,7 @@ private:
 		uint32 auto_split_max_per_iter_max_ = 100;
 		bool error_as_spheres_color_ = false;
 		float32 spheres_transparency_ = 0.5f;
-		float32 sqem_update_lambda_full_ = 0.05f;
+		float32 sqem_update_lambda_full_ = 0.20f;
 		float32 sqem_update_lambda_line_plane_ = 0.20f;
 		float32 sqem_fix_radius_scale_ = 1.0f;
 		bool udf_center_enabled_ = false;
@@ -431,7 +431,7 @@ public:
 		float32 auto_split_ratio_ = 0.2f;
 		uint32 auto_split_max_per_iter_error_ = 10;
 		uint32 auto_split_max_per_iter_max_ = 100;
-		float32 sqem_update_lambda_full_ = 0.05f;
+		float32 sqem_update_lambda_full_ = 0.20f;
 		float32 sqem_update_lambda_line_plane_ = 0.20f;
 		float32 sqem_fix_radius_scale_ = 1.0f;
 		bool udf_center_enabled_ = false;
@@ -929,18 +929,9 @@ public:
 
 	void apply_sqem_defaults_by_model_type(PointsParameters& p)
 	{
-		if (p.neural_model_type_ == NEURAL_MODEL_MF)
-		{
-			p.sqem_fix_radius_scale_ = 2.0f;
-			p.sqem_update_lambda_full_ = 2.0f;
-			p.sqem_update_lambda_line_plane_ = 2.0f;
-		}
-		else
-		{
-			p.sqem_fix_radius_scale_ = 1.0f;
-			p.sqem_update_lambda_full_ = 0.05f;
-			p.sqem_update_lambda_line_plane_ = 0.2f;
-		}
+		p.sqem_fix_radius_scale_ = 1.0f;
+		p.sqem_update_lambda_full_ = 0.2f;
+		p.sqem_update_lambda_line_plane_ = 0.2f;
 	}
 
 	Scalar sqem_update_lambda_for_case(const PointsParameters& p, SQEM_CASE sqem_case) const
@@ -13190,7 +13181,6 @@ private:
 } // namespace cgogn
 
 #endif // CGOGN_MODULE_UDF_TRAINING_H_
-
 
 
 
