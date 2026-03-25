@@ -2318,6 +2318,8 @@ private:
 			else
 				std::cout << "Recomputing Normals (PCA)..." << std::endl;
 			recompute_samples_normals_pca(p);
+		std::cout << "Computing Initial Medial Axis..." << std::endl;
+		compute_initial_medial_axis(p);
 		}
 		std::cout << "Computing KNN and Area..." << std::endl;
 		compute_samples_area(p); // Compute KNN and Area for samples
@@ -2325,8 +2327,6 @@ private:
 		compute_winding_numbers(p);
 		std::cout << "Computing Quadrics..." << std::endl;
 		compute_quadrics(p);
-		std::cout << "Computing Initial Medial Axis..." << std::endl;
-		compute_initial_medial_axis(p);
 
 		if (p.neural_udf_loaded_ && p.samples_ma_position_)
 		{
@@ -2413,15 +2413,19 @@ private:
 
 		std::cout << "[KNNRebuild] rebuilding sample KNN with k=" << p.knn_k_ << std::endl;
 		build_kdtree(p);
-		compute_samples_area(p); // updates samples_knn_ and samples_area_
 
 		if (p.fitting_data_computed_)
 		{
-			// Keep fitting-state attributes coherent after KNN changes.
+			// Let MA stabilization finish before rebuilding fitting primitives.
+			compute_initial_medial_axis(p);
+			compute_samples_area(p); // updates samples_knn_ and samples_area_
 			compute_winding_numbers(p);
 			compute_quadrics(p);
-			compute_initial_medial_axis(p);
 			std::cout << "[KNNRebuild] fitting-dependent attributes refreshed." << std::endl;
+		else
+		{
+			compute_samples_area(p); // updates samples_knn_ and samples_area_
+		}
 		}
 
 		clear_knn_hover(p);
