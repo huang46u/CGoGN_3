@@ -313,6 +313,7 @@ private:
 		float32 skeleton_edge_udf_zero_tol_ = 1e-4f;
 		float32 skeleton_face_udf_zero_tol_ = 1e-4f;
 		bool topology_edge_stage_diffuse_ = true;
+		bool topology_enforce_tet_face_cap_ = true;
 		bool skeleton_face_score_normalize_by_area_ = false;
 		float32 init_dilation_constant_ = 0.001f;
 		uint32 init_min_cover_points_ = 10;
@@ -8976,6 +8977,8 @@ protected:
 			return (it != face_score_cache.end()) ? it->second : Scalar(0);
 		};
 		auto has_face_budget = [&](uint32 face_id) -> bool {
+			if (!p.topology_enforce_tet_face_cap_)
+				return true;
 			auto it_owner = face_owner_tets.find(face_id);
 			if (it_owner == face_owner_tets.end())
 				return false;
@@ -11170,6 +11173,8 @@ protected:
 			return (it != face_score_cache.end()) ? it->second : Scalar(0);
 		};
 		auto has_face_budget = [&](uint32 face_id) -> bool {
+			if (!p.topology_enforce_tet_face_cap_)
+				return true;
 			auto it_owner = face_owner_tets.find(face_id);
 			if (it_owner == face_owner_tets.end())
 				return false;
@@ -11710,6 +11715,8 @@ protected:
 			deleted_face_count_per_tet[tet_id] = initial_deleted_faces;
 		}
 		auto is_blocked_by_tet_face_cap = [&](uint32 face_id) -> bool {
+			if (!p.topology_enforce_tet_face_cap_)
+				return false;
 			auto owner_it = face_owner_tets.find(face_id);
 			if (owner_it == face_owner_tets.end())
 				return false;
@@ -12040,6 +12047,8 @@ protected:
 		size_t total_edge_followup_pushes = 0;
 		size_t total_degree1_edges_removed_after_face = 0;
 		auto is_blocked_by_tet_face_cap = [&](uint32 face_id) -> bool {
+			if (!p.topology_enforce_tet_face_cap_)
+				return false;
 			auto owner_it = face_owner_tets.find(face_id);
 			if (owner_it == face_owner_tets.end())
 				return false;
@@ -12936,6 +12945,7 @@ protected:
 					ImGui::InputFloat("Edge UDF |0| tol", &p.skeleton_edge_udf_zero_tol_, 0.0f, 0.0f, "%.6f");
 					ImGui::InputFloat("Face UDF |0| tol", &p.skeleton_face_udf_zero_tol_, 0.0f, 0.0f, "%.6f");
 					ImGui::Checkbox("Face score normalize(area)", &p.skeleton_face_score_normalize_by_area_);
+					ImGui::Checkbox("Enforce tet face cap (<=2)", &p.topology_enforce_tet_face_cap_);
 					if (ImGui::Button("Geometry filter"))
 					{
 						if (!p.running_)
