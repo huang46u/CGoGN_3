@@ -7743,12 +7743,6 @@ protected:
 	void run_completion_residual_sheet_score_prune(
 		PointsParameters& p, Scalar score_threshold, const char* log_prefix = "[NMCompletionResidual]")
 	{
-		if (!(score_threshold >= Scalar(0)))
-		{
-			std::cout << log_prefix << " skipped because score_threshold=" << score_threshold
-					  << " (< 0 disables this pass)." << std::endl;
-			return;
-		}
 		if (!ensure_topology_score_backend(p, log_prefix))
 			return;
 		if (!p.skeleton_ || !p.skeleton_face_component_id_ || !p.incident_tets_)
@@ -7813,14 +7807,21 @@ protected:
 			return;
 		}
 
+		const bool threshold_enabled = (score_threshold >= Scalar(0));
+		const size_t forced_delete_max_face_count = 2;
+
 		struct ResidualSheetScoreEntry
 		{
 			uint32 sheet_label = INVALID_INDEX;
 			size_t face_count = 0;
+			bool is_residual_candidate = false;
 			uint32 non_manifold_edge_count = 0;
 			Scalar area = Scalar(0);
 			Scalar score = std::numeric_limits<Scalar>::infinity();
 			bool delete_sheet = false;
+			bool delete_by_small_sheet = false;
+			bool delete_by_threshold = false;
+			bool delete_all_residual_when_threshold_disabled = false;
 		};
 
 		uint32 candidate_sheet_count = 0;
@@ -7831,28 +7832,43 @@ protected:
 		residual_sheet_scores.reserve(sorted_sheet_labels.size());
 		for (uint32 sheet_label : sorted_sheet_labels)
 		{
-			if (sheet_label == dominant_label)
-				continue;
-
 			const auto it_faces = label_to_faces.find(sheet_label);
 			if (it_faces == label_to_faces.end() || it_faces->second.empty())
 				continue;
 
+			const size_t face_count = it_faces->second.size();
 			uint32 non_manifold_edge_count = 0;
-			if (!is_dominant_plus_self_non_manifold_sheet(
-					p, sheet_label, dominant_label, it_faces->second, non_manifold_edge_count))
-				continue;
-
-			++candidate_sheet_count;
-			total_candidate_non_manifold_edges += non_manifold_edge_count;
+			const bool is_residual_candidate =
+				(sheet_label != dominant_label) &&
+				is_dominant_plus_self_non_manifold_sheet(
+					p, sheet_label, dominant_label, it_faces->second, non_manifold_edge_count);
+			if (is_residual_candidate)
+			{
+				++candidate_sheet_count;
+				total_candidate_non_manifold_edges += non_manifold_edge_count;
+			}
 
 			const Scalar score = label_area_normalized_error.count(sheet_label)
 									 ? label_area_normalized_error.at(sheet_label)
 									 : std::numeric_limits<Scalar>::infinity();
 			const Scalar area = label_area_sum.count(sheet_label) ? label_area_sum.at(sheet_label) : Scalar(0);
-			const bool delete_sheet = score > score_threshold;
-			residual_sheet_scores.push_back(
-				ResidualSheetScoreEntry{sheet_label, it_faces->second.size(), non_manifold_edge_count, area, score, delete_sheet});
+			const bool delete_by_small_sheet = (face_count <= forced_delete_max_face_count);
+			const bool delete_by_threshold = is_residual_candidate && threshold_enabled && (score > score_threshold);
+			const bool delete_all_residual_when_threshold_disabled =
+				is_residual_candidate && !threshold_enabled;
+			const bool delete_sheet =
+				delete_by_small_sheet || delete_by_threshold || delete_all_residual_when_threshold_disabled;
+			residual_sheet_scores.push_back(ResidualSheetScoreEntry{
+				sheet_label,
+				face_count,
+				is_residual_candidate,
+				non_manifold_edge_count,
+				area,
+				score,
+				delete_sheet,
+				delete_by_small_sheet,
+				delete_by_threshold,
+				delete_all_residual_when_threshold_disabled});
 
 			if (!delete_sheet)
 				continue;
@@ -7865,19 +7881,41 @@ protected:
 
 		std::cout << log_prefix << " current_residual_sheet_scores"
 				  << " dominant_label=" << dominant_label
-				  << " candidate_sheets=" << residual_sheet_scores.size()
-				  << " threshold=" << score_threshold << std::endl;
+				  << " evaluated_sheets=" << residual_sheet_scores.size()
+				  << " candidate_sheets=" << candidate_sheet_count
+				  << " threshold=" << score_threshold
+				  << " threshold_enabled=" << (threshold_enabled ? "true" : "false")
+				  << " forced_delete_max_face_count=" << forced_delete_max_face_count << std::endl;
 		for (const ResidualSheetScoreEntry& entry : residual_sheet_scores)
 		{
+			const char* action = "keep";
+			if (entry.delete_sheet)
+			{
+				if (entry.delete_by_small_sheet && entry.delete_by_threshold)
+					action = "delete_small_sheet+threshold";
+				else if (entry.delete_by_small_sheet && entry.delete_all_residual_when_threshold_disabled)
+					action = "delete_small_sheet+all_residual";
+				else if (entry.delete_by_small_sheet)
+					action = "delete_small_sheet";
+				else if (entry.delete_all_residual_when_threshold_disabled)
+					action = "delete_all_residual";
+				else
+					action = "delete_threshold";
+			}
 			std::cout << log_prefix << " residual_sheet_score"
 					  << " sheet=" << entry.sheet_label
 					  << " dominant_label=" << dominant_label
 					  << " face_count=" << entry.face_count
+					  << " residual_candidate=" << (entry.is_residual_candidate ? "true" : "false")
 					  << " non_manifold_edges=" << entry.non_manifold_edge_count
 					  << " area=" << entry.area
 					  << " score=" << entry.score
 					  << " threshold=" << score_threshold
-					  << " action=" << (entry.delete_sheet ? "delete" : "keep") << std::endl;
+					  << " threshold_enabled=" << (threshold_enabled ? "true" : "false")
+					  << " forced_small_sheet_delete=" << (entry.delete_by_small_sheet ? "true" : "false")
+					  << " all_residual_when_threshold_disabled="
+					  << (entry.delete_all_residual_when_threshold_disabled ? "true" : "false")
+					  << " action=" << action << std::endl;
 		}
 
 		if (face_ids_to_delete.empty())
@@ -13161,7 +13199,7 @@ protected:
 					if (p.completion_residual_sheet_score_threshold_ < -1.0f)
 						p.completion_residual_sheet_score_threshold_ = -1.0f;
 					ImGui::SameLine();
-					ImGui::TextUnformatted("<0 disables residual prune");
+					ImGui::TextUnformatted("<0 deletes all residual sheets");
 					ImGui::SameLine();
 					if (ImGui::Button("Singular completion path"))
 					{
