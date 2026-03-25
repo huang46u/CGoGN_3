@@ -2673,77 +2673,122 @@ private:
 
 	// --- Sampling ---
 
+	bool recompute_sample_normal_pca_for_vertex(PointsParameters& p, PVertex v)
+	{
+		if (!p.samples_mesh_ || !p.samples_kdtree_ || !p.samples_position_ || !p.samples_normal_ || !v.is_valid())
+			return false;
+
+		const int k = std::max(3, p.knn_k_);
+		const uint32 v_idx = index_of(*p.samples_mesh_, v);
+		if (v_idx == INVALID_INDEX)
+			return false;
+		const Vec3& center = (*p.samples_position_)[v_idx];
+		const Scalar eps = Scalar(1e-12);
+
+		std::vector<std::pair<uint32, Scalar>> knn_res;
+		p.samples_kdtree_->find_nns(center, k + 1, &knn_res);
+
+		std::vector<Vec3> neighbors;
+		neighbors.reserve(k);
+		for (const auto& res : knn_res)
+		{
+			PVertex nb = p.samples_kdtree_vertices_[res.first];
+			if (nb == v)
+				continue;
+			uint32 nb_idx = index_of(*p.samples_mesh_, nb);
+			neighbors.push_back((*p.samples_position_)[nb_idx]);
+			if (static_cast<int>(neighbors.size()) >= k)
+				break;
+		}
+		if (neighbors.size() < 3)
+			return false;
+
+		Vec3 mean(0, 0, 0);
+		for (const Vec3& q : neighbors)
+			mean += q;
+		mean /= Scalar(neighbors.size());
+
+		Eigen::Matrix<Scalar, 3, 3> cov = Eigen::Matrix<Scalar, 3, 3>::Zero();
+		for (const Vec3& q : neighbors)
+		{
+			Vec3 d = q - mean;
+			cov(0, 0) += d.x() * d.x();
+			cov(0, 1) += d.x() * d.y();
+			cov(0, 2) += d.x() * d.z();
+			cov(1, 1) += d.y() * d.y();
+			cov(1, 2) += d.y() * d.z();
+			cov(2, 2) += d.z() * d.z();
+		}
+		cov(1, 0) = cov(0, 1);
+		cov(2, 0) = cov(0, 2);
+		cov(2, 1) = cov(1, 2);
+
+		Eigen::SelfAdjointEigenSolver<Eigen::Matrix<Scalar, 3, 3>> solver(cov);
+		if (solver.info() != Eigen::Success)
+			return false;
+
+		Eigen::Matrix<Scalar, 3, 1> ev = solver.eigenvectors().col(0);
+		Vec3 n(ev(0), ev(1), ev(2));
+		Scalar n2 = n.squaredNorm();
+		if (n2 < eps)
+			return false;
+
+		Vec3 n0 = (*p.samples_normal_)[v_idx];
+		if (n0.squaredNorm() > eps && n.dot(n0) < Scalar(0))
+			n = -n;
+		n.normalize();
+		(*p.samples_normal_)[v_idx] = n;
+		return true;
+	}
+
 	void recompute_samples_normals_pca(PointsParameters& p)
 	{
 		if (!p.samples_mesh_ || !p.samples_kdtree_ || !p.samples_position_ || !p.samples_normal_)
 			return;
 
-		const int k = std::max(3, p.knn_k_);
-		const Scalar eps = Scalar(1e-12);
-
 		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			const Vec3& center = (*p.samples_position_)[v_idx];
-
-			std::vector<std::pair<uint32, Scalar>> knn_res;
-			p.samples_kdtree_->find_nns(center, k + 1, &knn_res);
-
-			std::vector<Vec3> neighbors;
-			neighbors.reserve(k);
-			for (const auto& res : knn_res)
-			{
-				PVertex nb = p.samples_kdtree_vertices_[res.first];
-				if (nb == v)
-					continue;
-				uint32 nb_idx = index_of(*p.samples_mesh_, nb);
-				neighbors.push_back((*p.samples_position_)[nb_idx]);
-				if (static_cast<int>(neighbors.size()) >= k)
-					break;
-			}
-			if (neighbors.size() < 3)
-				return true;
-
-			Vec3 mean(0, 0, 0);
-			for (const Vec3& q : neighbors)
-				mean += q;
-			mean /= Scalar(neighbors.size());
-
-			Eigen::Matrix<Scalar, 3, 3> cov = Eigen::Matrix<Scalar, 3, 3>::Zero();
-			for (const Vec3& q : neighbors)
-			{
-				Vec3 d = q - mean;
-				cov(0, 0) += d.x() * d.x();
-				cov(0, 1) += d.x() * d.y();
-				cov(0, 2) += d.x() * d.z();
-				cov(1, 1) += d.y() * d.y();
-				cov(1, 2) += d.y() * d.z();
-				cov(2, 2) += d.z() * d.z();
-			}
-			cov(1, 0) = cov(0, 1);
-			cov(2, 0) = cov(0, 2);
-			cov(2, 1) = cov(1, 2);
-
-			Eigen::SelfAdjointEigenSolver<Eigen::Matrix<Scalar, 3, 3>> solver(cov);
-			if (solver.info() != Eigen::Success)
-				return true;
-
-			Eigen::Matrix<Scalar, 3, 1> ev = solver.eigenvectors().col(0);
-			Vec3 n(ev(0), ev(1), ev(2));
-			Scalar n2 = n.squaredNorm();
-			if (n2 < eps)
-				return true;
-
-			Vec3 n0 = (*p.samples_normal_)[v_idx];
-			if (n0.squaredNorm() > eps && n.dot(n0) < Scalar(0))
-				n = -n;
-			n.normalize();
-			(*p.samples_normal_)[v_idx] = n;
+			recompute_sample_normal_pca_for_vertex(p, v);
 			return true;
 		});
 
 		refresh_sample_normals_color(p);
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
+
+	void recompute_samples_normals_pca_for_vertices(PointsParameters& p, const std::vector<PVertex>& vertices)
+	{
+		if (!p.samples_mesh_ || !p.samples_kdtree_ || !p.samples_position_ || !p.samples_normal_ || vertices.empty())
+			return;
+
+		std::unordered_set<uint32> visited_ids;
+		visited_ids.reserve(vertices.size());
+		std::vector<PVertex> updated_vertices;
+		updated_vertices.reserve(vertices.size());
+		for (PVertex v : vertices)
+		{
+			if (!v.is_valid())
+				continue;
+			const uint32 v_idx = index_of(*p.samples_mesh_, v);
+			if (v_idx == INVALID_INDEX || !visited_ids.insert(v_idx).second)
+				continue;
+			if (recompute_sample_normal_pca_for_vertex(p, v))
+				updated_vertices.push_back(v);
+		}
+		if (updated_vertices.empty())
+			return;
+
+		for (PVertex v : updated_vertices)
+		{
+			const uint32 v_idx = index_of(*p.samples_mesh_, v);
+			if (v_idx == INVALID_INDEX)
+				continue;
+			const Vec3& n = (*p.samples_normal_)[v_idx];
+			(*p.samples_normal_color_)[v_idx] =
+				Vec4((n.x() + 1.0) * 0.5, (n.y() + 1.0) * 0.5, (n.z() + 1.0) * 0.5, 1.0);
+		}
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
+		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
+	}
 	}
 	Vec3 random_sample_around(const Vec3& p, const Scalar radius, std::uniform_real_distribution<Scalar>& uni,
 							  std::mt19937& rng)
@@ -3286,6 +3331,7 @@ private:
 		// - MF model: retry if sdf(center) > 0; still sdf > 0 -> delete sample.
 		uint32 flipped_normals = 0;
 		uint32 flip_triggered_points = 0;
+		std::vector<PVertex> flipped_vertices;
 		uint32 deleted_samples = 0;
 		if (p.neural_udf_loaded_)
 		{
@@ -3381,6 +3427,7 @@ private:
 					if (trigger_retry)
 						need_retry.push_back(vertices[i]);
 				}
+				flipped_vertices.reserve(need_retry.size());
 				flip_triggered_points += static_cast<uint32>(need_retry.size());
 
 				for (PVertex v : need_retry)
@@ -3392,6 +3439,7 @@ private:
 					if (n.squaredNorm() > min_norm)
 					{
 						n.normalize();
+					flipped_vertices.push_back(v);
 						(*p.samples_normal_)[vid] = -n;
 						++flipped_normals;
 					}
@@ -3455,15 +3503,13 @@ private:
 					  << " deleted_samples=" << deleted_samples
 					  << " remaining_samples=" << nb_cells<PVertex>(*p.samples_mesh_) << std::endl;
 			
-			// Keep fitting-dependent structures coherent after sample removals.
+			// Sample connectivity changed; refresh the geometry needed to stabilize MA first.
 			build_kdtree(p);
-			if (nb_cells<PVertex>(*p.samples_mesh_) > 0)
+			if (nb_cells<PVertex>(*p.samples_mesh_) > 0 && !flipped_vertices.empty())
 			{
-				recompute_samples_normals_pca(p);
-				compute_samples_area(p);
-				compute_winding_numbers(p);
-				compute_quadrics(p);
-				run_shrinking_ball_for_all();
+				recompute_samples_normals_pca_for_vertices(p, flipped_vertices);
+				for (PVertex v : flipped_vertices)
+					run_shrinking_ball_for_vertex(v);
 			}
 			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
 		}
