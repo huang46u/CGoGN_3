@@ -6218,6 +6218,7 @@ protected:
 		std::unordered_map<uint32, uint32> root_to_component_id;
 		root_to_component_id.reserve(faces.size());
 		if (out_component_cardinality)
+		uint32 assigned_faces = 0;
 			out_component_cardinality->clear();
 		for (uint32 i = 0; i < static_cast<uint32>(faces.size()); ++i)
 		{
@@ -6226,17 +6227,57 @@ protected:
 				root_to_component_id.emplace(root, static_cast<uint32>(root_to_component_id.size()));
 			(void)inserted;
 			const uint32 face_id = index_of(*p.skeleton_, faces[i]);
+			{
 			if (face_id != INVALID_INDEX)
+				++assigned_faces;
+			}
 				(*p.skeleton_face_component_id_)[face_id] = it->second;
+
+		uint32 recovered_unlabeled_faces = 0;
+		uint32 standalone_unlabeled_components = 0;
+		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			if (!f.is_valid())
+				return true;
+			const uint32 face_id = index_of(*p.skeleton_, f);
+			if (face_id == INVALID_INDEX)
+				return true;
+			if ((*p.skeleton_face_component_id_)[face_id] != INVALID_INDEX)
+				return true;
+
+			const auto it_face = face_id_to_uf_index.find(face_id);
+			if (it_face != face_id_to_uf_index.end())
+			{
+				const uint32 root = uf.find(it_face->second);
+				const auto [it_component, inserted] =
+					root_to_component_id.emplace(root, static_cast<uint32>(root_to_component_id.size()));
+				(void)inserted;
+				(*p.skeleton_face_component_id_)[face_id] = it_component->second;
+				++recovered_unlabeled_faces;
+				++assigned_faces;
+				return true;
+			}
+
+			const uint32 fallback_component_id = static_cast<uint32>(root_to_component_id.size());
+			root_to_component_id.emplace(std::numeric_limits<uint32>::max() - fallback_component_id, fallback_component_id);
+			(*p.skeleton_face_component_id_)[face_id] = fallback_component_id;
+			++standalone_unlabeled_components;
+			++recovered_unlabeled_faces;
+			++assigned_faces;
+			return true;
+		});
 		}
 		if (out_component_cardinality)
 		{
 			out_component_cardinality->reserve(root_to_component_id.size());
 			for (const auto& kv : root_to_component_id)
-				(*out_component_cardinality)[kv.second] = uf.root_size(kv.first);
+				(*out_component_cardinality)[kv.second] =
+					(kv.first < static_cast<uint32>(faces.size())) ? uf.root_size(kv.first) : 1u;
 		}
 
-		std::cout << log_prefix << " faces=" << faces.size() << " degree2_edges=" << manifold_degree2_edges
+		std::cout << log_prefix << " faces=" << faces.size() << " assigned_faces=" << assigned_faces
+				  << " degree2_edges=" << manifold_degree2_edges
+				  << " recovered_unlabeled_faces=" << recovered_unlabeled_faces
+				  << " standalone_unlabeled_components=" << standalone_unlabeled_components
 				  << " completion_barrier_edges=" << completion_barrier_edges
 				  << " components=" << root_to_component_id.size() << std::endl;
 		return true;
