@@ -7492,6 +7492,7 @@ protected:
 			std::cerr << log_prefix << " failed to build initial face components." << std::endl;
 			return;
 		}
+		const std::unordered_set<uint32> preexisting_orphan_edge_ids = collect_current_orphan_edge_ids(p);
 
 		std::unordered_map<uint32, std::vector<uint32>> label_to_faces;
 		label_to_faces.reserve(nb_cells<NMFace>(*p.skeleton_));
@@ -7717,7 +7718,8 @@ protected:
 		{
 			uint32 deferred_removed_edges = 0;
 			uint32 deferred_removed_vertices = 0;
-			remove_global_orphan_skeleton_elements(p, &deferred_removed_edges, &deferred_removed_vertices);
+			remove_global_orphan_skeleton_elements(
+				p, &deferred_removed_edges, &deferred_removed_vertices, &preexisting_orphan_edge_ids);
 			total_removed_edges += deferred_removed_edges;
 			total_removed_vertices += deferred_removed_vertices;
 		}
@@ -8014,8 +8016,28 @@ protected:
 		return removed_edges;
 	}
 
+	std::unordered_set<uint32> collect_current_orphan_edge_ids(PointsParameters& p)
+	{
+		std::unordered_set<uint32> orphan_edge_ids;
+		if (!p.skeleton_)
+			return orphan_edge_ids;
+		orphan_edge_ids.reserve(nb_cells<NMEdge>(*p.skeleton_));
+		foreach_cell(*p.skeleton_, [&](NMEdge e) -> bool {
+			if (!e.is_valid())
+				return true;
+			const uint32 ide = index_of(*p.skeleton_, e);
+			if (ide == INVALID_INDEX)
+				return true;
+			if (incident_faces(*p.skeleton_, e).empty())
+				orphan_edge_ids.insert(ide);
+			return true;
+		});
+		return orphan_edge_ids;
+	}
+
 	void remove_global_orphan_skeleton_elements(PointsParameters& p, uint32* out_removed_edges = nullptr,
-												uint32* out_removed_vertices = nullptr)
+												uint32* out_removed_vertices = nullptr,
+												const std::unordered_set<uint32>* preserved_orphan_edge_ids = nullptr)
 	{
 		uint32 removed_edges = 0;
 		uint32 removed_vertices = 0;
@@ -8033,8 +8055,14 @@ protected:
 		foreach_cell(*p.skeleton_, [&](NMEdge e) -> bool {
 			if (!e.is_valid())
 				return true;
-			if (incident_faces(*p.skeleton_, e).empty())
-				orphan_edges.push_back(e);
+			if (!incident_faces(*p.skeleton_, e).empty())
+				return true;
+			const uint32 ide = index_of(*p.skeleton_, e);
+			if (ide == INVALID_INDEX)
+				return true;
+			if (preserved_orphan_edge_ids && preserved_orphan_edge_ids->find(ide) != preserved_orphan_edge_ids->end())
+				return true;
+			orphan_edges.push_back(e);
 			return true;
 		});
 
@@ -8102,6 +8130,8 @@ protected:
 		out_stats = SkeletonFaceDeletionStats{};
 		if (!p.skeleton_ || !p.incident_tets_ || face_ids_to_delete.empty())
 			return false;
+		const std::unordered_set<uint32> preexisting_orphan_edge_ids =
+			options.remove_global_orphan_elements_after_batch ? collect_current_orphan_edge_ids(p) : std::unordered_set<uint32>{};
 
 		for (uint32 face_id : face_ids_to_delete)
 		{
@@ -8171,7 +8201,8 @@ protected:
 		{
 			uint32 global_orphan_edges = 0;
 			uint32 global_orphan_vertices = 0;
-			remove_global_orphan_skeleton_elements(p, &global_orphan_edges, &global_orphan_vertices);
+			remove_global_orphan_skeleton_elements(
+				p, &global_orphan_edges, &global_orphan_vertices, &preexisting_orphan_edge_ids);
 			out_stats.removed_edges += global_orphan_edges;
 			out_stats.removed_vertices += global_orphan_vertices;
 		}
@@ -10902,6 +10933,7 @@ protected:
 			std::cerr << log_prefix << " requires a built skeleton." << std::endl;
 			return;
 		}
+		const std::unordered_set<uint32> preexisting_orphan_edge_ids = collect_current_orphan_edge_ids(p);
 
 		uint32 removed_faces_total = 0;
 		uint32 removed_edges_total = 0;
@@ -11094,7 +11126,8 @@ protected:
 
 		uint32 removed_global_orphan_edges = 0;
 		uint32 removed_global_orphan_vertices = 0;
-		remove_global_orphan_skeleton_elements(p, &removed_global_orphan_edges, &removed_global_orphan_vertices);
+		remove_global_orphan_skeleton_elements(
+			p, &removed_global_orphan_edges, &removed_global_orphan_vertices, &preexisting_orphan_edge_ids);
 		if (removed_global_orphan_edges != 0 || removed_global_orphan_vertices != 0)
 		{
 			std::cout << log_prefix << " cleanup"
