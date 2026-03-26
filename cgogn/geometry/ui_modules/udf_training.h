@@ -141,6 +141,12 @@ public:
 		INITIAL_MA_DISPLACEMENT,
 		INITIAL_MA_SHRINKING_BALL
 	};
+	enum OutputVerbosity : uint32
+	{
+		OUTPUT_MUTE,
+		OUTPUT_NORMAL,
+		OUTPUT_VERBOSE
+	};
 
 private:
 	struct PointsParameters;
@@ -347,6 +353,7 @@ private:
 		Scalar min_error_ = 0.0;
 		Scalar max_error_ = 0.0;
 		PVertex max_error_sphere_ = PVertex();
+		OutputVerbosity output_verbosity_ = OUTPUT_NORMAL;
 
 		// Threading
 		uint32 iteration_count_ = 0;
@@ -377,6 +384,8 @@ private:
 
 		void print_tet_info(PointsParameters& p) const
 		{
+			if (p.output_verbosity_ != OUTPUT_VERBOSE)
+				return;
 			std::cout << "Tet ID: " << tet_id << "\n";
 			for (int i = 0; i < 4; ++i)
 			{
@@ -413,6 +422,7 @@ public:
 	struct HeadlessBenchmarkOptions
 	{
 		bool verbose_ = true;
+		OutputVerbosity output_verbosity_ = OUTPUT_NORMAL;
 		uint32 initial_nb_spheres_ = 1;
 		InitialMAMode initial_ma_mode_override_ = INITIAL_MA_AUTO;
 		float32 filter_radius_threshold_ = 0.0f;
@@ -477,6 +487,129 @@ public:
 		uint32 optimization_iterations_ = 0;
 	};
 
+	static int output_verbosity_index(OutputVerbosity value)
+	{
+		switch (value)
+		{
+		case OUTPUT_MUTE:
+			return 0;
+		case OUTPUT_VERBOSE:
+			return 2;
+		case OUTPUT_NORMAL:
+		default:
+			return 1;
+		}
+	}
+
+	static OutputVerbosity output_verbosity_from_index(int index)
+	{
+		switch (index)
+		{
+		case 0:
+			return OUTPUT_MUTE;
+		case 2:
+			return OUTPUT_VERBOSE;
+		case 1:
+		default:
+			return OUTPUT_NORMAL;
+		}
+	}
+
+	bool is_basic_logging_enabled(const PointsParameters& p) const
+	{
+		return p.output_verbosity_ != OUTPUT_MUTE;
+	}
+
+	bool is_verbose_logging_enabled(const PointsParameters& p) const
+	{
+		return p.output_verbosity_ == OUTPUT_VERBOSE;
+	}
+
+	bool is_basic_logging_enabled(OutputVerbosity output_verbosity) const
+	{
+		return output_verbosity != OUTPUT_MUTE;
+	}
+
+	bool is_verbose_logging_enabled(OutputVerbosity output_verbosity) const
+	{
+		return output_verbosity == OUTPUT_VERBOSE;
+	}
+
+	template <typename... Args>
+	void log_basic(const PointsParameters& p, Args&&... args) const
+	{
+		if (!is_basic_logging_enabled(p))
+			return;
+		(std::cout << ... << std::forward<Args>(args));
+	}
+
+	template <typename... Args>
+	void log_basic(OutputVerbosity output_verbosity, Args&&... args) const
+	{
+		if (!is_basic_logging_enabled(output_verbosity))
+			return;
+		(std::cout << ... << std::forward<Args>(args));
+	}
+
+	template <typename... Args>
+	void log_basic(const PointsParameters& p, Args&&... args, std::ostream& (*manip)(std::ostream&)) const
+	{
+		if (!is_basic_logging_enabled(p))
+			return;
+		(std::cout << ... << std::forward<Args>(args));
+		manip(std::cout);
+	}
+
+	template <typename... Args>
+	void log_verbose(const PointsParameters& p, Args&&... args) const
+	{
+		if (!is_verbose_logging_enabled(p))
+			return;
+		(std::cout << ... << std::forward<Args>(args));
+	}
+
+	template <typename... Args>
+	void log_verbose(OutputVerbosity output_verbosity, Args&&... args) const
+	{
+		if (!is_verbose_logging_enabled(output_verbosity))
+			return;
+		(std::cout << ... << std::forward<Args>(args));
+	}
+
+	template <typename... Args>
+	void log_verbose(const PointsParameters& p, Args&&... args, std::ostream& (*manip)(std::ostream&)) const
+	{
+		if (!is_verbose_logging_enabled(p))
+			return;
+		(std::cout << ... << std::forward<Args>(args));
+		manip(std::cout);
+	}
+
+	template <typename... Args>
+	void log_error(const PointsParameters& p, Args&&... args) const
+	{
+		if (!is_basic_logging_enabled(p))
+			return;
+		(std::cerr << ... << std::forward<Args>(args));
+	}
+
+	template <typename... Args>
+	void log_error(OutputVerbosity output_verbosity, Args&&... args) const
+	{
+		if (!is_basic_logging_enabled(output_verbosity))
+			return;
+		(std::cerr << ... << std::forward<Args>(args));
+	}
+
+	template <typename... Args>
+	void log_error(const PointsParameters& p, Args&&... args, std::ostream& (*manip)(std::ostream&)) const
+	{
+		if (!is_basic_logging_enabled(p))
+			return;
+		(std::cerr << ... << std::forward<Args>(args));
+		manip(std::cerr);
+	}
+
 	void headless_prepare_points(POINTS& points)
 	{
 		init_points_data(points);
@@ -489,6 +622,9 @@ public:
 
 	void apply_headless_benchmark_options_prepared(PointsParameters& p, const HeadlessBenchmarkOptions& options)
 	{
+		p.output_verbosity_ = options.output_verbosity_;
+		if (options.verbose_)
+			p.output_verbosity_ = OUTPUT_VERBOSE;
 		p.initial_ma_mode_override_ = options.initial_ma_mode_override_;
 		p.filter_radius_threshold_ = options.filter_radius_threshold_;
 		p.sphere_correction_ = options.sphere_correction_;
@@ -600,6 +736,7 @@ public:
 
 	HeadlessOptimizationStats headless_optimize_spheres_prepared(PointsParameters& p, bool verbose = false)
 	{
+		const OutputVerbosity output_verbosity = verbose ? OUTPUT_VERBOSE : p.output_verbosity_;
 		const Scalar convergence_eps = Scalar(1e-10);
 		const uint32 max_post_convergence_iterations = 10;
 		const uint32 max_iterations_without_autosplit = p.max_iterations_without_autosplit_;
@@ -671,11 +808,8 @@ public:
 			stats.split_total_ms_ += std::chrono::duration<float64, std::milli>(split_end - split_start).count();
 
 			++p.iteration_count_;
-			if (verbose)
-			{
-				std::cout << "[HeadlessOptimize] iteration=" << p.iteration_count_ << " spheres=" << p.nb_spheres_
-						  << " error=" << p.total_error_ << " diff=" << p.total_error_diff_ << std::endl;
-			}
+			log_basic(output_verbosity, "[HeadlessOptimize] iteration=", p.iteration_count_, " spheres=",
+					  p.nb_spheres_, " error=", p.total_error_, " diff=", p.total_error_diff_, '\n');
 
 			if (p.auto_stop_)
 			{
@@ -898,12 +1032,12 @@ public:
 		PointsParameters& p = points_parameters_[&points];
 		if (!std::filesystem::exists(model_path))
 		{
-			std::cout << "Neural UDF model file does not exist: " << model_path << std::endl;
+			log_error(p, "Neural UDF model file does not exist: ", model_path, '\n');
 			return;
 		}
 		try
 		{
-			std::cout << "Loading Neural UDF model from: " << model_path << std::endl;
+			log_basic(p, "Loading Neural UDF model from: ", model_path, '\n');
 			p.neural_udf_model_ = torch::jit::load(model_path, device_);
 			p.neural_udf_model_.eval();
 			p.neural_udf_loaded_ = true;
@@ -913,11 +1047,11 @@ public:
 			p.udf_input_normalized_ = false;
 			p.udf_normalized_source_ = nullptr;
 			p.input_mode_ = INPUT_NEURAL_UDF;
-			std::cout << "Loaded neural UDF model from: " << model_path << std::endl;
+			log_basic(p, "Loaded neural UDF model from: ", model_path, '\n');
 		}
 		catch (const c10::Error& e)
 		{
-			std::cerr << "Error loading Neural UDF model: " << e.what() << std::endl;
+			log_error(p, "Error loading Neural UDF model: ", e.what(), '\n');
 			p.neural_udf_loaded_ = false;
 		}
 	}
@@ -1043,10 +1177,10 @@ public:
 
 	void finalize_sample_mesh_after_sampling(PointsParameters& p)
 	{
-		std::cout << "Building KDTree for sampled points..." << std::endl;
+		log_basic(p, "Building KDTree for sampled points...", '\n');
 		build_kdtree(p);
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		std::cout << "Alpha level set sampling complete. Ready for fitting." << std::endl;
+		log_basic(p, "Alpha level set sampling complete. Ready for fitting.", '\n');
 	}
 
 	RaySamplerParams make_ray_params(const PointsParameters& p) const
@@ -1161,7 +1295,7 @@ public:
 	{
 		if (!p.neural_udf_loaded_)
 		{
-			std::cerr << "Neural UDF model not loaded. Cannot sample alpha level set." << std::endl;
+			log_error(p, "Neural UDF model not loaded. Cannot sample alpha level set.", '\n');
 			return;
 		}
 
@@ -1171,9 +1305,9 @@ public:
 		else
 		{
 			p.samples_spatial_grid_.reset();
-			std::cout << "Grid Cell Size <= 0: sampling without SpatialGrid deduplication." << std::endl;
+			log_basic(p, "Grid Cell Size <= 0: sampling without SpatialGrid deduplication.", '\n');
 		}
-		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
+		log_basic(p, "Sampling ", num_points, " points on alpha=", p.alpha_, " level set...", '\n');
 
 		RaySamplerParams ray_params = make_ray_params(p);
 		NeuralFieldForward udf = make_neural_field_forward(p);
@@ -1185,8 +1319,8 @@ public:
 			p.ray_sampler_->set_params(ray_params);
 			p.ray_sampler_->set_device(udf.device());
 		}
-		std::cout << "Neural sampling bbox: min(" << bbox_min.transpose() << "), max(" << bbox_max.transpose() << ")"
-				  << std::endl;
+		log_basic(p, "Neural sampling bbox: min(", bbox_min.transpose(), "), max(", bbox_max.transpose(), ")",
+				  '\n');
 		bool used_sdf_filter = false;
 		auto traits = RaySamplerConfig::make(udf);
 		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
@@ -1194,11 +1328,12 @@ public:
 
 		if (sampled_points.empty())
 		{
-			std::cerr << "Failed to sample points on alpha level set." << std::endl;
+			log_error(p, "Failed to sample points on alpha level set.", '\n');
 			return;
 		}
 
-		std::cout << "Successfully sampled " << sampled_points.size() << " points." << std::endl;
+		log_basic(p, "Successfully sampled ", sampled_points.size(), " points.", '\n');
+		if (is_verbose_logging_enabled(p))
 		{
 			const size_t check_n = std::min<size_t>(30, sampled_points.size());
 			if (check_n > 0)
@@ -1215,17 +1350,16 @@ public:
 				BatchUDFResult check_res = udf.forward_batch(check_points);
 				if (check_res.ok && check_res.values.size() == check_n)
 				{
-					std::cout << "UDF check (random " << check_n << "):" << std::endl;
+					log_verbose(p, "UDF check (random ", check_n, "):", '\n');
 					for (size_t i = 0; i < check_n; ++i)
 					{
 						const Scalar v = check_res.values[i];
-						std::cout << "  " << i << ": udf=" << v << " |udf-alpha|=" << std::abs(v - p.alpha_)
-								  << std::endl;
+						log_verbose(p, "  ", i, ": udf=", v, " |udf-alpha|=", std::abs(v - p.alpha_), '\n');
 					}
 				}
 				else
 				{
-					std::cerr << "UDF check failed (forward_batch)." << std::endl;
+					log_error(p, "UDF check failed (forward_batch).", '\n');
 				}
 			}
 		}
@@ -1243,7 +1377,7 @@ public:
 				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
 		}
 
-		std::cout << "Computing normals from UDF gradients..." << std::endl;
+		log_basic(p, "Computing normals from UDF gradients...", '\n');
 		std::vector<Vec3> all_positions;
 		all_positions.reserve(sampled_points.size());
 		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
@@ -1314,7 +1448,7 @@ public:
 			});
 		}
 		if (!normals_ok)
-			std::cerr << "Failed to compute normals from UDF gradients." << std::endl;
+			log_error(p, "Failed to compute normals from UDF gradients.", '\n');
 
 		finalize_sample_mesh_after_sampling(p);
 	}
@@ -1324,14 +1458,14 @@ public:
 		build_surface_bvh();
 		if (!surface_bvh_)
 		{
-			std::cerr << "Surface BVH not available. Cannot sample alpha level set." << std::endl;
+			log_error(p, "Surface BVH not available. Cannot sample alpha level set.", '\n');
 			return;
 		}
 
 		auto s_pos = get_attribute<Vec3, SVertex>(*selected_surface_, "position");
 		if (!s_pos)
 		{
-			std::cerr << "Surface position attribute not available. Cannot sample alpha level set." << std::endl;
+			log_error(p, "Surface position attribute not available. Cannot sample alpha level set.", '\n');
 			return;
 		}
 
@@ -1341,9 +1475,9 @@ public:
 		else
 		{
 			p.samples_spatial_grid_.reset();
-			std::cout << "Grid Cell Size <= 0: sampling without SpatialGrid deduplication." << std::endl;
+			log_basic(p, "Grid Cell Size <= 0: sampling without SpatialGrid deduplication.", '\n');
 		}
-		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
+		log_basic(p, "Sampling ", num_points, " points on alpha=", p.alpha_, " level set...", '\n');
 
 		RaySamplerParams ray_params = make_ray_params(p);
 		if (!p.ray_sampler_)
@@ -1354,8 +1488,8 @@ public:
 			p.ray_sampler_->set_device(torch::kCPU);
 		}
 		auto [bbox_min, bbox_max] = compute_sampling_bbox(p);
-		std::cout << "Surface sampling bbox: min(" << bbox_min.transpose() << "), max(" << bbox_max.transpose() << ")"
-				  << std::endl;
+		log_basic(p, "Surface sampling bbox: min(", bbox_min.transpose(), "), max(", bbox_max.transpose(), ")",
+				  '\n');
 
 		auto traits =
 			RaySamplerConfig::make(*selected_surface_, s_pos.get(), surface_bvh_.get(), &surface_bvh_faces_);
@@ -1364,11 +1498,11 @@ public:
 
 		if (sampled_points.empty())
 		{
-			std::cerr << "Failed to sample points on alpha level set." << std::endl;
+			log_error(p, "Failed to sample points on alpha level set.", '\n');
 			return;
 		}
 
-		std::cout << "Successfully sampled " << sampled_points.size() << " points." << std::endl;
+		log_basic(p, "Successfully sampled ", sampled_points.size(), " points.", '\n');
 		if (p.samples_mesh_)
 			points_provider_->clear_mesh(*p.samples_mesh_);
 		p.samples_jitter_backup_valid_ = false;
@@ -1383,7 +1517,7 @@ public:
 				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
 		}
 
-		std::cout << "Computing normals from surface mesh..." << std::endl;
+		log_basic(p, "Computing normals from surface mesh...", '\n');
 		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
 			const Vec3& pos = (*p.samples_position_)[v_idx];
@@ -1437,12 +1571,12 @@ public:
 	{
 		if (!p.input_kdtree_)
 		{
-			std::cerr << "Input point cloud KDTree not available. Cannot sample alpha level set." << std::endl;
+			log_error(p, "Input point cloud KDTree not available. Cannot sample alpha level set.", '\n');
 			return;
 		}
 		if (!p.normal_ || !p.knn_)
 		{
-			std::cerr << "Input point cloud normals/KNN not available. Cannot sample alpha level set." << std::endl;
+			log_error(p, "Input point cloud normals/KNN not available. Cannot sample alpha level set.", '\n');
 			return;
 		}
 
@@ -1452,9 +1586,9 @@ public:
 		else
 		{
 			p.samples_spatial_grid_.reset();
-			std::cout << "Grid Cell Size <= 0: sampling without SpatialGrid deduplication." << std::endl;
+			log_basic(p, "Grid Cell Size <= 0: sampling without SpatialGrid deduplication.", '\n');
 		}
-		std::cout << "Sampling " << num_points << " points on alpha=" << p.alpha_ << " level set..." << std::endl;
+		log_basic(p, "Sampling ", num_points, " points on alpha=", p.alpha_, " level set...", '\n');
 
 		RaySamplerParams ray_params = make_ray_params(p);
 		if (!p.ray_sampler_)
@@ -1465,8 +1599,8 @@ public:
 			p.ray_sampler_->set_device(torch::kCPU);
 		}
 		auto [bbox_min, bbox_max] = compute_sampling_bbox(p);
-		std::cout << "Point cloud sampling bbox: min(" << bbox_min.transpose() << "), max(" << bbox_max.transpose()
-				  << ")" << std::endl;
+		log_basic(p, "Point cloud sampling bbox: min(", bbox_min.transpose(), "), max(", bbox_max.transpose(), ")",
+				  '\n');
 
 		auto traits = RaySamplerConfig::make(*p.points_, p.position_.get(), p.normal_.get(), p.knn_.get(),
 											 p.input_kdtree_, &p.input_kdtree_vertices_);
@@ -1475,11 +1609,11 @@ public:
 
 		if (sampled_points.empty())
 		{
-			std::cerr << "Failed to sample points on alpha level set." << std::endl;
+			log_error(p, "Failed to sample points on alpha level set.", '\n');
 			return;
 		}
 
-		std::cout << "Successfully sampled " << sampled_points.size() << " points." << std::endl;
+		log_basic(p, "Successfully sampled ", sampled_points.size(), " points.", '\n');
 		if (p.samples_mesh_)
 			points_provider_->clear_mesh(*p.samples_mesh_);
 		p.samples_jitter_backup_valid_ = false;
@@ -1494,7 +1628,7 @@ public:
 				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
 		}
 
-		std::cout << "Computing normals from input point cloud..." << std::endl;
+		log_basic(p, "Computing normals from input point cloud...", '\n');
 		const Scalar eps = Scalar(1e-12);
 		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
 			uint32 v_idx = index_of(*p.samples_mesh_, v);
@@ -1521,7 +1655,7 @@ public:
 	{
 		const Scalar tol = Scalar(1e-2);
 		const Scalar max_dist = p.alpha_ + tol;
-		std::cout << "Before pre-processing, " << points.size() << " points." << std::endl;
+		log_basic(p, "Before pre-processing, ", points.size(), " points.", '\n');
 		if (!p.input_kdtree_)
 			return;
 		auto new_end = std::remove_if(points.begin(), points.end(), [&](const Vec3& pos) {
@@ -1529,14 +1663,14 @@ public:
 			return !p.input_kdtree_->find_nn(pos, &knn_res, max_dist);
 		});
 		points.erase(new_end, points.end());
-		std::cout << "After pre-processing, " << points.size() << " points." << std::endl;
+		log_basic(p, "After pre-processing, ", points.size(), " points.", '\n');
 	}
 
 	void pre_process_sampling_points_bvh(PointsParameters& p, std::vector<Vec3>& points)
 	{
 		const Scalar tol = Scalar(1e-2);
 		const Scalar max_dist = p.alpha_ + tol;
-		std::cout << "Before pre-processing, " << points.size() << " points." << std::endl;
+		log_basic(p, "Before pre-processing, ", points.size(), " points.", '\n');
 		//Todo: the bvh shuld not be built here, to be moved
 		build_surface_bvh();
 		if (!surface_bvh_)
@@ -1547,7 +1681,7 @@ public:
 			return !surface_bvh_->closest_point(pos, &cp, max_dist);
 		});
 		points.erase(new_end, points.end());
-		std::cout << "After pre-processing, " << points.size() << " points." << std::endl;
+		log_basic(p, "After pre-processing, ", points.size(), " points.", '\n');
 	}
 
 	void recompute_samples_normals_from_current_input(PointsParameters& p)
@@ -1726,14 +1860,14 @@ public:
 			return;
 		if (p.running_)
 		{
-			std::cerr << "Stop spheres update before filtering sampled points." << std::endl;
+			log_error(p, "Stop spheres update before filtering sampled points.", '\n');
 			return;
 		}
 
 		const uint32 count = nb_cells<PVertex>(*p.samples_mesh_);
 		if (count == 0)
 		{
-			std::cout << "No sampled points to filter." << std::endl;
+			log_basic(p, "No sampled points to filter.", '\n');
 			return;
 		}
 
@@ -1754,8 +1888,7 @@ public:
 		const size_t after = filtered_points.size();
 		if (after == before)
 		{
-			std::cout << "Sampling filtering applied: no points removed (" << before << " -> " << after << ")."
-					  << std::endl;
+			log_basic(p, "Sampling filtering applied: no points removed (", before, " -> ", after, ").", '\n');
 			return;
 		}
 
@@ -1784,7 +1917,7 @@ public:
 			p.samples_kdtree_vertices_.clear();
 			p.samples_ma_kdtree_vertices_.clear();
 			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-			std::cout << "Sampling filtering applied: " << before << " -> 0 points." << std::endl;
+			log_basic(p, "Sampling filtering applied: ", before, " -> 0 points.", '\n');
 			return;
 		}
 
@@ -1809,7 +1942,7 @@ public:
 			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_knn_color_.get());
 		if (p.samples_color_)
 			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
-		std::cout << "Sampling filtering applied: " << before << " -> " << after << " points." << std::endl;
+		log_basic(p, "Sampling filtering applied: ", before, " -> ", after, " points.", '\n');
 	}
 
 	std::vector<Vec3> poisson_eliminate_points(const std::vector<Vec3>& points, size_t target_num)
@@ -1839,14 +1972,14 @@ public:
 			return;
 		if (p.running_)
 		{
-			std::cerr << "Stop spheres update before Poisson eliminate on sampled points." << std::endl;
+			log_error(p, "Stop spheres update before Poisson eliminate on sampled points.", '\n');
 			return;
 		}
 
 		const uint32 count = nb_cells<PVertex>(*p.samples_mesh_);
 		if (count == 0)
 		{
-			std::cout << "No sampled points to downsample." << std::endl;
+			log_basic(p, "No sampled points to downsample.", '\n');
 			return;
 		}
 
@@ -1862,15 +1995,15 @@ public:
 		const size_t clamped_target = std::max<size_t>(1, std::min(target_num, before));
 		if (clamped_target >= before)
 		{
-			std::cout << "Poisson eliminate skipped: target >= current (" << clamped_target << " >= " << before
-					  << ")." << std::endl;
+			log_basic(p, "Poisson eliminate skipped: target >= current (", clamped_target, " >= ", before, ").",
+					  '\n');
 			return;
 		}
 
 		std::vector<Vec3> reduced_points = poisson_eliminate_points(input_points, clamped_target);
 		if (reduced_points.empty())
 		{
-			std::cerr << "Poisson eliminate failed: no points generated." << std::endl;
+			log_error(p, "Poisson eliminate failed: no points generated.", '\n');
 			return;
 		}
 
@@ -1906,8 +2039,8 @@ public:
 		if (p.samples_color_)
 			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
 
-		std::cout << "Poisson eliminate applied: " << before << " -> " << reduced_points.size()
-				  << " points (target=" << clamped_target << ")." << std::endl;
+		log_basic(p, "Poisson eliminate applied: ", before, " -> ", reduced_points.size(), " points (target=",
+				  clamped_target, ").", '\n');
 	}
 
 	std::pair<std::vector<Vec3>, std::vector<Vec3>> project_points_to_alpha_gpu_impl(PointsParameters& p,
@@ -2025,7 +2158,7 @@ public:
 		}
 		catch (const c10::Error& e)
 		{
-			std::cerr << "GPU projection to alpha level set failed: " << e.what() << std::endl;
+			log_error(p, "GPU projection to alpha level set failed: ", e.what(), '\n');
 			return {};
 		}
 	}
@@ -2051,16 +2184,16 @@ public:
 		BatchUDFResult result = udf.forward_batch_with_grad(test_points);
 		if (result.ok)
 		{
-			std::cout << "Batch UDF evaluation successful. Sample results:" << std::endl;
+			log_verbose(p, "Batch UDF evaluation successful. Sample results:", '\n');
 			for (size_t i = 0; i < 5; ++i)
 			{
-				std::cout << "Point: " << test_points[i].transpose() << " UDF: " << result.values[i]
-						  << " Grad: " << result.gradients[i].transpose() << std::endl;
+				log_verbose(p, "Point: ", test_points[i].transpose(), " UDF: ", result.values[i],
+						   " Grad: ", result.gradients[i].transpose(), '\n');
 			}
 		}
 		else
 		{
-			std::cerr << "Batch UDF evaluation failed." << std::endl;
+			log_error(p, "Batch UDF evaluation failed.", '\n');
 		}
 	}
 
@@ -2080,6 +2213,8 @@ protected:
 
 		pcr_ = static_cast<PointCloudRender<POINTS>*>(
 			app_.module("PointCloudRender (" + std::string{mesh_traits<POINTS>::name} + ")"));
+		skeleton_render_ = static_cast<SurfaceRender<NONMANIFOLD>*>(
+			app_.module("SurfaceRender (" + std::string{mesh_traits<NONMANIFOLD>::name} + ")"));
 
 		timer_connection_ = boost::synapse::connect<App::timer_tick>(&app_, [this]() {
 			if (selected_points_)
@@ -2099,14 +2234,16 @@ protected:
 			}
 		});
 		// Initialize PyTorch device
+		const OutputVerbosity startup_output_verbosity =
+			selected_points_ ? points_parameters_[selected_points_].output_verbosity_ : OUTPUT_NORMAL;
 		if (torch::cuda::is_available())
 		{
-			std::cout << "CUDA is available! Using GPU device 0." << std::endl;
+			log_basic(startup_output_verbosity, "CUDA is available! Using GPU device 0.", '\n');
 			device_ = torch::Device(torch::kCUDA, 0);
 		}
 		else
 		{
-			std::cout << "CUDA is not available! Using the CPU." << std::endl;
+			log_basic(startup_output_verbosity, "CUDA is not available! Using the CPU.", '\n');
 			device_ = torch::kCPU;
 		}
 	}
@@ -2303,32 +2440,32 @@ private:
 			return;
 		if (!p.samples_mesh_)
 		{
-			std::cerr << "Error: No sampled points found. Please sample points first." << std::endl;
+			log_error(p, "Error: No sampled points found. Please sample points first.", '\n');
 			return;
 		}
 
-		std::cout << "Building KDTree..." << std::endl;
+		log_basic(p, "Building KDTree...", '\n');
 		build_kdtree(p);
 		const bool force_pca_normals = should_force_pca_normals_in_fitting(p);
 		const bool recompute_pca_normals = force_pca_normals || p.recompute_sample_normals_after_sampling_;
 		if (recompute_pca_normals)
 		{
 			if (force_pca_normals)
-				std::cout << "Recomputing Normals (PCA)... [forced for non-UDF-model input]" << std::endl;
+				log_basic(p, "Recomputing Normals (PCA)... [forced for non-UDF-model input]", '\n');
 			else
-				std::cout << "Recomputing Normals (PCA)..." << std::endl;
+				log_basic(p, "Recomputing Normals (PCA)...", '\n');
 			recompute_samples_normals_pca(p);
 		}
-		std::cout << "Computing Initial Medial Axis..." << std::endl;
+		log_basic(p, "Computing Initial Medial Axis...", '\n');
 		compute_initial_medial_axis(p);
-		std::cout << "Computing KNN and Area..." << std::endl;
+		log_basic(p, "Computing KNN and Area...", '\n');
 		compute_samples_area(p); // Compute KNN and Area for samples
-		std::cout << "Computing Winding Numbers..." << std::endl;
+		log_basic(p, "Computing Winding Numbers...", '\n');
 		compute_winding_numbers(p);
-		std::cout << "Computing Quadrics..." << std::endl;
+		log_basic(p, "Computing Quadrics...", '\n');
 		compute_quadrics(p);
 
-		if (p.neural_udf_loaded_ && p.samples_ma_position_)
+		if (is_verbose_logging_enabled(p) && p.neural_udf_loaded_ && p.samples_ma_position_)
 		{
 			NeuralFieldForward udf = make_neural_field_forward(p);
 			if (udf.is_loaded())
@@ -2366,28 +2503,27 @@ private:
 						sample_res.values.size() == check_n && medial_res.gradients.size() == check_n &&
 						sample_res.gradients.size() == check_n)
 					{
-						std::cout << "Medial UDF check (random " << check_n << "):" << std::endl;
+						log_verbose(p, "Medial UDF check (random ", check_n, "):", '\n');
 						for (size_t i = 0; i < check_n; ++i)
 						{
 							const Scalar medial_udf = medial_res.values[i];
 							const Scalar sample_udf = sample_res.values[i];
 							const Scalar medial_grad_norm = medial_res.gradients[i].norm();
 							const Scalar sample_grad_norm = sample_res.gradients[i].norm();
-							std::cout << "  " << i << ": medial_udf=" << medial_udf << " | sample_udf=" << sample_udf
-									  << " | sample_udf-alpha=" << (sample_udf - p.alpha_)
-									  << " | medial_grad_norm=" << medial_grad_norm
-									  << " | sample_grad_norm=" << sample_grad_norm << std::endl;
+							log_verbose(p, "  ", i, ": medial_udf=", medial_udf, " | sample_udf=", sample_udf,
+									 " | sample_udf-alpha=", (sample_udf - p.alpha_), " | medial_grad_norm=",
+									 medial_grad_norm, " | sample_grad_norm=", sample_grad_norm, '\n');
 						}
 					}
 					else
 					{
-						std::cerr << "Medial UDF check failed (forward_batch)." << std::endl;
+						log_error(p, "Medial UDF check failed (forward_batch).", '\n');
 					}
 				}
 			}
 		}
 
-		std::cout << "Fitting Data Computed." << std::endl;
+		log_basic(p, "Fitting Data Computed.", '\n');
 
 		p.fitting_data_computed_ = true;
 	}
@@ -2405,13 +2541,13 @@ private:
 	{
 		if (!p.samples_mesh_ || !p.samples_position_ || !p.samples_normal_ || !p.samples_knn_ || !p.samples_area_)
 		{
-			std::cerr << "[KNNRebuild] samples are not initialized." << std::endl;
+			log_error(p, "[KNNRebuild] samples are not initialized.", '\n');
 			return;
 		}
 
 		p.knn_k_ = std::max(1, requested_k);
 
-		std::cout << "[KNNRebuild] rebuilding sample KNN with k=" << p.knn_k_ << std::endl;
+		log_basic(p, "[KNNRebuild] rebuilding sample KNN with k=", p.knn_k_, '\n');
 		build_kdtree(p);
 
 		if (p.fitting_data_computed_)
@@ -2421,7 +2557,7 @@ private:
 			compute_samples_area(p); // updates samples_knn_ and samples_area_
 			compute_winding_numbers(p);
 			compute_quadrics(p);
-			std::cout << "[KNNRebuild] fitting-dependent attributes refreshed." << std::endl;
+			log_basic(p, "[KNNRebuild] fitting-dependent attributes refreshed.", '\n');
 		}
 		else
 		{
@@ -2432,8 +2568,7 @@ private:
 		if (p.samples_knn_color_)
 			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_knn_color_.get());
 
-		std::cout << "[KNNRebuild] done samples=" << nb_cells<PVertex>(*p.samples_mesh_)
-				  << " k=" << p.knn_k_ << std::endl;
+		log_basic(p, "[KNNRebuild] done samples=", nb_cells<PVertex>(*p.samples_mesh_), " k=", p.knn_k_, '\n');
 	}
 
 	void build_kdtree(PointsParameters& p)
@@ -3179,8 +3314,8 @@ private:
 					active_list.push_back(new_vertex);
 					count++;
 					found_new_sample = true;
-					if (count % 100 == 0)
-						std::cout << "Sampled point " << count << "\r" << std::flush;
+					if (is_verbose_logging_enabled(p) && count % 100 == 0)
+						log_verbose(p, "Sampled point ", count, "\r");
 				}
 			}
 			if (!found_new_sample)
@@ -3190,7 +3325,7 @@ private:
 			}
 		}
 
-		std::cout << "Building Final KDTree..." << std::endl;
+		log_basic(p, "Building Final KDTree...", '\n');
 		build_kdtree(p);
 
 		// Compute normal color
@@ -3409,11 +3544,11 @@ private:
 				if (mf_model)
 				{
 					const size_t debug_n = std::min<size_t>(20, score_values.size());
-					for (size_t i = 0; i < debug_n; ++i)
+					for (size_t i = 0; is_verbose_logging_enabled(p) && i < debug_n; ++i)
 					{
 						const Scalar sdf_i = (i < sdf_values.size()) ? sdf_values[i] : Scalar(0);
-						std::cout << "[MAFlipPrune][MF] center_udf#" << i << " udf=" << score_values[i]
-								  << " sdf=" << sdf_i << std::endl;
+						log_verbose(
+							p, "[MAFlipPrune][MF] center_udf#", i, " udf=", score_values[i], " sdf=", sdf_i, '\n');
 					}
 				}
 
@@ -3498,10 +3633,9 @@ private:
 
 		if (deleted_samples > 0)
 		{
-			std::cout << "[MAFlipPrune] flip_triggered_points=" << flip_triggered_points
-					  << " flipped_normals=" << flipped_normals
-					  << " deleted_samples=" << deleted_samples
-					  << " remaining_samples=" << nb_cells<PVertex>(*p.samples_mesh_) << std::endl;
+			log_basic(p, "[MAFlipPrune] flip_triggered_points=", flip_triggered_points, " flipped_normals=",
+					  flipped_normals, " deleted_samples=", deleted_samples, " remaining_samples=",
+					  nb_cells<PVertex>(*p.samples_mesh_), '\n');
 			
 			// Sample connectivity changed; refresh the geometry needed to stabilize MA first.
 			build_kdtree(p);
@@ -3515,8 +3649,8 @@ private:
 		}
 		else if (flip_triggered_points > 0 || flipped_normals > 0)
 		{
-			std::cout << "[MAFlipPrune] flip_triggered_points=" << flip_triggered_points
-					  << " flipped_normals=" << flipped_normals << " deleted_samples=0" << std::endl;
+			log_basic(p, "[MAFlipPrune] flip_triggered_points=", flip_triggered_points, " flipped_normals=",
+					  flipped_normals, " deleted_samples=0", '\n');
 		}
 
 		// MA positions changed; keep MA-KDTree in sync for MF topology scoring.
@@ -3531,7 +3665,10 @@ private:
 		init_spheres_from_samples(p, max_nb_spheres);
 
 		if (!p.running_)
+		{
 			update_render_data(p);
+			set_post_init_sphere_render_state(p);
+		}
 	}
 
 	void init_spheres_from_samples(PointsParameters& p, uint32 max_nb_spheres)
@@ -3670,7 +3807,7 @@ private:
 		}
 		remove_attribute<PVertex>(*p.samples_mesh_, covered);
 		if (skipped_invalid_ma_seeds > 0)
-			std::cout << "[InitSpheres] skipped_invalid_ma_seeds=" << skipped_invalid_ma_seeds << std::endl;
+			log_basic(p, "[InitSpheres] skipped_invalid_ma_seeds=", skipped_invalid_ma_seeds, '\n');
 
 		compute_clusters_full(p);
 	}
@@ -3778,9 +3915,9 @@ private:
 		});
 		if (invalid_sphere_candidates.load() > 0 || nonfinite_distance_candidates.load() > 0 || unassigned_samples.load() > 0)
 		{
-			std::cerr << "[ClusterFullGuard] invalid_sphere_candidates=" << invalid_sphere_candidates.load()
-					  << " nonfinite_distance_candidates=" << nonfinite_distance_candidates.load()
-					  << " unassigned_samples=" << unassigned_samples.load() << std::endl;
+			log_error(p, "[ClusterFullGuard] invalid_sphere_candidates=", invalid_sphere_candidates.load(),
+					  " nonfinite_distance_candidates=", nonfinite_distance_candidates.load(),
+					  " unassigned_samples=", unassigned_samples.load(), '\n');
 		}
 		// augment_insufficient_clusters(p);
 	}
@@ -3871,9 +4008,9 @@ private:
 		});
 		if (invalid_sphere_candidates.load() > 0 || nonfinite_distance_candidates.load() > 0 || unassigned_samples.load() > 0)
 		{
-			std::cerr << "[ClusterLocalGuard] invalid_sphere_candidates=" << invalid_sphere_candidates.load()
-					  << " nonfinite_distance_candidates=" << nonfinite_distance_candidates.load()
-					  << " unassigned_samples=" << unassigned_samples.load() << std::endl;
+			log_error(p, "[ClusterLocalGuard] invalid_sphere_candidates=", invalid_sphere_candidates.load(),
+					  " nonfinite_distance_candidates=", nonfinite_distance_candidates.load(),
+					  " unassigned_samples=", unassigned_samples.load(), '\n');
 		}
 	}
 
@@ -3915,7 +4052,7 @@ private:
 
 	void augment_insufficient_clusters(PointsParameters& p)
 	{
-		std::cout << "Augmenting insufficient clusters..." << std::endl;
+		log_basic(p, "Augmenting insufficient clusters...", '\n');
 
 		std::vector<PVertex> to_process;
 		std::vector<uint32> to_process_indices;
@@ -3949,13 +4086,12 @@ private:
 			return true;
 		});
 
-		std::cout << "  Found " << to_process.size() << " clusters to augment" << std::endl;
-		std::cout << "  Projecting " << all_raw_samples.size() << " samples..." << std::endl;
+		log_basic(p, "  Found ", to_process.size(), " clusters to augment", '\n');
+		log_basic(p, "  Projecting ", all_raw_samples.size(), " samples...", '\n');
 
 		auto [all_projected, all_normals] = project_points_to_alpha_gpu(p, all_raw_samples);
 
-		std::cout << "  Projected: " << all_raw_samples.size() << " -> " << all_projected.size() << " points"
-				  << std::endl;
+		log_basic(p, "  Projected: ", all_raw_samples.size(), " -> ", all_projected.size(), " points", '\n');
 		int total_added = 0;
 		for (size_t i = 0; i < to_process.size(); ++i)
 		{
@@ -3992,18 +4128,18 @@ private:
 				}
 			}
 		}
-		std::cout << "  Added a total of " << total_added << " samples to clusters." << std::endl;
-		std::cout << "  Rebuilding KDTree..." << std::endl;
+		log_basic(p, "  Added a total of ", total_added, " samples to clusters.", '\n');
+		log_basic(p, "  Rebuilding KDTree...", '\n');
 		build_kdtree(p);
 
-		std::cout << "  Recomputing KNN and area..." << std::endl;
+		log_basic(p, "  Recomputing KNN and area...", '\n');
 		compute_samples_area(p);
 
-		std::cout << "  Recomputing quadrics..." << std::endl;
+		log_basic(p, "  Recomputing quadrics...", '\n');
 		compute_quadrics(p);
 
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		std::cout << "  Cluster augmentation complete." << std::endl;
+		log_basic(p, "  Cluster augmentation complete.", '\n');
 	}
 
 	std::vector<Vec3> sample_in_sphere_volume(const Vec3& center, Scalar radius, int num_samples, std::mt19937& gen)
@@ -4094,9 +4230,9 @@ private:
 		});
 		if (invalid_sphere_candidates.load() > 0 || nonfinite_distance_candidates.load() > 0 || unassigned_samples.load() > 0)
 		{
-			std::cerr << "[PowerClusterGuard] invalid_sphere_candidates=" << invalid_sphere_candidates.load()
-					  << " nonfinite_distance_candidates=" << nonfinite_distance_candidates.load()
-					  << " unassigned_samples=" << unassigned_samples.load() << std::endl;
+			log_error(p, "[PowerClusterGuard] invalid_sphere_candidates=", invalid_sphere_candidates.load(),
+					  " nonfinite_distance_candidates=", nonfinite_distance_candidates.load(),
+					  " unassigned_samples=", unassigned_samples.load(), '\n');
 		}
 		prune_empty_clusters(p);
 
@@ -4294,15 +4430,15 @@ private:
 		{
 			if (!p.samples_mesh_ || !p.samples_ma_position_)
 			{
-				std::cerr << log_prefix << " missing sample/ma data for MF score evaluation." << std::endl;
+				log_error(p, log_prefix, " missing sample/ma data for MF score evaluation.", '\n');
 				return false;
 			}
 			if (!p.samples_ma_kdtree_ || p.samples_ma_kdtree_vertices_.empty())
 				build_kdtree(p);
 			if (!p.samples_ma_kdtree_ || p.samples_ma_kdtree_vertices_.empty())
 			{
-				std::cerr << log_prefix << " MA KDTree unavailable (no valid ma_position / ma_radius). "
-						  << "Run fitting data computation first." << std::endl;
+				log_error(p, log_prefix, " MA KDTree unavailable (no valid ma_position / ma_radius). ",
+						  "Run fitting data computation first.", '\n');
 				return false;
 			}
 			return true;
@@ -4312,7 +4448,7 @@ private:
 		{
 			if (!p.neural_udf_loaded_)
 			{
-				std::cerr << log_prefix << " requires a loaded neural UDF model." << std::endl;
+				log_error(p, log_prefix, " requires a loaded neural UDF model.", '\n');
 				return false;
 			}
 			return true;
@@ -4323,7 +4459,7 @@ private:
 			build_surface_bvh();
 			if (!surface_bvh_)
 			{
-				std::cerr << log_prefix << " requires a valid surface BVH for mesh distance evaluation." << std::endl;
+				log_error(p, log_prefix, " requires a valid surface BVH for mesh distance evaluation.", '\n');
 				return false;
 			}
 			return true;
@@ -4335,14 +4471,13 @@ private:
 				rebuild_input_kdtree(p);
 			if (!p.input_kdtree_ || p.input_kdtree_vertices_.empty() || !p.points_ || !p.position_)
 			{
-				std::cerr << log_prefix << " requires a valid input KDTree for point-cloud distance evaluation."
-						  << std::endl;
+				log_error(p, log_prefix, " requires a valid input KDTree for point-cloud distance evaluation.", '\n');
 				return false;
 			}
 			return true;
 		}
 
-		std::cerr << log_prefix << " no supported topology-score backend for current input mode." << std::endl;
+		log_error(p, log_prefix, " no supported topology-score backend for current input mode.", '\n');
 		return false;
 	}
 
@@ -4391,7 +4526,7 @@ private:
 				}
 				return true;
 			}
-			std::cerr << "[TopologyScore] unsupported backend during score evaluation." << std::endl;
+			log_error(p, "[TopologyScore] unsupported backend during score evaluation.", '\n');
 			return false;
 		}
 
@@ -4435,7 +4570,7 @@ private:
 			uint32 v_index = index_of(*data.mesh, v);
 			Scalar weight = value<Scalar>(*data.mesh, data.area, v);
 			if (weight <= 0.0)
-				std::cout << "Warning: sample with zero volume weight in sphere " << sphere_index << std::endl;
+				log_verbose(p, "Warning: sample with zero volume weight in sphere ", sphere_index, '\n');
 			q += (*data.quadric)[v_index] * weight;
 			h += weight * (*data.position)[v_index];
 			lq += (*data.line_quadric)[v_index] * weight;
@@ -4540,7 +4675,7 @@ private:
 			Scalar weight = value<Scalar>(*data.mesh, data.area, v);
 			if (weight <= Scalar(0))
 			{
-				std::cout << "Warning: sample with zero volume weight in sphere " << sphere_index << std::endl;
+				log_verbose(p, "Warning: sample with zero volume weight in sphere ", sphere_index, '\n');
 				continue;
 			}
 			q += (*data.quadric)[v_index] * weight;
@@ -4722,15 +4857,14 @@ private:
 			return true;
 		});
 
-		std::cout << "Collected " << all_raw_samples.size() << " samples from " << all_spheres.size() << " spheres"
-				  << std::endl;
+		log_verbose(p, "Collected ", all_raw_samples.size(), " samples from ", all_spheres.size(), " spheres", '\n');
 
 		// === 2. ????????? ===
 		auto [all_projected, all_normals] = project_points_to_alpha_gpu(p, all_raw_samples);
 
 		if (all_projected.empty())
 		{
-			std::cerr << "Projection failed, falling back to standard update" << std::endl;
+			log_error(p, "Projection failed, falling back to standard update", '\n');
 
 			// ???????
 			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
@@ -4744,7 +4878,7 @@ private:
 		}
 
 		// === 3. ??????UDF??????? ===
-		std::cout << "Verifying projected points..." << std::endl;
+		log_verbose(p, "Verifying projected points...", '\n');
 		std::vector<bool> is_valid(all_projected.size(), false);
 		int valid_count = 0;
 
@@ -4761,7 +4895,7 @@ private:
 			}
 		}
 
-		std::cout << "Valid projected points: " << valid_count << " / " << all_projected.size() << std::endl;
+		log_verbose(p, "Valid projected points: ", valid_count, " / ", all_projected.size(), '\n');
 
 		parallel_foreach_cell(*p.spheres_, [&](PVertex sphere) -> bool {
 			uint32 sphere_index = index_of(*p.spheres_, sphere);
@@ -5397,7 +5531,7 @@ private:
 		std::vector<Scalar> edge_udf_values;
 		if (!edge_midpoints.empty() && !eval_topology_score_values(p, edge_midpoints, edge_udf_values))
 		{
-			std::cerr << "Geometry filter failed: unable to evaluate topology score on edge midpoints." << std::endl;
+			log_error(p, "Geometry filter failed: unable to evaluate topology score on edge midpoints.", '\n');
 			return;
 		}
 
@@ -5471,7 +5605,7 @@ private:
 		std::vector<Scalar> face_udf_values;
 		if (!face_centers.empty() && !eval_topology_score_values(p, face_centers, face_udf_values))
 		{
-			std::cerr << "Geometry filter failed: unable to evaluate topology score on face centers." << std::endl;
+			log_error(p, "Geometry filter failed: unable to evaluate topology score on face centers.", '\n');
 			return;
 		}
 
@@ -5609,8 +5743,8 @@ private:
 		});
 		compute_edge_degree(p);
 
-		std::cout << "Geometry filter: edges " << edge_candidates.size() << " -> " << kept_edges.size()
-				  << ", faces " << face_candidates.size() << " -> " << kept_faces.size() << std::endl;
+		log_basic(p, "Geometry filter: edges ", edge_candidates.size(), " -> ", kept_edges.size(), ", faces ",
+				  face_candidates.size(), " -> ", kept_faces.size(), '\n');
 
 		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
@@ -6058,10 +6192,12 @@ protected:
 		if (!p.skeleton_)
 			return false;
 
+		const bool collect_verbose_stats = is_verbose_logging_enabled(p);
 		uint32 total_removed_faces = 0;
 		uint32 total_removed_edges = 0;
 		uint32 total_removed_vertices = 0;
 		uint32 total_passes = 0;
+		bool removed_any_faces = false;
 
 		for (;;)
 		{
@@ -6090,7 +6226,8 @@ protected:
 			if (face_ids_to_remove.empty())
 				break;
 
-			++total_passes;
+			if (collect_verbose_stats)
+				++total_passes;
 			uint32 removed_faces_this_pass = 0;
 			uint32 removed_edges_this_pass = 0;
 			uint32 removed_vertices_this_pass = 0;
@@ -6102,7 +6239,9 @@ protected:
 
 				const std::vector<NMEdge> affected_edges = incident_edges(*p.skeleton_, f);
 				remove_face(*p.skeleton_, f);
-				++removed_faces_this_pass;
+				removed_any_faces = true;
+				if (collect_verbose_stats)
+					++removed_faces_this_pass;
 
 				std::vector<NMVertex> candidate_vertices;
 				candidate_vertices.reserve(affected_edges.size() * 2);
@@ -6115,7 +6254,8 @@ protected:
 					if (incident_faces(*p.skeleton_, e).empty())
 					{
 						remove_edge(*p.skeleton_, e);
-						++removed_edges_this_pass;
+						if (collect_verbose_stats)
+							++removed_edges_this_pass;
 					}
 				}
 				for (const NMVertex& v : candidate_vertices)
@@ -6126,23 +6266,28 @@ protected:
 					if (vertex_id == INVALID_INDEX || !incident_edges(*p.skeleton_, v).empty())
 						continue;
 					if (remove_skeleton_vertex_and_linked_sphere(p, v))
-						++removed_vertices_this_pass;
+					{
+						if (collect_verbose_stats)
+							++removed_vertices_this_pass;
+					}
 				}
 			}
 
-			total_removed_faces += removed_faces_this_pass;
-			total_removed_edges += removed_edges_this_pass;
-			total_removed_vertices += removed_vertices_this_pass;
+			if (collect_verbose_stats)
+			{
+				total_removed_faces += removed_faces_this_pass;
+				total_removed_edges += removed_edges_this_pass;
+				total_removed_vertices += removed_vertices_this_pass;
+			}
 
 		}
 
-		if (p.edge_degree_ && total_removed_faces > 0)
+		if (p.edge_degree_ && removed_any_faces)
 			compute_edge_degree(p);
 
-		std::cout << log_prefix << " total_passes=" << total_passes
-				  << " total_removed_faces=" << total_removed_faces
-				  << " total_removed_edges=" << total_removed_edges
-				  << " total_removed_vertices=" << total_removed_vertices << std::endl;
+		log_verbose(p, log_prefix, " total_passes=", total_passes, " total_removed_faces=", total_removed_faces,
+					" total_removed_edges=", total_removed_edges, " total_removed_vertices=",
+					total_removed_vertices, '\n');
 		return true;
 	}
 
@@ -6158,11 +6303,12 @@ protected:
 	{
 		if (!p.skeleton_ || !p.skeleton_face_component_id_)
 		{
-			std::cerr << log_prefix << " requires skeleton and face component id attribute." << std::endl;
+			log_error(p, log_prefix, " requires skeleton and face component id attribute.", '\n');
 			return false;
 		}
 
 		prune_all_non_manifold_edge_triangles_before_face_union_find(p, "[FaceComponentsPreDelete]");
+		const bool collect_verbose_stats = is_verbose_logging_enabled(p);
 
 		std::vector<NMFace> faces;
 		faces.reserve(nb_cells<NMFace>(*p.skeleton_));
@@ -6192,7 +6338,8 @@ protected:
 				const uint32 edge_id = index_of(*p.skeleton_, e);
 				if (edge_id != INVALID_INDEX && (*p.skeleton_edge_completion_barrier_)[edge_id] != 0u)
 				{
-					++completion_barrier_edges;
+					if (collect_verbose_stats)
+						++completion_barrier_edges;
 					return true;
 				}
 			}
@@ -6211,7 +6358,8 @@ protected:
 				return true;
 
 			uf.unite(it0->second, it1->second);
-			++manifold_degree2_edges;
+			if (collect_verbose_stats)
+				++manifold_degree2_edges;
 			return true;
 		});
 
@@ -6230,7 +6378,8 @@ protected:
 			if (face_id != INVALID_INDEX)
 			{
 				(*p.skeleton_face_component_id_)[face_id] = it->second;
-				++assigned_faces;
+				if (collect_verbose_stats)
+					++assigned_faces;
 			}
 		}
 
@@ -6253,17 +6402,23 @@ protected:
 					root_to_component_id.emplace(root, static_cast<uint32>(root_to_component_id.size()));
 				(void)inserted;
 				(*p.skeleton_face_component_id_)[face_id] = it_component->second;
-				++recovered_unlabeled_faces;
-				++assigned_faces;
+				if (collect_verbose_stats)
+				{
+					++recovered_unlabeled_faces;
+					++assigned_faces;
+				}
 				return true;
 			}
 
 			const uint32 fallback_component_id = static_cast<uint32>(root_to_component_id.size());
 			root_to_component_id.emplace(std::numeric_limits<uint32>::max() - fallback_component_id, fallback_component_id);
 			(*p.skeleton_face_component_id_)[face_id] = fallback_component_id;
-			++standalone_unlabeled_components;
-			++recovered_unlabeled_faces;
-			++assigned_faces;
+			if (collect_verbose_stats)
+			{
+				++standalone_unlabeled_components;
+				++recovered_unlabeled_faces;
+				++assigned_faces;
+			}
 			return true;
 		});
 		if (out_component_cardinality)
@@ -6274,12 +6429,11 @@ protected:
 					(kv.first < static_cast<uint32>(faces.size())) ? uf.root_size(kv.first) : 1u;
 		}
 
-		std::cout << log_prefix << " faces=" << faces.size() << " assigned_faces=" << assigned_faces
-				  << " degree2_edges=" << manifold_degree2_edges
-				  << " completion_barrier_edges=" << completion_barrier_edges
-				  << " recovered_unlabeled_faces=" << recovered_unlabeled_faces
-				  << " standalone_unlabeled_components=" << standalone_unlabeled_components
-				  << " components=" << root_to_component_id.size() << std::endl;
+		log_verbose(p, log_prefix, " faces=", faces.size(), " assigned_faces=", assigned_faces,
+					" degree2_edges=", manifold_degree2_edges, " completion_barrier_edges=",
+					completion_barrier_edges, " recovered_unlabeled_faces=", recovered_unlabeled_faces,
+					" standalone_unlabeled_components=", standalone_unlabeled_components, " components=",
+					root_to_component_id.size(), '\n');
 		return true;
 	}
 
@@ -6287,10 +6441,11 @@ protected:
 	{
 		if (!p.skeleton_ || !p.skeleton_face_component_id_ || !p.skeleton_face_component_color_)
 		{
-			std::cerr << log_prefix << " requires skeleton, component id and component color attributes." << std::endl;
+			log_error(p, log_prefix, " requires skeleton, component id and component color attributes.", '\n');
 			return false;
 		}
 
+		const bool collect_verbose_stats = is_verbose_logging_enabled(p);
 		uint32 colored_faces = 0;
 		std::unordered_map<uint32, Vec3> component_colors;
 		component_colors.reserve(nb_cells<NMFace>(*p.skeleton_));
@@ -6310,15 +6465,15 @@ protected:
 				if (it == component_colors.end())
 					it = component_colors.emplace(component_id, component_palette_color(component_id)).first;
 				color = it->second;
-				++colored_faces;
+				if (collect_verbose_stats)
+					++colored_faces;
 			}
 			(*p.skeleton_face_component_color_)[idf] = color;
 			return true;
 		});
 
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_component_color_.get());
-		std::cout << log_prefix << " colored_faces=" << colored_faces
-				  << " components=" << component_colors.size() << std::endl;
+		log_verbose(p, log_prefix, " colored_faces=", colored_faces, " components=", component_colors.size(), '\n');
 		return true;
 	}
 
@@ -6885,16 +7040,16 @@ protected:
 			!p.skeleton_edge_completion_barrier_ ||
 			!p.skeleton_edge_completion_invalid_singular_color_)
 		{
-			std::cerr << log_prefix
-					  << " requires skeleton, edge degree, face component id/color, completion vertex color, completion path color, completion barrier and invalid singular color."
-					  << std::endl;
+			log_error(p, log_prefix,
+					  " requires skeleton, edge degree, face component id/color, completion vertex color, completion path color, completion barrier and invalid singular color.",
+					  '\n');
 			return false;
 		}
 
 		compute_edge_degree(p);
 		if (!compute_skeleton_face_components_union_find(p, "[FaceComponentsUF-ForCompletion]"))
 		{
-			std::cerr << log_prefix << " failed to rebuild face sheet labels." << std::endl;
+			log_error(p, log_prefix, " failed to rebuild face sheet labels.", '\n');
 			return false;
 		}
 
@@ -6939,8 +7094,8 @@ protected:
 			const bool sheet_exists = unique_sheet_labels_set.find(selected_label) != unique_sheet_labels_set.end();
 			if (!sheet_exists)
 			{
-				std::cout << log_prefix << " sheet_skip label=" << target_sheet_label
-						  << " reason=selected_sheet_not_found" << std::endl;
+				log_verbose(p, log_prefix, " sheet_skip label=", target_sheet_label,
+							" reason=selected_sheet_not_found", '\n');
 				return false;
 			}
 			unique_sheet_labels.assign(1, selected_label);
@@ -6990,9 +7145,9 @@ protected:
 			if (sheet_label == dominant_sheet_label)
 			{
 				++skipped_dominant_sheet;
-				std::cout << log_prefix << " sheet_skip label=" << sheet_label
-						  << " reason=largest_union_find_component"
-						  << " face_count=" << dominant_sheet_face_count << std::endl;
+				log_verbose(p, log_prefix, " sheet_skip label=", sheet_label,
+							" reason=largest_union_find_component", " face_count=", dominant_sheet_face_count,
+							'\n');
 				continue;
 			}
 
@@ -7013,17 +7168,17 @@ protected:
 						continue;
 					value<Vec3>(*p.skeleton_, p.skeleton_edge_completion_invalid_singular_color_, e) = invalid_color;
 				}
-				std::cout << log_prefix << " sheet_skip label=" << sheet_label
-						  << " reason=all_sheet_singular_edges_have_only_one_face"
-						  << " edge_id=" << build_status.first_invalid_edge_id
-						  << " sheet_face_count=" << build_status.first_invalid_sheet_face_count << std::endl;
+				log_verbose(p, log_prefix, " sheet_skip label=", sheet_label,
+							" reason=all_sheet_singular_edges_have_only_one_face", " edge_id=",
+							build_status.first_invalid_edge_id, " sheet_face_count=",
+							build_status.first_invalid_sheet_face_count, '\n');
 				continue;
 			}
 			if (relevant_singular_edge_ids.empty())
 			{
 				++skipped_without_singular_edges;
-				std::cout << log_prefix << " sheet_skip label=" << sheet_label
-						  << " reason=no_relevant_singular_edges" << std::endl;
+				log_verbose(p, log_prefix, " sheet_skip label=", sheet_label,
+							" reason=no_relevant_singular_edges", '\n');
 				continue;
 			}
 
@@ -7099,14 +7254,12 @@ protected:
 			{
 				sheet_unmatched_endpoints = static_cast<uint32>(endpoint_ids.size());
 				unmatched_endpoints += sheet_unmatched_endpoints;
-				std::cout << log_prefix << " sheet_fail label=" << sheet_label
-						  << " reason=singular_graph_vertex_degree_gt2" << std::endl;
-				std::cout << log_prefix << " sheet_summary label=" << sheet_label
-						  << " singular_edges=" << relevant_singular_edge_ids.size()
-						  << " subgraphs=" << subgraphs.size()
-						  << " endpoints=" << sheet_endpoint_count
-						  << " success_paths=" << sheet_success_paths
-						  << " unmatched_endpoints=" << sheet_unmatched_endpoints << std::endl;
+				log_verbose(p, log_prefix, " sheet_fail label=", sheet_label,
+							" reason=singular_graph_vertex_degree_gt2", '\n');
+				log_verbose(p, log_prefix, " sheet_summary label=", sheet_label, " singular_edges=",
+							relevant_singular_edge_ids.size(), " subgraphs=", subgraphs.size(), " endpoints=",
+							sheet_endpoint_count, " success_paths=", sheet_success_paths,
+							" unmatched_endpoints=", sheet_unmatched_endpoints, '\n');
 				continue;
 			}
 
@@ -7147,8 +7300,8 @@ protected:
 			{
 				sheet_unmatched_endpoints = static_cast<uint32>(endpoint_ids.size());
 				unmatched_endpoints += sheet_unmatched_endpoints;
-				std::cout << log_prefix << " sheet_fail label=" << sheet_label
-						  << " reason=global_single_cycle_not_found" << std::endl;
+				log_verbose(p, log_prefix, " sheet_fail label=", sheet_label,
+							" reason=global_single_cycle_not_found", '\n');
 			}
 			else
 			{
@@ -7164,36 +7317,30 @@ protected:
 					}
 					++success_paths;
 					++sheet_success_paths;
-					std::cout << log_prefix << " sheet=" << result.sheet_label
-							  << " subgraphs=(" << result.source_subgraph_id << "," << result.target_subgraph_id << ")"
-							  << " endpoints=(" << result.source_endpoint << "," << result.target_endpoint << ")"
-							  << " path_edges=" << result.path_edge_ids.size()
-							  << " path_vertices=" << result.path_vertex_ids.size()
-							  << " path_length=" << result.path_length << std::endl;
+					log_verbose(p, log_prefix, " sheet=", result.sheet_label, " subgraphs=(",
+								result.source_subgraph_id, ",", result.target_subgraph_id, ") endpoints=(",
+								result.source_endpoint, ",", result.target_endpoint, ") path_edges=",
+								result.path_edge_ids.size(), " path_vertices=", result.path_vertex_ids.size(),
+								" path_length=", result.path_length, '\n');
 				}
 			}
 
-			std::cout << log_prefix << " sheet_summary label=" << sheet_label
-					  << " singular_edges=" << relevant_singular_edge_ids.size()
-					  << " subgraphs=" << subgraphs.size()
-					  << " endpoints=" << sheet_endpoint_count
-					  << " success_paths=" << sheet_success_paths
-					  << " unmatched_endpoints=" << sheet_unmatched_endpoints << std::endl;
+			log_verbose(p, log_prefix, " sheet_summary label=", sheet_label, " singular_edges=",
+						relevant_singular_edge_ids.size(), " subgraphs=", subgraphs.size(), " endpoints=",
+						sheet_endpoint_count, " success_paths=", sheet_success_paths, " unmatched_endpoints=",
+						sheet_unmatched_endpoints, '\n');
 		}
 
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_component_color_.get());
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_vertex_completion_color_.get());
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_completion_path_color_.get());
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_completion_invalid_singular_color_.get());
-		std::cout << log_prefix << " total_sheets=" << unique_sheet_labels.size()
-				  << " skipped_dominant_sheet=" << skipped_dominant_sheet
-				  << " processed_sheets=" << processed_sheets
-				  << " skipped_invalid_sheets=" << skipped_invalid_sheets
-				  << " skipped_without_singular_edges=" << skipped_without_singular_edges
-				  << " total_singular_subgraphs=" << total_singular_subgraphs
-				  << " total_endpoints=" << total_endpoints
-				  << " success_paths=" << success_paths
-				  << " unmatched_endpoints=" << unmatched_endpoints << std::endl;
+		log_basic(p, log_prefix, " total_sheets=", unique_sheet_labels.size(), " skipped_dominant_sheet=",
+				  skipped_dominant_sheet, " processed_sheets=", processed_sheets,
+				  " skipped_invalid_sheets=", skipped_invalid_sheets, " skipped_without_singular_edges=",
+				  skipped_without_singular_edges, " total_singular_subgraphs=", total_singular_subgraphs,
+				  " total_endpoints=", total_endpoints, " success_paths=", success_paths,
+				  " unmatched_endpoints=", unmatched_endpoints, '\n');
 		return true;
 	}
 	Scalar compute_skeleton_face_area(PointsParameters& p, const NMFace& f)
@@ -7468,12 +7615,14 @@ protected:
 			return;
 		if (!p.skeleton_ || !p.skeleton_face_component_id_ || !p.incident_tets_)
 		{
-			std::cerr << log_prefix << " requires skeleton/component-id/incident_tets." << std::endl;
+			log_error(p, log_prefix, " requires skeleton/component-id/incident_tets.", '\n');
 			return;
 		}
 
 		const Scalar metric_eps = Scalar(1e-12);
 		const uint32 max_rounds = std::max<uint32>(1u, nb_cells<NMFace>(*p.skeleton_));
+		const bool collect_basic_stats = is_basic_logging_enabled(p);
+		const bool collect_verbose_stats = is_verbose_logging_enabled(p);
 
 		uint32 total_rounds = 0;
 		uint32 total_processed_sheets = 0;
@@ -7489,7 +7638,7 @@ protected:
 		compute_edge_degree(p);
 		if (!compute_skeleton_face_components_union_find(p, "[FaceComponentsUF-ForPrune-Init]", nullptr, uf_options))
 		{
-			std::cerr << log_prefix << " failed to build initial face components." << std::endl;
+			log_error(p, log_prefix, " failed to build initial face components.", '\n');
 			return;
 		}
 		const std::unordered_set<uint32> preexisting_orphan_edge_ids = collect_current_orphan_edge_ids(p);
@@ -7513,7 +7662,7 @@ protected:
 		});
 		if (all_face_ids.empty())
 		{
-			std::cout << log_prefix << " no valid faces." << std::endl;
+			log_basic(p, log_prefix, " no valid faces.", '\n');
 			return;
 		}
 
@@ -7529,7 +7678,7 @@ protected:
 		}
 		if (dominant_label == INVALID_INDEX)
 		{
-			std::cout << log_prefix << " no dominant label." << std::endl;
+			log_basic(p, log_prefix, " no dominant label.", '\n');
 			return;
 		}
 
@@ -7538,7 +7687,7 @@ protected:
 		if (!compute_sheet_area_normalized_face_scores(
 				p, label_to_faces, all_face_ids, label_area_sum, label_area_normalized_error, log_prefix))
 		{
-			std::cerr << log_prefix << " failed to compute initial face errors." << std::endl;
+			log_error(p, log_prefix, " failed to compute initial face errors.", '\n');
 			return;
 		}
 		SkeletonFaceDeletionOptions deletion_options;
@@ -7547,7 +7696,8 @@ protected:
 
 		for (uint32 round = 0; round < max_rounds; ++round)
 		{
-			++total_rounds;
+			if (collect_basic_stats)
+				++total_rounds;
 			std::vector<uint32> sorted_sheet_labels;
 			sorted_sheet_labels.reserve(label_to_faces.size());
 			for (const auto& kv : label_to_faces)
@@ -7560,22 +7710,30 @@ protected:
 			sheet_candidate_decisions.reserve(sorted_sheet_labels.size());
 			uint32 processed_sheets_this_round = 0;
 			std::unordered_set<uint32> round_candidate_edge_ids;
-			round_candidate_edge_ids.reserve(nb_cells<NMEdge>(*p.skeleton_));
+			if (collect_verbose_stats)
+				round_candidate_edge_ids.reserve(nb_cells<NMEdge>(*p.skeleton_));
+			bool has_candidate_edge_in_round = false;
 			bool has_selected_decision = false;
 			SheetTwoLayerCandidateDecision selected_decision;
 			for (uint32 sheet_label : sorted_sheet_labels)
 			{
 				if (sheet_label == dominant_label)
 					continue;
-				++processed_sheets_this_round;
+				if (collect_verbose_stats)
+					++processed_sheets_this_round;
 				const auto it_faces = label_to_faces.find(sheet_label);
 				if (it_faces == label_to_faces.end() || it_faces->second.empty())
 					continue;
 
 				std::vector<uint32> sheet_candidate_edge_ids;
 				collect_sheet_candidate_edge_ids(p, it_faces->second, options, sheet_candidate_edge_ids);
-				for (uint32 edge_id : sheet_candidate_edge_ids)
-					round_candidate_edge_ids.insert(edge_id);
+				if (!sheet_candidate_edge_ids.empty())
+					has_candidate_edge_in_round = true;
+				if (collect_verbose_stats)
+				{
+					for (uint32 edge_id : sheet_candidate_edge_ids)
+						round_candidate_edge_ids.insert(edge_id);
+				}
 
 				SheetTwoLayerCandidateDecision decision;
 				for (uint32 edge_id : sheet_candidate_edge_ids)
@@ -7608,28 +7766,37 @@ protected:
 				}
 			}
 
-			total_processed_sheets += processed_sheets_this_round;
-			total_candidate_edges += static_cast<uint32>(round_candidate_edge_ids.size());
-			if (round_candidate_edge_ids.empty())
+			if (collect_verbose_stats)
 			{
-				std::cout << log_prefix << " round=" << round
-						  << " no "
-						  << (options.include_completion_path_barrier_candidates ? "non-manifold-or-completion"
-																			 : "non-manifold")
-						  << " edges."
-						  << std::endl;
+				total_processed_sheets += processed_sheets_this_round;
+				total_candidate_edges += static_cast<uint32>(round_candidate_edge_ids.size());
+			}
+			if (!has_candidate_edge_in_round)
+			{
+				log_basic(p, log_prefix, " round=", round, " no ",
+						  (options.include_completion_path_barrier_candidates ? "non-manifold-or-completion"
+																			 : "non-manifold"),
+						  " edges.", '\n');
 				break;
 			}
 
 			if (!has_selected_decision)
 			{
-				std::cout << log_prefix << " round=" << round << " processed_sheets=" << processed_sheets_this_round
-						  << " resolvable_sheets=" << sheet_candidate_decisions.size()
-						  << " dominant_label=" << dominant_label << " candidate_edges="
-						  << round_candidate_edge_ids.size() << " no resolvable two-layer sheet." << std::endl;
+				if (collect_verbose_stats)
+				{
+					log_verbose(p, log_prefix, " round=", round, " processed_sheets=", processed_sheets_this_round,
+								" resolvable_sheets=", sheet_candidate_decisions.size(), " dominant_label=",
+								dominant_label, " candidate_edges=", round_candidate_edge_ids.size(),
+								" no resolvable two-layer sheet.", '\n');
+				}
+				else
+				{
+					log_basic(p, log_prefix, " round=", round, " no resolvable two-layer sheet.", '\n');
+				}
 				break;
 			}
-			++total_resolved_sheets;
+			if (collect_verbose_stats)
+				++total_resolved_sheets;
 
 			std::unordered_set<uint32> face_ids_to_delete;
 			const auto it_del = label_to_faces.find(selected_decision.delete_label);
@@ -7641,9 +7808,8 @@ protected:
 			}
 			if (face_ids_to_delete.empty())
 			{
-				std::cout << log_prefix << " round=" << round << " selected_sheet=" << selected_decision.sheet_label
-						  << " delete_label=" << selected_decision.delete_label
-						  << " has no faces to delete." << std::endl;
+				log_basic(p, log_prefix, " round=", round, " selected_sheet=", selected_decision.sheet_label,
+						  " delete_label=", selected_decision.delete_label, " has no faces to delete.", '\n');
 				break;
 			}
 
@@ -7661,7 +7827,8 @@ protected:
 						if (index_of(*p.skeleton_, keep_face) != face_id)
 							continue;
 						(*p.skeleton_face_component_id_)[face_id] = dominant_label;
-						++merged_keep_faces;
+						if (collect_verbose_stats)
+							++merged_keep_faces;
 					}
 					auto& dominant_faces = label_to_faces[dominant_label];
 					dominant_faces.insert(dominant_faces.end(), it_keep->second.begin(), it_keep->second.end());
@@ -7677,8 +7844,8 @@ protected:
 			SkeletonFaceDeletionStats deletion_stats;
 			if (!delete_skeleton_face_id_set(p, face_ids_to_delete, deletion_stats, deletion_options))
 			{
-				std::cout << log_prefix << " round=" << round << " selected_sheet=" << selected_decision.sheet_label
-						  << " but no face was actually removed." << std::endl;
+				log_basic(p, log_prefix, " round=", round, " selected_sheet=", selected_decision.sheet_label,
+						  " but no face was actually removed.", '\n');
 				break;
 			}
 
@@ -7691,27 +7858,36 @@ protected:
 			label_area_sum.erase(selected_decision.delete_label);
 			label_area_normalized_error.erase(selected_decision.delete_label);
 
-			std::cout << log_prefix << " round=" << round
-					  << " dominant_label=" << dominant_label
-					  << " processed_sheets=" << processed_sheets_this_round
-					  << " resolvable_sheets=" << sheet_candidate_decisions.size()
-					  << " selected_sheet=" << selected_decision.sheet_label
-					  << " selected_delete_label=" << selected_decision.delete_label
-					  << " keep_label=" << selected_decision.keep_label
-					  << " source_edge=" << selected_decision.source_edge_id
-					  << " source_type="
-					  << (selected_decision.source_is_completion_barrier ? "completion_barrier" : "non_manifold")
-					  << " edge_degree=" << selected_decision.edge_degree
-					  << " unique_label_count=" << selected_decision.unique_label_count
-					  << " two_layer_labels=(" << selected_decision.label_a << "," << selected_decision.label_b << ")"
-					  << " pair_area=(" << selected_decision.area_sum_a << "," << selected_decision.area_sum_b << ")"
-					  << " pair_normErr=(" << selected_decision.norm_err_a << "," << selected_decision.norm_err_b << ")"
-					  << " merged_keep_faces=" << merged_keep_faces
-					  << " candidate_edges=" << round_candidate_edge_ids.size()
-					  << " removed_faces=" << deletion_stats.removed_faces
-					  << " removed_edges=" << deletion_stats.removed_edges
-					  << " removed_vertices=" << deletion_stats.removed_vertices
-					  << " removed_tets=" << deletion_stats.removed_tets << std::endl;
+			if (collect_verbose_stats)
+			{
+				log_verbose(p, log_prefix, " round=", round, " dominant_label=", dominant_label,
+							" processed_sheets=", processed_sheets_this_round, " resolvable_sheets=",
+							sheet_candidate_decisions.size(), " selected_sheet=", selected_decision.sheet_label,
+							" selected_delete_label=", selected_decision.delete_label, " keep_label=",
+							selected_decision.keep_label, " source_edge=", selected_decision.source_edge_id,
+							" source_type=",
+							(selected_decision.source_is_completion_barrier ? "completion_barrier" : "non_manifold"),
+							" edge_degree=", selected_decision.edge_degree, " unique_label_count=",
+							selected_decision.unique_label_count, " two_layer_labels=(", selected_decision.label_a, ",",
+							selected_decision.label_b, ")", " pair_area=(", selected_decision.area_sum_a, ",",
+							selected_decision.area_sum_b, ")", " pair_normErr=(", selected_decision.norm_err_a, ",",
+							selected_decision.norm_err_b, ")", " merged_keep_faces=", merged_keep_faces,
+							" candidate_edges=", round_candidate_edge_ids.size(), " removed_faces=",
+							deletion_stats.removed_faces, " removed_edges=", deletion_stats.removed_edges,
+							" removed_vertices=", deletion_stats.removed_vertices, " removed_tets=",
+							deletion_stats.removed_tets, '\n');
+			}
+			else
+			{
+				log_basic(p, log_prefix, " round=", round, " selected_sheet=", selected_decision.sheet_label,
+						  " selected_delete_label=", selected_decision.delete_label, " keep_label=",
+						  selected_decision.keep_label, " source_edge=", selected_decision.source_edge_id,
+						  " source_type=",
+						  (selected_decision.source_is_completion_barrier ? "completion_barrier" : "non_manifold"),
+						  " removed_faces=", deletion_stats.removed_faces, " removed_edges=",
+						  deletion_stats.removed_edges, " removed_vertices=", deletion_stats.removed_vertices,
+						  " removed_tets=", deletion_stats.removed_tets, '\n');
+			}
 		}
 
 		if (total_removed_faces > 0)
@@ -7730,14 +7906,20 @@ protected:
 		refresh_skeleton_topology_colors(p);
 		mark_boundary_tets_color(p);
 
-		std::cout << log_prefix << " rounds=" << total_rounds
-				  << " total_processed_sheets=" << total_processed_sheets
-				  << " total_resolved_sheets=" << total_resolved_sheets
-				  << " total_candidate_edges=" << total_candidate_edges
-				  << " total_removed_faces=" << total_removed_faces
-				  << " total_removed_edges=" << total_removed_edges
-				  << " total_removed_vertices=" << total_removed_vertices
-				  << " total_removed_tets=" << total_removed_tets << std::endl;
+		if (collect_verbose_stats)
+		{
+			log_verbose(p, log_prefix, " rounds=", total_rounds, " total_processed_sheets=", total_processed_sheets,
+						" total_resolved_sheets=", total_resolved_sheets, " total_candidate_edges=",
+						total_candidate_edges, " total_removed_faces=", total_removed_faces,
+						" total_removed_edges=", total_removed_edges, " total_removed_vertices=",
+						total_removed_vertices, " total_removed_tets=", total_removed_tets, '\n');
+		}
+		else
+		{
+			log_basic(p, log_prefix, " rounds=", total_rounds, " total_removed_faces=", total_removed_faces,
+					  " total_removed_edges=", total_removed_edges, " total_removed_vertices=",
+					  total_removed_vertices, " total_removed_tets=", total_removed_tets, '\n');
+		}
 	}
 
 	void run_completion_residual_sheet_score_prune(
@@ -7747,7 +7929,7 @@ protected:
 			return;
 		if (!p.skeleton_ || !p.skeleton_face_component_id_ || !p.incident_tets_)
 		{
-			std::cerr << log_prefix << " requires skeleton/component-id/incident_tets." << std::endl;
+			log_error(p, log_prefix, " requires skeleton/component-id/incident_tets.", '\n');
 			return;
 		}
 
@@ -7756,7 +7938,7 @@ protected:
 		uf_options.treat_completion_path_barrier_as_nonmanifold = true;
 		if (!compute_skeleton_face_components_union_find(p, "[FaceComponentsUF-CompletionResidual]", nullptr, uf_options))
 		{
-			std::cerr << log_prefix << " failed to rebuild face components." << std::endl;
+			log_error(p, log_prefix, " failed to rebuild face components.", '\n');
 			return;
 		}
 
@@ -7779,7 +7961,7 @@ protected:
 		});
 		if (all_face_ids.empty())
 		{
-			std::cout << log_prefix << " no valid faces." << std::endl;
+			log_basic(p, log_prefix, " no valid faces.", '\n');
 			return;
 		}
 
@@ -7803,12 +7985,14 @@ protected:
 		if (!compute_sheet_area_normalized_face_scores(
 				p, label_to_faces, all_face_ids, label_area_sum, label_area_normalized_error, log_prefix))
 		{
-			std::cerr << log_prefix << " failed to compute sheet scores." << std::endl;
+			log_error(p, log_prefix, " failed to compute sheet scores.", '\n');
 			return;
 		}
 
 		const bool threshold_enabled = (score_threshold >= Scalar(0));
 		const size_t forced_delete_max_face_count = 2;
+		const bool collect_basic_stats = is_basic_logging_enabled(p);
+		const bool collect_verbose_stats = is_verbose_logging_enabled(p);
 
 		struct ResidualSheetScoreEntry
 		{
@@ -7829,7 +8013,8 @@ protected:
 		uint32 total_candidate_non_manifold_edges = 0;
 		std::unordered_set<uint32> face_ids_to_delete;
 		std::vector<ResidualSheetScoreEntry> residual_sheet_scores;
-		residual_sheet_scores.reserve(sorted_sheet_labels.size());
+		if (collect_verbose_stats)
+			residual_sheet_scores.reserve(sorted_sheet_labels.size());
 		for (uint32 sheet_label : sorted_sheet_labels)
 		{
 			const auto it_faces = label_to_faces.find(sheet_label);
@@ -7844,8 +8029,11 @@ protected:
 					p, sheet_label, dominant_label, it_faces->second, non_manifold_edge_count);
 			if (is_residual_candidate)
 			{
-				++candidate_sheet_count;
-				total_candidate_non_manifold_edges += non_manifold_edge_count;
+				if (collect_verbose_stats)
+				{
+					++candidate_sheet_count;
+					total_candidate_non_manifold_edges += non_manifold_edge_count;
+				}
 			}
 
 			const Scalar score = label_area_normalized_error.count(sheet_label)
@@ -7858,74 +8046,80 @@ protected:
 				is_residual_candidate && !threshold_enabled;
 			const bool delete_sheet =
 				delete_by_small_sheet || delete_by_threshold || delete_all_residual_when_threshold_disabled;
-			residual_sheet_scores.push_back(ResidualSheetScoreEntry{
-				sheet_label,
-				face_count,
-				is_residual_candidate,
-				non_manifold_edge_count,
-				area,
-				score,
-				delete_sheet,
-				delete_by_small_sheet,
-				delete_by_threshold,
-				delete_all_residual_when_threshold_disabled});
+			if (collect_verbose_stats)
+			{
+				residual_sheet_scores.push_back(ResidualSheetScoreEntry{
+					sheet_label,
+					face_count,
+					is_residual_candidate,
+					non_manifold_edge_count,
+					area,
+					score,
+					delete_sheet,
+					delete_by_small_sheet,
+					delete_by_threshold,
+					delete_all_residual_when_threshold_disabled});
+			}
 
 			if (!delete_sheet)
 				continue;
 
-			++deleted_sheet_count;
+			if (collect_basic_stats)
+				++deleted_sheet_count;
 			face_ids_to_delete.reserve(face_ids_to_delete.size() + it_faces->second.size());
 			for (uint32 face_id : it_faces->second)
 				face_ids_to_delete.insert(face_id);
 		}
 
-		std::cout << log_prefix << " current_residual_sheet_scores"
-				  << " dominant_label=" << dominant_label
-				  << " evaluated_sheets=" << residual_sheet_scores.size()
-				  << " candidate_sheets=" << candidate_sheet_count
-				  << " threshold=" << score_threshold
-				  << " threshold_enabled=" << (threshold_enabled ? "true" : "false")
-				  << " forced_delete_max_face_count=" << forced_delete_max_face_count << std::endl;
-		for (const ResidualSheetScoreEntry& entry : residual_sheet_scores)
+		if (collect_verbose_stats)
 		{
-			const char* action = "keep";
-			if (entry.delete_sheet)
+			log_verbose(p, log_prefix, " current_residual_sheet_scores", " dominant_label=", dominant_label,
+						" evaluated_sheets=", residual_sheet_scores.size(), " candidate_sheets=", candidate_sheet_count,
+						" threshold=", score_threshold, " threshold_enabled=",
+						(threshold_enabled ? "true" : "false"), " forced_delete_max_face_count=",
+						forced_delete_max_face_count, '\n');
+			for (const ResidualSheetScoreEntry& entry : residual_sheet_scores)
 			{
-				if (entry.delete_by_small_sheet && entry.delete_by_threshold)
-					action = "delete_small_sheet+threshold";
-				else if (entry.delete_by_small_sheet && entry.delete_all_residual_when_threshold_disabled)
-					action = "delete_small_sheet+all_residual";
-				else if (entry.delete_by_small_sheet)
-					action = "delete_small_sheet";
-				else if (entry.delete_all_residual_when_threshold_disabled)
-					action = "delete_all_residual";
-				else
-					action = "delete_threshold";
+				const char* action = "keep";
+				if (entry.delete_sheet)
+				{
+					if (entry.delete_by_small_sheet && entry.delete_by_threshold)
+						action = "delete_small_sheet+threshold";
+					else if (entry.delete_by_small_sheet && entry.delete_all_residual_when_threshold_disabled)
+						action = "delete_small_sheet+all_residual";
+					else if (entry.delete_by_small_sheet)
+						action = "delete_small_sheet";
+					else if (entry.delete_all_residual_when_threshold_disabled)
+						action = "delete_all_residual";
+					else
+						action = "delete_threshold";
+				}
+				log_verbose(p, log_prefix, " residual_sheet_score", " sheet=", entry.sheet_label,
+							" dominant_label=", dominant_label, " face_count=", entry.face_count,
+							" residual_candidate=", (entry.is_residual_candidate ? "true" : "false"),
+							" non_manifold_edges=", entry.non_manifold_edge_count, " area=", entry.area, " score=",
+							entry.score, " threshold=", score_threshold, " threshold_enabled=",
+							(threshold_enabled ? "true" : "false"), " forced_small_sheet_delete=",
+							(entry.delete_by_small_sheet ? "true" : "false"),
+							" all_residual_when_threshold_disabled=",
+							(entry.delete_all_residual_when_threshold_disabled ? "true" : "false"),
+							" action=", action, '\n');
 			}
-			std::cout << log_prefix << " residual_sheet_score"
-					  << " sheet=" << entry.sheet_label
-					  << " dominant_label=" << dominant_label
-					  << " face_count=" << entry.face_count
-					  << " residual_candidate=" << (entry.is_residual_candidate ? "true" : "false")
-					  << " non_manifold_edges=" << entry.non_manifold_edge_count
-					  << " area=" << entry.area
-					  << " score=" << entry.score
-					  << " threshold=" << score_threshold
-					  << " threshold_enabled=" << (threshold_enabled ? "true" : "false")
-					  << " forced_small_sheet_delete=" << (entry.delete_by_small_sheet ? "true" : "false")
-					  << " all_residual_when_threshold_disabled="
-					  << (entry.delete_all_residual_when_threshold_disabled ? "true" : "false")
-					  << " action=" << action << std::endl;
 		}
 
 		if (face_ids_to_delete.empty())
 		{
-			std::cout << log_prefix << " done"
-					  << " dominant_label=" << dominant_label
-					  << " candidate_sheets=" << candidate_sheet_count
-					  << " deleted_sheets=0"
-					  << " candidate_non_manifold_edges=" << total_candidate_non_manifold_edges
-					  << " threshold=" << score_threshold << std::endl;
+			if (collect_verbose_stats)
+			{
+				log_verbose(p, log_prefix, " done", " dominant_label=", dominant_label, " candidate_sheets=",
+							candidate_sheet_count, " deleted_sheets=0", " candidate_non_manifold_edges=",
+							total_candidate_non_manifold_edges, " threshold=", score_threshold, '\n');
+			}
+			else
+			{
+				log_basic(p, log_prefix, " done", " dominant_label=", dominant_label, " deleted_sheets=0",
+						  " threshold=", score_threshold, '\n');
+			}
 			compute_edge_degree(p);
 			if (compute_skeleton_face_components_union_find(p, "[FaceComponentsUF-CompletionResidual-Final]", nullptr,
 															uf_options))
@@ -7936,8 +8130,8 @@ protected:
 		SkeletonFaceDeletionStats deletion_stats;
 		if (!delete_skeleton_face_id_set(p, face_ids_to_delete, deletion_stats))
 		{
-			std::cout << log_prefix << " selected " << deleted_sheet_count
-					  << " sheet(s) but no face was actually removed." << std::endl;
+			log_basic(p, log_prefix, " selected ", deleted_sheet_count,
+					  " sheet(s) but no face was actually removed.", '\n');
 			return;
 		}
 
@@ -7948,28 +8142,35 @@ protected:
 														uf_options))
 			colorize_skeleton_face_components(p, "[FaceComponentsColor-CompletionResidual-Final]");
 
-		std::cout << log_prefix << " done"
-				  << " dominant_label=" << dominant_label
-				  << " candidate_sheets=" << candidate_sheet_count
-				  << " deleted_sheets=" << deleted_sheet_count
-				  << " candidate_non_manifold_edges=" << total_candidate_non_manifold_edges
-				  << " threshold=" << score_threshold
-				  << " removed_faces=" << deletion_stats.removed_faces
-				  << " removed_edges=" << deletion_stats.removed_edges
-				  << " removed_vertices=" << deletion_stats.removed_vertices
-				  << " removed_tets=" << deletion_stats.removed_tets << std::endl;
+		if (collect_verbose_stats)
+		{
+			log_verbose(p, log_prefix, " done", " dominant_label=", dominant_label, " candidate_sheets=",
+						candidate_sheet_count, " deleted_sheets=", deleted_sheet_count,
+						" candidate_non_manifold_edges=", total_candidate_non_manifold_edges, " threshold=",
+						score_threshold, " removed_faces=", deletion_stats.removed_faces, " removed_edges=",
+						deletion_stats.removed_edges, " removed_vertices=", deletion_stats.removed_vertices,
+						" removed_tets=", deletion_stats.removed_tets, '\n');
+		}
+		else
+		{
+			log_basic(p, log_prefix, " done", " dominant_label=", dominant_label, " deleted_sheets=",
+					  deleted_sheet_count, " threshold=", score_threshold, " removed_faces=",
+					  deletion_stats.removed_faces, " removed_edges=", deletion_stats.removed_edges,
+					  " removed_vertices=", deletion_stats.removed_vertices, " removed_tets=",
+					  deletion_stats.removed_tets, '\n');
+		}
 	}
 
 	void run_completion_barrier_two_layer_prune(PointsParameters& p,
 												const char* log_prefix = "[NMCompletionTwoLayer]")
 	{
-		std::cout << log_prefix << " phase=pre_completion start" << std::endl;
+		log_basic(p, log_prefix, " phase=pre_completion start", '\n');
 		run_non_manifold_two_layer_label_prune(p, "[NMTwoLayerCurrent]");
-		std::cout << log_prefix << " phase=pre_completion done" << std::endl;
+		log_basic(p, log_prefix, " phase=pre_completion done", '\n');
 
 		if (!visualize_singular_chain_completion_paths(p, "[SingularCompletionForTwoLayer]"))
 		{
-			std::cerr << log_prefix << " failed to compute completion paths." << std::endl;
+			log_error(p, log_prefix, " failed to compute completion paths.", '\n');
 			return;
 		}
 
@@ -8361,7 +8562,7 @@ protected:
 			std::vector<Scalar> score_values;
 			if (!eval_topology_score_values(p, sample_points, score_values))
 			{
-				std::cerr << log_prefix << " face score field evaluation failed." << std::endl;
+				log_error(p, log_prefix, " face score field evaluation failed.", '\n');
 				return false;
 			}
 
@@ -8628,7 +8829,7 @@ protected:
 			std::vector<Scalar> score_values;
 			if (!eval_topology_score_values(p, sample_points, score_values))
 			{
-				std::cerr << log_prefix << " face score field evaluation failed." << std::endl;
+				log_error(p, log_prefix, " face score field evaluation failed.", '\n');
 				return false;
 			}
 
@@ -8804,7 +9005,7 @@ protected:
 		std::vector<Scalar> score_values;
 		if (!eval_topology_score_values(p, sample_points, score_values))
 		{
-			std::cerr << log_prefix << " edge score field evaluation failed." << std::endl;
+			log_error(p, log_prefix, " edge score field evaluation failed.", '\n');
 			return false;
 		}
 
@@ -8815,8 +9016,8 @@ protected:
 				avg_udf += gauss3_w_01[k] * score_values[edge_eval.sample_offset + k];
 			edge_scores[edge_eval.edge_id] = avg_udf;
 		}
-		std::cout << log_prefix << " scored_tet_edges=" << edge_scores.size()
-				  << " total_edges=" << nb_cells<NMEdge>(*p.skeleton_) << std::endl;
+		log_verbose(p, log_prefix, " scored_tet_edges=", edge_scores.size(), " total_edges=",
+					nb_cells<NMEdge>(*p.skeleton_), '\n');
 		return true;
 	}
 
@@ -8884,7 +9085,7 @@ protected:
 		std::vector<Scalar> score_values;
 		if (!eval_topology_score_values(p, sample_points, score_values))
 		{
-			std::cerr << log_prefix << " edge score field evaluation failed." << std::endl;
+			log_error(p, log_prefix, " edge score field evaluation failed.", '\n');
 			return false;
 		}
 
@@ -8906,14 +9107,14 @@ protected:
 		}
 		if (!p.skeleton_ || !p.skeleton_edge_udf_score_color_)
 		{
-			std::cerr << "Skeleton or edge score color attribute is not initialized." << std::endl;
+			log_error(p, "Skeleton or edge score color attribute is not initialized.", '\n');
 			return;
 		}
 
 		std::unordered_map<uint32, Scalar> edge_scores;
 		if (!compute_skeleton_edge_scores_gauss3_normalized(p, edge_scores, "[EdgeUDFColormap]"))
 		{
-			std::cerr << "Failed to compute edge topology scores." << std::endl;
+			log_error(p, "Failed to compute edge topology scores.", '\n');
 			return;
 		}
 
@@ -8962,10 +9163,10 @@ protected:
 		});
 
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_udf_score_color_.get());
-		std::cout << "[EdgeUDFColormap] edges=" << edge_count << " deg2_edges=" << deg2_edge_count;
+		log_basic(p, "[EdgeUDFColormap] edges=", edge_count, " deg2_edges=", deg2_edge_count);
 		if (edge_count > 0)
-			std::cout << " clamp_min=" << e_min << " clamp_max=" << e_max;
-		std::cout << " quadrature=gauss3 normalized_by_length=true" << std::endl;
+			log_basic(p, " clamp_min=", e_min, " clamp_max=", e_max);
+		log_basic(p, " quadrature=gauss3 normalized_by_length=true", '\n');
 	}
 
 	enum class EdgeTetDeleteMode
@@ -8995,21 +9196,21 @@ protected:
 		}
 		if (!p.skeleton_ || !p.incident_tets_)
 		{
-			std::cerr << log_tag << " requires a built skeleton." << std::endl;
+			log_error(p, log_tag, " requires a built skeleton.", '\n');
 			return stats;
 		}
 
 		std::unordered_map<uint32, Scalar> edge_score_cache;
 		if (!compute_skeleton_edge_scores_gauss3_normalized(p, edge_score_cache, log_tag))
 		{
-			std::cerr << log_tag << " failed to compute edge scores." << std::endl;
+			log_error(p, log_tag, " failed to compute edge scores.", '\n');
 			return stats;
 		}
 		std::unordered_map<uint32, Scalar> face_score_cache;
 		if (!compute_skeleton_face_scores(
 				p, face_score_cache, p.skeleton_face_score_normalize_by_area_, log_tag))
 		{
-			std::cerr << log_tag << " failed to compute face scores." << std::endl;
+			log_error(p, log_tag, " failed to compute face scores.", '\n');
 			return stats;
 		}
 
@@ -9385,8 +9586,8 @@ protected:
 			std::unordered_set<std::size_t> first_tets_to_erase;
 			if (!remove_faces_collect_tets({best.first_face}, first_tets_to_erase, step_removed_faces, step_removed_edges))
 			{
-				std::cout << log_tag << " skip tet=" << best.tet_id << " edge=" << best.edge_id
-						  << " first_face=" << best.first_face_id << " reason=first_face_remove_failed" << std::endl;
+				log_verbose(p, log_tag, " skip tet=", best.tet_id, " edge=", best.edge_id, " first_face=",
+							best.first_face_id, " reason=first_face_remove_failed", '\n');
 				continue;
 			}
 			step_tets_to_erase.insert(first_tets_to_erase.begin(), first_tets_to_erase.end());
@@ -9516,20 +9717,17 @@ protected:
 		}
 
 		if (single_step && processed_steps == 0)
-			std::cout << log_tag << " no removable tet in current mode." << std::endl;
+			log_basic(p, log_tag, " no removable tet in current mode.", '\n');
 		stats.steps = processed_steps;
 		stats.removed_faces = removed_faces;
 		stats.removed_edges = removed_edges;
 		stats.removed_tets = removed_tets;
 		stats.skipped_no_candidate = skipped_no_candidate;
 		stats.remaining_tets = static_cast<uint32>(p.skeleton_tets_.size());
-		std::cout << log_tag << " done"
-				  << " steps=" << stats.steps
-				  << " removed_faces=" << stats.removed_faces
-				  << " removed_edges=" << stats.removed_edges
-				  << " removed_tets=" << stats.removed_tets
-				  << " skipped_no_candidate=" << stats.skipped_no_candidate
-				  << " remaining_tets=" << stats.remaining_tets << std::endl;
+		log_basic(p, log_tag, " done", " steps=", stats.steps, " removed_faces=", stats.removed_faces,
+				  " removed_edges=", stats.removed_edges, " removed_tets=", stats.removed_tets,
+				  " skipped_no_candidate=", stats.skipped_no_candidate, " remaining_tets=", stats.remaining_tets,
+				  '\n');
 
 		refresh_skeleton_topology_colors(p);
 		mark_boundary_tets_color(p);
@@ -9565,14 +9763,14 @@ protected:
 		}
 		if (!p.skeleton_ || !p.incident_tets_ || !p.skeleton_face_udf_color_)
 		{
-			std::cerr << "Skeleton or face attributes are not initialized." << std::endl;
+			log_error(p, "Skeleton or face attributes are not initialized.", '\n');
 			return;
 		}
 
 		std::unordered_map<uint32, Scalar> face_udf_integrals;
 		if (!compute_skeleton_face_scores(p, face_udf_integrals, normalize_by_area, "[UDFColormap]"))
 		{
-			std::cerr << "Failed to compute face topology scores for visualization." << std::endl;
+			log_error(p, "Failed to compute face topology scores for visualization.", '\n');
 			return;
 		}
 
@@ -9627,11 +9825,10 @@ protected:
 		});
 
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_udf_color_.get());
-		std::cout << "[UDFColormap] tet_faces=" << tet_face_count << " non_tet_faces=" << non_tet_face_count;
+		log_basic(p, "[UDFColormap] tet_faces=", tet_face_count, " non_tet_faces=", non_tet_face_count);
 		if (has_tet_faces)
-			std::cout << " clamp_min=" << tri_min << " clamp_max=" << tri_max;
-		std::cout << " normalized_by_area=" << (normalize_by_area ? "true" : "false");
-		std::cout << std::endl;
+			log_basic(p, " clamp_min=", tri_min, " clamp_max=", tri_max);
+		log_basic(p, " normalized_by_area=", (normalize_by_area ? "true" : "false"), '\n');
 	}
 
 	struct K5DetectionResult
@@ -9812,7 +10009,7 @@ protected:
 	{
 		if (!p.skeleton_ || !p.skeleton_face_k5_color_ || !p.skeleton_edge_k5_color_)
 		{
-			std::cerr << "K5 coloring requires skeleton K5 color attributes." << std::endl;
+			log_error(p, "K5 coloring requires skeleton K5 color attributes.", '\n');
 			return;
 		}
 
@@ -9855,16 +10052,15 @@ protected:
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_k5_color_.get());
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_k5_color_.get());
 
-		std::cout << "[K5Mask] k5_count=" << k5_info.cliques.size() << " k5_faces=" << k5_info.face_ids.size()
-				  << " k5_edges=" << k5_info.edge_ids.size() << " deg2eq2_faces=" << deg2eq2_face_count
-				  << std::endl;
+		log_basic(p, "[K5Mask] k5_count=", k5_info.cliques.size(), " k5_faces=", k5_info.face_ids.size(),
+				  " k5_edges=", k5_info.edge_ids.size(), " deg2eq2_faces=", deg2eq2_face_count, '\n');
 	}
 
 	void mark_boundary_tets_color(PointsParameters& p)
 	{
 		if (!p.skeleton_ || !p.skeleton_face_boundary_tet_color_ || !p.skeleton_edge_boundary_tet_color_)
 		{
-			std::cerr << "Boundary tet coloring requires skeleton face/edge color attributes." << std::endl;
+			log_error(p, "Boundary tet coloring requires skeleton face/edge color attributes.", '\n');
 			return;
 		}
 
@@ -9997,7 +10193,7 @@ protected:
 	{
 		if (!p.skeleton_ || !p.incident_tets_)
 		{
-			std::cerr << "[K5Delete] requires a built skeleton." << std::endl;
+			log_error(p, "[K5Delete] requires a built skeleton.", '\n');
 			return;
 		}
 		if (!ensure_topology_score_backend(p, "[K5Delete]"))
@@ -10009,7 +10205,7 @@ protected:
 		if (k5_info.cliques.empty())
 		{
 			mark_k5_color(p);
-			std::cout << "[K5Delete] no K5 detected." << std::endl;
+			log_basic(p, "[K5Delete] no K5 detected.", '\n');
 			return;
 		}
 
@@ -10038,7 +10234,7 @@ protected:
 			if (!compute_skeleton_face_scores(
 					p, face_score_cache, p.skeleton_face_score_normalize_by_area_, "[K5Delete]"))
 			{
-				std::cerr << "[K5Delete] failed to compute face scores." << std::endl;
+				log_error(p, "[K5Delete] failed to compute face scores.", '\n');
 				break;
 			}
 
@@ -10231,16 +10427,11 @@ protected:
 		}
 
 		mark_k5_color(p);
-		std::cout << "[K5Delete] done"
-				  << " detected_k5=" << detected_k5
-				  << " processed_k5=" << processed_k5
-				  << " removed_faces=" << removed_faces
-				  << " removed_edges=" << removed_edges
-				  << " removed_vertices=" << removed_vertices
-				  << " removed_tets=" << removed_tets
-				  << " skipped_no_deg2_pair=" << skipped_no_deg2_pair
-				  << " skipped_no_followup_pair=" << skipped_no_followup_pair
-				  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
+		log_basic(p, "[K5Delete] done", " detected_k5=", detected_k5, " processed_k5=", processed_k5,
+				  " removed_faces=", removed_faces, " removed_edges=", removed_edges, " removed_vertices=",
+				  removed_vertices, " removed_tets=", removed_tets, " skipped_no_deg2_pair=",
+				  skipped_no_deg2_pair, " skipped_no_followup_pair=", skipped_no_followup_pair,
+				  " remaining_tets=", p.skeleton_tets_.size(), '\n');
 
 		refresh_skeleton_topology_colors(p);
 		mark_boundary_tets_color(p);
@@ -10391,11 +10582,9 @@ protected:
 			++stats.processed_tets;
 		}
 
-		std::cout << log_prefix << " boundary_prepass_passes=" << stats.passes
-				  << " processed_boundary_tets=" << stats.processed_tets
-				  << " removed_faces=" << stats.removed_faces
-				  << " removed_edges=" << stats.removed_edges
-				  << " removed_tets=" << stats.removed_tets << std::endl;
+		log_basic(p, log_prefix, " boundary_prepass_passes=", stats.passes, " processed_boundary_tets=",
+				  stats.processed_tets, " removed_faces=", stats.removed_faces, " removed_edges=",
+				  stats.removed_edges, " removed_tets=", stats.removed_tets, '\n');
 		return stats;
 	}
 
@@ -10465,7 +10654,7 @@ protected:
 	{
 		if (!p.skeleton_)
 		{
-			std::cerr << "[TopologyStage] cannot capture snapshot: skeleton is null." << std::endl;
+			log_error(p, "[TopologyStage] cannot capture snapshot: skeleton is null.", '\n');
 			return false;
 		}
 
@@ -10480,8 +10669,8 @@ protected:
 		p.topology_stage_snapshot_faces_map_ = p.skeleton_faces_map_;
 		p.topology_stage_snapshot_tets_ = p.skeleton_tets_;
 		p.topology_stage_snapshot_valid_ = true;
-		std::cout << "[TopologyStage] snapshot captured: faces=" << nb_cells<NMFace>(*p.skeleton_)
-				  << " tets=" << p.skeleton_tets_.size() << std::endl;
+		log_basic(p, "[TopologyStage] snapshot captured: faces=", nb_cells<NMFace>(*p.skeleton_), " tets=",
+				  p.skeleton_tets_.size(), '\n');
 		return true;
 	}
 
@@ -10489,7 +10678,7 @@ protected:
 	{
 		if (!p.topology_stage_snapshot_valid_ || !p.topology_stage_snapshot_mesh_)
 		{
-			std::cerr << "[TopologyStage] snapshot not available." << std::endl;
+			log_error(p, "[TopologyStage] snapshot not available.", '\n');
 			return false;
 		}
 		non_manifold_provider_->copy_mesh(*p.skeleton_, *p.topology_stage_snapshot_mesh_);
@@ -10503,7 +10692,7 @@ protected:
 	{
 		if (!p.skeleton_ || !p.incident_tets_)
 		{
-			std::cerr << "Boundary tet delete requires a built skeleton." << std::endl;
+			log_error(p, "Boundary tet delete requires a built skeleton.", '\n');
 			return;
 		}
 		run_boundary_tet_face_deletion(p, "[BoundaryTetDelete]");
@@ -10536,7 +10725,7 @@ protected:
 	{
 		if (!p.skeleton_ || !p.incident_tets_)
 		{
-			std::cerr << log_prefix << " requires a built skeleton." << std::endl;
+			log_error(p, log_prefix, " requires a built skeleton.", '\n');
 			return;
 		}
 
@@ -10566,6 +10755,7 @@ protected:
 			return pattern_a || pattern_b;
 		};
 
+		const bool collect_verbose_stats = is_verbose_logging_enabled(p);
 		uint32 total_removed_faces = 0;
 		uint32 total_removed_edges = 0;
 		uint32 total_removed_vertices = 0;
@@ -10594,7 +10784,8 @@ protected:
 			if (faces_to_remove.empty())
 				break;
 
-			++total_passes;
+			if (collect_verbose_stats)
+				++total_passes;
 			uint32 removed_faces_this_pass = 0;
 			for (const NMFace& f : faces_to_remove)
 			{
@@ -10638,13 +10829,20 @@ protected:
 
 		}
 
-		std::cout << log_prefix << " done"
-				  << " passes=" << total_passes
-				  << " removed_deg_faces=" << total_removed_faces
-				  << " removed_orphan_edges=" << total_removed_edges
-				  << " removed_orphan_vertices=" << total_removed_vertices
-				  << " removed_tets=" << total_removed_tets
-				  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
+		if (collect_verbose_stats)
+		{
+			log_verbose(p, log_prefix, " done", " passes=", total_passes, " removed_deg_faces=",
+						total_removed_faces, " removed_orphan_edges=", total_removed_edges,
+						" removed_orphan_vertices=", total_removed_vertices, " removed_tets=",
+						total_removed_tets, " remaining_tets=", p.skeleton_tets_.size(), '\n');
+		}
+		else
+		{
+			log_basic(p, log_prefix, " done", " removed_deg_faces=", total_removed_faces,
+					  " removed_orphan_edges=", total_removed_edges, " removed_orphan_vertices=",
+					  total_removed_vertices, " removed_tets=", total_removed_tets, " remaining_tets=",
+					  p.skeleton_tets_.size(), '\n');
+		}
 	}
 
 	struct NonManifoldDeg1FaceCandidate
@@ -10738,6 +10936,8 @@ protected:
 										   const std::unordered_map<uint32, Scalar>& edge_score_cache,
 										   const char* log_prefix, uint32 iteration)
 	{
+		if (!is_verbose_logging_enabled(p))
+			return;
 		std::vector<std::pair<uint32, Scalar>> sorted_faces(face_score_cache.begin(), face_score_cache.end());
 		std::sort(sorted_faces.begin(), sorted_faces.end(), [](const auto& a, const auto& b) {
 			if (a.second != b.second)
@@ -10752,20 +10952,19 @@ protected:
 			return a.first < b.first;
 		});
 
-		std::cout << log_prefix << " iter=" << iteration
-				  << " neighborhood_faces=" << sorted_faces.size()
-				  << " neighborhood_edges=" << sorted_edges.size() << std::endl;
+		log_verbose(p, log_prefix, " iter=", iteration, " neighborhood_faces=", sorted_faces.size(),
+					" neighborhood_edges=", sorted_edges.size(), '\n');
 
 		for (const auto& item : sorted_faces)
-			std::cout << log_prefix << " iter=" << iteration << " face_score face=" << item.first
-					  << " score=" << item.second << std::endl;
+			log_verbose(p, log_prefix, " iter=", iteration, " face_score face=", item.first, " score=",
+						item.second, '\n');
 
 		for (const auto& item : sorted_edges)
 		{
 			const NMEdge e = of_index<NMEdge>(*p.skeleton_, item.first);
 			const size_t degree = e.is_valid() ? incident_faces(*p.skeleton_, e).size() : size_t(0);
-			std::cout << log_prefix << " iter=" << iteration << " edge_score edge=" << item.first
-					  << " degree=" << degree << " score=" << item.second << std::endl;
+			log_verbose(p, log_prefix, " iter=", iteration, " edge_score edge=", item.first, " degree=", degree,
+						" score=", item.second, '\n');
 		}
 	}
 
@@ -10968,7 +11167,7 @@ protected:
 		}
 		if (!p.skeleton_ || !p.incident_tets_)
 		{
-			std::cerr << log_prefix << " requires a built skeleton." << std::endl;
+			log_error(p, log_prefix, " requires a built skeleton.", '\n');
 			return;
 		}
 		const std::unordered_set<uint32> preexisting_orphan_edge_ids = collect_current_orphan_edge_ids(p);
@@ -10994,7 +11193,7 @@ protected:
 					p, neighborhood_face_ids, neighborhood_edge_ids, face_score_cache, edge_score_cache, face_versions,
 					candidate_queue, log_prefix))
 			{
-				std::cerr << log_prefix << " failed to initialize candidate queue." << std::endl;
+				log_error(p, log_prefix, " failed to initialize candidate queue.", '\n');
 				return false;
 			}
 			return !candidate_queue.empty();
@@ -11090,7 +11289,7 @@ protected:
 			}
 			if (!face_removed)
 			{
-				std::cerr << log_prefix << " failed to invalidate removed face=" << candidate.face_id << std::endl;
+				log_error(p, log_prefix, " failed to invalidate removed face=", candidate.face_id, '\n');
 				break;
 			}
 			++removed_faces_total;
@@ -11149,18 +11348,15 @@ protected:
 					p, dirty_face_ids, dirty_edge_ids, face_score_cache, edge_score_cache, face_versions, candidate_queue,
 					log_prefix))
 			{
-				std::cerr << log_prefix << " failed to update candidate queue after face removal." << std::endl;
+				log_error(p, log_prefix, " failed to update candidate queue after face removal.", '\n');
 				break;
 			}
 
 		}
 
-		std::cout << log_prefix << " done"
-				  << " removed_faces=" << removed_faces_total
-				  << " removed_edges=" << removed_edges_total
-				  << " removed_vertices=" << removed_vertices_total
-				  << " removed_tets=" << removed_tets_total
-				  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
+		log_basic(p, log_prefix, " done removed_faces=", removed_faces_total, " removed_edges=", removed_edges_total,
+				  " removed_vertices=", removed_vertices_total, " removed_tets=", removed_tets_total,
+				  " remaining_tets=", p.skeleton_tets_.size(), '\n');
 
 		uint32 removed_global_orphan_edges = 0;
 		uint32 removed_global_orphan_vertices = 0;
@@ -11168,9 +11364,8 @@ protected:
 			p, &removed_global_orphan_edges, &removed_global_orphan_vertices, &preexisting_orphan_edge_ids);
 		if (removed_global_orphan_edges != 0 || removed_global_orphan_vertices != 0)
 		{
-			std::cout << log_prefix << " cleanup"
-					  << " removed_global_orphan_edges=" << removed_global_orphan_edges
-					  << " removed_global_orphan_vertices=" << removed_global_orphan_vertices << std::endl;
+			log_basic(p, log_prefix, " cleanup removed_global_orphan_edges=", removed_global_orphan_edges,
+					  " removed_global_orphan_vertices=", removed_global_orphan_vertices, '\n');
 		}
 		refresh_skeleton_topology_colors(p);
 		mark_boundary_tets_color(p);
@@ -11181,20 +11376,22 @@ protected:
 		PointsParameters& p, const std::unordered_set<uint32>& tet_face_whitelist, bool run_deg_face_deletion,
 		const char* log_prefix = "[TopologyFullRemain]")
 	{
+		if (!is_verbose_logging_enabled(p))
+			return;
 		if (!p.skeleton_ || !p.incident_tets_ || p.skeleton_tets_.empty())
 			return;
 
 		std::unordered_map<uint32, Scalar> edge_score_cache;
 		if (!compute_skeleton_edge_scores_gauss3_normalized(p, edge_score_cache, log_prefix))
 		{
-			std::cerr << log_prefix << " failed to compute edge scores for remaining-tet diagnostics." << std::endl;
+			log_error(p, log_prefix, " failed to compute edge scores for remaining-tet diagnostics.", '\n');
 			return;
 		}
 		std::unordered_map<uint32, Scalar> face_score_cache;
 		if (!compute_skeleton_face_scores(
 				p, face_score_cache, p.skeleton_face_score_normalize_by_area_, log_prefix))
 		{
-			std::cerr << log_prefix << " failed to compute face scores for remaining-tet diagnostics." << std::endl;
+			log_error(p, log_prefix, " failed to compute face scores for remaining-tet diagnostics.", '\n');
 			return;
 		}
 
@@ -11538,18 +11735,17 @@ protected:
 			return diagnostic;
 		};
 
-		auto print_reason_list = [&](const std::vector<std::string>& reasons) {
+		auto format_reason_list = [&](const std::vector<std::string>& reasons) -> std::string {
 			if (reasons.empty())
-			{
-				std::cout << "none";
-				return;
-			}
+				return "none";
+			std::string joined;
 			for (std::size_t i = 0; i < reasons.size(); ++i)
 			{
 				if (i != 0)
-					std::cout << ",";
-				std::cout << reasons[i];
+					joined += ",";
+				joined += reasons[i];
 			}
+			return joined;
 		};
 
 		std::vector<std::size_t> tet_ids;
@@ -11558,7 +11754,7 @@ protected:
 			tet_ids.push_back(kv.first);
 		std::sort(tet_ids.begin(), tet_ids.end());
 
-		std::cout << log_prefix << " start remaining_tets=" << tet_ids.size() << std::endl;
+		log_verbose(p, log_prefix, " start remaining_tets=", tet_ids.size(), '\n');
 		for (std::size_t tet_id : tet_ids)
 		{
 			auto it_tet = p.skeleton_tets_.find(tet_id);
@@ -11591,60 +11787,52 @@ protected:
 				boundary_diag.eligible_now || simple_diag.eligible_now || nonsimple_diag.eligible_now ||
 				(run_deg_face_deletion && deg_face_eligible_now);
 
-			std::cout << log_prefix << " tet=" << tet_id
-					  << " status=" << (removable_now ? "still_removable_now" : "no_current_removal_path")
-					  << " missing_faces=" << missing_faces
-					  << " live_faces=" << live_faces;
-
-			std::cout << " boundary=";
-			if (boundary_diag.eligible_now)
-				std::cout << "eligible_now(edge=" << boundary_diag.candidate_edge_id << ")";
-			else
-			{
-				std::cout << "blocked(reasons=";
-				print_reason_list(boundary_diag.reasons);
-				std::cout << ",faces_with_2_deg2_edges=" << boundary_diag.faces_with_two_deg2_edges << ")";
-			}
-
-			std::cout << " simple=";
+			const std::string boundary_state = boundary_diag.eligible_now
+												 ? "eligible_now(edge=" + std::to_string(boundary_diag.candidate_edge_id) + ")"
+												 : "blocked(reasons=" + format_reason_list(boundary_diag.reasons) +
+													   ",faces_with_2_deg2_edges=" +
+													   std::to_string(boundary_diag.faces_with_two_deg2_edges) + ")";
+			std::string simple_state;
 			if (simple_diag.eligible_now)
-				std::cout << "eligible_now(best_edge=" << simple_diag.best_edge_id
-						  << ",face=" << simple_diag.candidate_face_id << ")";
+				simple_state = "eligible_now(best_edge=" + std::to_string(simple_diag.best_edge_id) + ",face=" +
+							   std::to_string(simple_diag.candidate_face_id) + ")";
 			else
 			{
-				std::cout << "blocked(reasons=";
-				print_reason_list(simple_diag.reasons);
+				simple_state = "blocked(reasons=" + format_reason_list(simple_diag.reasons);
 				if (simple_diag.best_edge_id != INVALID_INDEX)
-					std::cout << ",best_edge=" << simple_diag.best_edge_id;
-				std::cout << ",owned_faces_on_best_edge=" << simple_diag.tet_owned_faces_on_best_edge
-						  << ",budget_blocked_on_best_edge=" << simple_diag.budget_blocked_faces_on_best_edge
-						  << ",mode_mismatch_on_best_edge=" << simple_diag.mode_mismatch_faces_on_best_edge << ")";
+					simple_state += ",best_edge=" + std::to_string(simple_diag.best_edge_id);
+				simple_state += ",owned_faces_on_best_edge=" +
+								std::to_string(simple_diag.tet_owned_faces_on_best_edge) +
+								",budget_blocked_on_best_edge=" +
+								std::to_string(simple_diag.budget_blocked_faces_on_best_edge) +
+								",mode_mismatch_on_best_edge=" +
+								std::to_string(simple_diag.mode_mismatch_faces_on_best_edge) + ")";
 			}
-
-			std::cout << " nonsimple=";
+			std::string nonsimple_state;
 			if (nonsimple_diag.eligible_now)
-				std::cout << "eligible_now(best_edge=" << nonsimple_diag.best_edge_id
-						  << ",face=" << nonsimple_diag.candidate_face_id << ")";
+				nonsimple_state = "eligible_now(best_edge=" + std::to_string(nonsimple_diag.best_edge_id) + ",face=" +
+								  std::to_string(nonsimple_diag.candidate_face_id) + ")";
 			else
 			{
-				std::cout << "blocked(reasons=";
-				print_reason_list(nonsimple_diag.reasons);
+				nonsimple_state = "blocked(reasons=" + format_reason_list(nonsimple_diag.reasons);
 				if (nonsimple_diag.best_edge_id != INVALID_INDEX)
-					std::cout << ",best_edge=" << nonsimple_diag.best_edge_id;
-				std::cout << ",owned_faces_on_best_edge=" << nonsimple_diag.tet_owned_faces_on_best_edge
-						  << ",budget_blocked_on_best_edge=" << nonsimple_diag.budget_blocked_faces_on_best_edge
-						  << ",mode_mismatch_on_best_edge=" << nonsimple_diag.mode_mismatch_faces_on_best_edge << ")";
+					nonsimple_state += ",best_edge=" + std::to_string(nonsimple_diag.best_edge_id);
+				nonsimple_state += ",owned_faces_on_best_edge=" +
+								   std::to_string(nonsimple_diag.tet_owned_faces_on_best_edge) +
+								   ",budget_blocked_on_best_edge=" +
+								   std::to_string(nonsimple_diag.budget_blocked_faces_on_best_edge) +
+								   ",mode_mismatch_on_best_edge=" +
+								   std::to_string(nonsimple_diag.mode_mismatch_faces_on_best_edge) + ")";
 			}
-
-			std::cout << " deg_prune=";
-			if (!run_deg_face_deletion)
-				std::cout << "disabled";
-			else if (deg_face_eligible_now)
-				std::cout << "eligible_now(face=" << deg_face_id << ")";
-			else
-				std::cout << "blocked(reasons=no_whitelisted_deg_face_pattern)";
-
-			std::cout << std::endl;
+			const std::string deg_prune_state =
+				!run_deg_face_deletion ? "disabled"
+									 : (deg_face_eligible_now ? "eligible_now(face=" + std::to_string(deg_face_id) + ")"
+															  : "blocked(reasons=no_whitelisted_deg_face_pattern)");
+			log_verbose(p, log_prefix, " tet=", tet_id, " status=",
+						(removable_now ? "still_removable_now" : "no_current_removal_path"),
+						" missing_faces=", missing_faces, " live_faces=", live_faces, " boundary=", boundary_state,
+						" simple=", simple_state, " nonsimple=", nonsimple_state, " deg_prune=", deg_prune_state,
+						'\n');
 		}
 	}
 
@@ -11652,7 +11840,7 @@ protected:
 	{
 		if (!p.skeleton_ || !p.incident_tets_)
 		{
-			std::cerr << "[TopologyFull] requires a built skeleton." << std::endl;
+			log_error(p, "[TopologyFull] requires a built skeleton.", '\n');
 			return;
 		}
 
@@ -11660,17 +11848,15 @@ protected:
 		// run_k5_face_deletion(p);
 
 		const std::unordered_set<uint32> tet_face_whitelist = collect_current_tet_face_id_whitelist(p);
-		std::cout << "[TopologyFull] start"
-				  << " whitelist_tet_faces=" << tet_face_whitelist.size()
-				  << " initial_tets=" << p.skeleton_tets_.size()
-				  << " deg_face_deletion=" << (run_deg_face_deletion ? "on" : "off") << std::endl;
+		log_basic(p, "[TopologyFull] start whitelist_tet_faces=", tet_face_whitelist.size(), " initial_tets=",
+				  p.skeleton_tets_.size(), " deg_face_deletion=", (run_deg_face_deletion ? "on" : "off"), '\n');
 
 		uint32 round = 0;
 		while (!p.skeleton_tets_.empty())
 		{
 			++round;
 			const uint32 round_start_tets = static_cast<uint32>(p.skeleton_tets_.size());
-			std::cout << "[TopologyFull] round=" << round << " start_tets=" << round_start_tets << std::endl;
+			log_basic(p, "[TopologyFull] round=", round, " start_tets=", round_start_tets, '\n');
 
 			mark_boundary_tets_color(p);
 			const BoundaryTetPrepassStats boundary_stats = run_boundary_tet_face_deletion(p, "[TopologyFull]");
@@ -11694,17 +11880,14 @@ protected:
 
 			const uint32 round_end_tets = static_cast<uint32>(p.skeleton_tets_.size());
 			const uint32 round_removed_tets = round_start_tets - round_end_tets;
-			std::cout << "[TopologyFull] round=" << round << " done"
-					  << " boundary_removed_tets=" << boundary_stats.removed_tets
-					  << " simple_removed_tets=" << simple_stats.removed_tets
-					  << " nonsimple_removed_tets=" << nonsimple_stats.removed_tets
-					  << " deg_removed_tets=" << deg_removed_tets
-					  << " total_removed_tets=" << round_removed_tets
-					  << " remaining_tets=" << round_end_tets << std::endl;
+			log_basic(p, "[TopologyFull] round=", round, " done boundary_removed_tets=", boundary_stats.removed_tets,
+					  " simple_removed_tets=", simple_stats.removed_tets, " nonsimple_removed_tets=",
+					  nonsimple_stats.removed_tets, " deg_removed_tets=", deg_removed_tets,
+					  " total_removed_tets=", round_removed_tets, " remaining_tets=", round_end_tets, '\n');
 
 			if (round_removed_tets == 0)
 			{
-				std::cout << "[TopologyFull] round=" << round << " stop reason=no_progress" << std::endl;
+				log_basic(p, "[TopologyFull] round=", round, " stop reason=no_progress", '\n');
 				break;
 			}
 		}
@@ -11714,7 +11897,7 @@ protected:
 		visualize_skeleton_edge_udf_scores(p);
 		if (!p.skeleton_tets_.empty())
 			log_remaining_topology_fix_tet_diagnostics(p, tet_face_whitelist, run_deg_face_deletion);
-		std::cout << "[TopologyFull] done remaining_tets=" << p.skeleton_tets_.size() << std::endl;
+		log_basic(p, "[TopologyFull] done remaining_tets=", p.skeleton_tets_.size(), '\n');
 	}
 
 	void run_complete_topology_fix_pipeline(PointsParameters& p)
@@ -11727,7 +11910,7 @@ protected:
 	{
 		if (!p.skeleton_ || !p.incident_tets_)
 		{
-			std::cerr << "Topology stage filter requires a built skeleton." << std::endl;
+			log_error(p, "Topology stage filter requires a built skeleton.", '\n');
 			return;
 		}
 		if (!p.topology_stage_snapshot_valid_)
@@ -11738,9 +11921,8 @@ protected:
 		if (!restore_topology_stage_snapshot(p))
 			return;
 
-		std::cout << "[TopologyStage] run=" << (run_edge_stage ? "edge(face+edge)" : "face-only")
-				  << " from_snapshot=true"
-				  << " edge_diffuse=" << (p.topology_edge_stage_diffuse_ ? "on" : "off") << std::endl;
+		log_basic(p, "[TopologyStage] run=", (run_edge_stage ? "edge(face+edge)" : "face-only"),
+				  " from_snapshot=true edge_diffuse=", (p.topology_edge_stage_diffuse_ ? "on" : "off"), '\n');
 		skeleton_post_pocessing(p, run_edge_stage, p.topology_edge_stage_diffuse_);
 	}
 
@@ -11896,7 +12078,7 @@ protected:
 	{
 		if (!p.skeleton_ || !p.incident_tets_)
 		{
-			std::cerr << "Face-stage single step requires a built skeleton." << std::endl;
+			log_error(p, "Face-stage single step requires a built skeleton.", '\n');
 			return;
 		}
 		if (!ensure_topology_score_backend(p, "[TopologyStep]"))
@@ -11908,7 +12090,7 @@ protected:
 		if (!compute_skeleton_face_scores(
 				p, face_score_cache, p.skeleton_face_score_normalize_by_area_, "[TopologyStep]"))
 		{
-			std::cerr << "[TopologyStep] failed to compute face scores." << std::endl;
+			log_error(p, "[TopologyStep] failed to compute face scores.", '\n');
 			return;
 		}
 
@@ -11917,7 +12099,7 @@ protected:
 		{
 			refresh_skeleton_topology_colors(p);
 			mark_boundary_tets_color(p);
-			std::cout << "[TopologyStep] no removable face candidate." << std::endl;
+			log_basic(p, "[TopologyStep] no removable face candidate.", '\n');
 			return;
 		}
 
@@ -11982,17 +12164,13 @@ protected:
 			non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
 		}
 
-		std::cout << "[TopologyStep] removed_face=" << current.face_id
-				  << " type=simple"
-				  << " score=" << current.score
-				  << " removed_tets=" << removed_tets_this_step
-				  << " removed_deg1_edges=" << removed_deg1_edges << std::endl;
+		log_basic(p, "[TopologyStep] removed_face=", current.face_id, " type=simple", " score=", current.score,
+				  " removed_tets=", removed_tets_this_step, " removed_deg1_edges=", removed_deg1_edges, '\n');
 		if (has_next)
-			std::cout << "[TopologyStep] next_face=" << next_candidate.face_id
-					  << " next_type=simple"
-					  << " next_score=" << next_candidate.score << " highlighted_color=(1,1,0)" << std::endl;
+			log_basic(p, "[TopologyStep] next_face=", next_candidate.face_id, " next_type=simple", " next_score=",
+					  next_candidate.score, " highlighted_color=(1,1,0)", '\n');
 		else
-			std::cout << "[TopologyStep] next_face=none" << std::endl;
+			log_basic(p, "[TopologyStep] next_face=none", '\n');
 	}
 
 	void skeleton_post_pocessing(PointsParameters& p, bool run_edge_stage = true, bool edge_stage_diffuse = true)
@@ -12006,11 +12184,12 @@ protected:
 		if (!compute_skeleton_face_scores(
 				p, face_score_cache, p.skeleton_face_score_normalize_by_area_, "[TopologyFilter]"))
 		{
-			std::cerr << "[TopologyFilter] Face scores may be incomplete due to topology-score evaluation failure."
-					  << std::endl;
+			log_error(p, "[TopologyFilter] Face scores may be incomplete due to topology-score evaluation failure.",
+					  '\n');
 		}
 
 		const BoundaryTetPrepassStats boundary_prepass = run_boundary_tet_face_deletion(p, "[TopologyFilter]");
+		const bool collect_verbose_stats = is_verbose_logging_enabled(p);
 		std::unordered_set<uint32> initial_tet_face_ids;
 		initial_tet_face_ids.reserve(nb_cells<NMFace>(*p.skeleton_));
 		for (const auto& kv : p.skeleton_tets_)
@@ -12058,22 +12237,30 @@ protected:
 			if (simple_face_ids.insert(idf).second)
 			{
 				simple_queue.push({score, f, idf});
-				++total_pushes_simple;
+				if (collect_verbose_stats)
+					++total_pushes_simple;
 			}
 		};
 
 		size_t initial_simple_faces = 0;
 		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
-			if (is_simple_face_3d(p, f))
+			if (collect_verbose_stats && is_simple_face_3d(p, f))
 				++initial_simple_faces;
 			push_face_by_type(f);
 			return true;
 		});
-		std::cout << "[TopologyFilter] start"
-				  << " initial_faces=" << nb_cells<NMFace>(*p.skeleton_)
-				  << " initial_tets=" << p.skeleton_tets_.size()
-				  << " initial_simple_faces=" << initial_simple_faces
-				  << " initial_tet_faces=" << initial_tet_face_ids.size() << std::endl;
+		if (collect_verbose_stats)
+		{
+			log_verbose(p, "[TopologyFilter] start", " initial_faces=", nb_cells<NMFace>(*p.skeleton_),
+						" initial_tets=", p.skeleton_tets_.size(), " initial_simple_faces=", initial_simple_faces,
+						" initial_tet_faces=", initial_tet_face_ids.size(), '\n');
+		}
+		else
+		{
+			log_basic(p, "[TopologyFilter] start", " initial_faces=", nb_cells<NMFace>(*p.skeleton_),
+					  " initial_tets=", p.skeleton_tets_.size(), " initial_tet_faces=", initial_tet_face_ids.size(),
+					  '\n');
+		}
 
 		// Global budget (face+edge stage): each tet can lose at most two faces.
 		std::unordered_map<uint32, std::vector<std::size_t>> face_owner_tets;
@@ -12191,7 +12378,8 @@ protected:
 			{
 				FaceQueueItem item = simple_queue.top();
 				simple_queue.pop();
-				++pop_count;
+				if (collect_verbose_stats)
+					++pop_count;
 
 				const auto itid = simple_face_ids.find(item.face_id);
 				if (itid == simple_face_ids.end())
@@ -12200,18 +12388,21 @@ protected:
 
 				if (!item.face.is_valid())
 				{
-					++skipped_invalid;
+					if (collect_verbose_stats)
+						++skipped_invalid;
 					continue;
 				}
 				const uint32 idf = index_of(*p.skeleton_, item.face);
 				if (idf == INVALID_INDEX || idf != item.face_id)
 				{
-					++skipped_invalid;
+					if (collect_verbose_stats)
+						++skipped_invalid;
 					continue;
 				}
 				if (!is_simple_face_3d(p, item.face))
 				{
-					++skipped_not_simple;
+					if (collect_verbose_stats)
+						++skipped_not_simple;
 					continue;
 				}
 				out = item;
@@ -12234,23 +12425,27 @@ protected:
 			const uint32 idf_current = index_of(*p.skeleton_, current_face);
 			if (is_blocked_by_tet_face_cap(idf_current))
 			{
-				++skipped_tet_face_cap;
+				if (collect_verbose_stats)
+					++skipped_tet_face_cap;
 				continue;
 			}
 			if (violates_face_removal_edge_guard(p, current_face))
 			{
-				++skipped_edge_guard;
+				if (collect_verbose_stats)
+					++skipped_edge_guard;
 				continue;
 			}
 			std::set<std::size_t> in_tets = (*p.incident_tets_)[idf_current];
 			if (!is_simple_face_3d(p, current_face))
 			{
-				++skipped_not_single_tet;
+				if (collect_verbose_stats)
+					++skipped_not_single_tet;
 				continue;
 			}
 			if (in_tets.empty())
 			{
-				++skipped_not_single_tet;
+				if (collect_verbose_stats)
+					++skipped_not_single_tet;
 				continue;
 			}
 			const std::vector<NMEdge> in_edges = incident_edges(*p.skeleton_, current_face);
@@ -12292,19 +12487,36 @@ protected:
 			}
 			uint32 removed_tets_this_step = remove_incident_tets_from_face(in_tets, current_face, true);
 			removed_tets += removed_tets_this_step;
-			total_edge_followup_pushes += newly_pushed;
-			total_degree1_edges_removed_after_face += removed_deg1_edges_this_step;
+			if (collect_verbose_stats)
+			{
+				total_edge_followup_pushes += newly_pushed;
+				total_degree1_edges_removed_after_face += removed_deg1_edges_this_step;
+			}
 		}
 
-		std::cout << "[TopologyFilter] done"
-				  << " removed_faces=" << removed_face
-				  << " removed_simple_faces=" << removed_simple_face
-				  << " removed_edges=" << removed_edges
-				  << " removed_tets=" << removed_tets
-				  << " boundary_prepass_removed_faces=" << boundary_prepass.removed_faces
-				  << " boundary_prepass_removed_edges=" << boundary_prepass.removed_edges
-				  << " boundary_prepass_removed_tets=" << boundary_prepass.removed_tets
-				  << " remaining_tets=" << p.skeleton_tets_.size() << std::endl;
+		if (collect_verbose_stats)
+		{
+			log_verbose(p, "[TopologyFilter] done", " removed_faces=", removed_face, " removed_simple_faces=",
+						removed_simple_face, " removed_edges=", removed_edges, " removed_tets=", removed_tets,
+						" boundary_prepass_removed_faces=", boundary_prepass.removed_faces,
+						" boundary_prepass_removed_edges=", boundary_prepass.removed_edges,
+						" boundary_prepass_removed_tets=", boundary_prepass.removed_tets, " remaining_tets=",
+						p.skeleton_tets_.size(), " queue_pushes=", total_pushes_simple, " queue_pops=", pop_count,
+						" skipped_invalid=", skipped_invalid, " skipped_not_simple=", skipped_not_simple,
+						" skipped_not_single_tet=", skipped_not_single_tet,
+						" skipped_tet_face_cap=", skipped_tet_face_cap, " skipped_edge_guard=",
+						skipped_edge_guard, " edge_followup_pushes=", total_edge_followup_pushes,
+						" removed_degree1_edges_after_face=", total_degree1_edges_removed_after_face, '\n');
+		}
+		else
+		{
+			log_basic(p, "[TopologyFilter] done", " removed_faces=", removed_face, " removed_simple_faces=",
+					  removed_simple_face, " removed_edges=", removed_edges, " removed_tets=", removed_tets,
+					  " boundary_prepass_removed_faces=", boundary_prepass.removed_faces,
+					  " boundary_prepass_removed_edges=", boundary_prepass.removed_edges,
+					  " boundary_prepass_removed_tets=", boundary_prepass.removed_tets, " remaining_tets=",
+					  p.skeleton_tets_.size(), '\n');
+		}
 
 		refresh_skeleton_topology_colors(p);
 		mark_boundary_tets_color(p);
@@ -12372,9 +12584,9 @@ protected:
 			});
 			if (missing_locked_vertices > 0)
 			{
-				std::cout << "[SkeletonLock] preserved existing connectivity while skipping missing skeleton vertices"
-						  << " updated_vertices=" << updated_locked_vertices
-						  << " missing_vertices=" << missing_locked_vertices << std::endl;
+				log_basic(p, "[SkeletonLock] preserved existing connectivity while skipping missing skeleton vertices"
+						 " updated_vertices=", updated_locked_vertices, " missing_vertices=", missing_locked_vertices,
+						 '\n');
 			}
 		}
 		else
@@ -12389,6 +12601,29 @@ protected:
 	{
 		for (View* v : linked_views_)
 			v->request_update();
+	}
+
+	void set_post_init_sphere_render_state(PointsParameters& p)
+	{
+		if (p.points_ && pcr_ && p.position_)
+		{
+			for (View* v : linked_views_)
+			{
+				pcr_->set_vertex_position(*v, *p.points_, p.position_);
+				pcr_->set_render_vertices(*v, *p.points_, false);
+			}
+		}
+
+		if (p.skeleton_ && skeleton_render_ && p.skeleton_position_)
+		{
+			for (View* v : linked_views_)
+			{
+				skeleton_render_->set_vertex_position(*v, *p.skeleton_, p.skeleton_position_);
+				skeleton_render_->set_render_vertices(*v, *p.skeleton_, true);
+				skeleton_render_->set_render_edges(*v, *p.skeleton_, true);
+				skeleton_render_->set_render_faces(*v, *p.skeleton_, true);
+			}
+		}
 	}
 
 	void start_spheres_update(PointsParameters& p)
@@ -12415,7 +12650,7 @@ protected:
 			while (true)
 			{
 				{
-					std::cout << "Start Sphere update" << std::endl;
+					log_basic(p, "Start Sphere update", '\n');
 					std::lock_guard<std::mutex> lock(p.mutex_);
 					update_spheres(p);
 					p.iteration_count_++;
@@ -12434,9 +12669,9 @@ protected:
 						{
 							convergence_reached = true;
 							post_convergence_iterations = 0;
-							std::cout << "Auto stop: error converged (Diff < " << convergence_eps
-									  << "), start post-convergence countdown (" << max_post_convergence_iterations
-									  << ")." << std::endl;
+							log_basic(p, "Auto stop: error converged (Diff < ", convergence_eps,
+									  "), start post-convergence countdown (", max_post_convergence_iterations, ").",
+									  '\n');
 						}
 						else
 						{
@@ -12460,14 +12695,14 @@ protected:
 						{
 							if (!target_reached_reported)
 							{
-								std::cout << "Auto stop: target reached under current auto-split mode." << std::endl;
+								log_basic(p, "Auto stop: target reached under current auto-split mode.", '\n');
 								target_reached_reported = true;
 							}
 						}
 						if (post_convergence_iterations >= max_post_convergence_iterations)
 						{
-							std::cout << "Auto stop: reached max post-convergence iterations ("
-									  << max_post_convergence_iterations << ")." << std::endl;
+							log_basic(p, "Auto stop: reached max post-convergence iterations (",
+									  max_post_convergence_iterations, ").", '\n');
 							p.stopping_ = true;
 						}
 					}
@@ -12487,9 +12722,9 @@ protected:
 						{
 							max_spheres_reached_once = true;
 							post_max_spheres_iterations = 0;
-							std::cout << "Auto split stop: reached max spheres (" << p.auto_split_max_nb_spheres_
-									  << "), start post-max countdown (" << max_iterations_after_reaching_max_spheres
-									  << ")." << std::endl;
+							log_basic(p, "Auto split stop: reached max spheres (", p.auto_split_max_nb_spheres_,
+									  "), start post-max countdown (", max_iterations_after_reaching_max_spheres, ").",
+									  '\n');
 						}
 						else
 						{
@@ -12498,21 +12733,21 @@ protected:
 
 						if (post_max_spheres_iterations >= max_iterations_after_reaching_max_spheres)
 						{
-							std::cout << "Auto split stop: reached max post-max-sphere iterations ("
-									  << max_iterations_after_reaching_max_spheres << ")." << std::endl;
+							log_basic(p, "Auto split stop: reached max post-max-sphere iterations (",
+									  max_iterations_after_reaching_max_spheres, ").", '\n');
 							p.stopping_ = true;
 						}
 					}
 				}
 				else if (p.iteration_count_ >= max_iterations_without_autosplit)
 				{
-					std::cout << "Stop: reached max iterations without auto split ("
-							  << max_iterations_without_autosplit << ")." << std::endl;
+					log_basic(p, "Stop: reached max iterations without auto split (",
+							  max_iterations_without_autosplit, ").", '\n');
 					p.stopping_ = true;
 				}
 
-				std::cout << "Iteration: " << p.iteration_count_ << " | Spheres: " << p.nb_spheres_
-						  << " | Error: " << p.total_error_ << " | Diff: " << p.total_error_diff_ << std::endl;
+				log_basic(p, "Iteration: ", p.iteration_count_, " | Spheres: ", p.nb_spheres_, " | Error: ",
+						  p.total_error_, " | Diff: ", p.total_error_diff_, '\n');
 
 				if (p.stopping_)
 				{
@@ -12524,9 +12759,9 @@ protected:
 				}
 			}
 			auto end = std::chrono::high_resolution_clock::now();
-			std::cout << "Sphere optimizations time: " << std::chrono::duration<Scalar>(end - start).count() << "s"
-					  << std::endl;
-			std::cout << "Nb iterations: " << p.iteration_count_ << std::endl;
+			log_basic(p, "Sphere optimizations time: ", std::chrono::duration<Scalar>(end - start).count(), "s",
+					  '\n');
+			log_basic(p, "Nb iterations: ", p.iteration_count_, '\n');
 		});
 
 		app_.start_timer(100, [&]() -> bool { return !p.running_ && !p.pending_full_refresh_after_stop_; });
@@ -12755,6 +12990,9 @@ protected:
 		if (!selected_points_)
 			return;
 		PointsParameters& p = points_parameters_[selected_points_];
+		int output_verbosity = output_verbosity_index(p.output_verbosity_);
+		if (ImGui::Combo("Output", &output_verbosity, "Mute\0Normal\0Verbose\0"))
+			p.output_verbosity_ = output_verbosity_from_index(output_verbosity);
 
 		ImGui::Separator();
 		if (ImGui::CollapsingHeader("Neural UDF", ImGuiTreeNodeFlags_DefaultOpen))
@@ -13353,6 +13591,7 @@ private:
 	MeshProvider<POINTS>* points_provider_ = nullptr;
 	PointCloudRender<POINTS>* pcr_ = nullptr;
 	MeshProvider<NONMANIFOLD>* non_manifold_provider_ = nullptr;
+	SurfaceRender<NONMANIFOLD>* skeleton_render_ = nullptr;
 
 	SURFACE* selected_surface_ = nullptr;
 	std::unique_ptr<acc::BVHTree<uint32, Vec3>> surface_bvh_;
