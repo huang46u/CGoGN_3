@@ -32,10 +32,12 @@ CMakeLists.txt.user
 # editor tempo/save
 *.back
 *.autosave
+*.md
 
-.vscode
 build
 /.vs
 /imgui.ini
 /CMakeSettings.json
 /data/
+/out/
+/.vscode/settings.json
