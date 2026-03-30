@@ -27,6 +27,9 @@
 #include <cgogn/io/surface/surface_import.h>
 #include <cgogn/io/utils.h>
 
+#include <cgogn/core/functions/attributes.h>
+#include <cgogn/core/functions/mesh_info.h>
+
 #include <fstream>
 using namespace std::literals::string_literals;
 
@@ -346,7 +349,38 @@ void export_OBJ(MESH& m, const typename mesh_traits<MESH>::template Attribute<ge
 {
 	static_assert(mesh_traits<MESH>::dimension == 2, "MESH dimension should be 2");
 
-	// TODO
+	using Vertex = typename MESH::Vertex;
+	using Face = typename MESH::Face;
+
+	auto vertex_id = add_attribute<uint32, Vertex>(m, "__vertex_id");
+
+	std::ofstream out_file(filename);
+	if (!out_file.good())
+	{
+		remove_attribute<Vertex>(m, vertex_id);
+		return;
+	}
+
+	uint32 id = 0;
+	foreach_cell(m, [&](Vertex v) -> bool {
+		const geometry::Vec3& p = value<geometry::Vec3>(m, vertex_position, v);
+		value<uint32>(m, vertex_id, v) = ++id;
+		out_file << "v " << p[0] << " " << p[1] << " " << p[2] << "\n";
+		return true;
+	});
+
+	foreach_cell(m, [&](Face f) -> bool {
+		out_file << "f";
+		foreach_incident_vertex(m, f, [&](Vertex v) -> bool {
+			out_file << " " << value<uint32>(m, vertex_id, v);
+			return true;
+		});
+		out_file << "\n";
+		return true;
+	});
+
+	remove_attribute<Vertex>(m, vertex_id);
+	out_file.close();
 }
 
 } // namespace io

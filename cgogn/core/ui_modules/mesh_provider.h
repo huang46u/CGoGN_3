@@ -38,6 +38,7 @@
 #include <cgogn/io/graph/cgr.h>
 #include <cgogn/io/graph/skel.h>
 #include <cgogn/io/incidence_graph/ig.h>
+#include <cgogn/io/point/export_options.h>
 #include <cgogn/io/surface/export_options.h>
 #include <cgogn/io/surface/obj.h>
 #include <cgogn/io/surface/off.h>
@@ -307,13 +308,24 @@ public:
 			const std::string filepath = ensure_extension(filename, filetype);
 			if (filetype.compare("off") == 0)
 				io::export_OFF(m, vertex_position, filepath);
-			if (filetype.compare("ply") == 0)
+			else if (filetype.compare("obj") == 0)
+				io::export_OBJ(m, vertex_position, filepath);
+			else if (filetype.compare("ply") == 0)
 				io::export_PLY(m, vertex_position, filepath);
 			else if (filetype.compare("ig") == 0)
 			{
 				if constexpr (has_edge_v<MESH>)
 					io::export_IG(m, vertex_position, filepath);
 			}
+		}
+	}
+
+	void save_surface_obj_to_file(MESH& m, const Attribute<Vec3>* vertex_position, const std::string& filename)
+	{
+		if constexpr (mesh_traits<MESH>::dimension == 2)
+		{
+			const std::string filepath = ensure_extension(filename, "obj");
+			io::export_OBJ(m, vertex_position, filepath);
 		}
 	}
 
@@ -434,6 +446,16 @@ public:
 			const std::string filepath = ensure_extension(filename, filetype);
 			if (filetype.compare("ply") == 0)
 				io::export_PLY(m, vertex_position, filepath);
+		}
+	}
+
+	void save_points_ply_to_file(MESH& m, const Attribute<Vec3>* vertex_position, const std::string& filename,
+								 const io::PointExportAttributeSelection<MESH>& export_attributes)
+	{
+		if constexpr (mesh_traits<MESH>::dimension == 0)
+		{
+			const std::string filepath = ensure_extension(filename, "ply");
+			io::export_PLY(m, vertex_position, filepath, &export_attributes);
 		}
 	}
 
