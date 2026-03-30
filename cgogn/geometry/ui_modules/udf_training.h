@@ -4956,7 +4956,6 @@ private:
 		Vec4 s = A.completeOrthogonalDecomposition().solve(b);
 		if (!s.allFinite())
 			return;
-		
 		Scalar nearest_ma_radius = Scalar(0);
 		const bool radius_too_large =
 			try_get_nearest_sample_ma_radius(p, s.head<3>(), nearest_ma_radius) &&
@@ -4970,9 +4969,7 @@ private:
 
 		(*p.spheres_position_)[sphere_index] = s.head<3>();
 		(*p.spheres_radius_)[sphere_index] = s[3];
-
 		return;
-		
 
 		update_sphere_line_quadric_distance_fix_radius(p, sphere);
 
@@ -13632,7 +13629,6 @@ protected:
 							run_k5_face_deletion(p);
 						}
 					}
-					
 					if (ImGui::Button("Topology fix full pipeline"))
 					{
 						if (!p.running_)
