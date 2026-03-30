@@ -24,8 +24,10 @@
 #include <cgogn/geometry/types/vector_traits.h>
 #include <cgogn/geometry/types/fast_winding_number_traits.h>
 #include <cgogn/geometry/types/fast_winding_number.h>
+#include <cgogn/io/point/export_options.h>
 #include <cgogn/io/surface/export_options.h>
 #include <cgogn/io/surface/ply.h>
+#include <cgogn/ui/portable-file-dialogs.h>
 
 
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
@@ -312,6 +314,10 @@ private:
 		float32 sqem_fix_radius_scale_ = 1.0f;
 		bool udf_center_enabled_ = false;
 		float32 udf_center_lambda_ = 0.10f;
+		bool export_samples_mesh_selected_ = true;
+		bool export_samples_mesh_normal_color_selected_ = false;
+		bool export_samples_spheres_selected_ = true;
+		bool export_skeleton_selected_ = true;
 
 		// Filtering
 		float32 target_radius_ = 0.1f;
@@ -975,6 +981,152 @@ public:
 		counts.skeleton_faces_ = p.skeleton_ ? nb_cells<NMFace>(*p.skeleton_) : 0;
 		counts.optimization_iterations_ = p.iteration_count_;
 		return counts;
+	}
+
+	std::filesystem::path default_training_export_directory(const PointsParameters& p) const
+	{
+		if (points_provider_ && p.points_)
+		{
+			const std::string source_filename = points_provider_->mesh_filename(*p.points_);
+			if (!source_filename.empty())
+			{
+				const std::filesystem::path parent = std::filesystem::path(source_filename).parent_path();
+				if (!parent.empty())
+					return parent;
+			}
+		}
+		return std::filesystem::current_path();
+	}
+
+	std::string training_export_basename(const PointsParameters& p) const
+	{
+		if (points_provider_ && p.points_)
+		{
+			const std::string mesh_name = points_provider_->mesh_name(*p.points_);
+			if (!mesh_name.empty())
+				return std::filesystem::path(mesh_name).stem().string();
+		}
+		return "udf_training";
+	}
+
+	bool export_samples_mesh_cluster_ply(PointsParameters& p, const std::string& filename)
+	{
+		if (!points_provider_ || !p.samples_mesh_ || !p.samples_position_ || !p.samples_sphere_ || !p.spheres_ ||
+			!p.spheres_cluster_color_)
+			return false;
+
+		auto export_cluster_color = get_attribute<Vec4, PVertex>(*p.samples_mesh_, "cluster_color");
+		const bool created_export_cluster_color = !export_cluster_color;
+		if (!export_cluster_color)
+			export_cluster_color = add_attribute<Vec4, PVertex>(*p.samples_mesh_, "cluster_color");
+		if (!export_cluster_color)
+			return false;
+		foreach_cell(*p.samples_mesh_, [&](PVertex sample) -> bool {
+			const uint32 sample_index = index_of(*p.samples_mesh_, sample);
+			Vec4 color(0.0, 0.0, 0.0, 1.0);
+			if (sample_index != INVALID_INDEX)
+			{
+				const PVertex sphere = (*p.samples_sphere_)[sample_index];
+				if (sphere.is_valid())
+					color = value<Vec4>(*p.spheres_, p.spheres_cluster_color_, sphere);
+				(*export_cluster_color)[sample_index] = color;
+			}
+			return true;
+		});
+
+		io::PointExportAttributeSelection<POINTS> export_attributes;
+		export_attributes.vertex_color_attribute = export_cluster_color;
+		points_provider_->save_points_ply_to_file(*p.samples_mesh_, p.samples_position_.get(), filename, export_attributes);
+		if (created_export_cluster_color)
+			remove_attribute<PVertex>(*p.samples_mesh_, export_cluster_color);
+		return true;
+	}
+
+	bool export_samples_spheres_ply(const PointsParameters& p, const std::string& filename) const
+	{
+		if (!points_provider_ || !p.spheres_ || !p.spheres_position_ || !p.spheres_radius_ || !p.spheres_cluster_color_)
+			return false;
+
+		io::PointExportAttributeSelection<POINTS> export_attributes;
+		export_attributes.vertex_attributes.push_back(p.spheres_radius_);
+		export_attributes.vertex_color_attribute = p.spheres_cluster_color_;
+		points_provider_->save_points_ply_to_file(*p.spheres_, p.spheres_position_.get(), filename, export_attributes);
+		return true;
+	}
+
+	bool export_samples_mesh_normal_color_ply(const PointsParameters& p, const std::string& filename) const
+	{
+		if (!points_provider_ || !p.samples_mesh_ || !p.samples_position_ || !p.samples_normal_color_)
+			return false;
+
+		io::PointExportAttributeSelection<POINTS> export_attributes;
+		export_attributes.vertex_color_attribute = p.samples_normal_color_;
+		points_provider_->save_points_ply_to_file(*p.samples_mesh_, p.samples_position_.get(), filename, export_attributes);
+		return true;
+	}
+
+	bool export_skeleton_mesh_ply(PointsParameters& p, const std::string& filename)
+	{
+		if (!p.skeleton_ || !p.skeleton_position_ || !p.skeleton_radius_ || !p.spheres_ || !p.spheres_radius_)
+			return false;
+
+		if (!std::filesystem::path(filename).parent_path().empty())
+			std::filesystem::create_directories(std::filesystem::path(filename).parent_path());
+
+		foreach_cell(*p.skeleton_, [&](NMVertex v) -> bool {
+			const uint32 v_index = index_of(*p.skeleton_, v);
+			if (v_index < nb_cells<PVertex>(*p.spheres_))
+				(*p.skeleton_radius_)[v_index] = (*p.spheres_radius_)[v_index];
+			return true;
+		});
+
+		io::SurfaceExportAttributeSelection<NONMANIFOLD> export_attributes;
+		export_attributes.vertex_attributes.push_back(p.skeleton_radius_);
+		if (p.skeleton_face_color_)
+			export_attributes.face_attributes.push_back(p.skeleton_face_color_);
+		if (non_manifold_provider_)
+			non_manifold_provider_->save_surface_ply_to_file(
+				*p.skeleton_, p.skeleton_position_.get(), filename, export_attributes);
+		else
+			io::export_PLY(*p.skeleton_, p.skeleton_position_.get(), filename, &export_attributes);
+		return true;
+	}
+
+	bool export_training_ply_bundle(PointsParameters& p, const std::filesystem::path& output_directory)
+	{
+		const std::string basename = training_export_basename(p);
+		const std::filesystem::path samples_mesh_path = output_directory / (basename + "_samples_mesh.ply");
+		const std::filesystem::path samples_mesh_normal_color_path =
+			output_directory / (basename + "_samples_mesh_normal_color.ply");
+		const std::filesystem::path samples_spheres_path = output_directory / (basename + "_samples_spheres.ply");
+		const std::filesystem::path skeleton_path = output_directory / (basename + "_skeleton.ply");
+
+		const bool any_selected =
+			p.export_samples_mesh_selected_ || p.export_samples_mesh_normal_color_selected_ ||
+			p.export_samples_spheres_selected_ || p.export_skeleton_selected_;
+		const bool samples_ok =
+			!p.export_samples_mesh_selected_ || export_samples_mesh_cluster_ply(p, samples_mesh_path.string());
+		const bool samples_normal_color_ok =
+			!p.export_samples_mesh_normal_color_selected_ ||
+			export_samples_mesh_normal_color_ply(p, samples_mesh_normal_color_path.string());
+		const bool spheres_ok =
+			!p.export_samples_spheres_selected_ || export_samples_spheres_ply(p, samples_spheres_path.string());
+		const bool skeleton_ok = !p.export_skeleton_selected_ || export_skeleton_mesh_ply(p, skeleton_path.string());
+		const std::string samples_status =
+			p.export_samples_mesh_selected_ ? (samples_ok ? samples_mesh_path.string() : "FAILED") : "SKIPPED";
+		const std::string samples_normal_color_status = p.export_samples_mesh_normal_color_selected_
+														 ? (samples_normal_color_ok ? samples_mesh_normal_color_path.string()
+																					: "FAILED")
+														 : "SKIPPED";
+		const std::string spheres_status =
+			p.export_samples_spheres_selected_ ? (spheres_ok ? samples_spheres_path.string() : "FAILED") : "SKIPPED";
+		const std::string skeleton_status =
+			p.export_skeleton_selected_ ? (skeleton_ok ? skeleton_path.string() : "FAILED") : "SKIPPED";
+
+		std::cout << "[UDFExport] samples_mesh=" << samples_status
+				  << " samples_mesh_normal_color=" << samples_normal_color_status
+				  << " samples_spheres=" << spheres_status << " skeleton=" << skeleton_status << std::endl;
+		return any_selected && samples_ok && samples_normal_color_ok && spheres_ok && skeleton_ok;
 	}
 
 	void headless_export_skeleton_ply_prepared(PointsParameters& p, const std::string& filename)
@@ -3462,13 +3614,18 @@ private:
 		run_shrinking_ball_for_all();
 
 		// Post-process on shrinking-ball centers:
-		// - UDF model: retry if udf(center) > alpha; still > alpha -> delete sample.
-		// - MF model: retry if sdf(center) > 0; still sdf > 0 -> delete sample.
+		// - UDF model / surface mesh / point cloud: retry if distance(center) > alpha; still > alpha -> delete sample.
+		// - MF model: retry if sdf(center) > 0 or udf(center) > alpha; after flip, delete if sdf(center) > 0
+		//   or udf(center) > alpha.
 		uint32 flipped_normals = 0;
 		uint32 flip_triggered_points = 0;
 		uint32 deleted_samples = 0;
-		std::vector<PVertex> flipped_vertices;
-		if (p.neural_udf_loaded_)
+		std::vector<uint32> flipped_vertex_indices;
+		std::function<uint32(const std::vector<PVertex>&)> prune_vertices_by_current_centers;
+		const bool supports_center_retry_prune =
+			mf_model || p.input_mode_ == INPUT_SURFACE_MESH || p.input_mode_ == INPUT_POINT_CLOUD ||
+			(p.input_mode_ == INPUT_NEURAL_UDF && p.neural_udf_loaded_);
+		if (supports_center_retry_prune)
 		{
 			auto eval_mf_values_sdf = [&](const std::vector<Vec3>& query_points, std::vector<Scalar>& out_values,
 										  std::vector<Scalar>& out_sdf) -> bool {
@@ -3518,6 +3675,64 @@ private:
 				return true;
 			};
 
+			auto eval_center_scores = [&](const std::vector<Vec3>& query_points, std::vector<Scalar>& out_values,
+									 std::vector<Scalar>& out_sdf) -> bool {
+				out_sdf.clear();
+				if (mf_model)
+					return eval_mf_values_sdf(query_points, out_values, out_sdf);
+				return eval_topology_score_values(p, query_points, out_values);
+			};
+
+			prune_vertices_by_current_centers = [&](const std::vector<PVertex>& candidate_vertices) -> uint32 {
+				std::vector<PVertex> active_vertices;
+				std::vector<Vec3> active_centers;
+				active_vertices.reserve(candidate_vertices.size());
+				active_centers.reserve(candidate_vertices.size());
+				for (PVertex v : candidate_vertices)
+				{
+					const uint32 vid = index_of(*p.samples_mesh_, v);
+					if (vid == INVALID_INDEX)
+						continue;
+					active_vertices.push_back(v);
+					active_centers.push_back((*p.samples_ma_position_)[vid]);
+				}
+				if (active_vertices.empty())
+					return 0;
+
+				std::vector<Scalar> current_score;
+				std::vector<Scalar> current_sdf;
+				const bool eval_ok = eval_center_scores(active_centers, current_score, current_sdf);
+				if (!eval_ok || current_score.size() != active_centers.size())
+					return 0;
+
+				std::unordered_set<uint32> deleted_ids;
+				deleted_ids.reserve(active_vertices.size());
+				uint32 removed_count = 0;
+				for (size_t i = 0; i < active_vertices.size(); ++i)
+				{
+					bool should_delete = false;
+					if (mf_model)
+					{
+						if ((i < current_sdf.size() && current_sdf[i] > Scalar(0)) || current_score[i] > p.alpha_)
+							should_delete = true;
+					}
+					else
+					{
+						if (current_score[i] > p.alpha_)
+							should_delete = true;
+					}
+					if (!should_delete)
+						continue;
+
+					const uint32 vid = index_of(*p.samples_mesh_, active_vertices[i]);
+					if (vid == INVALID_INDEX || !deleted_ids.insert(vid).second)
+						continue;
+					remove_vertex(*p.samples_mesh_, active_vertices[i]);
+					++removed_count;
+				}
+				return removed_count;
+			};
+
 			std::vector<PVertex> vertices;
 			std::vector<Vec3> centers;
 			vertices.reserve(nb_cells<PVertex>(*p.samples_mesh_));
@@ -3533,11 +3748,7 @@ private:
 
 			std::vector<Scalar> score_values;
 			std::vector<Scalar> sdf_values;
-			bool eval_ok = false;
-			if (mf_model)
-				eval_ok = eval_mf_values_sdf(centers, score_values, sdf_values);
-			else
-				eval_ok = eval_udf_values(p, centers, score_values);
+			const bool eval_ok = eval_center_scores(centers, score_values, sdf_values);
 
 			if (eval_ok && score_values.size() == centers.size())
 			{
@@ -3563,7 +3774,7 @@ private:
 						need_retry.push_back(vertices[i]);
 				}
 				flip_triggered_points += static_cast<uint32>(need_retry.size());
-				flipped_vertices.reserve(need_retry.size());
+				flipped_vertex_indices.reserve(need_retry.size());
 
 				for (PVertex v : need_retry)
 				{
@@ -3575,77 +3786,41 @@ private:
 					{
 						n.normalize();
 						(*p.samples_normal_)[vid] = -n;
-						flipped_vertices.push_back(v);
+						flipped_vertex_indices.push_back(vid);
 						++flipped_normals;
 					}
 					run_shrinking_ball_for_vertex(v);
 				}
 
-				std::vector<Vec3> retry_centers;
-				retry_centers.reserve(need_retry.size());
-				for (PVertex v : need_retry)
-				{
-					const uint32 vid = index_of(*p.samples_mesh_, v);
-					if (vid == INVALID_INDEX)
-					{
-						retry_centers.push_back(Vec3(0, 0, 0));
-						continue;
-					}
-					retry_centers.push_back((*p.samples_ma_position_)[vid]);
-				}
-
-				std::vector<Scalar> retry_score;
-				std::vector<Scalar> retry_sdf;
-				bool retry_eval_ok = false;
-				if (mf_model)
-					retry_eval_ok = eval_mf_values_sdf(retry_centers, retry_score, retry_sdf);
-				else
-					retry_eval_ok = eval_udf_values(p, retry_centers, retry_score);
-
-				if (retry_eval_ok && retry_score.size() == retry_centers.size())
-				{
-					std::unordered_set<uint32> deleted_ids;
-					deleted_ids.reserve(need_retry.size());
-					for (size_t i = 0; i < need_retry.size(); ++i)
-					{
-						bool should_delete = false;
-						if (mf_model)
-						{
-							if (i < retry_sdf.size() && retry_sdf[i] > Scalar(0))
-								should_delete = true;
-						}
-						else
-						{
-							if (retry_score[i] > p.alpha_)
-								should_delete = true;
-						}
-						if (!should_delete)
-							continue;
-						const uint32 vid = index_of(*p.samples_mesh_, need_retry[i]);
-						if (vid == INVALID_INDEX || !deleted_ids.insert(vid).second)
-							continue;
-						remove_vertex(*p.samples_mesh_, need_retry[i]);
-						++deleted_samples;
-					}
-				}
+				deleted_samples += prune_vertices_by_current_centers(need_retry);
 			}
 		}
 
 		if (deleted_samples > 0)
 		{
+			// Sample connectivity changed; refresh the geometry needed to stabilize MA first.
+			build_kdtree(p);
+			if (nb_cells<PVertex>(*p.samples_mesh_) > 0 && !flipped_vertex_indices.empty())
+			{
+				std::vector<PVertex> surviving_flipped_vertices;
+				surviving_flipped_vertices.reserve(flipped_vertex_indices.size());
+				for (uint32 vid : flipped_vertex_indices)
+				{
+					PVertex v = of_index<PVertex>(*p.samples_mesh_, vid);
+					if (v.is_valid())
+						surviving_flipped_vertices.push_back(v);
+				}
+
+				recompute_samples_normals_pca_for_vertices(p, surviving_flipped_vertices);
+				for (PVertex v : surviving_flipped_vertices)
+					run_shrinking_ball_for_vertex(v);
+				if (prune_vertices_by_current_centers)
+					deleted_samples += prune_vertices_by_current_centers(surviving_flipped_vertices);
+			}
+			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
 			log_basic(p, "[MAFlipPrune] flip_triggered_points=", flip_triggered_points, " flipped_normals=",
 					  flipped_normals, " deleted_samples=", deleted_samples, " remaining_samples=",
 					  nb_cells<PVertex>(*p.samples_mesh_), '\n');
-			
-			// Sample connectivity changed; refresh the geometry needed to stabilize MA first.
-			build_kdtree(p);
-			if (nb_cells<PVertex>(*p.samples_mesh_) > 0 && !flipped_vertices.empty())
-			{
-				recompute_samples_normals_pca_for_vertices(p, flipped_vertices);
-				for (PVertex v : flipped_vertices)
-					run_shrinking_ball_for_vertex(v);
-			}
-			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
 		}
 		else if (flip_triggered_points > 0 || flipped_normals > 0)
 		{
@@ -4781,26 +4956,45 @@ private:
 		Vec4 s = A.completeOrthogonalDecomposition().solve(b);
 		if (!s.allFinite())
 			return;
-
-		if (s[3] > Scalar(0))
+		
+		Scalar nearest_ma_radius = Scalar(0);
+		const bool radius_too_large =
+			try_get_nearest_sample_ma_radius(p, s.head<3>(), nearest_ma_radius) &&
+			(s[3] > nearest_ma_radius * Scalar(1.5));
+		const bool radius_non_positive = (s[3] <= Scalar(0));
+		if (radius_too_large || radius_non_positive)
 		{
-			Scalar nearest_ma_radius = Scalar(0);
-			const bool radius_too_large =
-				try_get_nearest_sample_ma_radius(p, s.head<3>(), nearest_ma_radius) &&
-				(s[3] > nearest_ma_radius * Scalar(1.5));
-			if (radius_too_large)
-			{
-				update_sphere_line_quadric_distance_fix_current_radius(p, sphere, radius);
-				return;
-			}
-
-			(*p.spheres_position_)[sphere_index] = s.head<3>();
-			(*p.spheres_radius_)[sphere_index] = s[3];
-
+			update_sphere_line_quadric_distance_fix_current_radius(p, sphere, radius);
 			return;
 		}
 
+		(*p.spheres_position_)[sphere_index] = s.head<3>();
+		(*p.spheres_radius_)[sphere_index] = s[3];
+
+		return;
+		
+
 		update_sphere_line_quadric_distance_fix_radius(p, sphere);
+
+		// if (s[3] > Scalar(0))
+		// {
+		// 	Scalar nearest_ma_radius = Scalar(0);
+		// 	const bool radius_too_large =
+		// 		try_get_nearest_sample_ma_radius(p, s.head<3>(), nearest_ma_radius) &&
+		// 		(s[3] > nearest_ma_radius * Scalar(1.5));
+		// 	if (radius_too_large)
+		// 	{
+		// 		update_sphere_line_quadric_distance_fix_current_radius(p, sphere, radius);
+		// 		return;
+		// 	}
+
+		// 	(*p.spheres_position_)[sphere_index] = s.head<3>();
+		// 	(*p.spheres_radius_)[sphere_index] = s[3];
+
+		// 	return;
+		// }
+
+		// update_sphere_line_quadric_distance_fix_radius(p, sphere);
 	}
 	void correct_sphere(PointsParameters& p, PVertex v)
 	{
@@ -7991,6 +8185,7 @@ protected:
 
 		const bool threshold_enabled = (score_threshold >= Scalar(0));
 		const size_t forced_delete_max_face_count = 2;
+		const size_t threshold_disabled_delete_face_count_limit = 10;
 		const bool collect_basic_stats = is_basic_logging_enabled(p);
 		const bool collect_verbose_stats = is_verbose_logging_enabled(p);
 
@@ -8005,7 +8200,7 @@ protected:
 			bool delete_sheet = false;
 			bool delete_by_small_sheet = false;
 			bool delete_by_threshold = false;
-			bool delete_all_residual_when_threshold_disabled = false;
+			bool delete_by_threshold_disabled_face_limit = false;
 		};
 
 		uint32 candidate_sheet_count = 0;
@@ -8042,10 +8237,10 @@ protected:
 			const Scalar area = label_area_sum.count(sheet_label) ? label_area_sum.at(sheet_label) : Scalar(0);
 			const bool delete_by_small_sheet = (face_count <= forced_delete_max_face_count);
 			const bool delete_by_threshold = is_residual_candidate && threshold_enabled && (score > score_threshold);
-			const bool delete_all_residual_when_threshold_disabled =
-				is_residual_candidate && !threshold_enabled;
+			const bool delete_by_threshold_disabled_face_limit =
+				!threshold_enabled && (face_count < threshold_disabled_delete_face_count_limit);
 			const bool delete_sheet =
-				delete_by_small_sheet || delete_by_threshold || delete_all_residual_when_threshold_disabled;
+				delete_by_small_sheet || delete_by_threshold || delete_by_threshold_disabled_face_limit;
 			if (collect_verbose_stats)
 			{
 				residual_sheet_scores.push_back(ResidualSheetScoreEntry{
@@ -8058,7 +8253,7 @@ protected:
 					delete_sheet,
 					delete_by_small_sheet,
 					delete_by_threshold,
-					delete_all_residual_when_threshold_disabled});
+					delete_by_threshold_disabled_face_limit});
 			}
 
 			if (!delete_sheet)
@@ -8077,7 +8272,8 @@ protected:
 						" evaluated_sheets=", residual_sheet_scores.size(), " candidate_sheets=", candidate_sheet_count,
 						" threshold=", score_threshold, " threshold_enabled=",
 						(threshold_enabled ? "true" : "false"), " forced_delete_max_face_count=",
-						forced_delete_max_face_count, '\n');
+						forced_delete_max_face_count, " threshold_disabled_delete_face_count_limit=",
+						threshold_disabled_delete_face_count_limit, '\n');
 			for (const ResidualSheetScoreEntry& entry : residual_sheet_scores)
 			{
 				const char* action = "keep";
@@ -8085,12 +8281,12 @@ protected:
 				{
 					if (entry.delete_by_small_sheet && entry.delete_by_threshold)
 						action = "delete_small_sheet+threshold";
-					else if (entry.delete_by_small_sheet && entry.delete_all_residual_when_threshold_disabled)
-						action = "delete_small_sheet+all_residual";
+					else if (entry.delete_by_small_sheet && entry.delete_by_threshold_disabled_face_limit)
+						action = "delete_small_sheet+threshold_disabled_face_limit";
 					else if (entry.delete_by_small_sheet)
 						action = "delete_small_sheet";
-					else if (entry.delete_all_residual_when_threshold_disabled)
-						action = "delete_all_residual";
+					else if (entry.delete_by_threshold_disabled_face_limit)
+						action = "delete_threshold_disabled_face_limit";
 					else
 						action = "delete_threshold";
 				}
@@ -8101,8 +8297,8 @@ protected:
 							entry.score, " threshold=", score_threshold, " threshold_enabled=",
 							(threshold_enabled ? "true" : "false"), " forced_small_sheet_delete=",
 							(entry.delete_by_small_sheet ? "true" : "false"),
-							" all_residual_when_threshold_disabled=",
-							(entry.delete_all_residual_when_threshold_disabled ? "true" : "false"),
+							" threshold_disabled_face_limit=",
+							(entry.delete_by_threshold_disabled_face_limit ? "true" : "false"),
 							" action=", action, '\n');
 			}
 		}
@@ -13251,6 +13447,55 @@ protected:
 							non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 						}
 					}
+					const bool samples_mesh_export_available =
+						p.samples_mesh_ && p.samples_position_ && nb_cells<PVertex>(*p.samples_mesh_) > 0;
+					const bool samples_mesh_normal_color_export_available =
+						p.samples_mesh_ && p.samples_position_ && p.samples_normal_color_ &&
+						nb_cells<PVertex>(*p.samples_mesh_) > 0;
+					const bool samples_spheres_export_available =
+						p.spheres_ && p.spheres_position_ && p.spheres_radius_ && p.spheres_cluster_color_ &&
+						nb_cells<PVertex>(*p.spheres_) > 0;
+					const bool skeleton_export_available =
+						p.skeleton_ && p.skeleton_position_ && nb_cells<NMVertex>(*p.skeleton_) > 0;
+					const bool all_selected_exports_available =
+						(!p.export_samples_mesh_selected_ || samples_mesh_export_available) &&
+						(!p.export_samples_mesh_normal_color_selected_ || samples_mesh_normal_color_export_available) &&
+						(!p.export_samples_spheres_selected_ || samples_spheres_export_available) &&
+						(!p.export_skeleton_selected_ || skeleton_export_available);
+					const bool any_export_selected =
+						p.export_samples_mesh_selected_ || p.export_samples_mesh_normal_color_selected_ ||
+						p.export_samples_spheres_selected_ || p.export_skeleton_selected_;
+					const bool can_export_training_bundle =
+						!p.running_ && any_export_selected && all_selected_exports_available;
+					ImGui::Checkbox("Save samples_mesh", &p.export_samples_mesh_selected_);
+					ImGui::SameLine();
+					ImGui::TextDisabled(samples_mesh_export_available ? "ready" : "missing");
+					ImGui::Checkbox("Save sample mesh + normal color", &p.export_samples_mesh_normal_color_selected_);
+					ImGui::SameLine();
+					ImGui::TextDisabled(samples_mesh_normal_color_export_available ? "ready" : "missing");
+					ImGui::Checkbox("Save samples_spheres", &p.export_samples_spheres_selected_);
+					ImGui::SameLine();
+					ImGui::TextDisabled(samples_spheres_export_available ? "ready" : "missing");
+					ImGui::Checkbox("Save skeleton", &p.export_skeleton_selected_);
+					ImGui::SameLine();
+					ImGui::TextDisabled(skeleton_export_available ? "ready" : "missing");
+					if (!can_export_training_bundle)
+						ImGui::BeginDisabled();
+					if (ImGui::Button("Export selected PLY"))
+					{
+						const std::string export_directory =
+							pfd::select_folder("Select export folder", default_training_export_directory(p).string())
+								.result();
+						if (!export_directory.empty())
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							export_training_ply_bundle(p, std::filesystem::path(export_directory));
+						}
+					}
+					if (!can_export_training_bundle)
+						ImGui::EndDisabled();
+					ImGui::SameLine();
+					ImGui::TextDisabled("Select one or more ready targets.");
 					ImGui::InputFloat("Edge UDF |0| tol", &p.skeleton_edge_udf_zero_tol_, 0.0f, 0.0f, "%.6f");
 					ImGui::InputFloat("Face UDF |0| tol", &p.skeleton_face_udf_zero_tol_, 0.0f, 0.0f, "%.6f");
 					ImGui::Checkbox("Face score normalize(area)", &p.skeleton_face_score_normalize_by_area_);
@@ -13437,7 +13682,7 @@ protected:
 					if (p.completion_residual_sheet_score_threshold_ < -1.0f)
 						p.completion_residual_sheet_score_threshold_ = -1.0f;
 					ImGui::SameLine();
-					ImGui::TextUnformatted("<0 deletes all residual sheets");
+					ImGui::TextUnformatted("<0 deletes all sheets with face_count < 10");
 					ImGui::SameLine();
 					if (ImGui::Button("Singular completion path"))
 					{

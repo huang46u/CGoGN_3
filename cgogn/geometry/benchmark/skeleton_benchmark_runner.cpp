@@ -273,7 +273,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 				core.run_deg_face_deletion_prepared(*points);
 			if (config.postprocess.nm_two_layer_prune)
 				core.run_nm_two_layer_prune_prepared(*points);
-			if (config.postprocess.residual_prune && config.postprocess.residual_prune_threshold >= 0.0f)
+			if (config.postprocess.residual_prune)
 				core.run_completion_residual_prune_prepared(*points, config.postprocess.residual_prune_threshold);
 			if (config.postprocess.face_post_processing)
 				core.run_face_post_processing_prepared(*points);

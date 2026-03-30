@@ -1,0 +1,139 @@
+{
+  "_template_metadata": {
+    "description": "UDF benchmark config master template. Extra metadata keys are ignored by the current loader. Copy this file and edit the actual config sections below.",
+    "enum_options": {
+      "input.mode": [
+        "point_cloud",
+        "surface_mesh",
+        "neural_udf"
+      ],
+      "input.neural_model_type": [
+        "udf",
+        "mf"
+      ],
+      "input.initial_ma_mode_override": [
+        "auto",
+        "displacement",
+        "shrinking_ball"
+      ],
+      "optimization.distance_mode.canonical": [
+        "line_quadric_distance_fix_r",
+        "line_quadric_distance_free_r"
+      ],
+      "optimization.distance_mode.accepted_aliases": [
+        "line_quadric_distance",
+        "line_quadric_distance_free_radius"
+      ],
+      "optimization.sphere_correction_mode": [
+        "always",
+        "on_split"
+      ],
+      "auto_split.mode": [
+        "error_threshold",
+        "max_nb_spheres"
+      ]
+    },
+    "boolean_fields_possible_values": [
+      "true",
+      "false"
+    ],
+    "required_when": {
+      "input.neural_udf_model_path": "required when input.mode = neural_udf and batch.enabled = false",
+      "batch.input_directory": "required when batch.enabled = true",
+      "batch.output_directory": "required when batch.enabled = true",
+      "batch.neural_udf_model_directory": "required when input.mode = neural_udf and batch.enabled = true",
+      "output.skeleton_ply": "required when batch.enabled = false"
+    },
+    "constraints": {
+      "benchmark.num_measure_runs": "must be 1 in current loader",
+      "initialization.initial_nb_spheres": "must be > 0",
+      "optimization.max_iterations_without_autosplit": "must be > 0",
+      "optimization.max_iterations_after_reaching_max_spheres": "must be > 0",
+      "auto_split.error_threshold": "must be > 0 when auto_split.enabled = true and auto_split.mode = error_threshold",
+      "auto_split.max_nb_spheres": "must be > 0 when auto_split.enabled = true and auto_split.mode = max_nb_spheres"
+    },
+    "notes": [
+      "Single-run mode: set batch.enabled = false, then fill input.input_path or input.surface_path and output.skeleton_ply.",
+      "Batch mode: set batch.enabled = true, then fill batch.input_directory and batch.output_directory. Per-case output paths are generated automatically.",
+      "When threshold < 0, postprocess.residual_prune_threshold now deletes all sheets with face_count < 10."
+    ]
+  },
+  "input": {
+    "mode": "point_cloud",
+    "input_path": "D:/Code/CGoGN_3/data/example/input.ply",
+    "surface_path": "",
+    "neural_udf_model_path": "",
+    "neural_model_type": "udf",
+    "initial_ma_mode_override": "auto"
+  },
+  "sampling": {
+    "alpha": 0.005,
+    "grid_cell_size": 0.0025,
+    "knn_k": 10,
+    "num_alpha_samples": 200000,
+    "apply_filtering": false,
+    "ray_sampler_batch_size": 4096,
+    "batch_size": 1310640,
+    "tol": 1e-5,
+    "udf_max_iterations": 3000
+  },
+  "optimization": {
+    "distance_mode": "line_quadric_distance_fix_r",
+    "use_local_clusters": false,
+    "local_cluster_connectivity_refresh_interval": 10,
+    "max_iterations_without_autosplit": 300,
+    "max_iterations_after_reaching_max_spheres": 100,
+    "sqem_update_lambda_full": 0.05,
+    "sqem_update_lambda_line_plane": 0.2,
+    "sqem_fix_radius_scale": 1.0,
+    "udf_center_enabled": false,
+    "udf_center_lambda": 0.1,
+    "sphere_correction": false,
+    "sphere_correction_mode": "always",
+    "lock_skeleton_connectivity": false,
+    "auto_stop": false
+  },
+  "auto_split": {
+    "enabled": false,
+    "mode": "error_threshold",
+    "error_threshold": 0.00025,
+    "max_nb_spheres": 500,
+    "ratio": 0.2,
+    "max_per_iter_error": 10,
+    "max_per_iter_max": 100
+  },
+  "initialization": {
+    "seed": 42,
+    "init_dilation_constant": 0.001,
+    "init_min_cover_points": 10,
+    "initial_nb_spheres": 1
+  },
+  "postprocess": {
+    "topology_fix": false,
+    "deg_face_deletion": false,
+    "nm_two_layer_prune": false,
+    "residual_prune": false,
+    "residual_prune_threshold": -1.0,
+    "face_post_processing": false
+  },
+  "benchmark": {
+    "num_measure_runs": 1,
+    "verbose": true
+  },
+  "output": {
+    "skeleton_ply": "D:/Code/CGoGN_3/out/example/result.ply",
+    "timing_json": "D:/Code/CGoGN_3/out/example/result_timing.json"
+  },
+  "batch": {
+    "enabled": false,
+    "input_directory": "D:/Code/CGoGN_3/data/example/batch_inputs",
+    "surface_directory": "",
+    "neural_udf_model_directory": "",
+    "input_extension": ".ply",
+    "surface_extension": "",
+    "neural_udf_model_extension": ".pt",
+    "recursive": false,
+    "output_directory": "D:/Code/CGoGN_3/out/example/batch_skeleton",
+    "timing_directory": "D:/Code/CGoGN_3/out/example/batch_timing"
+  }
+}
