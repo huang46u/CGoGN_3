@@ -1299,13 +1299,6 @@ public:
 		return center.allFinite() && std::isfinite(static_cast<double>(radius)) && radius > Scalar(0);
 	}
 
-	bool should_force_pca_normals_in_fitting(const PointsParameters& p) const
-	{
-		const bool is_udf_model =
-			(p.input_mode_ == INPUT_NEURAL_UDF && p.neural_udf_loaded_ && p.neural_model_type_ == NEURAL_MODEL_UDF);
-		return !is_udf_model;
-	}
-
 	void refresh_sphere_sqem_lambda_cache(PointsParameters& p)
 	{
 		if (!p.spheres_ || !p.spheres_sqem_lambda_)
@@ -1675,40 +1668,11 @@ public:
 			const Vec3& pos = (*p.samples_position_)[v_idx];
 			std::pair<uint32, Vec3> cp;
 			surface_bvh_->closest_point(pos, &cp);
-			SFace face = surface_bvh_faces_[cp.first];
-			Vec3 n = geometry::normal(*selected_surface_, face, s_pos.get());
-			if (surface_vertex_normal_)
-			{
-				std::array<SVertex, 3> vertices;
-				uint32 vi = 0;
-				foreach_incident_vertex(*selected_surface_, face, [&](SVertex sv) -> bool {
-					if (vi < vertices.size())
-						vertices[vi++] = sv;
-					return true;
-				});
-				if (vi == vertices.size())
-				{
-					const Vec3& p0 = value<Vec3>(*selected_surface_, s_pos, vertices[0]);
-					const Vec3& p1 = value<Vec3>(*selected_surface_, s_pos, vertices[1]);
-					const Vec3& p2 = value<Vec3>(*selected_surface_, s_pos, vertices[2]);
-					Scalar u = 0.0, v_bary = 0.0, w = 0.0;
-					cgogn::geometry::closest_point_in_triangle(cp.second, p0, p1, p2, u, v_bary, w);
-					const Vec3& n0 = value<Vec3>(*selected_surface_, surface_vertex_normal_, vertices[0]);
-					const Vec3& n1 = value<Vec3>(*selected_surface_, surface_vertex_normal_, vertices[1]);
-					const Vec3& n2 = value<Vec3>(*selected_surface_, surface_vertex_normal_, vertices[2]);
-					n = u * n0 + v_bary * n1 + w * n2;
-				}
-			}
+			Vec3 n = pos - cp.second;
 			if (n.squaredNorm() < Scalar(1e-12))
 				n = Vec3(0, 0, 1);
 			else
 				n.normalize();
-			Vec3 to_sample = pos - cp.second;
-			if (to_sample.squaredNorm() > Scalar(1e-12))
-			{
-				if (to_sample.dot(n) < Scalar(0))
-					n = -n;
-			}
 			(*p.samples_normal_)[v_idx] = n;
 			(*p.samples_normal_color_)[v_idx] =
 				Vec4((n.x() + 1.0) * 0.5, (n.y() + 1.0) * 0.5, (n.z() + 1.0) * 0.5, 1.0);
@@ -1929,37 +1893,11 @@ public:
 					Vec3 n(0, 0, 1);
 					if (surface_bvh_->closest_point(pos, &cp))
 					{
-						SFace face = surface_bvh_faces_[cp.first];
-						n = geometry::normal(*selected_surface_, face, s_pos.get());
-						if (surface_vertex_normal_)
-						{
-							std::array<SVertex, 3> vertices;
-							uint32 vi = 0;
-							foreach_incident_vertex(*selected_surface_, face, [&](SVertex sv) -> bool {
-								if (vi < vertices.size())
-									vertices[vi++] = sv;
-								return true;
-							});
-							if (vi == vertices.size())
-							{
-								const Vec3& p0 = value<Vec3>(*selected_surface_, s_pos, vertices[0]);
-								const Vec3& p1 = value<Vec3>(*selected_surface_, s_pos, vertices[1]);
-								const Vec3& p2 = value<Vec3>(*selected_surface_, s_pos, vertices[2]);
-								Scalar u = 0.0, v_bary = 0.0, w = 0.0;
-								cgogn::geometry::closest_point_in_triangle(cp.second, p0, p1, p2, u, v_bary, w);
-								const Vec3& n0 = value<Vec3>(*selected_surface_, surface_vertex_normal_, vertices[0]);
-								const Vec3& n1 = value<Vec3>(*selected_surface_, surface_vertex_normal_, vertices[1]);
-								const Vec3& n2 = value<Vec3>(*selected_surface_, surface_vertex_normal_, vertices[2]);
-								n = u * n0 + v_bary * n1 + w * n2;
-							}
-						}
+						n = pos - cp.second;
 						if (n.squaredNorm() < eps)
 							n = Vec3(0, 0, 1);
 						else
 							n.normalize();
-						Vec3 to_sample = pos - cp.second;
-						if (to_sample.squaredNorm() > eps && to_sample.dot(n) < Scalar(0))
-							n = -n;
 					}
 					(*p.samples_normal_)[v_idx] = n;
 					return true;
@@ -2598,14 +2536,9 @@ private:
 
 		log_basic(p, "Building KDTree...", '\n');
 		build_kdtree(p);
-		const bool force_pca_normals = should_force_pca_normals_in_fitting(p);
-		const bool recompute_pca_normals = force_pca_normals || p.recompute_sample_normals_after_sampling_;
-		if (recompute_pca_normals)
+		if (p.recompute_sample_normals_after_sampling_)
 		{
-			if (force_pca_normals)
-				log_basic(p, "Recomputing Normals (PCA)... [forced for non-UDF-model input]", '\n');
-			else
-				log_basic(p, "Recomputing Normals (PCA)...", '\n');
+			log_basic(p, "Recomputing Normals (PCA)...", '\n');
 			recompute_samples_normals_pca(p);
 		}
 		log_basic(p, "Computing Initial Medial Axis...", '\n');
