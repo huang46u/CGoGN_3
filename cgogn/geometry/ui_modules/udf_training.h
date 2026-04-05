@@ -234,6 +234,24 @@ private:
 		std::vector<PVertex> input_kdtree_vertices_;	 // Vertices of input points in KDTree order
 
 		std::unique_ptr<SpatialGrid> samples_spatial_grid_ = nullptr;
+		struct NeuralProjectionWorkspace
+		{
+			size_t capacity_ = 0;
+			torch::Tensor points_cpu_;
+			torch::Tensor points_gpu_;
+			torch::Tensor active_gpu_;
+			torch::Tensor projected_cpu_;
+			torch::Tensor grad_cpu_;
+			torch::Tensor sdf_cpu_;
+			torch::Tensor clamp_min_gpu_;
+			torch::Tensor clamp_max_gpu_;
+			Vec3 clamp_min_cache_ = Vec3(0, 0, 0);
+			Vec3 clamp_max_cache_ = Vec3(0, 0, 0);
+			bool clamp_bounds_valid_ = false;
+		};
+		NeuralProjectionWorkspace neural_projection_workspace_;
+		bool filter_positive_projection_ = false;
+		std::vector<uint8_t> last_projection_keep_mask_;
 		// Spheres
 		POINTS* spheres_ = nullptr;
 		uint32 nb_spheres_ = 0;
@@ -338,6 +356,9 @@ private:
 		int cluster_min_points_ = 20;
 		float grid_cell_size_ = 0.0025f;
 		// Neural UDF Sampling
+		int neural_seed_samples_ = 8192;
+		int neural_parent_batch_size_ = 8192;
+		int neural_max_samples_ = 4000000;
 		int num_alpha_samples_ = 200000;
 		int poisson_eliminate_target_samples_ = 50000;
 		int batch_size_ = 1310640;	   // NN evaluation batch
@@ -462,6 +483,9 @@ public:
 		int seed_ = 42;
 		int cluster_min_points_ = 20;
 		float grid_cell_size_ = 0.0025f;
+		int neural_seed_samples_ = 8192;
+		int neural_parent_batch_size_ = 8192;
+		int neural_max_samples_ = 4000000;
 		int num_alpha_samples_ = 200000;
 		int poisson_eliminate_target_samples_ = 0;
 		int batch_size_ = 1310640;
@@ -663,6 +687,9 @@ public:
 		p.seed_ = options.seed_;
 		p.cluster_min_points_ = options.cluster_min_points_;
 		p.grid_cell_size_ = options.grid_cell_size_;
+		p.neural_seed_samples_ = options.neural_seed_samples_;
+		p.neural_parent_batch_size_ = options.neural_parent_batch_size_;
+		p.neural_max_samples_ = options.neural_max_samples_;
 		p.num_alpha_samples_ = options.num_alpha_samples_;
 		p.poisson_eliminate_target_samples_ = options.poisson_eliminate_target_samples_;
 		p.batch_size_ = options.batch_size_;
@@ -1436,23 +1463,328 @@ public:
 		p.udf_normalized_source_ = source;
 	}
 
+	static constexpr uint32 invalid_active_slot_ = std::numeric_limits<uint32>::max();
+
+	Scalar derived_neural_grid_cell_size(const PointsParameters& p) const
+	{
+		const Scalar denom = std::sqrt(Scalar(3.0));
+		const Scalar cell = p.sample_radius_ / denom;
+		return std::max(cell, Scalar(1e-8));
+	}
+
+	void ensure_neural_projection_workspace(PointsParameters& p, size_t capacity)
+	{
+		auto& ws = p.neural_projection_workspace_;
+		if (ws.capacity_ >= capacity)
+			return;
+
+		size_t new_capacity = std::max(capacity, ws.capacity_ * 2);
+		auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+		if (device_.is_cuda())
+			cpu_opts = cpu_opts.pinned_memory(true);
+		auto gpu_float_opts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+		auto gpu_bool_opts = torch::TensorOptions().dtype(torch::kBool).device(device_);
+
+		ws.points_cpu_ = torch::empty({static_cast<int64_t>(new_capacity), 3}, cpu_opts);
+		ws.points_gpu_ = torch::empty({static_cast<int64_t>(new_capacity), 3}, gpu_float_opts);
+		ws.active_gpu_ = torch::empty({static_cast<int64_t>(new_capacity)}, gpu_bool_opts);
+		ws.projected_cpu_ = torch::empty({static_cast<int64_t>(new_capacity), 3}, cpu_opts);
+		ws.grad_cpu_ = torch::empty({static_cast<int64_t>(new_capacity), 3}, cpu_opts);
+		ws.sdf_cpu_ = torch::empty({static_cast<int64_t>(new_capacity)}, cpu_opts);
+		ws.clamp_bounds_valid_ = false;
+		ws.capacity_ = new_capacity;
+	}
+
+	void ensure_neural_projection_clamp_tensors(PointsParameters& p, const Vec3& bbox_min, const Vec3& bbox_max)
+	{
+		auto& ws = p.neural_projection_workspace_;
+		if (ws.clamp_bounds_valid_ && ws.clamp_min_cache_.isApprox(bbox_min) && ws.clamp_max_cache_.isApprox(bbox_max))
+			return;
+
+		auto gpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+		ws.clamp_min_gpu_ = torch::tensor(
+			{static_cast<float>(bbox_min.x()), static_cast<float>(bbox_min.y()), static_cast<float>(bbox_min.z())},
+			gpu_opts);
+		ws.clamp_max_gpu_ = torch::tensor(
+			{static_cast<float>(bbox_max.x()), static_cast<float>(bbox_max.y()), static_cast<float>(bbox_max.z())},
+			gpu_opts);
+		ws.clamp_min_cache_ = bbox_min;
+		ws.clamp_max_cache_ = bbox_max;
+		ws.clamp_bounds_valid_ = true;
+	}
+
+	bool compute_neural_gradients_gpu(PointsParameters& p, const std::vector<Vec3>& points, std::vector<Vec3>& normals)
+	{
+		normals.clear();
+		if (points.empty())
+			return true;
+
+		ensure_neural_projection_workspace(p, points.size());
+		auto& ws = p.neural_projection_workspace_;
+		const int64_t count = static_cast<int64_t>(points.size());
+		torch::Tensor cpu_points = ws.points_cpu_.narrow(0, 0, count);
+		auto pts_acc = cpu_points.accessor<float, 2>();
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			pts_acc[static_cast<long>(i)][0] = static_cast<float>(points[i].x());
+			pts_acc[static_cast<long>(i)][1] = static_cast<float>(points[i].y());
+			pts_acc[static_cast<long>(i)][2] = static_cast<float>(points[i].z());
+		}
+
+		torch::Tensor gpu_points = ws.points_gpu_.narrow(0, 0, count);
+		gpu_points.copy_(cpu_points);
+
+		NeuralFieldForward udf = make_neural_field_forward(p);
+		auto [values, grad] = udf.forward_values_grad_gpu(gpu_points);
+		if (!values.defined() || !grad.defined())
+			return false;
+		if (grad.dim() != 2 || grad.size(0) != count || grad.size(1) != 3)
+			return false;
+
+		torch::Tensor grad_cpu = ws.grad_cpu_.narrow(0, 0, count);
+		grad_cpu.copy_(grad);
+		auto grad_acc = grad_cpu.accessor<float, 2>();
+		normals.reserve(points.size());
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			Vec3 n(static_cast<Scalar>(grad_acc[static_cast<long>(i)][0]),
+				   static_cast<Scalar>(grad_acc[static_cast<long>(i)][1]),
+				   static_cast<Scalar>(grad_acc[static_cast<long>(i)][2]));
+			if (n.squaredNorm() < Scalar(1e-12))
+				n = Vec3(0, 0, 1);
+			else
+				n.normalize();
+			normals.push_back(n);
+		}
+		return true;
+	}
+
+	bool project_points_to_alpha_gpu_impl(PointsParameters& p, const std::vector<Vec3>& points, const Vec3& bbox_min,
+										  const Vec3& bbox_max, typename PointsParameters::NeuralProjectionWorkspace& workspace,
+										  std::vector<Vec3>& projected_points, std::vector<Vec3>& normals)
+	{
+		projected_points.clear();
+		normals.clear();
+		const size_t nb_points = points.size();
+		p.last_projection_keep_mask_.assign(nb_points, 1);
+		if (nb_points == 0)
+			return true;
+
+		ensure_neural_projection_workspace(p, nb_points);
+		ensure_neural_projection_clamp_tensors(p, bbox_min, bbox_max);
+
+		const int max_iters = 30;
+		const Scalar tol = 1e-6f;
+		NeuralFieldForward udf = make_neural_field_forward(p);
+
+		try
+		{
+			const int64_t count = static_cast<int64_t>(nb_points);
+			torch::Tensor cpu_points = workspace.points_cpu_.narrow(0, 0, count);
+			auto x_acc = cpu_points.accessor<float, 2>();
+			for (size_t i = 0; i < nb_points; ++i)
+			{
+				x_acc[static_cast<long>(i)][0] = static_cast<float>(points[i].x());
+				x_acc[static_cast<long>(i)][1] = static_cast<float>(points[i].y());
+				x_acc[static_cast<long>(i)][2] = static_cast<float>(points[i].z());
+			}
+
+			torch::Tensor X = workspace.points_gpu_.narrow(0, 0, count);
+			X.copy_(cpu_points);
+			torch::Tensor active = workspace.active_gpu_.narrow(0, 0, count);
+			active.fill_(true);
+			const torch::Tensor& bbox_min_t = workspace.clamp_min_gpu_;
+			const torch::Tensor& bbox_max_t = workspace.clamp_max_gpu_;
+
+			for (int iter = 0; iter < max_iters; ++iter)
+			{
+				auto [values, grad] = udf.forward_values_grad_gpu(X);
+				if (!values.defined() || !grad.defined())
+					return false;
+
+				torch::Tensor f = values;
+				if (f.dim() == 2 && f.size(1) == 1)
+					f = f.squeeze(1);
+				torch::Tensor residual = f - p.alpha_;
+				torch::Tensor abs_residual = torch::abs(residual);
+				torch::Tensor next_active = active & (abs_residual > tol);
+				active.copy_(next_active);
+				if (torch::sum(active).item<int64_t>() == 0)
+					break;
+
+				torch::Tensor grad_norm2 = (grad * grad).sum(1, true);
+				torch::Tensor step = residual.unsqueeze(1) / (grad_norm2 + 1e-12f);
+				step = torch::where(active.unsqueeze(1), step, torch::zeros_like(step));
+				X.sub_(step * grad);
+				X.copy_(torch::maximum(torch::minimum(X, bbox_max_t), bbox_min_t));
+			}
+
+			auto [values, grad] = udf.forward_values_grad_gpu(X);
+			if (!values.defined() || !grad.defined())
+				return false;
+
+			torch::Tensor projected_cpu = workspace.projected_cpu_.narrow(0, 0, count);
+			torch::Tensor grad_cpu = workspace.grad_cpu_.narrow(0, 0, count);
+			projected_cpu.copy_(X);
+			grad_cpu.copy_(grad);
+
+			torch::Tensor sdf_cpu;
+			auto [values_sdf, sdf] = udf.forward_values_sdf_gpu(X);
+			if (sdf.defined())
+			{
+				if (sdf.dim() == 2 && sdf.size(1) == 1)
+					sdf = sdf.squeeze(1);
+				sdf_cpu = workspace.sdf_cpu_.narrow(0, 0, count);
+				sdf_cpu.copy_(sdf);
+			}
+
+			auto projected_acc = projected_cpu.accessor<float, 2>();
+			auto grad_acc = grad_cpu.accessor<float, 2>();
+			projected_points.reserve(nb_points);
+			normals.reserve(nb_points);
+			if (sdf_cpu.defined() && sdf_cpu.dim() == 1 && sdf_cpu.size(0) == count)
+			{
+				auto sdf_acc = sdf_cpu.accessor<float, 1>();
+				for (size_t i = 0; i < nb_points; ++i)
+				{
+					const bool keep = (sdf_acc[static_cast<long>(i)] <= 0.0f);
+					p.last_projection_keep_mask_[i] = keep ? uint8_t(1) : uint8_t(0);
+					if (p.filter_positive_projection_ && !keep)
+						continue;
+					projected_points.push_back(
+						Vec3(projected_acc[static_cast<long>(i)][0], projected_acc[static_cast<long>(i)][1],
+							 projected_acc[static_cast<long>(i)][2]));
+					Vec3 n(static_cast<Scalar>(grad_acc[static_cast<long>(i)][0]),
+						   static_cast<Scalar>(grad_acc[static_cast<long>(i)][1]),
+						   static_cast<Scalar>(grad_acc[static_cast<long>(i)][2]));
+					if (n.squaredNorm() < Scalar(1e-12))
+						n = Vec3(0, 0, 1);
+					else
+						n.normalize();
+					normals.push_back(n);
+				}
+			}
+			else
+			{
+				for (size_t i = 0; i < nb_points; ++i)
+				{
+					projected_points.push_back(
+						Vec3(projected_acc[static_cast<long>(i)][0], projected_acc[static_cast<long>(i)][1],
+							 projected_acc[static_cast<long>(i)][2]));
+					Vec3 n(static_cast<Scalar>(grad_acc[static_cast<long>(i)][0]),
+						   static_cast<Scalar>(grad_acc[static_cast<long>(i)][1]),
+						   static_cast<Scalar>(grad_acc[static_cast<long>(i)][2]));
+					if (n.squaredNorm() < Scalar(1e-12))
+						n = Vec3(0, 0, 1);
+					else
+						n.normalize();
+					normals.push_back(n);
+				}
+			}
+			return true;
+		}
+		catch (const c10::Error& e)
+		{
+			log_error(p, "GPU projection to alpha level set failed: ", e.what(), '\n');
+			return false;
+		}
+	}
+
+	void build_stable_tangent_basis(const Vec3& normal_in, Vec3& tangent_u, Vec3& tangent_v) const
+	{
+		Vec3 n = normal_in;
+		if (n.squaredNorm() < Scalar(1e-12))
+			n = Vec3(0, 0, 1);
+		else
+			n.normalize();
+		Vec3 ref = (std::abs(n.z()) < Scalar(0.9)) ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
+		tangent_u = n.cross(ref);
+		if (tangent_u.squaredNorm() < Scalar(1e-12))
+			tangent_u = n.cross(Vec3(1, 0, 0));
+		tangent_u.normalize();
+		tangent_v = n.cross(tangent_u);
+		if (tangent_v.squaredNorm() < Scalar(1e-12))
+			tangent_v = Vec3(0, 1, 0);
+		else
+			tangent_v.normalize();
+	}
+
+	Vec3 sample_tangent_annulus_candidate(const Vec3& center, const Vec3& normal, Scalar radius,
+										   std::uniform_real_distribution<Scalar>& uni, std::mt19937& gen) const
+	{
+		Vec3 tangent_u, tangent_v;
+		build_stable_tangent_basis(normal, tangent_u, tangent_v);
+		const Scalar annulus_radius = radius * std::sqrt(Scalar(1.0) + Scalar(3.0) * uni(gen));
+		const Scalar theta = Scalar(2.0 * M_PI) * uni(gen);
+		return center + annulus_radius * (std::cos(theta) * tangent_u + std::sin(theta) * tangent_v);
+	}
+
+	void sample_active_parent_indices(const std::vector<uint32>& active_indices, size_t batch_size, std::mt19937& gen,
+									  std::vector<uint32>& selected_samples) const
+	{
+		selected_samples.clear();
+		const size_t active_count = active_indices.size();
+		if (active_count == 0)
+			return;
+
+		const size_t pick_count = std::min(batch_size, active_count);
+		selected_samples.reserve(pick_count);
+		std::unordered_map<size_t, size_t> remap;
+		remap.reserve(pick_count * 2);
+		for (size_t i = 0; i < pick_count; ++i)
+		{
+			std::uniform_int_distribution<size_t> dis(i, active_count - 1);
+			const size_t j = dis(gen);
+			const size_t mapped_j = remap.count(j) ? remap[j] : j;
+			const size_t mapped_i = remap.count(i) ? remap[i] : i;
+			remap[j] = mapped_i;
+			remap[i] = mapped_j;
+			selected_samples.push_back(active_indices[mapped_j]);
+		}
+	}
+
+	void materialize_neural_samples_to_mesh(PointsParameters& p, const std::vector<Vec3>& positions,
+											const std::vector<Vec3>& normals)
+	{
+		if (p.samples_mesh_)
+			points_provider_->clear_mesh(*p.samples_mesh_);
+		p.samples_jitter_backup_valid_ = false;
+		p.samples_position_backup_.clear();
+		p.samples_normal_backup_.clear();
+		for (size_t i = 0; i < positions.size(); ++i)
+		{
+			PVertex v = add_vertex(*p.samples_mesh_);
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			(*p.samples_position_)[v_idx] = positions[i];
+			const Vec3& n = normals[i];
+			(*p.samples_normal_)[v_idx] = n;
+			if (p.samples_color_)
+				(*p.samples_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
+			if (p.samples_knn_color_)
+				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
+			if (p.samples_normal_color_)
+				(*p.samples_normal_color_)[v_idx] =
+					Vec4((n.x() + 1.0) * 0.5, (n.y() + 1.0) * 0.5, (n.z() + 1.0) * 0.5, 1.0);
+		}
+	}
+
 	void load_alpha_samples_to_mesh_impl(PointsParameters& p, size_t num_points, geometry::RaySamplerNeural)
 	{
+		(void)num_points;
 		if (!p.neural_udf_loaded_)
 		{
 			log_error(p, "Neural UDF model not loaded. Cannot sample alpha level set.", '\n');
 			return;
 		}
-
-		const bool use_spatial_grid = (p.grid_cell_size_ > Scalar(0));
-		if (use_spatial_grid)
-			p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.grid_cell_size_);
-		else
+		if (p.sample_radius_ <= Scalar(0))
 		{
-			p.samples_spatial_grid_.reset();
-			log_basic(p, "Grid Cell Size <= 0: sampling without SpatialGrid deduplication.", '\n');
+			log_error(p, "Sample radius must be positive for neural Bridson saturation sampling.", '\n');
+			return;
 		}
-		log_basic(p, "Sampling ", num_points, " points on alpha=", p.alpha_, " level set...", '\n');
+
+		p.grid_cell_size_ = derived_neural_grid_cell_size(p);
+		log_basic(p, "Sampling alpha=", p.alpha_, " level set with batched Bridson saturation. radius=",
+				  p.sample_radius_, " grid_cell=", p.grid_cell_size_, '\n');
 
 		RaySamplerParams ray_params = make_ray_params(p);
 		NeuralFieldForward udf = make_neural_field_forward(p);
@@ -1466,135 +1798,218 @@ public:
 		}
 		log_basic(p, "Neural sampling bbox: min(", bbox_min.transpose(), "), max(", bbox_max.transpose(), ")",
 				  '\n');
-		bool used_sdf_filter = false;
 		auto traits = RaySamplerConfig::make(udf);
-		std::vector<Vec3> sampled_points = p.ray_sampler_->sample_alpha_level_set_rays(
-			traits, num_points, p.samples_spatial_grid_.get(), p.grid_cell_size_, bbox_min, bbox_max, &used_sdf_filter);
+		std::mt19937 gen(p.seed_);
+		std::unique_ptr<SpatialGrid> global_grid = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+		std::vector<Vec3> accepted_positions;
+		std::vector<Vec3> accepted_normals;
+		std::vector<uint32> attempt_counts;
+		std::vector<uint32> active_indices;
+		std::vector<uint32> active_slot_of_sample;
+		std::vector<uint32> selected_parents;
+		std::vector<Vec3> raw_candidates;
+		std::vector<Vec3> projected_candidates;
+		std::vector<Vec3> projected_normals;
+		bool bridson_progress_live = false;
 
-		if (sampled_points.empty())
+		const size_t seed_target = static_cast<size_t>(std::max(1, p.neural_seed_samples_));
+		const size_t parent_batch_size = static_cast<size_t>(std::max(1, p.neural_parent_batch_size_));
+		const size_t max_samples = static_cast<size_t>(std::max(1, p.neural_max_samples_));
+		const size_t initial_reserve = std::max(seed_target, parent_batch_size) * size_t(4);
+		accepted_positions.reserve(initial_reserve);
+		accepted_normals.reserve(initial_reserve);
+		attempt_counts.reserve(initial_reserve);
+		active_indices.reserve(initial_reserve);
+		active_slot_of_sample.reserve(initial_reserve);
+		raw_candidates.reserve(parent_batch_size);
+		projected_candidates.reserve(parent_batch_size);
+		projected_normals.reserve(parent_batch_size);
+
+		auto add_sample = [&](const Vec3& pos, const Vec3& normal) {
+			uint32 sample_idx = static_cast<uint32>(accepted_positions.size());
+			Vec3 n = normal;
+			if (n.squaredNorm() < Scalar(1e-12))
+				n = Vec3(0, 0, 1);
+			else
+				n.normalize();
+			accepted_positions.push_back(pos);
+			accepted_normals.push_back(n);
+			attempt_counts.push_back(0);
+			active_slot_of_sample.push_back(static_cast<uint32>(active_indices.size()));
+			active_indices.push_back(sample_idx);
+			global_grid->insert(pos, sample_idx);
+		};
+
+		auto remove_active_sample = [&](uint32 sample_idx) {
+			if (sample_idx >= active_slot_of_sample.size())
+				return;
+			const uint32 slot = active_slot_of_sample[sample_idx];
+			if (slot == invalid_active_slot_ || slot >= active_indices.size())
+				return;
+			const uint32 last_sample = active_indices.back();
+			active_indices[slot] = last_sample;
+			active_slot_of_sample[last_sample] = slot;
+			active_indices.pop_back();
+			active_slot_of_sample[sample_idx] = invalid_active_slot_;
+		};
+
+		auto finish_bridson_progress = [&]() {
+			if (!bridson_progress_live)
+				return;
+			log_basic(p, '\n');
+			bridson_progress_live = false;
+		};
+
+		auto sample_seed_round = [&]() -> size_t {
+			finish_bridson_progress();
+			std::unique_ptr<SpatialGrid> seed_grid = std::make_unique<SpatialGrid>(p.grid_cell_size_);
+			bool used_sdf_filter = false;
+			std::vector<Vec3> seed_points = p.ray_sampler_->sample_alpha_level_set_rays(
+				traits, seed_target, seed_grid.get(), p.grid_cell_size_, bbox_min, bbox_max,
+				&used_sdf_filter);
+			if (seed_points.empty())
+			{
+				log_basic(p, "[NeuralSeed] candidates=0 added=0 total=", accepted_positions.size(), '\n');
+				return size_t(0);
+			}
+
+			std::vector<Vec3> seed_normals;
+			if (!compute_neural_gradients_gpu(p, seed_points, seed_normals) || seed_normals.size() != seed_points.size())
+			{
+				log_error(p, "Failed to compute neural seed normals.", '\n');
+				return size_t(0);
+			}
+
+			size_t added = 0;
+			for (size_t i = 0; i < seed_points.size(); ++i)
+			{
+				if (accepted_positions.size() >= max_samples)
+					break;
+				if (!seed_points[i].allFinite())
+					continue;
+				if (!global_grid->is_valid_sample(seed_points[i], p.sample_radius_, accepted_positions))
+					continue;
+				add_sample(seed_points[i], seed_normals[i]);
+				++added;
+			}
+			log_basic(p, "[NeuralSeed] candidates=", seed_points.size(), " added=", added, " total=",
+					  accepted_positions.size(), '\n');
+			return added;
+		};
+
+		size_t zero_reseed_rounds = 0;
+		size_t seed_added = sample_seed_round();
+		const uint32 max_attempts = static_cast<uint32>(std::max(1, p.sample_iterations_));
+
+		while (accepted_positions.size() < max_samples)
 		{
-			log_error(p, "Failed to sample points on alpha level set.", '\n');
+			if (active_indices.empty())
+			{
+				seed_added = sample_seed_round();
+				if (seed_added == 0)
+				{
+					++zero_reseed_rounds;
+					if (zero_reseed_rounds >= 3)
+						break;
+				}
+				else
+				{
+					zero_reseed_rounds = 0;
+				}
+				if (active_indices.empty())
+					continue;
+			}
+
+			sample_active_parent_indices(active_indices, parent_batch_size, gen, selected_parents);
+			raw_candidates.clear();
+			raw_candidates.reserve(selected_parents.size());
+			std::uniform_real_distribution<Scalar> uniform(Scalar(0), Scalar(1));
+			for (uint32 parent_idx : selected_parents)
+				raw_candidates.push_back(sample_tangent_annulus_candidate(
+					accepted_positions[parent_idx], accepted_normals[parent_idx], p.sample_radius_, uniform, gen));
+
+			if (!project_points_to_alpha_gpu_impl(p, raw_candidates, bbox_min, bbox_max, p.neural_projection_workspace_,
+												  projected_candidates, projected_normals))
+			{
+				finish_bridson_progress();
+				log_error(p, "Batched Bridson projection failed.", '\n');
+				break;
+			}
+
+			if (projected_candidates.size() != raw_candidates.size() || projected_normals.size() != raw_candidates.size() ||
+				p.last_projection_keep_mask_.size() != raw_candidates.size())
+			{
+				finish_bridson_progress();
+				log_error(p, "Projected candidate batch shape mismatch.", '\n');
+				break;
+			}
+
+			size_t accepted_this_batch = 0;
+			for (size_t i = 0; i < selected_parents.size(); ++i)
+			{
+				if (accepted_positions.size() >= max_samples)
+					break;
+				const uint32 parent_idx = selected_parents[i];
+				const Vec3& parent_pos = accepted_positions[parent_idx];
+				const Vec3& parent_normal = accepted_normals[parent_idx];
+				const Vec3& child_pos = projected_candidates[i];
+				const Vec3& child_normal = projected_normals[i];
+				const Vec3& raw_candidate = raw_candidates[i];
+
+				bool accept = p.last_projection_keep_mask_[i] != 0;
+				if (accept)
+				{
+					const Scalar parent_dot = parent_normal.dot(child_normal);
+					const Scalar parent_dist = (child_pos - parent_pos).norm();
+					const Scalar projection_dist = (child_pos - raw_candidate).norm();
+					if (parent_dot <= Scalar(0))
+						accept = false;
+					if (accept && (parent_dist < Scalar(0.5) * p.sample_radius_ ||
+								   parent_dist > Scalar(2.5) * p.sample_radius_))
+						accept = false;
+					if (accept && projection_dist > p.sample_radius_)
+						accept = false;
+					if (accept && !global_grid->is_valid_sample(child_pos, p.sample_radius_, accepted_positions))
+						accept = false;
+				}
+
+				if (accept)
+				{
+					add_sample(child_pos, child_normal);
+					++accepted_this_batch;
+					continue;
+				}
+
+				if (parent_idx < attempt_counts.size())
+				{
+					++attempt_counts[parent_idx];
+					if (attempt_counts[parent_idx] >= max_attempts)
+						remove_active_sample(parent_idx);
+				}
+			}
+			if (accepted_this_batch > 0 && is_basic_logging_enabled(p))
+			{
+				std::cout << "\r[NeuralSampling] accepted_total=" << accepted_positions.size() << std::flush;
+				bridson_progress_live = true;
+			}
+		}
+
+		if (accepted_positions.empty())
+		{
+			finish_bridson_progress();
+			if (p.samples_mesh_)
+				points_provider_->clear_mesh(*p.samples_mesh_);
+			p.samples_spatial_grid_ = std::move(global_grid);
+			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+			log_error(p, "Failed to generate any alpha level set samples with neural Bridson saturation.", '\n');
 			return;
 		}
 
-		log_basic(p, "Successfully sampled ", sampled_points.size(), " points.", '\n');
-		if (is_verbose_logging_enabled(p))
-		{
-			const size_t check_n = std::min<size_t>(30, sampled_points.size());
-			if (check_n > 0)
-			{
-				std::vector<size_t> indices(sampled_points.size());
-				std::iota(indices.begin(), indices.end(), size_t(0));
-				std::mt19937 gen(p.seed_ + 1337);
-				std::shuffle(indices.begin(), indices.end(), gen);
-				std::vector<Vec3> check_points;
-				check_points.reserve(check_n);
-				for (size_t i = 0; i < check_n; ++i)
-					check_points.push_back(sampled_points[indices[i]]);
-
-				BatchUDFResult check_res = udf.forward_batch(check_points);
-				if (check_res.ok && check_res.values.size() == check_n)
-				{
-					log_verbose(p, "UDF check (random ", check_n, "):", '\n');
-					for (size_t i = 0; i < check_n; ++i)
-					{
-						const Scalar v = check_res.values[i];
-						log_verbose(p, "  ", i, ": udf=", v, " |udf-alpha|=", std::abs(v - p.alpha_), '\n');
-					}
-				}
-				else
-				{
-					log_error(p, "UDF check failed (forward_batch).", '\n');
-				}
-			}
-		}
-		if (p.samples_mesh_)
-			points_provider_->clear_mesh(*p.samples_mesh_);
-		p.samples_jitter_backup_valid_ = false;
-		p.samples_position_backup_.clear();
-		p.samples_normal_backup_.clear();
-		for (const Vec3& pt : sampled_points)
-		{
-			PVertex v = add_vertex(*p.samples_mesh_);
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			(*p.samples_position_)[v_idx] = pt;
-			if (p.samples_knn_color_)
-				(*p.samples_knn_color_)[v_idx] = Vec4(0.0, 0.0, 0.0, 1.0);
-		}
-
-		log_basic(p, "Computing normals from UDF gradients...", '\n');
-		std::vector<Vec3> all_positions;
-		all_positions.reserve(sampled_points.size());
-		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			all_positions.push_back((*p.samples_position_)[v_idx]);
-			return true;
-		});
-
-		bool normals_ok = true;
-		std::vector<Vec3> gradients(all_positions.size(), Vec3(0, 0, 1));
-		const size_t grad_batch_cap = 131464;
-		const size_t grad_batch =
-			std::max<size_t>(1, std::min<size_t>(static_cast<size_t>(p.batch_size_), grad_batch_cap));
-		for (size_t offset = 0; offset < all_positions.size(); offset += grad_batch)
-		{
-			const size_t count = std::min(grad_batch, all_positions.size() - offset);
-			auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-			if (device_.is_cuda())
-				cpu_opts = cpu_opts.pinned_memory(true);
-			torch::Tensor pts_cpu = torch::empty({static_cast<int64_t>(count), 3}, cpu_opts);
-			auto pts_acc = pts_cpu.accessor<float, 2>();
-			for (size_t i = 0; i < count; ++i)
-			{
-				const Vec3& pnt = all_positions[offset + i];
-				pts_acc[static_cast<long>(i)][0] = static_cast<float>(pnt.x());
-				pts_acc[static_cast<long>(i)][1] = static_cast<float>(pnt.y());
-				pts_acc[static_cast<long>(i)][2] = static_cast<float>(pnt.z());
-			}
-
-			auto [values_t, grad_t] = udf.forward_values_grad_gpu(pts_cpu);
-			if (!values_t.defined() || !grad_t.defined())
-			{
-				normals_ok = false;
-				break;
-			}
-			if (grad_t.dim() != 2 || grad_t.size(0) != static_cast<long>(count) || grad_t.size(1) != 3)
-			{
-				normals_ok = false;
-				break;
-			}
-
-			torch::Tensor grad_cpu = grad_t.to(torch::kCPU).contiguous();
-			auto grad_acc = grad_cpu.accessor<float, 2>();
-			for (size_t i = 0; i < count; ++i)
-			{
-				Vec3 normal(static_cast<Scalar>(grad_acc[static_cast<long>(i)][0]),
-							static_cast<Scalar>(grad_acc[static_cast<long>(i)][1]),
-							static_cast<Scalar>(grad_acc[static_cast<long>(i)][2]));
-				if (normal.squaredNorm() > Scalar(1e-12))
-					normal.normalize();
-				else
-					normal = Vec3(0, 0, 1);
-				gradients[offset + i] = normal;
-			}
-		}
-
-		if (normals_ok)
-		{
-			uint32 idx = 0;
-			foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-				uint32 v_idx = index_of(*p.samples_mesh_, v);
-				const Vec3& normal = gradients[idx];
-				(*p.samples_normal_)[v_idx] = normal;
-				(*p.samples_normal_color_)[v_idx] =
-					Vec4((normal.x() + 1.0) * 0.5, (normal.y() + 1.0) * 0.5, (normal.z() + 1.0) * 0.5, 1.0);
-				idx++;
-				return true;
-			});
-		}
-		if (!normals_ok)
-			log_error(p, "Failed to compute normals from UDF gradients.", '\n');
-
+		finish_bridson_progress();
+		log_basic(p, "[NeuralBridson] accepted=", accepted_positions.size(), " zero_reseed_rounds=",
+				  zero_reseed_rounds, " remaining_active=", active_indices.size(), '\n');
+		p.samples_spatial_grid_ = std::move(global_grid);
+		materialize_neural_samples_to_mesh(p, accepted_positions, accepted_normals);
 		finalize_sample_mesh_after_sampling(p);
 	}
 
@@ -2136,121 +2551,13 @@ public:
 	std::pair<std::vector<Vec3>, std::vector<Vec3>> project_points_to_alpha_gpu_impl(PointsParameters& p,
 																					 const std::vector<Vec3>& points)
 	{
-		const size_t nb_points = points.size();
-		const int max_iters = 30;
-		const Scalar tol = 1e-6f;
-		NeuralFieldForward udf = make_neural_field_forward(p);
-
-		try
-		{
-			torch::Tensor X_cpu =
-				torch::empty({static_cast<int64_t>(nb_points), 3},
-							 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true));
-			torch::Tensor active_cpu = torch::ones({static_cast<int64_t>(nb_points)},
-												   torch::TensorOptions().dtype(torch::kBool).device(device_));
-			auto x_acc = X_cpu.accessor<float, 2>();
-			auto active_acc = active_cpu.accessor<bool, 1>();
-			for (size_t i = 0; i < nb_points; ++i)
-			{
-				x_acc[i][0] = static_cast<float>(points[i].x());
-				x_acc[i][1] = static_cast<float>(points[i].y());
-				x_acc[i][2] = static_cast<float>(points[i].z());
-			}
-			torch::Tensor X = X_cpu.to(device_);
-			torch::Tensor active = active_cpu.to(device_);
-
-			for (int iter = 0; iter < max_iters; ++iter)
-			{
-				auto [values, grad] = udf.forward_values_grad_gpu(X);
-				if (!values.defined() || !grad.defined())
-					break;
-
-				torch::Tensor f = values;
-				if (f.dim() == 2 && f.size(1) == 1)
-					f = f.squeeze(1);
-
-				torch::Tensor residual = f - p.alpha_;
-				torch::Tensor abs_residual = torch::abs(residual);
-
-				//// DEBUG
-				// float max_residual = abs_residual.max().item<float>();
-				// float mean_residual = abs_residual.mean().item<float>();
-				// int active_count = torch::sum(active).item<int>();
-
-				// std::cout << "Iter " << iter << ": active=" << active_count << ", max_res=" << max_residual
-				//		  << ", mean_res=" << mean_residual << std::endl;
-				//// END DEBUG
-				// Decide which points are still active
-
-				active = active & (abs_residual > tol);
-
-				torch::Tensor grad_norm2 = (grad * grad).sum(1, true);
-				torch::Tensor step = residual.unsqueeze(1) / (grad_norm2 + 1e-12f);
-				step = torch::where(active.unsqueeze(1), step, torch::zeros_like(step));
-
-				X = X - step * grad;
-
-				X = torch::clamp(X, 0.0f, 1.0f);
-			}
-
-			auto [values, grad] = udf.forward_values_grad_gpu(X);
-			if (!values.defined() || !grad.defined())
-				return {};
-
-			torch::Tensor final_X_cpu = X.to(torch::kCPU);
-			torch::Tensor final_grad_cpu = grad.to(torch::kCPU);
-
-			torch::Tensor sdf_cpu;
-			{
-				auto [values_sdf, sdf] = udf.forward_values_sdf_gpu(X);
-				if (sdf.defined())
-				{
-					if (sdf.dim() == 2 && sdf.size(1) == 1)
-						sdf = sdf.squeeze(1);
-					sdf_cpu = sdf.to(torch::kCPU);
-				}
-			}
-
-			auto final_X_acc = final_X_cpu.accessor<float, 2>();
-			auto final_grad_acc = final_grad_cpu.accessor<float, 2>();
-
-			std::vector<Vec3> projected_points;
-			std::vector<Vec3> normals;
-			projected_points.reserve(nb_points);
-			normals.reserve(nb_points);
-
-			p.last_projection_keep_mask_.assign(nb_points, 1);
-			if (sdf_cpu.defined() && sdf_cpu.dim() == 1 &&
-				sdf_cpu.size(0) == static_cast<long>(nb_points))
-			{
-				auto sdf_acc = sdf_cpu.accessor<float, 1>();
-				for (size_t i = 0; i < nb_points; ++i)
-				{
-					const bool keep = (sdf_acc[i] <= 0.0f);
-					p.last_projection_keep_mask_[i] = keep ? uint8_t(1) : uint8_t(0);
-					if (p.filter_positive_projection_ && !keep)
-						continue;
-					projected_points.push_back(Vec3(final_X_acc[i][0], final_X_acc[i][1], final_X_acc[i][2]));
-					normals.push_back(
-						Vec3(final_grad_acc[i][0], final_grad_acc[i][1], final_grad_acc[i][2]).normalized());
-				}
-			}
-			else
-			{
-				for (size_t i = 0; i < nb_points; ++i)
-				{
-					projected_points.push_back(Vec3(final_X_acc[i][0], final_X_acc[i][1], final_X_acc[i][2]));
-					normals.push_back(
-						Vec3(final_grad_acc[i][0], final_grad_acc[i][1], final_grad_acc[i][2]).normalized());
-				}
-			}
-			return {projected_points, normals};
-		}
-		catch (const c10::Error& e)
-		{
-			log_error(p, "GPU projection to alpha level set failed: ", e.what(), '\n');
+		std::vector<Vec3> projected_points;
+		std::vector<Vec3> normals;
+		auto [bbox_min, bbox_max] = compute_sampling_bbox(p);
+		if (!project_points_to_alpha_gpu_impl(
+				p, points, bbox_min, bbox_max, p.neural_projection_workspace_, projected_points, normals))
 			return {};
-		}
+		return {std::move(projected_points), std::move(normals)};
 	}
 
 	std::pair<std::vector<Vec3>, std::vector<Vec3>> project_points_to_alpha_gpu(PointsParameters& p,
@@ -13142,8 +13449,20 @@ protected:
 		if (ImGui::CollapsingHeader("Sampling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
 			ImGui::InputFloat("Alpha", &p.alpha_, 0.001f, 0.1f, "%.4f");
-			ImGui::InputInt("Num Samples", &p.num_alpha_samples_, 1000, 10000);
-			ImGui::InputFloat("Grid Cell Size", &p.grid_cell_size_, 0.001f, 0.01f, "%.4f");
+			if (p.input_mode_ == INPUT_NEURAL_UDF)
+			{
+				ImGui::InputFloat("Sample Radius", &p.sample_radius_, 0.001f, 0.01f, "%.4f");
+				ImGui::InputInt("Seed Samples", &p.neural_seed_samples_, 256, 1024);
+				ImGui::InputInt("Parent Batch Size", &p.neural_parent_batch_size_, 256, 1024);
+				ImGui::InputInt("Max Samples", &p.neural_max_samples_, 10000, 100000);
+				ImGui::InputInt("Max Attempts", &p.sample_iterations_, 1, 10);
+				ImGui::Text("Derived Grid Cell Size: %.6f", static_cast<float>(derived_neural_grid_cell_size(p)));
+			}
+			else
+			{
+				ImGui::InputInt("Num Samples", &p.num_alpha_samples_, 1000, 10000);
+				ImGui::InputFloat("Grid Cell Size", &p.grid_cell_size_, 0.001f, 0.01f, "%.4f");
+			}
 			ImGui::InputInt("Eval Batch Size", &p.batch_size_, 256, 1024);
 			ImGui::InputInt("Ray Batch Size", &p.ray_sampler_batch_size_, 256, 2048);
 			ImGui::InputInt("Max Iterations", &p.udf_max_iterations_, 1000, 8000);
@@ -13186,7 +13505,9 @@ protected:
 
 			if (ImGui::Button("Sample UDF"))
 			{
-				load_alpha_samples_to_mesh(p, static_cast<size_t>(p.num_alpha_samples_));
+				const size_t requested_samples =
+					(p.input_mode_ == INPUT_NEURAL_UDF) ? size_t(0) : static_cast<size_t>(std::max(0, p.num_alpha_samples_));
+				load_alpha_samples_to_mesh(p, requested_samples);
 				p.fitting_data_computed_ = false;
 			}
 			ImGui::SameLine();

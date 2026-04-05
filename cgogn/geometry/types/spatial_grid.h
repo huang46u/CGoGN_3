@@ -54,14 +54,16 @@ struct SpatialGrid
 	template <typename PositionAttribute>
 	bool is_valid_sample(const Vec3& pos, Scalar radius, const PositionAttribute& positions) const
 	{
+		if (cell_size_ <= Scalar(0))
+			return true;
 		GridKey k = get_key(pos);
 		Scalar r2 = radius * radius;
-		// Check 3x3x3 neighborhood
-		for (int dx = -1; dx <= 1; ++dx)
+		const int range = std::max(1, static_cast<int>(std::ceil(radius / cell_size_)));
+		for (int dx = -range; dx <= range; ++dx)
 		{
-			for (int dy = -1; dy <= 1; ++dy)
+			for (int dy = -range; dy <= range; ++dy)
 			{
-				for (int dz = -1; dz <= 1; ++dz)
+				for (int dz = -range; dz <= range; ++dz)
 				{
 					GridKey neighbor_key = {k.x + dx, k.y + dy, k.z + dz};
 					auto it = grid_.find(neighbor_key);
