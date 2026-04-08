@@ -29,10 +29,40 @@ public:
 	{
 	}
 
+	void reset_headless_state()
+	{
+		context_.udf_training.reset_headless_state();
+		context_.selected_surface = nullptr;
+		context_.selected_points = nullptr;
+	}
+
 	Points& load_point_cloud_input(const std::string& input_path, bool normalize_for_udf)
 	{
 		Points* points = context_.points_provider.load_points_from_file(input_path);
 		if (!points)
+			throw std::runtime_error("Failed to load point cloud: " + input_path);
+
+		auto position = get_attribute<Vec3, PVertex>(*points, "position");
+		if (!position)
+			throw std::runtime_error("Point cloud has no `position` attribute: " + input_path);
+
+		if (normalize_for_udf)
+		{
+			geometry::normalize_centered(*position.get());
+			context_.points_provider.emit_attribute_changed(*points, position.get());
+		}
+
+		context_.points_provider.set_mesh_bb_vertex_position(*points, position);
+		context_.selected_points = points;
+		context_.udf_training.set_selected_points(*points);
+		return *points;
+	}
+
+	Points& reload_point_cloud_input(const std::string& mesh_name, const std::string& input_path, bool normalize_for_udf)
+	{
+		Points* points = context_.points_provider.has_mesh(mesh_name) ? context_.points_provider.mesh(mesh_name)
+																  : context_.points_provider.add_mesh(mesh_name);
+		if (!points || !context_.points_provider.reload_points_from_file(*points, input_path))
 			throw std::runtime_error("Failed to load point cloud: " + input_path);
 
 		auto position = get_attribute<Vec3, PVertex>(*points, "position");
@@ -70,11 +100,32 @@ public:
 		return *surface;
 	}
 
+	Surface& reload_surface_input(const std::string& mesh_name, const std::string& surface_path, bool normalize_for_udf)
+	{
+		Surface* surface = context_.surface_provider.has_mesh(mesh_name) ? context_.surface_provider.mesh(mesh_name)
+																	 : context_.surface_provider.add_mesh(mesh_name);
+		if (!surface || !context_.surface_provider.reload_surface_from_file(*surface, surface_path))
+			throw std::runtime_error("Failed to load surface mesh: " + surface_path);
+		auto position = get_attribute<Vec3, SVertex>(*surface, "position");
+		if (!position)
+			throw std::runtime_error("Surface mesh has no `position` attribute: " + surface_path);
+		if (normalize_for_udf)
+		{
+			geometry::normalize_centered(*position.get());
+			context_.surface_provider.emit_attribute_changed(*surface, position.get());
+		}
+		context_.surface_provider.set_mesh_bb_vertex_position(*surface, position);
+		context_.selected_surface = surface;
+		context_.udf_training.set_selected_surface(*surface);
+		return *surface;
+	}
+
 	Points& create_empty_points_input(const std::string& mesh_name)
 	{
 		Points* points = context_.points_provider.add_mesh(mesh_name);
 		if (!points)
 			throw std::runtime_error("Failed to create point container: " + mesh_name);
+		context_.points_provider.clear_mesh(*points);
 		auto position = get_or_add_attribute<Vec3, PVertex>(*points, "position");
 		context_.points_provider.set_mesh_bb_vertex_position(*points, position);
 		context_.selected_points = points;

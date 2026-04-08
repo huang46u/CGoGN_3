@@ -63,15 +63,23 @@ struct BenchmarkInputConfig
 
 struct BenchmarkSamplingConfig
 {
+	struct BridsonConfig
+	{
+		float sample_radius = 0.0025f;
+		int sample_iterations = 30;
+		int seed_samples = 8192;
+		int parent_batch_size = 8192;
+		int max_samples = 4000000;
+	};
+
 	float alpha = 0.005f;
-	float grid_cell_size = 0.0025f;
 	int knn_k = 10;
-	int num_alpha_samples = 200000;
 	bool apply_filtering = false;
 	int ray_sampler_batch_size = 4096;
 	int batch_size = 1310640;
 	float tol = 1e-5f;
 	int udf_max_iterations = 3000;
+	BridsonConfig bridson;
 };
 
 struct BenchmarkOptimizationConfig

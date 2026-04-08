@@ -300,6 +300,51 @@ public:
 			return nullptr;
 	}
 
+	bool reload_surface_from_file(MESH& m, const std::string& filename, bool normalized = true)
+	{
+		if constexpr (mesh_traits<MESH>::dimension == 2 && std::is_default_constructible_v<MESH>)
+		{
+			clear(m);
+			std::string ext = to_lower(extension(filename));
+			bool imported = false;
+			if (ext.compare("off") == 0)
+				imported = io::import_OFF(m, filename);
+			else if (ext.compare("obj") == 0)
+				imported = io::import_OBJ(m, filename);
+			else if (ext.compare("ply") == 0)
+				imported = io::import_PLY(m, filename);
+			else if (ext.compare("stl") == 0)
+				imported = io::import_STL(m, filename);
+			else if (ext.compare("ig") == 0)
+			{
+				if constexpr (std::is_same_v<MESH, IncidenceGraph>)
+					imported = io::import_IG(m, filename);
+			}
+
+			if (!imported)
+			{
+				mesh_filename_.erase(&m);
+				emit_connectivity_changed(m);
+				return false;
+			}
+
+			MeshData<MESH>& md = mesh_data(m);
+			md.init(&m);
+			mesh_filename_[&m] = filename;
+			std::shared_ptr<Attribute<Vec3>> vertex_position = get_attribute<Vec3, Vertex>(m, "position");
+			if (vertex_position)
+			{
+				if (normalized)
+					geometry::rescale_centered(*vertex_position, 1);
+				set_mesh_bb_vertex_position(m, vertex_position);
+			}
+			emit_connectivity_changed(m);
+			return true;
+		}
+		else
+			return false;
+	}
+
 	void save_surface_to_file(MESH& m, const Attribute<Vec3>* vertex_position, const std::string& filetype,
 							  const std::string& filename)
 	{
@@ -436,6 +481,40 @@ public:
 		}
 		else
 			return nullptr;
+	}
+
+	bool reload_points_from_file(MESH& m, const std::string& filename, bool normalized = true)
+	{
+		if constexpr (mesh_traits<MESH>::dimension == 0 && std::is_default_constructible_v<MESH>)
+		{
+			clear(m);
+			std::string ext = extension(filename);
+			bool imported = false;
+			if (ext.compare("ply") == 0)
+				imported = io::import_PLY(m, filename);
+
+			if (!imported)
+			{
+				mesh_filename_.erase(&m);
+				emit_connectivity_changed(m);
+				return false;
+			}
+
+			MeshData<MESH>& md = mesh_data(m);
+			md.init(&m);
+			mesh_filename_[&m] = filename;
+			std::shared_ptr<Attribute<Vec3>> vertex_position = get_attribute<Vec3, Vertex>(m, "position");
+			if (vertex_position)
+			{
+				if (normalized)
+					geometry::rescale_centered(*vertex_position, 1);
+				set_mesh_bb_vertex_position(m, vertex_position);
+			}
+			emit_connectivity_changed(m);
+			return true;
+		}
+		else
+			return false;
 	}
 
 	void save_points_to_file(MESH& m, const Attribute<Vec3>* vertex_position, const std::string& filetype,

@@ -1,22 +1,24 @@
 {
   "input": {
     "mode": "neural_udf",
-    "input_path": "",
-    "surface_path": "",
-    "neural_udf_model_path": "",
     "neural_model_type": "udf",
     "initial_ma_mode_override": "shrinking_ball"
   },
   "sampling": {
-    "alpha": 0.005,
-    "grid_cell_size": 0.0015,
-    "knn_k": 10,
-    "num_alpha_samples": 500000,
+    "alpha": 0.002,
+    "knn_k": 20,
     "apply_filtering": true,
-    "ray_sampler_batch_size": 1048576,
+    "ray_sampler_batch_size": 8192,
     "batch_size": 1048576,
-    "tol": 1e-5,
-    "udf_max_iterations": 3000
+    "tol": 1e-6,
+    "udf_max_iterations": 3000,
+    "bridson": {
+      "sample_radius": 0.002,
+      "sample_iterations": 30,
+      "seed_samples": 8192,
+      "parent_batch_size": 8192,
+      "max_samples": 5000000
+    }
   },
   "optimization": {
     "distance_mode": "line_quadric_distance_free_r",
@@ -46,35 +48,30 @@
   "initialization": {
     "seed": 42,
     "init_dilation_constant": 0.01,
-    "init_min_cover_points": 1,
+    "init_min_cover_points": 10,
     "initial_nb_spheres": 100000
   },
-   "postprocess": {
+  "postprocess": {
     "topology_fix": true,
-    "deg_face_deletion": false,
-    "nm_two_layer_prune": true,
-    "residual_prune": true,
-    "residual_prune_threshold": 0.0001,
-    "face_post_processing": true
+    "deg_face_deletion": true,
+    "nm_two_layer_prune": false,
+    "residual_prune": false,
+    "residual_prune_threshold": 1,
+    "face_post_processing": false
   },
   "benchmark": {
     "num_measure_runs": 1,
-    "verbose": false
+    "verbose": true
   },
-  "output": {
-    "skeleton_ply": "",
-    "timing_json": ""
-  },
+  "output": {},
   "batch": {
     "enabled": true,
-    "input_directory": "D:/Code/CGoGN_3/data/skeleton/udf/deepfashion/model",
-    "surface_directory": "",
-    "neural_udf_model_directory": "D:/Code/CGoGN_3/data/skeleton/udf/deepfashion/weight",
+    "input_directory": "D:/Code/CGoGN_3/data/skeleton/udf/shapenetcar_200/model",
+    "neural_udf_model_directory": "D:/Code/CGoGN_3/data/skeleton/udf/shapenetcar_200/weight",
     "input_extension": ".ply",
-    "surface_extension": "",
     "neural_udf_model_extension": ".pt",
     "recursive": false,
-    "output_directory": "D:/Code/CGoGN_3/out/deepfashion_free_r/skeleton",
-    "timing_directory": "D:/Code/CGoGN_3/out/deepfashion_free_r/timing"
+    "output_directory": "D:/Code/CGoGN_3/out/shapenetcar_200_free_r/skeleton",
+    "timing_directory": "D:/Code/CGoGN_3/out/shapenetcar_200_free_r/timing"
   }
 }

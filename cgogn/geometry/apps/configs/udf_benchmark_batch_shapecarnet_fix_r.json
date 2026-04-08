@@ -1,37 +1,34 @@
-﻿{
+{
   "input": {
     "mode": "neural_udf",
-    "input_path": "D:/Code/CGoGN_3/data/skeleton/udf/deepfashion/model/1-12.ply",
-    "surface_path": "",
-    "neural_udf_model_path": "D:/Code/CGoGN_3/data/skeleton/udf/deepfashion/weight/1-12.pt",
     "neural_model_type": "udf",
-    "initial_ma_mode_override": "shrinking_ball"
+    "initial_ma_mode_override": "displacement"
   },
   "sampling": {
-    "alpha": 0.005,
-    "knn_k": 10,
+    "alpha": 0.002,
+    "knn_k": 20,
     "apply_filtering": true,
-    "ray_sampler_batch_size": 1048576,
+    "ray_sampler_batch_size": 8192,
     "batch_size": 1048576,
-    "tol": 1e-5,
+    "tol": 1e-6,
     "udf_max_iterations": 3000,
     "bridson": {
-      "sample_radius": 0.0018,
+      "sample_radius": 0.002,
       "sample_iterations": 30,
       "seed_samples": 8192,
       "parent_batch_size": 8192,
-      "max_samples": 500000
+      "max_samples": 5000000
     }
   },
   "optimization": {
-    "distance_mode": "line_quadric_distance_free_r",
+    "distance_mode": "line_quadric_distance_fix_r",
     "use_local_clusters": true,
     "local_cluster_connectivity_refresh_interval": 10,
     "max_iterations_without_autosplit": 150,
     "max_iterations_after_reaching_max_spheres": 100,
-    "sqem_update_lambda_full": 1.0,
-    "sqem_update_lambda_line_plane": 1.0,
-    "sqem_fix_radius_scale": 1.5,
+    "sqem_update_lambda_full": 0.2,
+    "sqem_update_lambda_line_plane": 0.2,
+    "sqem_fix_radius_scale": 1.0,
     "udf_center_enabled": false,
     "udf_center_lambda": 0.1,
     "sphere_correction": false,
@@ -51,23 +48,30 @@
   "initialization": {
     "seed": 42,
     "init_dilation_constant": 0.01,
-    "init_min_cover_points": 1,
+    "init_min_cover_points": 10,
     "initial_nb_spheres": 100000
   },
   "postprocess": {
     "topology_fix": true,
-    "deg_face_deletion": false,
-    "nm_two_layer_prune": true,
-    "residual_prune": true,
-    "residual_prune_threshold": 0.0,
-    "face_post_processing": true
+    "deg_face_deletion": true,
+    "nm_two_layer_prune": false,
+    "residual_prune": false,
+    "residual_prune_threshold": 1,
+    "face_post_processing": false
   },
   "benchmark": {
     "num_measure_runs": 1,
     "verbose": true
   },
-  "output": {
-    "skeleton_ply": "D:/Code/CGoGN_3/out/deepfashion/1-12.ply",
-    "timing_json": "D:/Code/CGoGN_3/out/deepfashion/1-12_timing.json"
+  "output": {},
+  "batch": {
+    "enabled": true,
+    "input_directory": "D:/Code/CGoGN_3/data/skeleton/udf/shapenetcar_200/model",
+    "neural_udf_model_directory": "D:/Code/CGoGN_3/data/skeleton/udf/shapenetcar_200/weight",
+    "input_extension": ".ply",
+    "neural_udf_model_extension": ".pt",
+    "recursive": false,
+    "output_directory": "D:/Code/CGoGN_3/out/shapenetcar_200_fix_r/skeleton",
+    "timing_directory": "D:/Code/CGoGN_3/out/shapenetcar_200_fix_r/timing"
   }
 }

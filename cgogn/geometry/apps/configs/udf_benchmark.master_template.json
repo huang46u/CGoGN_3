@@ -49,12 +49,18 @@
       "initialization.initial_nb_spheres": "must be > 0",
       "optimization.max_iterations_without_autosplit": "must be > 0",
       "optimization.max_iterations_after_reaching_max_spheres": "must be > 0",
+      "sampling.bridson.sample_radius": "must be > 0",
+      "sampling.bridson.sample_iterations": "must be > 0",
+      "sampling.bridson.seed_samples": "must be > 0",
+      "sampling.bridson.parent_batch_size": "must be > 0",
+      "sampling.bridson.max_samples": "must be > 0",
       "auto_split.error_threshold": "must be > 0 when auto_split.enabled = true and auto_split.mode = error_threshold",
       "auto_split.max_nb_spheres": "must be > 0 when auto_split.enabled = true and auto_split.mode = max_nb_spheres"
     },
     "notes": [
       "Single-run mode: set batch.enabled = false, then fill input.input_path or input.surface_path and output.skeleton_ply.",
       "Batch mode: set batch.enabled = true, then fill batch.input_directory and batch.output_directory. Per-case output paths are generated automatically.",
+      "All input modes now use the same batched Bridson sampler; configure it with sampling.bridson.*.",
       "When threshold < 0, postprocess.residual_prune_threshold now deletes all sheets with face_count < 10."
     ]
   },
@@ -68,14 +74,19 @@
   },
   "sampling": {
     "alpha": 0.005,
-    "grid_cell_size": 0.0025,
     "knn_k": 10,
-    "num_alpha_samples": 200000,
     "apply_filtering": false,
     "ray_sampler_batch_size": 4096,
     "batch_size": 1310640,
     "tol": 1e-5,
-    "udf_max_iterations": 3000
+    "udf_max_iterations": 3000,
+    "bridson": {
+      "sample_radius": 0.0025,
+      "sample_iterations": 30,
+      "seed_samples": 8192,
+      "parent_batch_size": 8192,
+      "max_samples": 4000000
+    }
   },
   "optimization": {
     "distance_mode": "line_quadric_distance_fix_r",

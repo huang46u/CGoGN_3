@@ -255,15 +255,39 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		config.input.neural_model_type = parse_neural_model_type(*neural_type);
 
 	const ptree& sampling = root.get_child("sampling");
+	const BenchmarkSamplingConfig default_sampling{};
 	config.sampling.alpha = require_value<float>(sampling, "alpha");
-	config.sampling.grid_cell_size = require_value<float>(sampling, "grid_cell_size");
 	config.sampling.knn_k = require_value<int>(sampling, "knn_k");
-	config.sampling.num_alpha_samples = require_value<int>(sampling, "num_alpha_samples");
 	config.sampling.apply_filtering = get_value<bool>(sampling, "apply_filtering", false);
 	config.sampling.ray_sampler_batch_size = require_value<int>(sampling, "ray_sampler_batch_size");
 	config.sampling.batch_size = require_value<int>(sampling, "batch_size");
 	config.sampling.tol = require_value<float>(sampling, "tol");
 	config.sampling.udf_max_iterations = require_value<int>(sampling, "udf_max_iterations");
+	if (sampling.find("grid_cell_size") != sampling.not_found())
+	{
+		fail_config("`sampling.grid_cell_size` has been removed; use `sampling.bridson.sample_radius`");
+	}
+	if (sampling.find("num_alpha_samples") != sampling.not_found())
+	{
+		fail_config("`sampling.num_alpha_samples` has been removed; use `sampling.bridson.max_samples`");
+	}
+	if (sampling.find("neural_bridson") != sampling.not_found())
+	{
+		fail_config("`sampling.neural_bridson` has been renamed to `sampling.bridson`");
+	}
+	auto bridson = sampling.get_child_optional("bridson");
+	if (!bridson)
+	{
+		fail_config("missing required field `sampling.bridson`");
+	}
+	const auto& defaults = default_sampling.bridson;
+	config.sampling.bridson.sample_radius = get_value<float>(*bridson, "sample_radius", defaults.sample_radius);
+	config.sampling.bridson.sample_iterations =
+		get_value<int>(*bridson, "sample_iterations", defaults.sample_iterations);
+	config.sampling.bridson.seed_samples = get_value<int>(*bridson, "seed_samples", defaults.seed_samples);
+	config.sampling.bridson.parent_batch_size =
+		get_value<int>(*bridson, "parent_batch_size", defaults.parent_batch_size);
+	config.sampling.bridson.max_samples = get_value<int>(*bridson, "max_samples", defaults.max_samples);
 
 	const ptree& optimization = root.get_child("optimization");
 	config.optimization.distance_mode =
@@ -368,6 +392,16 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	{
 		fail_config("one of `input.input_path` or `input.surface_path` must be provided");
 	}
+	if (config.sampling.bridson.sample_radius <= 0.0f)
+		fail_config("`sampling.bridson.sample_radius` must be > 0");
+	if (config.sampling.bridson.sample_iterations <= 0)
+		fail_config("`sampling.bridson.sample_iterations` must be > 0");
+	if (config.sampling.bridson.seed_samples <= 0)
+		fail_config("`sampling.bridson.seed_samples` must be > 0");
+	if (config.sampling.bridson.parent_batch_size <= 0)
+		fail_config("`sampling.bridson.parent_batch_size` must be > 0");
+	if (config.sampling.bridson.max_samples <= 0)
+		fail_config("`sampling.bridson.max_samples` must be > 0");
 	if (!config.batch.enabled && config.output.skeleton_ply.empty())
 		fail_config("`output.skeleton_ply` is required in single-run mode");
 	if (config.initialization.initial_nb_spheres == 0)

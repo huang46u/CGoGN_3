@@ -6,6 +6,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
+#include <cmath>
 #include <chrono>
 #include <filesystem>
 #include <iostream>
@@ -27,6 +28,16 @@ namespace
 double seconds_from_milliseconds(double value_ms)
 {
 	return value_ms / 1000.0;
+}
+
+constexpr const char* BENCHMARK_POINTS_MESH_NAME = "__benchmark_input_points";
+constexpr const char* BENCHMARK_SURFACE_MESH_NAME = "__benchmark_input_surface";
+
+template <typename Context>
+Context& shared_context()
+{
+	static Context context;
+	return context;
 }
 
 class ScopedStreamSilencer
@@ -104,10 +115,15 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 	options.init_dilation_constant_ = config.initialization.init_dilation_constant;
 	options.init_min_cover_points_ = config.initialization.init_min_cover_points;
 	options.alpha_ = config.sampling.alpha;
+	options.sample_radius_ = config.sampling.bridson.sample_radius;
+	options.sample_iterations_ = config.sampling.bridson.sample_iterations;
 	options.knn_k_ = config.sampling.knn_k;
 	options.seed_ = config.initialization.seed;
-	options.grid_cell_size_ = config.sampling.grid_cell_size;
-	options.num_alpha_samples_ = config.sampling.num_alpha_samples;
+	options.bridson_seed_samples_ = config.sampling.bridson.seed_samples;
+	options.bridson_parent_batch_size_ = config.sampling.bridson.parent_batch_size;
+	options.bridson_max_samples_ = config.sampling.bridson.max_samples;
+	options.sample_grid_cell_size_ =
+		config.sampling.bridson.sample_radius / static_cast<float>(std::sqrt(3.0));
 	options.batch_size_ = config.sampling.batch_size;
 	options.ray_sampler_batch_size_ = config.sampling.ray_sampler_batch_size;
 	options.tol_ = config.sampling.tol;
@@ -128,10 +144,9 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 			std::cerr << "[BenchmarkStage] " << stage << std::endl;
 	};
 
-	log_stage("construct_context_begin");
-	Context context;
-	log_stage("construct_context_end");
-
+	log_stage("context_acquire_begin");
+	Context& context = shared_context<Context>();
+	log_stage("context_acquire_end");
 	Core core(context);
 	BenchmarkResult result;
 	result.input_mode = to_string(config.input.mode);
@@ -141,6 +156,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	Points* points = nullptr;
 	{
 		ScopedStreamSilencer silence_internal_output(!config.benchmark.verbose);
+		core.reset_headless_state();
 
 		log_stage("input_loading_begin");
 		{
@@ -150,21 +166,22 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 			switch (config.input.mode)
 			{
 			case InputMode::PointCloud:
-				points = &core.load_point_cloud_input(config.input.input_path, normalize_for_udf);
+				points = &core.reload_point_cloud_input(BENCHMARK_POINTS_MESH_NAME, config.input.input_path, normalize_for_udf);
 				break;
 			case InputMode::SurfaceMesh:
-				core.load_surface_input(config.input.input_path, normalize_for_udf);
-				points = &core.create_empty_points_input("input_points");
+				core.reload_surface_input(BENCHMARK_SURFACE_MESH_NAME, config.input.input_path, normalize_for_udf);
+				points = &core.create_empty_points_input(BENCHMARK_POINTS_MESH_NAME);
 				break;
 			case InputMode::NeuralUDF:
 				if (!config.input.surface_path.empty())
 				{
-					core.load_surface_input(config.input.surface_path, normalize_for_udf);
-					points = &core.create_empty_points_input("input_points");
+					core.reload_surface_input(BENCHMARK_SURFACE_MESH_NAME, config.input.surface_path, normalize_for_udf);
+					points = &core.create_empty_points_input(BENCHMARK_POINTS_MESH_NAME);
 				}
 				else
 				{
-					points = &core.load_point_cloud_input(config.input.input_path, normalize_for_udf);
+					points = &core.reload_point_cloud_input(BENCHMARK_POINTS_MESH_NAME, config.input.input_path,
+															 normalize_for_udf);
 				}
 				break;
 			}
