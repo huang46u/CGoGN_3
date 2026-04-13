@@ -6,7 +6,6 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
-#include <cmath>
 #include <chrono>
 #include <filesystem>
 #include <iostream>
@@ -116,18 +115,21 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 	options.init_min_cover_points_ = config.initialization.init_min_cover_points;
 	options.alpha_ = config.sampling.alpha;
 	options.sample_radius_ = config.sampling.bridson.sample_radius;
+	options.bridson_candidate_mode_ = (config.sampling.bridson.candidate_mode == BridsonCandidateMode::Plane2D)
+										 ? Training::BRIDSON_CANDIDATE_2D_TANGENT_RING
+										 : Training::BRIDSON_CANDIDATE_3D_SHELL;
+	options.bridson_outer_radius_scale_ = config.sampling.bridson.outer_radius_scale;
+	options.bridson_seed_warmup_iterations_ = config.sampling.bridson.warmup_iterations;
 	options.sample_iterations_ = config.sampling.bridson.sample_iterations;
 	options.knn_k_ = config.sampling.knn_k;
 	options.seed_ = config.initialization.seed;
-	options.bridson_seed_samples_ = config.sampling.bridson.seed_samples;
 	options.bridson_parent_batch_size_ = config.sampling.bridson.parent_batch_size;
 	options.bridson_max_samples_ = config.sampling.bridson.max_samples;
-	options.sample_grid_cell_size_ =
-		config.sampling.bridson.sample_radius / static_cast<float>(std::sqrt(3.0));
 	options.batch_size_ = config.sampling.batch_size;
 	options.ray_sampler_batch_size_ = config.sampling.ray_sampler_batch_size;
 	options.tol_ = config.sampling.tol;
 	options.udf_max_iterations_ = config.sampling.udf_max_iterations;
+	options.recompute_sample_normals_after_sampling_ = config.sampling.recompute_normals_after_sampling;
 	return options;
 }
 
@@ -234,6 +236,11 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 		log_stage("kdtree_begin");
 		{
 			ScopedBenchmarkTimer timer(result.timing.kdtree_bvh_ms);
+			if (config.benchmark.verbose)
+			{
+				std::cout << "[BenchmarkKDTree] recompute_normals_after_sampling="
+						  << (config.sampling.recompute_normals_after_sampling ? "true" : "false") << std::endl;
+			}
 			core.build_kdtree_and_normals_prepared(*points);
 		}
 		log_stage("kdtree_end");
@@ -326,6 +333,10 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	std::cout << "Input mode: " << result.input_mode << std::endl;
 	std::cout << "Input path: " << result.input_path << std::endl;
 	std::cout << "Apply filtering: " << (config.sampling.apply_filtering ? "true" : "false") << std::endl;
+	std::cout << "Bridson candidate mode: " << to_string(config.sampling.bridson.candidate_mode)
+			  << " outer_radius_scale=" << config.sampling.bridson.outer_radius_scale << std::endl;
+	std::cout << "Recompute normals after sampling: "
+			  << (config.sampling.recompute_normals_after_sampling ? "true" : "false") << std::endl;
 	std::cout << "Initial spheres: " << config.initialization.initial_nb_spheres << std::endl;
 	std::cout << "Topology fix: " << (config.postprocess.topology_fix ? "true" : "false") << std::endl;
 	std::cout << "Deg face deletion: " << (config.postprocess.deg_face_deletion ? "true" : "false") << std::endl;
@@ -357,6 +368,9 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 
 	boost::property_tree::ptree benchmark_config;
 	benchmark_config.put("sampling.apply_filtering", config.sampling.apply_filtering);
+	benchmark_config.put("sampling.bridson.candidate_mode", to_string(config.sampling.bridson.candidate_mode));
+	benchmark_config.put("sampling.bridson.outer_radius_scale", config.sampling.bridson.outer_radius_scale);
+	benchmark_config.put("sampling.recompute_normals_after_sampling", config.sampling.recompute_normals_after_sampling);
 	benchmark_config.put("initialization.initial_nb_spheres", config.initialization.initial_nb_spheres);
 	benchmark_config.put("initialization.init_min_cover_points", config.initialization.init_min_cover_points);
 	benchmark_config.put("input.initial_ma_mode_override", to_string(config.input.initial_ma_mode_override));

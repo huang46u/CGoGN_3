@@ -11,14 +11,17 @@
     "alpha": 0.005,
     "knn_k": 10,
     "apply_filtering": true,
+    "recompute_normals_after_sampling": false,
     "ray_sampler_batch_size": 1048576,
     "batch_size": 1048576,
     "tol": 1e-5,
     "udf_max_iterations": 3000,
     "bridson": {
       "sample_radius": 0.0018,
+      "candidate_mode": "3d_shell",
+      "outer_radius_scale": 2.0,
+      "warmup_iterations": 2,
       "sample_iterations": 30,
-      "seed_samples": 8192,
       "parent_batch_size": 8192,
       "max_samples": 500000
     }

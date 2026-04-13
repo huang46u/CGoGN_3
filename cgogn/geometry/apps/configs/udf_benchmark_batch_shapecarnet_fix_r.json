@@ -8,14 +8,17 @@
     "alpha": 0.002,
     "knn_k": 20,
     "apply_filtering": true,
+    "recompute_normals_after_sampling": false,
     "ray_sampler_batch_size": 8192,
     "batch_size": 1048576,
     "tol": 1e-6,
     "udf_max_iterations": 3000,
     "bridson": {
       "sample_radius": 0.002,
+      "candidate_mode": "3d_shell",
+      "outer_radius_scale": 2.0,
+      "warmup_iterations": 2,
       "sample_iterations": 30,
-      "seed_samples": 8192,
       "parent_batch_size": 8192,
       "max_samples": 5000000
     }
@@ -71,6 +74,7 @@
     "input_extension": ".ply",
     "neural_udf_model_extension": ".pt",
     "recursive": false,
+    "resume_from_existing": true,
     "output_directory": "D:/Code/CGoGN_3/out/shapenetcar_200_fix_r/skeleton",
     "timing_directory": "D:/Code/CGoGN_3/out/shapenetcar_200_fix_r/timing"
   }

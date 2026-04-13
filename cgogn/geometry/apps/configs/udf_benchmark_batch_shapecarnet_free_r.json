@@ -5,18 +5,21 @@
     "initial_ma_mode_override": "shrinking_ball"
   },
   "sampling": {
-    "alpha": 0.002,
+    "alpha": 0.0015,
     "knn_k": 20,
     "apply_filtering": true,
+    "recompute_normals_after_sampling": true,
     "ray_sampler_batch_size": 8192,
     "batch_size": 1048576,
     "tol": 1e-6,
     "udf_max_iterations": 3000,
     "bridson": {
-      "sample_radius": 0.002,
-      "sample_iterations": 30,
-      "seed_samples": 8192,
-      "parent_batch_size": 8192,
+      "sample_radius": 0.0015,
+      "candidate_mode": "2d_plane",
+      "outer_radius_scale": 1.25,
+      "warmup_iterations": 2,
+      "sample_iterations": 12,
+      "parent_batch_size": 1024,
       "max_samples": 5000000
     }
   },
@@ -47,13 +50,13 @@
   },
   "initialization": {
     "seed": 42,
-    "init_dilation_constant": 0.01,
+    "init_dilation_constant": 0.0050,
     "init_min_cover_points": 10,
     "initial_nb_spheres": 100000
   },
   "postprocess": {
     "topology_fix": true,
-    "deg_face_deletion": true,
+    "deg_face_deletion": false,
     "nm_two_layer_prune": false,
     "residual_prune": false,
     "residual_prune_threshold": 1,
@@ -71,6 +74,7 @@
     "input_extension": ".ply",
     "neural_udf_model_extension": ".pt",
     "recursive": false,
+    "resume_from_existing": true,
     "output_directory": "D:/Code/CGoGN_3/out/shapenetcar_200_free_r/skeleton",
     "timing_directory": "D:/Code/CGoGN_3/out/shapenetcar_200_free_r/timing"
   }

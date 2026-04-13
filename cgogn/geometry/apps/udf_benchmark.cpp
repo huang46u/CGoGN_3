@@ -25,6 +25,7 @@ int main(int argc, char** argv)
 	using cgogn::geometry::benchmark::BenchmarkResult;
 	using cgogn::geometry::benchmark::SkeletonBenchmarkRunner;
 	using cgogn::geometry::benchmark::expand_batch_benchmark_configs;
+	using cgogn::geometry::benchmark::is_batch_case_completed;
 	using cgogn::geometry::benchmark::is_batch_benchmark_config;
 	using cgogn::geometry::benchmark::load_benchmark_config;
 	using cgogn::geometry::benchmark::write_benchmark_timing_json;
@@ -97,9 +98,31 @@ int main(int argc, char** argv)
 			}
 			else
 			{
-				const auto case_configs = expand_batch_benchmark_configs(config);
+				const auto expanded_case_configs = expand_batch_benchmark_configs(config);
+				std::vector<BenchmarkConfig> case_configs;
+				std::vector<std::string> skipped_completed_cases;
+				case_configs.reserve(expanded_case_configs.size());
+				skipped_completed_cases.reserve(expanded_case_configs.size());
+				for (const auto& case_config : expanded_case_configs)
+				{
+					const std::string case_name = std::filesystem::path(case_config.input.input_path).stem().string();
+					if (config.batch.resume_from_existing && is_batch_case_completed(case_config))
+					{
+						skipped_completed_cases.push_back(case_name);
+						continue;
+					}
+					case_configs.push_back(case_config);
+				}
 				std::vector<std::string> failed_cases;
-				std::cout << "Batch cases: " << case_configs.size() << std::endl;
+				std::cout << "Batch cases: total=" << expanded_case_configs.size() << " pending=" << case_configs.size();
+				if (config.batch.resume_from_existing)
+					std::cout << " skipped_completed=" << skipped_completed_cases.size();
+				std::cout << std::endl;
+				if (config.batch.resume_from_existing && config.benchmark.verbose)
+				{
+					for (const auto& skipped_case : skipped_completed_cases)
+						std::cout << "Skip completed case: " << skipped_case << std::endl;
+				}
 				for (std::size_t i = 0; i < case_configs.size(); ++i)
 				{
 					const auto& case_config = case_configs[i];
@@ -122,7 +145,10 @@ int main(int argc, char** argv)
 				}
 
 				std::cout << "Batch finished: success=" << (case_configs.size() - failed_cases.size())
-						  << " failed=" << failed_cases.size() << std::endl;
+						  << " failed=" << failed_cases.size();
+				if (config.batch.resume_from_existing)
+					std::cout << " skipped_completed=" << skipped_completed_cases.size();
+				std::cout << std::endl;
 				if (!failed_cases.empty())
 				{
 					std::string failed_summary;

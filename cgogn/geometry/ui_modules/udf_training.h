@@ -48,6 +48,7 @@
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <limits>
@@ -149,6 +150,11 @@ public:
 		OUTPUT_NORMAL,
 		OUTPUT_VERBOSE
 	};
+	enum BridsonCandidateMode : uint32
+	{
+		BRIDSON_CANDIDATE_3D_SHELL,
+		BRIDSON_CANDIDATE_2D_TANGENT_RING
+	};
 
 private:
 	struct PointsParameters;
@@ -240,8 +246,10 @@ private:
 			torch::Tensor points_cpu_;
 			torch::Tensor points_gpu_;
 			torch::Tensor active_gpu_;
+			torch::Tensor iter_counts_gpu_;
 			torch::Tensor projected_cpu_;
 			torch::Tensor grad_cpu_;
+			torch::Tensor iter_counts_cpu_;
 			torch::Tensor sdf_cpu_;
 			torch::Tensor clamp_min_gpu_;
 			torch::Tensor clamp_max_gpu_;
@@ -252,6 +260,12 @@ private:
 		NeuralProjectionWorkspace neural_projection_workspace_;
 		bool filter_positive_projection_ = false;
 		std::vector<uint8_t> last_projection_keep_mask_;
+		size_t last_projection_batch_size_ = 0;
+		size_t last_projection_batch_iterations_ = 0;
+		bool last_projection_batch_hit_max_iterations_ = false;
+		size_t last_projection_point_iterations_sum_ = 0;
+		int last_projection_point_iterations_max_ = 0;
+		size_t last_projection_points_hit_max_iterations_ = 0;
 		// Spheres
 		POINTS* spheres_ = nullptr;
 		uint32 nb_spheres_ = 0;
@@ -350,8 +364,10 @@ private:
 		// Sampling Parameters
 		float alpha_ = 0.005f;
 		float sample_radius_ = 0.0025f;
-		int sample_iterations_ = 30; // Max attempts per point
-		int bridson_seed_samples_ = 8192;
+		BridsonCandidateMode bridson_candidate_mode_ = BRIDSON_CANDIDATE_3D_SHELL;
+		float32 bridson_outer_radius_scale_ = 1.25f;
+		int bridson_seed_warmup_iterations_ = 2;
+		int sample_iterations_ = 12; // Candidates generated per active parent
 		int bridson_parent_batch_size_ = 8192;
 		int bridson_max_samples_ = 4000000;
 		int knn_k_ = 10;
@@ -360,8 +376,8 @@ private:
 		float sample_grid_cell_size_ = 0.0025f;
 		int poisson_eliminate_target_samples_ = 50000;
 		int batch_size_ = 1310640;	   // NN evaluation batch
-		int ray_sampler_batch_size_ = 4096; // Rays per sampling iteration
-		float tol_ = 1e-5f; // convergence tolerance
+		int ray_sampler_batch_size_ = 8192; // Rays per sampling iteration
+		float tol_ = 1e-6f; // convergence tolerance
 		bool recompute_sample_normals_after_sampling_ = false;
 
 		// Neural UDF ray sampling parameters
@@ -476,19 +492,21 @@ public:
 		uint32 init_min_cover_points_ = 10;
 		float alpha_ = 0.005f;
 		float sample_radius_ = 0.0025f;
+		BridsonCandidateMode bridson_candidate_mode_ = BRIDSON_CANDIDATE_3D_SHELL;
+		float32 bridson_outer_radius_scale_ = 2.0f;
+		int bridson_seed_warmup_iterations_ = 2;
 		int sample_iterations_ = 30;
-		int bridson_seed_samples_ = 8192;
 		int bridson_parent_batch_size_ = 8192;
 		int bridson_max_samples_ = 4000000;
 		int knn_k_ = 10;
 		int seed_ = 42;
 		int cluster_min_points_ = 20;
-		float sample_grid_cell_size_ = 0.0025f;
 		int poisson_eliminate_target_samples_ = 0;
 		int batch_size_ = 1310640;
 		int ray_sampler_batch_size_ = 4096;
-		float tol_ = 1e-5f;
+		float tol_ = 1e-6f;
 		int udf_max_iterations_ = 3000;
+		bool recompute_sample_normals_after_sampling_ = false;
 	};
 
 	struct HeadlessOptimizationStats
@@ -539,6 +557,18 @@ public:
 		case 1:
 		default:
 			return OUTPUT_NORMAL;
+		}
+	}
+
+	static const char* bridson_candidate_mode_label(BridsonCandidateMode mode)
+	{
+		switch (mode)
+		{
+		case BRIDSON_CANDIDATE_2D_TANGENT_RING:
+			return "2d_tangent_ring";
+		case BRIDSON_CANDIDATE_3D_SHELL:
+		default:
+			return "3d_shell";
 		}
 	}
 
@@ -679,19 +709,22 @@ public:
 		p.init_min_cover_points_ = options.init_min_cover_points_;
 		p.alpha_ = options.alpha_;
 		p.sample_radius_ = options.sample_radius_;
+		p.bridson_candidate_mode_ = options.bridson_candidate_mode_;
+		p.bridson_outer_radius_scale_ = std::max(options.bridson_outer_radius_scale_, 1.0f);
+		p.bridson_seed_warmup_iterations_ = std::max(1, options.bridson_seed_warmup_iterations_);
 		p.sample_iterations_ = options.sample_iterations_;
-		p.bridson_seed_samples_ = options.bridson_seed_samples_;
 		p.bridson_parent_batch_size_ = options.bridson_parent_batch_size_;
 		p.bridson_max_samples_ = options.bridson_max_samples_;
 		p.knn_k_ = options.knn_k_;
 		p.seed_ = options.seed_;
 		p.cluster_min_points_ = options.cluster_min_points_;
-		p.sample_grid_cell_size_ = options.sample_grid_cell_size_;
+		p.sample_grid_cell_size_ = derived_bridson_grid_cell_size(p);
 		p.poisson_eliminate_target_samples_ = options.poisson_eliminate_target_samples_;
 		p.batch_size_ = options.batch_size_;
 		p.ray_sampler_batch_size_ = options.ray_sampler_batch_size_;
 		p.tol_ = options.tol_;
 		p.udf_max_iterations_ = options.udf_max_iterations_;
+		p.recompute_sample_normals_after_sampling_ = options.recompute_sample_normals_after_sampling_;
 		if (p.sample_grid_cell_size_ > Scalar(0))
 			p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.sample_grid_cell_size_);
 		else
@@ -721,8 +754,18 @@ public:
 
 	void headless_build_sample_kdtree_and_normals_prepared(PointsParameters& p)
 	{
+		log_basic(p, "Headless sample normal recompute after sampling: ",
+				  (p.recompute_sample_normals_after_sampling_ ? "true" : "false"), '\n');
 		build_kdtree(p);
-		recompute_samples_normals_pca(p);
+		if (p.recompute_sample_normals_after_sampling_)
+		{
+			log_basic(p, "Recomputing sampled normals with PCA after sampling...", '\n');
+			recompute_samples_normals_pca(p);
+		}
+		else
+		{
+			log_basic(p, "Keeping sampled normals from sampling output without PCA recompute.", '\n');
+		}
 	}
 
 	void headless_build_sample_kdtree_and_normals_prepared(POINTS& points)
@@ -1267,6 +1310,38 @@ public:
 		}
 	}
 
+	bool try_eval_debug_udf_value(POINTS& points, const Vec3& query_point, Scalar& out_value)
+	{
+		PointsParameters* params = nullptr;
+		auto it = points_parameters_.find(&points);
+		if (it != points_parameters_.end())
+		{
+			params = &it->second;
+		}
+		else
+		{
+			for (auto& [input_points, p] : points_parameters_)
+			{
+				(void)input_points;
+				if (p.points_ == &points || p.samples_mesh_ == &points || p.spheres_ == &points)
+				{
+					params = &p;
+					break;
+				}
+			}
+		}
+		if (!params)
+			return false;
+		PointsParameters& p = *params;
+		if (!p.neural_udf_loaded_)
+			return false;
+		std::vector<Scalar> values;
+		if (!eval_udf_values(p, std::vector<Vec3>{query_point}, values) || values.empty())
+			return false;
+		out_value = values[0];
+		return true;
+	}
+
 	NeuralFieldForward make_neural_field_forward(PointsParameters& p)
 	{
 		return NeuralFieldForward(&p.neural_udf_model_, p.neural_udf_loaded_, device_);
@@ -1387,6 +1462,7 @@ public:
 		log_basic(p, "Alpha level set sampling complete. Ready for fitting.", '\n');
 	}
 
+
 	RaySamplerParams make_ray_params(const PointsParameters& p) const
 	{
 		RaySamplerParams params;
@@ -1504,6 +1580,11 @@ public:
 		return std::max(cell, Scalar(1e-8));
 	}
 
+	Scalar bridson_outer_radius_scale(const PointsParameters& p) const
+	{
+		return std::max(Scalar(1.0), Scalar(p.bridson_outer_radius_scale_));
+	}
+
 	void ensure_neural_projection_workspace(PointsParameters& p, size_t capacity)
 	{
 		auto& ws = p.neural_projection_workspace_;
@@ -1516,12 +1597,18 @@ public:
 			cpu_opts = cpu_opts.pinned_memory(true);
 		auto gpu_float_opts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
 		auto gpu_bool_opts = torch::TensorOptions().dtype(torch::kBool).device(device_);
+		auto gpu_int_opts = torch::TensorOptions().dtype(torch::kInt32).device(device_);
+		auto cpu_int_opts = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+		if (device_.is_cuda())
+			cpu_int_opts = cpu_int_opts.pinned_memory(true);
 
 		ws.points_cpu_ = torch::empty({static_cast<int64_t>(new_capacity), 3}, cpu_opts);
 		ws.points_gpu_ = torch::empty({static_cast<int64_t>(new_capacity), 3}, gpu_float_opts);
 		ws.active_gpu_ = torch::empty({static_cast<int64_t>(new_capacity)}, gpu_bool_opts);
+		ws.iter_counts_gpu_ = torch::empty({static_cast<int64_t>(new_capacity)}, gpu_int_opts);
 		ws.projected_cpu_ = torch::empty({static_cast<int64_t>(new_capacity), 3}, cpu_opts);
 		ws.grad_cpu_ = torch::empty({static_cast<int64_t>(new_capacity), 3}, cpu_opts);
+		ws.iter_counts_cpu_ = torch::empty({static_cast<int64_t>(new_capacity)}, cpu_int_opts);
 		ws.sdf_cpu_ = torch::empty({static_cast<int64_t>(new_capacity)}, cpu_opts);
 		ws.clamp_bounds_valid_ = false;
 		ws.capacity_ = new_capacity;
@@ -1551,62 +1638,79 @@ public:
 		if (points.empty())
 			return true;
 
-		ensure_neural_projection_workspace(p, points.size());
+		const size_t grad_batch_size = static_cast<size_t>(std::max(1, p.batch_size_));
+		ensure_neural_projection_workspace(p, std::min(points.size(), grad_batch_size));
 		auto& ws = p.neural_projection_workspace_;
-		const int64_t count = static_cast<int64_t>(points.size());
-		torch::Tensor cpu_points = ws.points_cpu_.narrow(0, 0, count);
-		auto pts_acc = cpu_points.accessor<float, 2>();
-		for (size_t i = 0; i < points.size(); ++i)
-		{
-			pts_acc[static_cast<long>(i)][0] = static_cast<float>(points[i].x());
-			pts_acc[static_cast<long>(i)][1] = static_cast<float>(points[i].y());
-			pts_acc[static_cast<long>(i)][2] = static_cast<float>(points[i].z());
-		}
-
-		torch::Tensor gpu_points = ws.points_gpu_.narrow(0, 0, count);
-		gpu_points.copy_(cpu_points);
+		normals.assign(points.size(), Vec3(0, 0, 1));
 
 		NeuralFieldForward udf = make_neural_field_forward(p);
-		auto [values, grad] = udf.forward_values_grad_gpu(gpu_points);
-		if (!values.defined() || !grad.defined())
-			return false;
-		if (grad.dim() != 2 || grad.size(0) != count || grad.size(1) != 3)
-			return false;
-
-		torch::Tensor grad_cpu = ws.grad_cpu_.narrow(0, 0, count);
-		grad_cpu.copy_(grad);
-		auto grad_acc = grad_cpu.accessor<float, 2>();
-		normals.reserve(points.size());
-		for (size_t i = 0; i < points.size(); ++i)
+		for (size_t offset = 0; offset < points.size(); offset += grad_batch_size)
 		{
-			Vec3 n(static_cast<Scalar>(grad_acc[static_cast<long>(i)][0]),
-				   static_cast<Scalar>(grad_acc[static_cast<long>(i)][1]),
-				   static_cast<Scalar>(grad_acc[static_cast<long>(i)][2]));
-			if (n.squaredNorm() < Scalar(1e-12))
-				n = Vec3(0, 0, 1);
-			else
-				n.normalize();
-			normals.push_back(n);
+			const size_t chunk_size = std::min(grad_batch_size, points.size() - offset);
+			const int64_t count = static_cast<int64_t>(chunk_size);
+			torch::Tensor cpu_points = ws.points_cpu_.narrow(0, 0, count);
+			auto pts_acc = cpu_points.accessor<float, 2>();
+			for (size_t i = 0; i < chunk_size; ++i)
+			{
+				const Vec3& pt = points[offset + i];
+				pts_acc[static_cast<long>(i)][0] = static_cast<float>(pt.x());
+				pts_acc[static_cast<long>(i)][1] = static_cast<float>(pt.y());
+				pts_acc[static_cast<long>(i)][2] = static_cast<float>(pt.z());
+			}
+
+			torch::Tensor gpu_points = ws.points_gpu_.narrow(0, 0, count);
+			gpu_points.copy_(cpu_points);
+
+			auto [values, grad] = udf.forward_values_grad_gpu(gpu_points);
+			if (!values.defined() || !grad.defined())
+				return false;
+			if (grad.dim() != 2 || grad.size(0) != count || grad.size(1) != 3)
+				return false;
+
+			torch::Tensor grad_cpu = ws.grad_cpu_.narrow(0, 0, count);
+			grad_cpu.copy_(grad);
+			auto grad_acc = grad_cpu.accessor<float, 2>();
+			for (size_t i = 0; i < chunk_size; ++i)
+			{
+				Vec3 n(static_cast<Scalar>(grad_acc[static_cast<long>(i)][0]),
+					   static_cast<Scalar>(grad_acc[static_cast<long>(i)][1]),
+					   static_cast<Scalar>(grad_acc[static_cast<long>(i)][2]));
+				if (n.squaredNorm() < Scalar(1e-12))
+					n = Vec3(0, 0, 1);
+				else
+					n.normalize();
+				normals[offset + i] = n;
+			}
 		}
 		return true;
 	}
 
 	bool project_points_to_alpha_gpu_impl(PointsParameters& p, const std::vector<Vec3>& points, const Vec3& bbox_min,
 										  const Vec3& bbox_max, typename PointsParameters::NeuralProjectionWorkspace& workspace,
-										  std::vector<Vec3>& projected_points, std::vector<Vec3>& normals)
+										  std::vector<Vec3>& projected_points, std::vector<Vec3>& normals, int max_iters = 30,
+										  std::vector<Scalar>* final_abs_residuals = nullptr)
 	{
 		const size_t nb_points = points.size();
+		p.last_projection_batch_size_ = nb_points;
+		p.last_projection_batch_iterations_ = 0;
+		p.last_projection_batch_hit_max_iterations_ = false;
+		p.last_projection_point_iterations_sum_ = 0;
+		p.last_projection_point_iterations_max_ = 0;
+		p.last_projection_points_hit_max_iterations_ = 0;
 		p.last_projection_keep_mask_.assign(nb_points, 1);
 		projected_points.assign(nb_points, Vec3(0, 0, 0));
 		normals.assign(nb_points, Vec3(0, 0, 1));
 		if (nb_points == 0)
+		{
+			if (final_abs_residuals)
+				final_abs_residuals->clear();
 			return true;
+		}
 
 		ensure_neural_projection_workspace(p, nb_points);
 		ensure_neural_projection_clamp_tensors(p, bbox_min, bbox_max);
 
-		const int max_iters = 30;
-		const Scalar tol = 1e-6f;
+		const Scalar tol = p.tol_;
 		NeuralFieldForward udf = make_neural_field_forward(p);
 
 		try
@@ -1625,11 +1729,15 @@ public:
 			X.copy_(cpu_points);
 			torch::Tensor active = workspace.active_gpu_.narrow(0, 0, count);
 			active.fill_(true);
+			torch::Tensor iter_counts = workspace.iter_counts_gpu_.narrow(0, 0, count);
+			iter_counts.zero_();
 			const torch::Tensor& bbox_min_t = workspace.clamp_min_gpu_;
 			const torch::Tensor& bbox_max_t = workspace.clamp_max_gpu_;
+			size_t batch_iterations = 0;
 
 			for (int iter = 0; iter < max_iters; ++iter)
 			{
+				++batch_iterations;
 				auto [values, grad] = udf.forward_values_grad_gpu(X);
 				if (!values.defined() || !grad.defined())
 					return false;
@@ -1640,6 +1748,7 @@ public:
 				torch::Tensor residual = f - p.alpha_;
 				torch::Tensor abs_residual = torch::abs(residual);
 				torch::Tensor next_active = active & (abs_residual > tol);
+				iter_counts.add_(next_active.to(torch::kInt32));
 				active.copy_(next_active);
 				if (torch::sum(active).item<int64_t>() == 0)
 					break;
@@ -1650,6 +1759,7 @@ public:
 				X.sub_(step * grad);
 				X.copy_(torch::maximum(torch::minimum(X, bbox_max_t), bbox_min_t));
 			}
+			p.last_projection_batch_iterations_ = batch_iterations;
 
 			auto [values, grad] = udf.forward_values_grad_gpu(X);
 			if (!values.defined() || !grad.defined())
@@ -1657,8 +1767,10 @@ public:
 
 			torch::Tensor projected_cpu = workspace.projected_cpu_.narrow(0, 0, count);
 			torch::Tensor grad_cpu = workspace.grad_cpu_.narrow(0, 0, count);
+			torch::Tensor iter_counts_cpu = workspace.iter_counts_cpu_.narrow(0, 0, count);
 			projected_cpu.copy_(X);
 			grad_cpu.copy_(grad);
+			iter_counts_cpu.copy_(iter_counts);
 
 			torch::Tensor sdf_cpu;
 			auto [values_sdf, sdf] = udf.forward_values_sdf_gpu(X);
@@ -1672,11 +1784,20 @@ public:
 
 			auto projected_acc = projected_cpu.accessor<float, 2>();
 			auto grad_acc = grad_cpu.accessor<float, 2>();
+			auto iter_acc = iter_counts_cpu.accessor<int32_t, 1>();
+			size_t point_iteration_sum = 0;
+			int point_iteration_max = 0;
+			size_t points_hit_max_iterations = 0;
 			if (sdf_cpu.defined() && sdf_cpu.dim() == 1 && sdf_cpu.size(0) == count)
 			{
 				auto sdf_acc = sdf_cpu.accessor<float, 1>();
 				for (size_t i = 0; i < nb_points; ++i)
 				{
+					const int point_iterations = iter_acc[static_cast<long>(i)];
+					point_iteration_sum += static_cast<size_t>(point_iterations);
+					point_iteration_max = std::max(point_iteration_max, point_iterations);
+					if (point_iterations >= max_iters)
+						++points_hit_max_iterations;
 					const bool keep = (sdf_acc[static_cast<long>(i)] <= 0.0f) || !p.filter_positive_projection_;
 					p.last_projection_keep_mask_[i] = keep ? uint8_t(1) : uint8_t(0);
 					projected_points[i] =
@@ -1696,6 +1817,11 @@ public:
 			{
 				for (size_t i = 0; i < nb_points; ++i)
 				{
+					const int point_iterations = iter_acc[static_cast<long>(i)];
+					point_iteration_sum += static_cast<size_t>(point_iterations);
+					point_iteration_max = std::max(point_iteration_max, point_iterations);
+					if (point_iterations >= max_iters)
+						++points_hit_max_iterations;
 					projected_points[i] =
 						Vec3(projected_acc[static_cast<long>(i)][0], projected_acc[static_cast<long>(i)][1],
 							 projected_acc[static_cast<long>(i)][2]);
@@ -1708,6 +1834,22 @@ public:
 						n.normalize();
 					normals[i] = n;
 				}
+			}
+			p.last_projection_point_iterations_sum_ = point_iteration_sum;
+			p.last_projection_point_iterations_max_ = point_iteration_max;
+			p.last_projection_points_hit_max_iterations_ = points_hit_max_iterations;
+			p.last_projection_batch_hit_max_iterations_ = (points_hit_max_iterations > 0);
+			if (final_abs_residuals)
+			{
+				torch::Tensor final_residuals = values;
+				if (final_residuals.dim() == 2 && final_residuals.size(1) == 1)
+					final_residuals = final_residuals.squeeze(1);
+				final_residuals = torch::abs(final_residuals - static_cast<float>(p.alpha_));
+				torch::Tensor final_residuals_cpu = final_residuals.to(torch::kCPU).contiguous();
+				final_abs_residuals->resize(nb_points);
+				auto final_residuals_acc = final_residuals_cpu.accessor<float, 1>();
+				for (size_t i = 0; i < nb_points; ++i)
+					(*final_abs_residuals)[i] = static_cast<Scalar>(final_residuals_acc[static_cast<long>(i)]);
 			}
 			return true;
 		}
@@ -1782,20 +1924,82 @@ public:
 		return info.valid;
 	}
 
+	bool eval_alpha_residuals_impl(PointsParameters& p, const std::vector<Vec3>& points,
+								   std::vector<Scalar>& out_residuals, geometry::RaySamplerNeural)
+	{
+		out_residuals.assign(points.size(), std::numeric_limits<Scalar>::infinity());
+		std::vector<Scalar> values;
+		if (!eval_udf_values(p, points, values) || values.size() != points.size())
+			return false;
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			const Scalar value = values[i];
+			if (!std::isfinite(static_cast<double>(value)))
+				continue;
+			out_residuals[i] = std::abs(value - p.alpha_);
+		}
+		return true;
+	}
+
+	bool eval_alpha_residuals_impl(PointsParameters& p, const std::vector<Vec3>& points,
+								   std::vector<Scalar>& out_residuals, geometry::RaySamplerSurface)
+	{
+		out_residuals.assign(points.size(), std::numeric_limits<Scalar>::infinity());
+		if (!selected_surface_)
+			return false;
+		auto surface_position = get_attribute<Vec3, SVertex>(*selected_surface_, "position");
+		if (!surface_position)
+			return false;
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			AlphaProjectionInfo info;
+			if (!query_surface_projection_info(points[i], surface_position.get(), info) || !info.valid)
+				continue;
+			out_residuals[i] = std::abs(info.distance - p.alpha_);
+		}
+		return true;
+	}
+
+	bool eval_alpha_residuals_impl(PointsParameters& p, const std::vector<Vec3>& points,
+								   std::vector<Scalar>& out_residuals, geometry::RaySamplerPointCloud)
+	{
+		out_residuals.assign(points.size(), std::numeric_limits<Scalar>::infinity());
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			AlphaProjectionInfo info;
+			if (!query_point_cloud_projection_info(p, points[i], info) || !info.valid)
+				continue;
+			out_residuals[i] = std::abs(info.distance - p.alpha_);
+		}
+		return true;
+	}
+
 	template <typename QueryFn>
 	bool project_points_to_alpha_cpu_impl(PointsParameters& p, const std::vector<Vec3>& points, const Vec3& bbox_min,
 										  const Vec3& bbox_max, QueryFn&& query, std::vector<Vec3>& projected_points,
-										  std::vector<Vec3>& normals)
+										  std::vector<Vec3>& normals, int max_iters = 30,
+										  std::vector<Scalar>* final_abs_residuals = nullptr)
 	{
 		const size_t nb_points = points.size();
+		p.last_projection_batch_size_ = nb_points;
+		p.last_projection_batch_iterations_ = 0;
+		p.last_projection_batch_hit_max_iterations_ = false;
+		p.last_projection_point_iterations_sum_ = 0;
+		p.last_projection_point_iterations_max_ = 0;
+		p.last_projection_points_hit_max_iterations_ = 0;
 		p.last_projection_keep_mask_.assign(nb_points, 0);
 		projected_points.assign(nb_points, Vec3(0, 0, 0));
 		normals.assign(nb_points, Vec3(0, 0, 1));
 		if (nb_points == 0)
+		{
+			if (final_abs_residuals)
+				final_abs_residuals->clear();
 			return true;
+		}
 
-		const int max_iters = 30;
-		const Scalar tol = std::max(Scalar(1e-6), Scalar(p.tol_));
+		const Scalar tol = p.tol_;
+		if (final_abs_residuals)
+			final_abs_residuals->assign(nb_points, std::numeric_limits<Scalar>::infinity());
 		for (size_t i = 0; i < nb_points; ++i)
 		{
 			Vec3 x = points[i].cwiseMax(bbox_min).cwiseMin(bbox_max);
@@ -1825,6 +2029,8 @@ public:
 				continue;
 
 			const Scalar residual = std::abs(info.distance - p.alpha_);
+			if (final_abs_residuals)
+				(*final_abs_residuals)[i] = residual;
 			if (residual > tol)
 				continue;
 
@@ -1837,15 +2043,18 @@ public:
 
 	bool project_points_to_alpha_impl(PointsParameters& p, const std::vector<Vec3>& points, const Vec3& bbox_min,
 									  const Vec3& bbox_max, std::vector<Vec3>& projected_points,
-									  std::vector<Vec3>& normals, geometry::RaySamplerNeural)
+									  std::vector<Vec3>& normals, geometry::RaySamplerNeural, int max_iters = 30,
+									  std::vector<Scalar>* final_abs_residuals = nullptr)
 	{
 		return project_points_to_alpha_gpu_impl(
-			p, points, bbox_min, bbox_max, p.neural_projection_workspace_, projected_points, normals);
+			p, points, bbox_min, bbox_max, p.neural_projection_workspace_, projected_points, normals, max_iters,
+			final_abs_residuals);
 	}
 
 	bool project_points_to_alpha_impl(PointsParameters& p, const std::vector<Vec3>& points, const Vec3& bbox_min,
 									  const Vec3& bbox_max, std::vector<Vec3>& projected_points,
-									  std::vector<Vec3>& normals, geometry::RaySamplerSurface)
+									  std::vector<Vec3>& normals, geometry::RaySamplerSurface, int max_iters = 30,
+									  std::vector<Scalar>* final_abs_residuals = nullptr)
 	{
 		auto surface_position = get_attribute<Vec3, SVertex>(*selected_surface_, "position");
 		if (!surface_position)
@@ -1855,30 +2064,147 @@ public:
 			[&](const Vec3& sample_pos, AlphaProjectionInfo& info) {
 				return query_surface_projection_info(sample_pos, surface_position.get(), info);
 			},
-			projected_points, normals);
+			projected_points, normals, max_iters, final_abs_residuals);
 	}
 
 	bool project_points_to_alpha_impl(PointsParameters& p, const std::vector<Vec3>& points, const Vec3& bbox_min,
 									  const Vec3& bbox_max, std::vector<Vec3>& projected_points,
-									  std::vector<Vec3>& normals, geometry::RaySamplerPointCloud)
+									  std::vector<Vec3>& normals, geometry::RaySamplerPointCloud, int max_iters = 30,
+									  std::vector<Scalar>* final_abs_residuals = nullptr)
 	{
 		return project_points_to_alpha_cpu_impl(
 			p, points, bbox_min, bbox_max,
 			[&](const Vec3& sample_pos, AlphaProjectionInfo& info) {
 				return query_point_cloud_projection_info(p, sample_pos, info);
 			},
-			projected_points, normals);
+			projected_points, normals, max_iters, final_abs_residuals);
 	}
 
-	Vec3 sample_spherical_shell_candidate(const Vec3& center, Scalar radius,
+	bool compute_alpha_point_normals_impl(PointsParameters& p, const std::vector<Vec3>& points,
+										  std::vector<Vec3>& normals, std::vector<uint8_t>& keep_mask,
+										  geometry::RaySamplerNeural)
+	{
+		keep_mask.assign(points.size(), uint8_t(0));
+		if (!compute_neural_gradients_gpu(p, points, normals))
+			return false;
+		if (normals.size() != points.size())
+			return false;
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			if (!points[i].allFinite() || !normals[i].allFinite())
+				continue;
+			keep_mask[i] = uint8_t(1);
+		}
+		return true;
+	}
+
+	bool compute_alpha_point_normals_impl(PointsParameters& p, const std::vector<Vec3>& points,
+										  std::vector<Vec3>& normals, std::vector<uint8_t>& keep_mask,
+										  geometry::RaySamplerSurface)
+	{
+		auto surface_position = get_attribute<Vec3, SVertex>(*selected_surface_, "position");
+		if (!surface_position)
+			return false;
+		keep_mask.assign(points.size(), uint8_t(0));
+		normals.assign(points.size(), Vec3(0, 0, 1));
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			AlphaProjectionInfo info;
+			if (!query_surface_projection_info(points[i], surface_position.get(), info) || !info.valid)
+				continue;
+			if (!points[i].allFinite() || !info.normal.allFinite())
+				continue;
+			Vec3 n = info.normal;
+			if (n.squaredNorm() < Scalar(1e-12))
+				n = Vec3(0, 0, 1);
+			else
+				n.normalize();
+			normals[i] = n;
+			keep_mask[i] = uint8_t(1);
+		}
+		return true;
+	}
+
+	bool compute_alpha_point_normals_impl(PointsParameters& p, const std::vector<Vec3>& points,
+										  std::vector<Vec3>& normals, std::vector<uint8_t>& keep_mask,
+										  geometry::RaySamplerPointCloud)
+	{
+		keep_mask.assign(points.size(), uint8_t(0));
+		normals.assign(points.size(), Vec3(0, 0, 1));
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			AlphaProjectionInfo info;
+			if (!query_point_cloud_projection_info(p, points[i], info) || !info.valid)
+				continue;
+			if (!points[i].allFinite() || !info.normal.allFinite())
+				continue;
+			Vec3 n = info.normal;
+			if (n.squaredNorm() < Scalar(1e-12))
+				n = Vec3(0, 0, 1);
+			else
+				n.normalize();
+			normals[i] = n;
+			keep_mask[i] = uint8_t(1);
+		}
+		return true;
+	}
+
+	void build_stable_tangent_basis(const Vec3& normal_in, Vec3& tangent_u, Vec3& tangent_v) const
+	{
+		Vec3 n = normal_in;
+		if (n.squaredNorm() < Scalar(1e-12))
+			n = Vec3(0, 0, 1);
+		else
+			n.normalize();
+		Vec3 ref = (std::abs(n.z()) < Scalar(0.9)) ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
+		tangent_u = n.cross(ref);
+		if (tangent_u.squaredNorm() < Scalar(1e-12))
+			tangent_u = n.cross(Vec3(1, 0, 0));
+		tangent_u.normalize();
+		tangent_v = n.cross(tangent_u);
+		if (tangent_v.squaredNorm() < Scalar(1e-12))
+			tangent_v = Vec3(0, 1, 0);
+		else
+			tangent_v.normalize();
+	}
+
+	Vec3 sample_tangent_annulus_candidate(const Vec3& center, const Vec3& normal, Scalar radius,
+										  Scalar outer_radius_scale, std::uniform_real_distribution<Scalar>& uni,
+										  std::mt19937& gen) const
+	{
+		Vec3 tangent_u, tangent_v;
+		build_stable_tangent_basis(normal, tangent_u, tangent_v);
+		const Scalar outer_radius_sq = outer_radius_scale * outer_radius_scale;
+		const Scalar annulus_radius = radius * std::sqrt(Scalar(1.0) + (outer_radius_sq - Scalar(1.0)) * uni(gen));
+		const Scalar theta = Scalar(2.0 * M_PI) * uni(gen);
+		return center + annulus_radius * (std::cos(theta) * tangent_u + std::sin(theta) * tangent_v);
+	}
+
+	Vec3 sample_spherical_shell_candidate(const Vec3& center, Scalar radius, Scalar outer_radius_scale,
 										   std::uniform_real_distribution<Scalar>& uni, std::mt19937& gen) const
 	{
 		const Scalar z = Scalar(1.0) - Scalar(2.0) * uni(gen);
 		const Scalar theta = Scalar(2.0 * M_PI) * uni(gen);
 		const Scalar xy_scale = std::sqrt(std::max(Scalar(0.0), Scalar(1.0) - z * z));
 		const Vec3 direction(xy_scale * std::cos(theta), xy_scale * std::sin(theta), z);
-		const Scalar shell_radius = radius * std::cbrt(Scalar(1.0) + Scalar(7.0) * uni(gen));
+		const Scalar outer_radius_cube = outer_radius_scale * outer_radius_scale * outer_radius_scale;
+		const Scalar shell_radius =
+			radius * std::cbrt(Scalar(1.0) + (outer_radius_cube - Scalar(1.0)) * uni(gen));
 		return center + shell_radius * direction;
+	}
+
+	Vec3 sample_bridson_candidate(const Vec3& center, const Vec3& normal, Scalar radius,
+								  BridsonCandidateMode mode, Scalar outer_radius_scale,
+								  std::uniform_real_distribution<Scalar>& uni, std::mt19937& gen) const
+	{
+		switch (mode)
+		{
+		case BRIDSON_CANDIDATE_2D_TANGENT_RING:
+			return sample_tangent_annulus_candidate(center, normal, radius, outer_radius_scale, uni, gen);
+		case BRIDSON_CANDIDATE_3D_SHELL:
+		default:
+			return sample_spherical_shell_candidate(center, radius, outer_radius_scale, uni, gen);
+		}
 	}
 
 	void sample_active_parent_indices(const std::vector<uint32>& active_indices, size_t batch_size, std::mt19937& gen,
@@ -1934,6 +2260,7 @@ public:
 	void load_alpha_samples_to_mesh_bridson_impl(PointsParameters& p, Traits& traits, const torch::Device& device,
 												 const char* mode_label, Tag tag)
 	{
+		const auto sampling_start_time = std::chrono::steady_clock::now();
 		if (p.sample_radius_ <= Scalar(0))
 		{
 			log_error(p, "Sample radius must be positive for batched Bridson saturation sampling.", '\n');
@@ -1945,9 +2272,11 @@ public:
 			return;
 		}
 
-		p.sample_grid_cell_size_ = derived_bridson_grid_cell_size(p);
+		const Scalar bridson_grid_cell_size = derived_bridson_grid_cell_size(p);
+		const Scalar outer_radius_scale = bridson_outer_radius_scale(p);
 		log_basic(p, "Sampling alpha=", p.alpha_, " level set with batched Bridson saturation (", mode_label,
-				  "). radius=", p.sample_radius_, " grid_cell=", p.sample_grid_cell_size_, '\n');
+				  "). radius=", p.sample_radius_, " candidate=", bridson_candidate_mode_label(p.bridson_candidate_mode_),
+				  " outer_scale=", outer_radius_scale, " grid_cell=", bridson_grid_cell_size, '\n');
 
 		RaySamplerParams ray_params = make_ray_params(p);
 		if (!p.ray_sampler_)
@@ -1963,34 +2292,109 @@ public:
 				  '\n');
 
 		std::mt19937 gen(p.seed_);
-		std::unique_ptr<SpatialGrid> global_grid = std::make_unique<SpatialGrid>(p.sample_grid_cell_size_);
+		std::unique_ptr<SpatialGrid> global_grid = std::make_unique<SpatialGrid>(bridson_grid_cell_size);
 		std::vector<Vec3> accepted_positions;
 		std::vector<Vec3> accepted_normals;
-		std::vector<uint32> attempt_counts;
+		std::vector<uint8_t> accepted_sample_origin;
 		std::vector<uint32> active_indices;
 		std::vector<uint32> active_slot_of_sample;
 		std::vector<uint32> selected_parents;
 		std::vector<Vec3> raw_candidates;
 		std::vector<Vec3> projected_candidates;
 		std::vector<Vec3> projected_normals;
+		std::vector<Scalar> projected_errors;
 		bool bridson_progress_live = false;
 		size_t last_logged_accepted_total = std::numeric_limits<size_t>::max();
 		size_t last_logged_active_total = std::numeric_limits<size_t>::max();
+		double warmup_rays_s = 0.0;
+		double warmup_seed_normals_s = 0.0;
+		double bridson_loop_s = 0.0;
+		double bridson_project_s = 0.0;
+		double bridson_grid_check_s = 0.0;
+		size_t bridson_projected_points = 0;
+		size_t bridson_projection_batches = 0;
+		size_t bridson_projection_total_batch_iterations = 0;
+		int bridson_projection_max_batch_iterations = 0;
+		size_t bridson_projection_batches_hit_max_iterations = 0;
+		size_t bridson_projection_total_point_iterations = 0;
+		int bridson_projection_max_point_iterations = 0;
+		size_t bridson_projection_points_hit_max_iterations = 0;
+		const Scalar tol = p.tol_;
+		enum SampleOrigin : uint8_t
+		{
+			SAMPLE_ORIGIN_WARMUP = 0,
+			SAMPLE_ORIGIN_BRIDSON_CHILD = 1
+		};
+		struct ResidualHistogramStats
+		{
+			size_t total_points_ = 0;
+			size_t not_converged_points_ = 0;
+			Scalar max_error_ = Scalar(0);
+			std::array<size_t, 8> bins_{};
+		};
+		ResidualHistogramStats warmup_seed_residual_stats;
+		ResidualHistogramStats bridson_projection_error_stats;
+		ResidualHistogramStats bridson_projection_error_stats_warmup_parents;
+		ResidualHistogramStats bridson_projection_error_stats_bridson_parents;
+		bool warmup_seed_residual_stats_valid = true;
 
-		const size_t seed_target = static_cast<size_t>(std::max(1, p.bridson_seed_samples_));
 		const size_t parent_batch_size = static_cast<size_t>(std::max(1, p.bridson_parent_batch_size_));
 		const size_t max_samples = static_cast<size_t>(std::max(1, p.bridson_max_samples_));
-		const size_t initial_reserve = std::max(seed_target, parent_batch_size) * size_t(4);
+		const size_t seed_outer_iterations =
+			static_cast<size_t>(std::max(1, p.bridson_seed_warmup_iterations_));
+		const size_t seed_rays_per_round =
+			static_cast<size_t>(std::max(1, p.ray_sampler_batch_size_)) * seed_outer_iterations;
+		const Scalar max_parent_distance = (outer_radius_scale + Scalar(0.5)) * p.sample_radius_;
+		const size_t initial_reserve = std::max(seed_rays_per_round, parent_batch_size) * size_t(4);
 		accepted_positions.reserve(initial_reserve);
 		accepted_normals.reserve(initial_reserve);
-		attempt_counts.reserve(initial_reserve);
+		accepted_sample_origin.reserve(initial_reserve);
 		active_indices.reserve(initial_reserve);
 		active_slot_of_sample.reserve(initial_reserve);
-		raw_candidates.reserve(parent_batch_size);
-		projected_candidates.reserve(parent_batch_size);
-		projected_normals.reserve(parent_batch_size);
+		raw_candidates.reserve(parent_batch_size * static_cast<size_t>(std::max(1, p.sample_iterations_)));
+		projected_candidates.reserve(parent_batch_size * static_cast<size_t>(std::max(1, p.sample_iterations_)));
+		projected_normals.reserve(parent_batch_size * static_cast<size_t>(std::max(1, p.sample_iterations_)));
 
-		auto add_sample = [&](const Vec3& pos, const Vec3& normal) {
+		auto accumulate_residual_histogram = [&](ResidualHistogramStats& stats, Scalar error) {
+			++stats.total_points_;
+			if (!std::isfinite(static_cast<double>(error)))
+			{
+				++stats.not_converged_points_;
+				++stats.bins_[0];
+				return;
+			}
+			stats.max_error_ = std::max(stats.max_error_, error);
+			if (error > tol)
+				++stats.not_converged_points_;
+			if (error >= Scalar(1e-2))
+				++stats.bins_[0];
+			else if (error >= Scalar(1e-3))
+				++stats.bins_[1];
+			else if (error >= Scalar(1e-4))
+				++stats.bins_[2];
+			else if (error >= Scalar(1e-5))
+				++stats.bins_[3];
+			else if (error >= Scalar(1e-6))
+				++stats.bins_[4];
+			else if (error >= Scalar(1e-7))
+				++stats.bins_[5];
+			else if (error >= Scalar(1e-8))
+				++stats.bins_[6];
+			else
+				++stats.bins_[7];
+		};
+
+		auto log_residual_histogram = [&](const char* log_tag, const char* group_label,
+										  const ResidualHistogramStats& stats) {
+			log_basic(p, "[", log_tag, ":", mode_label, "] group=", group_label, " total_points=", stats.total_points_,
+					  " not_converged=", stats.not_converged_points_, " max_error=", stats.max_error_, " tol=", tol,
+					  " bins >=1e-2=", stats.bins_[0], " 1e-2-1e-3=", stats.bins_[1], " 1e-3-1e-4=",
+					  stats.bins_[2], " 1e-4-1e-5=", stats.bins_[3], " 1e-5-1e-6=", stats.bins_[4],
+					  " 1e-6-1e-7=", stats.bins_[5], " 1e-7-1e-8=", stats.bins_[6], " <1e-8=", stats.bins_[7],
+					  '\n');
+		};
+
+		auto add_sample = [&](const Vec3& pos, const Vec3& normal, SampleOrigin origin) {
 			uint32 sample_idx = static_cast<uint32>(accepted_positions.size());
 			Vec3 n = normal;
 			if (n.squaredNorm() < Scalar(1e-12))
@@ -1999,7 +2403,7 @@ public:
 				n.normalize();
 			accepted_positions.push_back(pos);
 			accepted_normals.push_back(n);
-			attempt_counts.push_back(0);
+			accepted_sample_origin.push_back(origin);
 			active_slot_of_sample.push_back(static_cast<uint32>(active_indices.size()));
 			active_indices.push_back(sample_idx);
 			global_grid->insert(pos, sample_idx);
@@ -2039,90 +2443,197 @@ public:
 			last_logged_active_total = active_total;
 		};
 
+		auto log_bridson_projection_error_stats = [&]() {
+			log_residual_histogram("BridsonProjectionErrors", "all", bridson_projection_error_stats);
+			log_residual_histogram(
+				"BridsonProjectionErrors", "parent_from_warmup", bridson_projection_error_stats_warmup_parents);
+			log_residual_histogram("BridsonProjectionErrors", "parent_from_bridson_child",
+								   bridson_projection_error_stats_bridson_parents);
+		};
+
+		auto log_bridson_timing = [&](double elapsed_s) {
+			const double avg_batch_iterations =
+				bridson_projection_batches == 0
+					? 0.0
+					: static_cast<double>(bridson_projection_total_batch_iterations) /
+						  static_cast<double>(bridson_projection_batches);
+			const double avg_point_iterations =
+				bridson_projected_points == 0
+					? 0.0
+					: static_cast<double>(bridson_projection_total_point_iterations) /
+						  static_cast<double>(bridson_projected_points);
+			log_basic(p, "[BridsonTiming:", mode_label, "] warmup_rays_s=", warmup_rays_s,
+					  " warmup_seed_normals_s=", warmup_seed_normals_s, " bridson_loop_s=", bridson_loop_s,
+					  " bridson_projected_points=", bridson_projected_points,
+					  " bridson_projection_batches=", bridson_projection_batches,
+					  " bridson_project_s=", bridson_project_s, " bridson_grid_check_s=", bridson_grid_check_s,
+					  " projection_total_batch_iters=", bridson_projection_total_batch_iterations,
+					  " projection_avg_batch_iters=", avg_batch_iterations,
+					  " projection_max_batch_iters=", bridson_projection_max_batch_iterations,
+					  " projection_batches_hit_max_iters=", bridson_projection_batches_hit_max_iterations,
+					  " projection_total_point_iters=", bridson_projection_total_point_iterations,
+					  " projection_avg_point_iters=", avg_point_iterations,
+					  " projection_max_point_iters=", bridson_projection_max_point_iterations,
+					  " projection_points_hit_max_iters=", bridson_projection_points_hit_max_iterations,
+					  " total_s=", elapsed_s, '\n');
+			log_bridson_projection_error_stats();
+		};
+
 		auto sample_seed_round = [&]() -> size_t {
 			finish_bridson_progress();
-			std::unique_ptr<SpatialGrid> seed_grid = std::make_unique<SpatialGrid>(p.sample_grid_cell_size_);
-			bool used_sdf_filter = false;
-			std::vector<Vec3> seed_points = p.ray_sampler_->sample_alpha_level_set_rays(
-				traits, seed_target, seed_grid.get(), p.sample_grid_cell_size_, bbox_min, bbox_max, &used_sdf_filter);
-			if (seed_points.empty())
-			{
-				log_basic(p, "[BridsonSeed:", mode_label, "] candidates=0 added=0 total=", accepted_positions.size(),
-						  " active=", active_indices.size(), '\n');
-				return size_t(0);
-			}
-
-			std::vector<Vec3> seed_projected_points;
-			std::vector<Vec3> seed_normals;
-			if (!project_points_to_alpha_impl(p, seed_points, bbox_min, bbox_max, seed_projected_points, seed_normals, tag))
-			{
-				log_error(p, "Failed to project Bridson seed points back to the alpha level set.", '\n');
-				return size_t(0);
-			}
-			if (seed_projected_points.size() != seed_points.size() || seed_normals.size() != seed_points.size() ||
-				p.last_projection_keep_mask_.size() != seed_points.size())
-			{
-				log_error(p, "Projected Bridson seed batch shape mismatch.", '\n');
-				return size_t(0);
-			}
-
 			size_t added = 0;
-			for (size_t i = 0; i < seed_projected_points.size(); ++i)
+			const int warmup_iterations = std::max(1, p.bridson_seed_warmup_iterations_);
+			if (accepted_positions.size() < max_samples)
 			{
-				if (accepted_positions.size() >= max_samples)
-					break;
-				if (p.last_projection_keep_mask_[i] == 0)
-					continue;
-				if (!seed_projected_points[i].allFinite() || !seed_normals[i].allFinite())
-					continue;
-				if (!global_grid->is_valid_sample(seed_projected_points[i], p.sample_radius_, accepted_positions))
-					continue;
-				add_sample(seed_projected_points[i], seed_normals[i]);
-				++added;
+				SpatialGrid working_grid(bridson_grid_cell_size);
+				for (uint32 sample_idx = 0; sample_idx < accepted_positions.size(); ++sample_idx)
+					working_grid.insert(accepted_positions[sample_idx], sample_idx);
+
+				bool used_sdf_filter = false;
+				const auto warmup_rays_start_time = std::chrono::steady_clock::now();
+				std::vector<Vec3> seed_points = p.ray_sampler_->sample_alpha_level_set_rays_fixed_iterations(
+					traits, warmup_iterations, &working_grid, p.sample_radius_, bbox_min, bbox_max, &accepted_positions,
+					&used_sdf_filter);
+				const auto warmup_rays_end_time = std::chrono::steady_clock::now();
+				warmup_rays_s +=
+					std::chrono::duration<double>(warmup_rays_end_time - warmup_rays_start_time).count();
+				const size_t total_seed_hits = seed_points.size();
+				if (!seed_points.empty())
+				{
+					const size_t remaining_slots = max_samples - accepted_positions.size();
+					if (seed_points.size() > remaining_slots)
+						seed_points.resize(remaining_slots);
+
+					std::vector<Vec3> seed_normals;
+					std::vector<uint8_t> seed_keep_mask;
+					const auto warmup_seed_normals_start_time = std::chrono::steady_clock::now();
+					const bool normals_ok =
+						compute_alpha_point_normals_impl(p, seed_points, seed_normals, seed_keep_mask, tag);
+					const auto warmup_seed_normals_end_time = std::chrono::steady_clock::now();
+					warmup_seed_normals_s += std::chrono::duration<double>(
+						warmup_seed_normals_end_time - warmup_seed_normals_start_time)
+												 .count();
+					if (!normals_ok)
+					{
+						log_error(p, "Failed to compute Bridson seed normals.", '\n');
+						return added;
+					}
+					if (seed_normals.size() != seed_points.size() || seed_keep_mask.size() != seed_points.size())
+					{
+						log_error(p, "Bridson seed normal batch shape mismatch.", '\n');
+						return added;
+					}
+					std::vector<Vec3> accepted_seed_points;
+					std::vector<Vec3> accepted_seed_normals;
+					accepted_seed_points.reserve(seed_points.size());
+					accepted_seed_normals.reserve(seed_points.size());
+					for (size_t i = 0; i < seed_points.size(); ++i)
+					{
+						if (!seed_points[i].allFinite() || seed_keep_mask[i] == 0 || !seed_normals[i].allFinite())
+							continue;
+						if (accepted_positions.size() >= max_samples)
+							break;
+						accepted_seed_points.push_back(seed_points[i]);
+						accepted_seed_normals.push_back(seed_normals[i]);
+					}
+					if (!accepted_seed_points.empty())
+					{
+						std::vector<Scalar> seed_residuals;
+						if (!eval_alpha_residuals_impl(p, accepted_seed_points, seed_residuals, tag) ||
+							seed_residuals.size() != accepted_seed_points.size())
+						{
+							warmup_seed_residual_stats_valid = false;
+							log_error(p, "Failed to evaluate warmup seed residuals.", '\n');
+						}
+						else
+						{
+							for (Scalar residual : seed_residuals)
+								accumulate_residual_histogram(warmup_seed_residual_stats, residual);
+						}
+						for (size_t i = 0; i < accepted_seed_points.size(); ++i)
+						{
+							add_sample(accepted_seed_points[i], accepted_seed_normals[i], SAMPLE_ORIGIN_WARMUP);
+							++added;
+						}
+					}
+				}
+
+				log_basic(p, "[BridsonSeed:", mode_label, "] iterations=", p.bridson_seed_warmup_iterations_,
+						  " rays_per_iter=", p.ray_sampler_batch_size_, " seed_hits=", total_seed_hits,
+						  " added=", added, " total=", accepted_positions.size(), " active=", active_indices.size(),
+						  " sdf_filter=", (used_sdf_filter ? "true" : "false"), '\n');
+				if (warmup_seed_residual_stats_valid)
+					log_residual_histogram("BridsonWarmupSeedResiduals", "accepted_warmup_seed",
+										   warmup_seed_residual_stats);
 			}
-			log_basic(p, "[BridsonSeed:", mode_label, "] candidates=", seed_points.size(), " added=", added, " total=",
-					  accepted_positions.size(), " active=", active_indices.size(), " sdf_filter=",
-					  (used_sdf_filter ? "true" : "false"), '\n');
 			return added;
 		};
 
-		size_t zero_reseed_rounds = 0;
-		size_t seed_added = sample_seed_round();
-		const uint32 max_attempts = static_cast<uint32>(std::max(1, p.sample_iterations_));
+		sample_seed_round();
+		const size_t candidates_per_parent = static_cast<size_t>(std::max(1, p.sample_iterations_));
+		const auto bridson_loop_start_time = std::chrono::steady_clock::now();
 
-		while (accepted_positions.size() < max_samples)
+		while (accepted_positions.size() < max_samples && !active_indices.empty())
 		{
-			if (active_indices.empty())
-			{
-				seed_added = sample_seed_round();
-				if (seed_added == 0)
-				{
-					++zero_reseed_rounds;
-					if (zero_reseed_rounds >= 3)
-						break;
-				}
-				else
-				{
-					zero_reseed_rounds = 0;
-				}
-				if (active_indices.empty())
-					continue;
-			}
-
 			sample_active_parent_indices(active_indices, parent_batch_size, gen, selected_parents);
 			raw_candidates.clear();
-			raw_candidates.reserve(selected_parents.size());
+			raw_candidates.reserve(selected_parents.size() * candidates_per_parent);
 			std::uniform_real_distribution<Scalar> uniform(Scalar(0), Scalar(1));
 			for (uint32 parent_idx : selected_parents)
-				raw_candidates.push_back(
-					sample_spherical_shell_candidate(accepted_positions[parent_idx], p.sample_radius_, uniform, gen));
+			{
+				for (size_t candidate_idx = 0; candidate_idx < candidates_per_parent; ++candidate_idx)
+					raw_candidates.push_back(
+						sample_bridson_candidate(accepted_positions[parent_idx], accepted_normals[parent_idx],
+												p.sample_radius_, p.bridson_candidate_mode_, outer_radius_scale, uniform, gen));
+			}
 
-			if (!project_points_to_alpha_impl(p, raw_candidates, bbox_min, bbox_max, projected_candidates,
-											  projected_normals, tag))
+			bridson_projected_points += raw_candidates.size();
+			++bridson_projection_batches;
+			const auto bridson_project_start_time = std::chrono::steady_clock::now();
+			const bool projection_ok = project_points_to_alpha_impl(
+				p, raw_candidates, bbox_min, bbox_max, projected_candidates, projected_normals, tag, 1,
+				&projected_errors);
+			const auto bridson_project_end_time = std::chrono::steady_clock::now();
+			bridson_project_s +=
+				std::chrono::duration<double>(bridson_project_end_time - bridson_project_start_time).count();
+			if (!projection_ok)
 			{
 				finish_bridson_progress();
 				log_error(p, "Batched Bridson projection failed.", '\n');
 				break;
+			}
+			bridson_projection_total_batch_iterations += p.last_projection_batch_iterations_;
+			bridson_projection_max_batch_iterations =
+				std::max(bridson_projection_max_batch_iterations, static_cast<int>(p.last_projection_batch_iterations_));
+			if (p.last_projection_batch_hit_max_iterations_)
+				++bridson_projection_batches_hit_max_iterations;
+			bridson_projection_total_point_iterations += p.last_projection_point_iterations_sum_;
+			bridson_projection_max_point_iterations =
+				std::max(bridson_projection_max_point_iterations, p.last_projection_point_iterations_max_);
+			bridson_projection_points_hit_max_iterations += p.last_projection_points_hit_max_iterations_;
+			if (projected_errors.size() != raw_candidates.size())
+			{
+				finish_bridson_progress();
+				log_error(p, "Projected error batch shape mismatch.", '\n');
+				break;
+			}
+			for (size_t parent_batch_idx = 0; parent_batch_idx < selected_parents.size(); ++parent_batch_idx)
+			{
+				const uint32 parent_idx = selected_parents[parent_batch_idx];
+				const bool parent_from_warmup =
+					parent_idx < accepted_sample_origin.size() &&
+					accepted_sample_origin[parent_idx] == SAMPLE_ORIGIN_WARMUP;
+				ResidualHistogramStats& parent_stats = parent_from_warmup
+														 ? bridson_projection_error_stats_warmup_parents
+														 : bridson_projection_error_stats_bridson_parents;
+				const size_t candidate_begin = parent_batch_idx * candidates_per_parent;
+				for (size_t candidate_offset = 0; candidate_offset < candidates_per_parent; ++candidate_offset)
+				{
+					const size_t candidate_index = candidate_begin + candidate_offset;
+					const Scalar error = projected_errors[candidate_index];
+					accumulate_residual_histogram(bridson_projection_error_stats, error);
+					accumulate_residual_histogram(parent_stats, error);
+				}
 			}
 
 			if (projected_candidates.size() != raw_candidates.size() || projected_normals.size() != raw_candidates.size() ||
@@ -2133,51 +2644,73 @@ public:
 				break;
 			}
 
-			for (size_t i = 0; i < selected_parents.size(); ++i)
+			for (size_t parent_batch_idx = 0; parent_batch_idx < selected_parents.size(); ++parent_batch_idx)
 			{
 				if (accepted_positions.size() >= max_samples)
 					break;
-				const uint32 parent_idx = selected_parents[i];
+				const uint32 parent_idx = selected_parents[parent_batch_idx];
 				const Vec3& parent_pos = accepted_positions[parent_idx];
 				const Vec3& parent_normal = accepted_normals[parent_idx];
-				const Vec3& child_pos = projected_candidates[i];
-				const Vec3& child_normal = projected_normals[i];
-				const Vec3& raw_candidate = raw_candidates[i];
-
-				bool accept = p.last_projection_keep_mask_[i] != 0;
-				if (accept)
+				bool parent_found_new_sample = false;
+				const size_t candidate_begin = parent_batch_idx * candidates_per_parent;
+				for (size_t candidate_offset = 0; candidate_offset < candidates_per_parent; ++candidate_offset)
 				{
-					const Scalar parent_dot = parent_normal.dot(child_normal);
-					const Scalar parent_dist = (child_pos - parent_pos).norm();
-					const Scalar projection_dist = (child_pos - raw_candidate).norm();
-					if (parent_dot <= Scalar(0))
-						accept = false;
-					if (accept && (parent_dist < Scalar(0.5) * p.sample_radius_ ||
-								   parent_dist > Scalar(2.5) * p.sample_radius_))
-						accept = false;
-					if (accept && projection_dist > p.sample_radius_)
-						accept = false;
-					if (accept && !child_pos.allFinite())
-						accept = false;
-					if (accept && !global_grid->is_valid_sample(child_pos, p.sample_radius_, accepted_positions))
-						accept = false;
+					if (accepted_positions.size() >= max_samples)
+						break;
+					const size_t candidate_index = candidate_begin + candidate_offset;
+					const Vec3& child_pos = projected_candidates[candidate_index];
+					const Vec3& child_normal = projected_normals[candidate_index];
+					const Vec3& raw_candidate = raw_candidates[candidate_index];
+
+					bool accept = p.last_projection_keep_mask_[candidate_index] != 0;
+					if (accept)
+					{
+						// const Scalar parent_dot = parent_normal.dot(child_normal);
+						// const Scalar parent_dist = (child_pos - parent_pos).norm();
+						 const Scalar projection_dist = (child_pos - raw_candidate).norm();
+						// if (parent_dot <= Scalar(0))
+						// 	accept = false;
+						// if (accept && (parent_dist < Scalar(0.5) * p.sample_radius_ ||
+						// 			   parent_dist > max_parent_distance))
+						// 	accept = false;
+						if (accept && projection_dist > p.sample_radius_)
+						 	accept = false;
+						// if (accept && !child_pos.allFinite())
+						// 	accept = false;
+						(void)parent_pos;
+						(void)parent_normal;
+						(void)child_normal;
+						(void)raw_candidate;
+						(void)max_parent_distance;
+						if (accept)
+						{
+							const auto bridson_grid_check_start_time = std::chrono::steady_clock::now();
+							const bool grid_valid =
+								global_grid->is_valid_sample(child_pos, p.sample_radius_, accepted_positions);
+							const auto bridson_grid_check_end_time = std::chrono::steady_clock::now();
+							bridson_grid_check_s += std::chrono::duration<double>(
+								bridson_grid_check_end_time - bridson_grid_check_start_time)
+													   .count();
+							if (!grid_valid)
+								accept = false;
+						}
+					}
+
+					if (!accept)
+						continue;
+
+					add_sample(child_pos, child_normal, SAMPLE_ORIGIN_BRIDSON_CHILD);
+					parent_found_new_sample = true;
+					break;
 				}
 
-				if (accept)
-				{
-					add_sample(child_pos, child_normal);
-					continue;
-				}
-
-				if (parent_idx < attempt_counts.size())
-				{
-					++attempt_counts[parent_idx];
-					if (attempt_counts[parent_idx] >= max_attempts)
-						remove_active_sample(parent_idx);
-				}
+				if (!parent_found_new_sample)
+					remove_active_sample(parent_idx);
 			}
 			print_bridson_progress();
 		}
+		const auto bridson_loop_end_time = std::chrono::steady_clock::now();
+		bridson_loop_s = std::chrono::duration<double>(bridson_loop_end_time - bridson_loop_start_time).count();
 
 		if (accepted_positions.empty())
 		{
@@ -2186,13 +2719,20 @@ public:
 				points_provider_->clear_mesh(*p.samples_mesh_);
 			p.samples_spatial_grid_ = std::move(global_grid);
 			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-			log_error(p, "Failed to generate any alpha level set samples with batched Bridson saturation.", '\n');
+			const auto sampling_end_time = std::chrono::steady_clock::now();
+			const double elapsed_s = std::chrono::duration<double>(sampling_end_time - sampling_start_time).count();
+			log_bridson_timing(elapsed_s);
+			log_error(p, "Failed to generate any alpha level set samples with batched Bridson saturation. elapsed_s=",
+					  elapsed_s, '\n');
 			return;
 		}
 
 		finish_bridson_progress();
-		log_basic(p, "[Bridson:", mode_label, "] accepted=", accepted_positions.size(), " zero_reseed_rounds=",
-				  zero_reseed_rounds, " remaining_active=", active_indices.size(), '\n');
+		const auto sampling_end_time = std::chrono::steady_clock::now();
+		const double elapsed_s = std::chrono::duration<double>(sampling_end_time - sampling_start_time).count();
+		log_basic(p, "[Bridson:", mode_label, "] accepted=", accepted_positions.size(),
+				  " remaining_active=", active_indices.size(), " elapsed_s=", elapsed_s, '\n');
+		log_bridson_timing(elapsed_s);
 		p.samples_spatial_grid_ = std::move(global_grid);
 		materialize_samples_to_mesh(p, accepted_positions, accepted_normals);
 		finalize_sample_mesh_after_sampling(p);
@@ -3924,7 +4464,8 @@ private:
 		run_shrinking_ball_for_all();
 
 		// Post-process on shrinking-ball centers:
-		// - UDF model / surface mesh / point cloud: retry if distance(center) > alpha; still > alpha -> delete sample.
+		// - UDF model: retry/delete only if udf(center) > 1.2 * alpha.
+		// - Surface mesh / point cloud: retry if distance(center) > alpha; still > alpha -> delete sample.
 		// - MF model: retry if sdf(center) > 0 or udf(center) > alpha; after flip, delete if sdf(center) > 0
 		//   or udf(center) > alpha.
 		uint32 flipped_normals = 0;
@@ -3932,6 +4473,7 @@ private:
 		uint32 deleted_samples = 0;
 		std::vector<uint32> flipped_vertex_indices;
 		std::function<uint32(const std::vector<PVertex>&)> prune_vertices_by_current_centers;
+		const Scalar udf_center_prune_threshold = udf_model ? (Scalar(1.2) * p.alpha_) : p.alpha_;
 		const bool supports_center_retry_prune =
 			mf_model || p.input_mode_ == INPUT_SURFACE_MESH || p.input_mode_ == INPUT_POINT_CLOUD ||
 			(p.input_mode_ == INPUT_NEURAL_UDF && p.neural_udf_loaded_);
@@ -4028,7 +4570,7 @@ private:
 					}
 					else
 					{
-						if (current_score[i] > p.alpha_)
+						if (current_score[i] > udf_center_prune_threshold)
 							should_delete = true;
 					}
 					if (!should_delete)
@@ -4077,7 +4619,7 @@ private:
 				need_retry.reserve(vertices.size() / 8 + 1);
 				for (size_t i = 0; i < vertices.size(); ++i)
 				{
-					const bool by_udf = (score_values[i] > p.alpha_);
+					const bool by_udf = (score_values[i] > udf_center_prune_threshold);
 					const bool by_mf_sdf = mf_model && i < sdf_values.size() && (sdf_values[i] > Scalar(0));
 					const bool trigger_retry = mf_model ? (by_mf_sdf || by_udf) : by_udf;
 					if (trigger_retry)
@@ -13520,10 +14062,25 @@ protected:
 		{
 			ImGui::InputFloat("Alpha", &p.alpha_, 0.001f, 0.1f, "%.4f");
 			ImGui::InputFloat("Sample Radius", &p.sample_radius_, 0.001f, 0.01f, "%.4f");
-			ImGui::InputInt("Seed Samples", &p.bridson_seed_samples_, 256, 1024);
+			ImGui::Text("Candidate Domain");
+			if (ImGui::RadioButton("3D Shell", p.bridson_candidate_mode_ == BRIDSON_CANDIDATE_3D_SHELL))
+				p.bridson_candidate_mode_ = BRIDSON_CANDIDATE_3D_SHELL;
+			ImGui::SameLine();
+			if (ImGui::RadioButton("2D Tangent Ring", p.bridson_candidate_mode_ == BRIDSON_CANDIDATE_2D_TANGENT_RING))
+				p.bridson_candidate_mode_ = BRIDSON_CANDIDATE_2D_TANGENT_RING;
+			ImGui::InputFloat("Outer Radius Scale", &p.bridson_outer_radius_scale_, 0.05f, 0.25f, "%.3f");
+			if (p.bridson_outer_radius_scale_ < 1.0f)
+				p.bridson_outer_radius_scale_ = 1.0f;
+			ImGui::Text("Candidate radius range: [%.3f R, %.3f R] (outer=%.6f)", 1.0f, p.bridson_outer_radius_scale_,
+						static_cast<float>(p.sample_radius_ * p.bridson_outer_radius_scale_));
+			ImGui::InputInt("Warmup Iterations", &p.bridson_seed_warmup_iterations_, 1, 4);
+			if (p.bridson_seed_warmup_iterations_ < 1)
+				p.bridson_seed_warmup_iterations_ = 1;
+			ImGui::Text("Seed phase: %d ray iterations x batch %d", p.bridson_seed_warmup_iterations_,
+						p.ray_sampler_batch_size_);
 			ImGui::InputInt("Parent Batch Size", &p.bridson_parent_batch_size_, 256, 1024);
 			ImGui::InputInt("Max Samples", &p.bridson_max_samples_, 10000, 100000);
-			ImGui::InputInt("Max Attempts", &p.sample_iterations_, 1, 10);
+			ImGui::InputInt("Candidates Per Parent", &p.sample_iterations_, 1, 10);
 			ImGui::Text("Derived Grid Cell Size: %.6f", static_cast<float>(derived_bridson_grid_cell_size(p)));
 			ImGui::InputInt("Eval Batch Size", &p.batch_size_, 256, 1024);
 			ImGui::InputInt("Ray Batch Size", &p.ray_sampler_batch_size_, 256, 2048);

@@ -179,6 +179,15 @@ InitialMAMode parse_initial_ma_mode(const std::string& value)
 	fail_config("unsupported `input.initial_ma_mode_override`: " + value);
 }
 
+BridsonCandidateMode parse_bridson_candidate_mode(const std::string& value)
+{
+	if (value == "3d_shell" || value == "shell" || value == "3d")
+		return BridsonCandidateMode::Shell3D;
+	if (value == "2d_plane" || value == "2d_tangent_ring" || value == "plane" || value == "2d")
+		return BridsonCandidateMode::Plane2D;
+	fail_config("unsupported `sampling.bridson.candidate_mode`: " + value);
+}
+
 } // namespace
 
 std::string to_string(InputMode value)
@@ -230,6 +239,11 @@ std::string to_string(InitialMAMode value)
 	}
 }
 
+std::string to_string(BridsonCandidateMode value)
+{
+	return value == BridsonCandidateMode::Plane2D ? "2d_plane" : "3d_shell";
+}
+
 BenchmarkConfig load_benchmark_config(const std::string& path)
 {
 	const fs::path config_path = fs::absolute(path).lexically_normal();
@@ -259,6 +273,8 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	config.sampling.alpha = require_value<float>(sampling, "alpha");
 	config.sampling.knn_k = require_value<int>(sampling, "knn_k");
 	config.sampling.apply_filtering = get_value<bool>(sampling, "apply_filtering", false);
+	config.sampling.recompute_normals_after_sampling =
+		get_value<bool>(sampling, "recompute_normals_after_sampling", false);
 	config.sampling.ray_sampler_batch_size = require_value<int>(sampling, "ray_sampler_batch_size");
 	config.sampling.batch_size = require_value<int>(sampling, "batch_size");
 	config.sampling.tol = require_value<float>(sampling, "tol");
@@ -282,9 +298,14 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	}
 	const auto& defaults = default_sampling.bridson;
 	config.sampling.bridson.sample_radius = get_value<float>(*bridson, "sample_radius", defaults.sample_radius);
+	if (auto candidate_mode = bridson->get_optional<std::string>("candidate_mode"))
+		config.sampling.bridson.candidate_mode = parse_bridson_candidate_mode(*candidate_mode);
+	config.sampling.bridson.outer_radius_scale =
+		get_value<float>(*bridson, "outer_radius_scale", defaults.outer_radius_scale);
+	config.sampling.bridson.warmup_iterations =
+		get_value<int>(*bridson, "warmup_iterations", defaults.warmup_iterations);
 	config.sampling.bridson.sample_iterations =
 		get_value<int>(*bridson, "sample_iterations", defaults.sample_iterations);
-	config.sampling.bridson.seed_samples = get_value<int>(*bridson, "seed_samples", defaults.seed_samples);
 	config.sampling.bridson.parent_batch_size =
 		get_value<int>(*bridson, "parent_batch_size", defaults.parent_batch_size);
 	config.sampling.bridson.max_samples = get_value<int>(*bridson, "max_samples", defaults.max_samples);
@@ -358,6 +379,7 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		config.batch.neural_udf_model_extension =
 			get_value<std::string>(*batch, "neural_udf_model_extension", ".pt");
 		config.batch.recursive = get_value<bool>(*batch, "recursive", false);
+		config.batch.resume_from_existing = get_value<bool>(*batch, "resume_from_existing", false);
 		config.batch.output_directory =
 			resolve_config_relative_path(config_directory, get_value<std::string>(*batch, "output_directory", ""));
 		config.batch.timing_directory =
@@ -394,10 +416,12 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	}
 	if (config.sampling.bridson.sample_radius <= 0.0f)
 		fail_config("`sampling.bridson.sample_radius` must be > 0");
+	if (config.sampling.bridson.outer_radius_scale < 1.0f)
+		fail_config("`sampling.bridson.outer_radius_scale` must be >= 1");
+	if (config.sampling.bridson.warmup_iterations <= 0)
+		fail_config("`sampling.bridson.warmup_iterations` must be > 0");
 	if (config.sampling.bridson.sample_iterations <= 0)
 		fail_config("`sampling.bridson.sample_iterations` must be > 0");
-	if (config.sampling.bridson.seed_samples <= 0)
-		fail_config("`sampling.bridson.seed_samples` must be > 0");
 	if (config.sampling.bridson.parent_batch_size <= 0)
 		fail_config("`sampling.bridson.parent_batch_size` must be > 0");
 	if (config.sampling.bridson.max_samples <= 0)
@@ -429,6 +453,17 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 bool is_batch_benchmark_config(const BenchmarkConfig& config)
 {
 	return config.batch.enabled;
+}
+
+bool is_batch_case_completed(const BenchmarkConfig& config)
+{
+	if (config.output.skeleton_ply.empty())
+		return false;
+	if (!fs::exists(config.output.skeleton_ply))
+		return false;
+	if (!config.output.timing_json.empty() && !fs::exists(config.output.timing_json))
+		return false;
+	return true;
 }
 
 std::vector<BenchmarkConfig> expand_batch_benchmark_configs(const BenchmarkConfig& base_config)

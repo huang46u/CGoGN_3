@@ -31,6 +31,10 @@
       "auto_split.mode": [
         "error_threshold",
         "max_nb_spheres"
+      ],
+      "sampling.bridson.candidate_mode": [
+        "3d_shell",
+        "2d_plane"
       ]
     },
     "boolean_fields_possible_values": [
@@ -50,8 +54,9 @@
       "optimization.max_iterations_without_autosplit": "must be > 0",
       "optimization.max_iterations_after_reaching_max_spheres": "must be > 0",
       "sampling.bridson.sample_radius": "must be > 0",
+      "sampling.bridson.outer_radius_scale": "must be >= 1",
+      "sampling.bridson.warmup_iterations": "must be > 0",
       "sampling.bridson.sample_iterations": "must be > 0",
-      "sampling.bridson.seed_samples": "must be > 0",
       "sampling.bridson.parent_batch_size": "must be > 0",
       "sampling.bridson.max_samples": "must be > 0",
       "auto_split.error_threshold": "must be > 0 when auto_split.enabled = true and auto_split.mode = error_threshold",
@@ -60,7 +65,10 @@
     "notes": [
       "Single-run mode: set batch.enabled = false, then fill input.input_path or input.surface_path and output.skeleton_ply.",
       "Batch mode: set batch.enabled = true, then fill batch.input_directory and batch.output_directory. Per-case output paths are generated automatically.",
+      "Set batch.resume_from_existing = true to skip cases whose skeleton output already exists; if timing_directory is set, the timing json must also exist for the case to be treated as completed.",
       "All input modes now use the same batched Bridson sampler; configure it with sampling.bridson.*.",
+      "sampling.bridson.candidate_mode accepts 3d_shell and 2d_plane; 2d_tangent_ring is kept as a backward-compatible alias.",
+      "Bridson seed warmup uses sampling.ray_sampler_batch_size for sampling.ray_sampler_batch_size x sampling.bridson.warmup_iterations rays before active-list growth starts.",
       "When threshold < 0, postprocess.residual_prune_threshold now deletes all sheets with face_count < 10."
     ]
   },
@@ -76,14 +84,17 @@
     "alpha": 0.005,
     "knn_k": 10,
     "apply_filtering": false,
+    "recompute_normals_after_sampling": false,
     "ray_sampler_batch_size": 4096,
     "batch_size": 1310640,
     "tol": 1e-5,
     "udf_max_iterations": 3000,
     "bridson": {
       "sample_radius": 0.0025,
+      "candidate_mode": "3d_shell",
+      "outer_radius_scale": 2.0,
+      "warmup_iterations": 2,
       "sample_iterations": 30,
-      "seed_samples": 8192,
       "parent_batch_size": 8192,
       "max_samples": 4000000
     }
@@ -144,6 +155,7 @@
     "surface_extension": "",
     "neural_udf_model_extension": ".pt",
     "recursive": false,
+    "resume_from_existing": false,
     "output_directory": "D:/Code/CGoGN_3/out/example/batch_skeleton",
     "timing_directory": "D:/Code/CGoGN_3/out/example/batch_timing"
   }

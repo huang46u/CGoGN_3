@@ -51,6 +51,12 @@ enum class InitialMAMode
 	ShrinkingBall
 };
 
+enum class BridsonCandidateMode
+{
+	Shell3D,
+	Plane2D
+};
+
 struct BenchmarkInputConfig
 {
 	InputMode mode = InputMode::PointCloud;
@@ -66,8 +72,10 @@ struct BenchmarkSamplingConfig
 	struct BridsonConfig
 	{
 		float sample_radius = 0.0025f;
+		BridsonCandidateMode candidate_mode = BridsonCandidateMode::Shell3D;
+		float outer_radius_scale = 2.0f;
+		int warmup_iterations = 2;
 		int sample_iterations = 30;
-		int seed_samples = 8192;
 		int parent_batch_size = 8192;
 		int max_samples = 4000000;
 	};
@@ -75,6 +83,7 @@ struct BenchmarkSamplingConfig
 	float alpha = 0.005f;
 	int knn_k = 10;
 	bool apply_filtering = false;
+	bool recompute_normals_after_sampling = false;
 	int ray_sampler_batch_size = 4096;
 	int batch_size = 1310640;
 	float tol = 1e-5f;
@@ -151,6 +160,7 @@ struct BenchmarkBatchConfig
 	std::string surface_extension;
 	std::string neural_udf_model_extension = ".pt";
 	bool recursive = false;
+	bool resume_from_existing = false;
 	std::string output_directory;
 	std::string timing_directory;
 };
@@ -172,6 +182,7 @@ struct BenchmarkConfig
 BenchmarkConfig load_benchmark_config(const std::string& path);
 std::vector<BenchmarkConfig> expand_batch_benchmark_configs(const BenchmarkConfig& base_config);
 bool is_batch_benchmark_config(const BenchmarkConfig& config);
+bool is_batch_case_completed(const BenchmarkConfig& config);
 
 std::string to_string(InputMode value);
 std::string to_string(NeuralModelType value);
@@ -179,6 +190,7 @@ std::string to_string(DistanceMode value);
 std::string to_string(SphereCorrectionMode value);
 std::string to_string(AutoSplitMode value);
 std::string to_string(InitialMAMode value);
+std::string to_string(BridsonCandidateMode value);
 
 } // namespace benchmark
 

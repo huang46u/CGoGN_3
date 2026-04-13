@@ -66,7 +66,7 @@ public:
 	}
 
 	std::vector<Vec3> sample_alpha_level_set_rays(Traits& traits, size_t target_num_points,
-												  SpatialGrid* spatial_grid, Scalar grid_cell_size,
+												  SpatialGrid* spatial_grid, Scalar sample_spacing,
 												  const Vec3& bbox_min, const Vec3& bbox_max,
 												  bool* used_sdf_filter = nullptr)
 	{
@@ -74,15 +74,38 @@ public:
 		if constexpr (Traits::kUsesTorch)
 		{
 			set_device(traits.device());
-			return sample_alpha_level_set_rays_gpu(traits, target_num_points, spatial_grid, grid_cell_size, bbox_min,
-												   bbox_max, used_sdf_filter);
+			return sample_alpha_level_set_rays_gpu(traits, target_num_points, spatial_grid, sample_spacing, bbox_min,
+												   bbox_max, used_sdf_filter, params_.max_outer_iterations, nullptr);
 		}
 		else
 		{
 			if (used_sdf_filter)
 				*used_sdf_filter = false;
-			return sample_alpha_level_set_rays_cpu(traits, target_num_points, spatial_grid, grid_cell_size, bbox_min,
-												   bbox_max);
+			return sample_alpha_level_set_rays_cpu(traits, target_num_points, spatial_grid, sample_spacing, bbox_min,
+												   bbox_max, params_.max_outer_iterations, nullptr);
+		}
+	}
+
+	std::vector<Vec3> sample_alpha_level_set_rays_fixed_iterations(Traits& traits, int outer_iterations,
+																   SpatialGrid* spatial_grid, Scalar sample_spacing,
+																   const Vec3& bbox_min, const Vec3& bbox_max,
+																   const std::vector<Vec3>* existing_samples = nullptr,
+																   bool* used_sdf_filter = nullptr)
+	{
+		const int clamped_outer_iterations = std::max(1, outer_iterations);
+		if constexpr (Traits::kUsesTorch)
+		{
+			set_device(traits.device());
+			return sample_alpha_level_set_rays_gpu(traits, unlimited_sample_target_, spatial_grid, sample_spacing,
+												   bbox_min, bbox_max, used_sdf_filter, clamped_outer_iterations,
+												   existing_samples);
+		}
+		else
+		{
+			if (used_sdf_filter)
+				*used_sdf_filter = false;
+			return sample_alpha_level_set_rays_cpu(traits, unlimited_sample_target_, spatial_grid, sample_spacing,
+												   bbox_min, bbox_max, clamped_outer_iterations, existing_samples);
 		}
 	}
 
@@ -119,9 +142,16 @@ public:
 	}
 
 private:
+	static constexpr size_t unlimited_sample_target_ = std::numeric_limits<size_t>::max();
+
 	static Vec3 clamp_point(const Vec3& p, const Vec3& bbox_min, const Vec3& bbox_max)
 	{
 		return p.cwiseMax(bbox_min).cwiseMin(bbox_max);
+	}
+
+	Scalar convergence_tolerance() const
+	{
+		return std::max(Scalar(0), params_.tol);
 	}
 
 	struct InsideSegment
@@ -138,7 +168,7 @@ private:
 								   const std::vector<uint8_t>& ray_inside0,
 								   std::vector<InsideSegment>& segments, Scalar& total_length)
 	{
-		const Scalar eps = std::max(Scalar(1e-6), params_.tol);
+		const Scalar eps = convergence_tolerance();
 
 		for (size_t i = 0; i < rays.size(); ++i)
 		{
@@ -200,7 +230,7 @@ private:
 			return false;
 		if (segments.empty())
 			return false;
-		const Scalar eps = std::max(Scalar(1e-6), params_.tol);
+		const Scalar eps = convergence_tolerance();
 		if (total_length <= eps)
 			return false;
 
@@ -246,21 +276,34 @@ private:
 	}
 
 	std::vector<Vec3> sample_alpha_level_set_rays_gpu(Traits& traits, size_t target_num_points,
-													  SpatialGrid* spatial_grid, Scalar grid_cell_size,
+													  SpatialGrid* spatial_grid, Scalar sample_spacing,
 													  const Vec3& bbox_min, const Vec3& bbox_max,
-													  bool* used_sdf_filter)
+													  bool* used_sdf_filter, int max_outer_iterations,
+													  const std::vector<Vec3>* existing_samples)
 	{
+		const bool bounded_target = (target_num_points != unlimited_sample_target_);
+		const size_t reserve_hint =
+			bounded_target
+				? std::max<size_t>(target_num_points + target_num_points / 2, size_t(1024))
+				: std::max<size_t>(static_cast<size_t>(std::max(1, params_.batch_size)) *
+									   static_cast<size_t>(std::max(1, max_outer_iterations)),
+								   size_t(1024));
+		std::vector<Vec3> neighbor_samples;
+		if (existing_samples)
+			neighbor_samples = *existing_samples;
+		neighbor_samples.reserve(neighbor_samples.size() + reserve_hint);
 		std::vector<Vec3> all_samples;
-		all_samples.reserve(target_num_points * 1.5);
+		all_samples.reserve(reserve_hint);
 
 		std::mt19937 gen(params_.seed);
-		const Scalar eps = std::max(Scalar(1e-5), params_.tol);
+		const Scalar eps = convergence_tolerance();
 		const int max_steps = std::max(1, params_.max_iterations);
 		const int check_interval = 500;
 		int total_rays = 0;
 
 		bool has_sdf_any = false;
-		for (int iter = 0; iter < params_.max_outer_iterations && all_samples.size() < target_num_points; ++iter)
+		for (int iter = 0; iter < max_outer_iterations && (!bounded_target || all_samples.size() < target_num_points);
+			 ++iter)
 		{
 			auto rays = generate_rays(bbox_min, bbox_max, params_.batch_size, gen);
 			total_rays += static_cast<int>(rays.size());
@@ -320,12 +363,13 @@ private:
 						Vec3 pt(hit_acc[i][0], hit_acc[i][1], hit_acc[i][2]);
 						pt = clamp_point(pt, bbox_min, bbox_max);
 
-						if (!spatial_grid || spatial_grid->is_valid_sample(pt, grid_cell_size, all_samples))
+						if (!spatial_grid || spatial_grid->is_valid_sample(pt, sample_spacing, neighbor_samples))
 						{
 							iter_samples.push_back(pt);
 							all_samples.push_back(pt);
+							neighbor_samples.push_back(pt);
 							if (spatial_grid)
-								spatial_grid->insert(pt, static_cast<uint32>(all_samples.size() - 1));
+								spatial_grid->insert(pt, static_cast<uint32>(neighbor_samples.size() - 1));
 						}
 					}
 
@@ -363,7 +407,7 @@ private:
 				if (nc_idx.numel() == 0)
 				{
 					not_converged = t < t_max;
-					if (all_samples.size() >= target_num_points)
+					if (bounded_target && all_samples.size() >= target_num_points)
 						break;
 					continue;
 				}
@@ -410,16 +454,19 @@ private:
 
 				not_converged = t < t_max;
 
-				if (all_samples.size() >= target_num_points)
+				if (bounded_target && all_samples.size() >= target_num_points)
 					break;
 			}
 
 			std::cout << std::endl;
 			std::cout << "  Collected " << iter_samples.size() << " unique samples this iteration" << std::endl;
-			std::cout << "  Total: " << all_samples.size() << " / " << target_num_points << std::endl;
+			if (bounded_target)
+				std::cout << "  Total: " << all_samples.size() << " / " << target_num_points << std::endl;
+			else
+				std::cout << "  Total: " << all_samples.size() << std::endl;
 		}
 
-		if (all_samples.size() > target_num_points)
+		if (bounded_target && all_samples.size() > target_num_points)
 		{
 			std::shuffle(all_samples.begin(), all_samples.end(), gen);
 			all_samples.resize(target_num_points);
@@ -430,18 +477,32 @@ private:
 	}
 
 	std::vector<Vec3> sample_alpha_level_set_rays_cpu(Traits& traits, size_t target_num_points,
-													  SpatialGrid* spatial_grid, Scalar grid_cell_size,
-													  const Vec3& bbox_min, const Vec3& bbox_max)
+													  SpatialGrid* spatial_grid, Scalar sample_spacing,
+													  const Vec3& bbox_min, const Vec3& bbox_max,
+													  int max_outer_iterations,
+													  const std::vector<Vec3>* existing_samples)
 	{
+		const bool bounded_target = (target_num_points != unlimited_sample_target_);
+		const size_t reserve_hint =
+			bounded_target
+				? std::max<size_t>(target_num_points + target_num_points / 2, size_t(1024))
+				: std::max<size_t>(static_cast<size_t>(std::max(1, params_.batch_size)) *
+									   static_cast<size_t>(std::max(1, max_outer_iterations)),
+								   size_t(1024));
+		std::vector<Vec3> neighbor_samples;
+		if (existing_samples)
+			neighbor_samples = *existing_samples;
+		neighbor_samples.reserve(neighbor_samples.size() + reserve_hint);
 		std::vector<Vec3> all_samples;
-		all_samples.reserve(target_num_points * 1.5);
+		all_samples.reserve(reserve_hint);
 
 		std::mt19937 gen(params_.seed);
-		const Scalar eps = std::max(Scalar(1e-5), params_.tol);
+		const Scalar eps = convergence_tolerance();
 		const int max_steps = std::max(1, params_.max_iterations);
 		const int check_interval = 10;
 
-		for (int iter = 0; iter < params_.max_outer_iterations && all_samples.size() < target_num_points; ++iter)
+		for (int iter = 0; iter < max_outer_iterations && (!bounded_target || all_samples.size() < target_num_points);
+			 ++iter)
 		{
 			auto rays = generate_rays(bbox_min, bbox_max, params_.batch_size, gen);
 			const int R = static_cast<int>(rays.size());
@@ -486,12 +547,13 @@ private:
 					if (delta < eps)
 					{
 						Vec3 pt = clamp_point(X, bbox_min, bbox_max);
-						if (!spatial_grid || spatial_grid->is_valid_sample(pt, grid_cell_size, all_samples))
+						if (!spatial_grid || spatial_grid->is_valid_sample(pt, sample_spacing, neighbor_samples))
 						{
 							iter_samples.push_back(pt);
 							all_samples.push_back(pt);
+							neighbor_samples.push_back(pt);
 							if (spatial_grid)
-								spatial_grid->insert(pt, static_cast<uint32>(all_samples.size() - 1));
+								spatial_grid->insert(pt, static_cast<uint32>(neighbor_samples.size() - 1));
 						}
 
 						const Scalar step_size = std::max(delta, eps * Scalar(0.5));
@@ -504,19 +566,22 @@ private:
 					}
 					if (t[i] >= t_max[i])
 						--active_count;
-					if (all_samples.size() >= target_num_points)
+					if (bounded_target && all_samples.size() >= target_num_points)
 						break;
 				}
-				if (all_samples.size() >= target_num_points)
+				if (bounded_target && all_samples.size() >= target_num_points)
 					break;
 			}
 
 			std::cout << std::endl;
 			std::cout << "  Collected " << iter_samples.size() << " unique samples this iteration" << std::endl;
-			std::cout << "  Total: " << all_samples.size() << " / " << target_num_points << std::endl;
+			if (bounded_target)
+				std::cout << "  Total: " << all_samples.size() << " / " << target_num_points << std::endl;
+			else
+				std::cout << "  Total: " << all_samples.size() << std::endl;
 		}
 
-		if (all_samples.size() > target_num_points)
+		if (bounded_target && all_samples.size() > target_num_points)
 		{
 			std::shuffle(all_samples.begin(), all_samples.end(), gen);
 			all_samples.resize(target_num_points);
@@ -536,7 +601,7 @@ private:
 		result.inside_samples.reserve(target_inside_points * 1.5);
 
 		std::mt19937 gen(params_.seed);
-		const Scalar eps = std::max(Scalar(1e-5), params_.tol);
+		const Scalar eps = convergence_tolerance();
 		const int max_steps = std::max(1, params_.max_iterations);
 		const int check_interval = 500;
 		const size_t max_inside_reject = 1000;
@@ -818,7 +883,7 @@ private:
 		result.inside_samples.reserve(target_inside_points * 1.5);
 
 		std::mt19937 gen(params_.seed);
-		const Scalar eps = std::max(Scalar(1e-5), params_.tol);
+		const Scalar eps = convergence_tolerance();
 		const int max_steps = std::max(1, params_.max_iterations);
 		const int check_interval = 10;
 		const size_t max_inside_reject = 1000;
