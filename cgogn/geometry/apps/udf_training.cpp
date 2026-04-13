@@ -78,6 +78,9 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 	cgogn::ui::AlphaSamplesSphereDebugger<Points> aisd(app);
 
 	cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag> udf(app);
+	sbd.set_center_udf_query([&udf](Points& points, const Vec3& query_point, cgogn::geometry::Scalar& out_value) {
+		return udf.try_eval_debug_udf_value(points, query_point, out_value);
+	});
 
 	app.init_modules();
 

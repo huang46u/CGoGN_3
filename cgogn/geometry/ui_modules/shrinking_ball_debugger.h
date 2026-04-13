@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -48,6 +49,7 @@ public:
 	template <typename T>
 	using PAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
+	using CenterUDFQuery = std::function<bool(POINTS&, const Vec3&, Scalar&)>;
 
 	ShrinkingBallDebugger(const App& app)
 		: ViewModule(app, "ShrinkingBallDebugger (" + std::string{mesh_traits<POINTS>::name} + ")"),
@@ -62,6 +64,11 @@ public:
 			if (p.kdtree_)
 				delete p.kdtree_;
 		}
+	}
+
+	void set_center_udf_query(CenterUDFQuery query)
+	{
+		center_udf_query_ = std::move(query);
 	}
 
 private:
@@ -195,6 +202,12 @@ protected:
 		{
 			uint32 idx = index_of(*selected_points_, p.picked_vertex_);
 			ImGui::Text("Picked id: %u", idx);
+			Scalar picked_udf = Scalar(0);
+			if (center_udf_query_ && selected_points_ && p.position_ &&
+				center_udf_query_(*selected_points_, (*p.position_)[idx], picked_udf))
+				ImGui::Text("Picked udf: %f", static_cast<double>(picked_udf));
+			else
+				ImGui::TextUnformatted("Picked udf: N/A");
 		}
 		if (p.contact_vertex_.is_valid())
 		{
@@ -202,7 +215,14 @@ protected:
 			ImGui::Text("Contact id: %u", idx);
 		}
 		if (p.ball_initialized_)
+		{
 			ImGui::Text("Ball: r=%f", static_cast<double>(p.ball_radius_));
+			Scalar center_udf = Scalar(0);
+			if (center_udf_query_ && selected_points_ && center_udf_query_(*selected_points_, p.ball_center_, center_udf))
+				ImGui::Text("Ball center udf: %f", static_cast<double>(center_udf));
+			else
+				ImGui::TextUnformatted("Ball center udf: N/A");
+		}
 
 		if (ImGui::Button("Shrink step"))
 		{
@@ -605,6 +625,7 @@ private:
 	PointCloudRender<POINTS>* pcr_ = nullptr;
 	View* selected_view_ = nullptr;
 	POINTS* selected_points_ = nullptr;
+	CenterUDFQuery center_udf_query_;
 	std::unordered_map<POINTS*, Parameters> parameters_;
 };
 
