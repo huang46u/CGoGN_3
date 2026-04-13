@@ -298,7 +298,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 			if (config.postprocess.nm_two_layer_prune)
 				core.run_nm_two_layer_prune_prepared(*points);
 			if (config.postprocess.residual_prune)
-				core.run_completion_residual_prune_prepared(*points, config.postprocess.residual_prune_threshold);
+				core.run_completion_residual_prune_prepared(*points);
 			if (config.postprocess.face_post_processing)
 				core.run_face_post_processing_prepared(*points);
 			log_stage("postprocess_end");
@@ -341,8 +341,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	std::cout << "Topology fix: " << (config.postprocess.topology_fix ? "true" : "false") << std::endl;
 	std::cout << "Deg face deletion: " << (config.postprocess.deg_face_deletion ? "true" : "false") << std::endl;
 	std::cout << "NM two-layer prune: " << (config.postprocess.nm_two_layer_prune ? "true" : "false") << std::endl;
-	std::cout << "Residual prune: " << (config.postprocess.residual_prune ? "true" : "false")
-			  << " threshold=" << config.postprocess.residual_prune_threshold << std::endl;
+	std::cout << "Residual prune: " << (config.postprocess.residual_prune ? "true" : "false") << std::endl;
 	std::cout << "Face post processing: " << (config.postprocess.face_post_processing ? "true" : "false") << std::endl;
 	std::cout << "Samples: " << result.counts.sample_points_before_filtering << " -> " << result.counts.sample_points
 			  << std::endl;
@@ -383,7 +382,6 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	benchmark_config.put("postprocess.deg_face_deletion", config.postprocess.deg_face_deletion);
 	benchmark_config.put("postprocess.nm_two_layer_prune", config.postprocess.nm_two_layer_prune);
 	benchmark_config.put("postprocess.residual_prune", config.postprocess.residual_prune);
-	benchmark_config.put("postprocess.residual_prune_threshold", config.postprocess.residual_prune_threshold);
 	benchmark_config.put("postprocess.face_post_processing", config.postprocess.face_post_processing);
 	root.add_child("benchmark_config", benchmark_config);
 

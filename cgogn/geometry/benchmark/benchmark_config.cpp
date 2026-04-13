@@ -356,8 +356,6 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		config.postprocess.deg_face_deletion = get_value<bool>(*postprocess, "deg_face_deletion", false);
 		config.postprocess.nm_two_layer_prune = get_value<bool>(*postprocess, "nm_two_layer_prune", false);
 		config.postprocess.residual_prune = get_value<bool>(*postprocess, "residual_prune", false);
-		config.postprocess.residual_prune_threshold =
-			get_value<float>(*postprocess, "residual_prune_threshold", -1.0f);
 		config.postprocess.face_post_processing = get_value<bool>(*postprocess, "face_post_processing", false);
 	}
 

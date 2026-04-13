@@ -208,9 +208,9 @@ public:
 		context_.udf_training.headless_run_nm_two_layer_prune_prepared(points);
 	}
 
-	void run_completion_residual_prune_prepared(Points& points, float threshold)
+	void run_completion_residual_prune_prepared(Points& points)
 	{
-		context_.udf_training.headless_run_completion_residual_prune_prepared(points, threshold);
+		context_.udf_training.headless_run_completion_residual_prune_prepared(points);
 	}
 
 	typename Training::HeadlessCounts collect_counts(const Points& points) const

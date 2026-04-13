@@ -69,7 +69,7 @@
       "All input modes now use the same batched Bridson sampler; configure it with sampling.bridson.*.",
       "sampling.bridson.candidate_mode accepts 3d_shell and 2d_plane; 2d_tangent_ring is kept as a backward-compatible alias.",
       "Bridson seed warmup uses sampling.ray_sampler_batch_size for sampling.ray_sampler_batch_size x sampling.bridson.warmup_iterations rays before active-list growth starts.",
-      "When threshold < 0, postprocess.residual_prune_threshold now deletes all sheets with face_count < 10."
+      "When postprocess.residual_prune is true, completion residual prune now deletes all sheets with face_count <= 2."
     ]
   },
   "input": {
@@ -135,7 +135,6 @@
     "deg_face_deletion": false,
     "nm_two_layer_prune": false,
     "residual_prune": false,
-    "residual_prune_threshold": -1.0,
     "face_post_processing": false
   },
   "benchmark": {

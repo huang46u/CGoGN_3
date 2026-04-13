@@ -308,7 +308,6 @@ private:
 		std::shared_ptr<NMAttribute<uint32>> skeleton_edge_completion_barrier_ = nullptr;
 		std::shared_ptr<NMAttribute<uint32>> edge_degree_ = nullptr;
 		int completion_debug_sheet_label_ = -1;
-		float32 completion_residual_sheet_score_threshold_ = -1.0f;
 		bool skeleton_face_score_cache_valid_ = false;
 		bool skeleton_face_score_cache_normalized_by_area_ = false;
 		bool skeleton_face_score_cache_covers_all_faces_ = false;
@@ -1021,14 +1020,14 @@ public:
 		headless_run_nm_two_layer_prune_prepared(points_parameters_[&points]);
 	}
 
-	void headless_run_completion_residual_prune_prepared(PointsParameters& p, Scalar threshold)
+	void headless_run_completion_residual_prune_prepared(PointsParameters& p)
 	{
-		run_completion_residual_sheet_score_prune(p, threshold, "[NMCompletionResidual]");
+		run_completion_residual_sheet_score_prune(p, "[NMCompletionResidual]");
 	}
 
-	void headless_run_completion_residual_prune_prepared(POINTS& points, Scalar threshold)
+	void headless_run_completion_residual_prune_prepared(POINTS& points)
 	{
-		headless_run_completion_residual_prune_prepared(points_parameters_[&points], threshold);
+		headless_run_completion_residual_prune_prepared(points_parameters_[&points]);
 	}
 
 
@@ -8966,10 +8965,8 @@ protected:
 	}
 
 	void run_completion_residual_sheet_score_prune(
-		PointsParameters& p, Scalar score_threshold, const char* log_prefix = "[NMCompletionResidual]")
+		PointsParameters& p, const char* log_prefix = "[NMCompletionResidual]")
 	{
-		if (!ensure_topology_score_backend(p, log_prefix))
-			return;
 		if (!p.skeleton_ || !p.skeleton_face_component_id_ || !p.incident_tets_)
 		{
 			log_error(p, log_prefix, " requires skeleton/component-id/incident_tets.", '\n');
@@ -9008,33 +9005,13 @@ protected:
 			return;
 		}
 
-		uint32 dominant_label = INVALID_INDEX;
-		uint32 dominant_face_count = 0;
 		std::vector<uint32> sorted_sheet_labels;
 		sorted_sheet_labels.reserve(label_to_faces.size());
 		for (const auto& kv : label_to_faces)
-		{
 			sorted_sheet_labels.push_back(kv.first);
-			if (dominant_label == INVALID_INDEX || kv.second.size() > dominant_face_count)
-			{
-				dominant_label = kv.first;
-				dominant_face_count = static_cast<uint32>(kv.second.size());
-			}
-		}
 		std::sort(sorted_sheet_labels.begin(), sorted_sheet_labels.end());
 
-		std::unordered_map<uint32, Scalar> label_area_sum;
-		std::unordered_map<uint32, Scalar> label_area_normalized_error;
-		if (!compute_sheet_area_normalized_face_scores(
-				p, label_to_faces, all_face_ids, label_area_sum, label_area_normalized_error, log_prefix))
-		{
-			log_error(p, log_prefix, " failed to compute sheet scores.", '\n');
-			return;
-		}
-
-		const bool threshold_enabled = (score_threshold >= Scalar(0));
 		const size_t forced_delete_max_face_count = 2;
-		const size_t threshold_disabled_delete_face_count_limit = 10;
 		const bool collect_basic_stats = is_basic_logging_enabled(p);
 		const bool collect_verbose_stats = is_verbose_logging_enabled(p);
 
@@ -9042,19 +9019,11 @@ protected:
 		{
 			uint32 sheet_label = INVALID_INDEX;
 			size_t face_count = 0;
-			bool is_residual_candidate = false;
-			uint32 non_manifold_edge_count = 0;
-			Scalar area = Scalar(0);
-			Scalar score = std::numeric_limits<Scalar>::infinity();
 			bool delete_sheet = false;
 			bool delete_by_small_sheet = false;
-			bool delete_by_threshold = false;
-			bool delete_by_threshold_disabled_face_limit = false;
 		};
 
-		uint32 candidate_sheet_count = 0;
 		uint32 deleted_sheet_count = 0;
-		uint32 total_candidate_non_manifold_edges = 0;
 		std::unordered_set<uint32> face_ids_to_delete;
 		std::vector<ResidualSheetScoreEntry> residual_sheet_scores;
 		if (collect_verbose_stats)
@@ -9066,43 +9035,15 @@ protected:
 				continue;
 
 			const size_t face_count = it_faces->second.size();
-			uint32 non_manifold_edge_count = 0;
-			const bool is_residual_candidate =
-				(sheet_label != dominant_label) &&
-				is_dominant_plus_self_non_manifold_sheet(
-					p, sheet_label, dominant_label, it_faces->second, non_manifold_edge_count);
-			if (is_residual_candidate)
-			{
-				if (collect_verbose_stats)
-				{
-					++candidate_sheet_count;
-					total_candidate_non_manifold_edges += non_manifold_edge_count;
-				}
-			}
-
-			const Scalar score = label_area_normalized_error.count(sheet_label)
-									 ? label_area_normalized_error.at(sheet_label)
-									 : std::numeric_limits<Scalar>::infinity();
-			const Scalar area = label_area_sum.count(sheet_label) ? label_area_sum.at(sheet_label) : Scalar(0);
 			const bool delete_by_small_sheet = (face_count <= forced_delete_max_face_count);
-			const bool delete_by_threshold = is_residual_candidate && threshold_enabled && (score > score_threshold);
-			const bool delete_by_threshold_disabled_face_limit =
-				!threshold_enabled && (face_count < threshold_disabled_delete_face_count_limit);
-			const bool delete_sheet =
-				delete_by_small_sheet || delete_by_threshold || delete_by_threshold_disabled_face_limit;
+			const bool delete_sheet = delete_by_small_sheet;
 			if (collect_verbose_stats)
 			{
 				residual_sheet_scores.push_back(ResidualSheetScoreEntry{
 					sheet_label,
 					face_count,
-					is_residual_candidate,
-					non_manifold_edge_count,
-					area,
-					score,
 					delete_sheet,
-					delete_by_small_sheet,
-					delete_by_threshold,
-					delete_by_threshold_disabled_face_limit});
+					delete_by_small_sheet});
 			}
 
 			if (!delete_sheet)
@@ -9117,38 +9058,14 @@ protected:
 
 		if (collect_verbose_stats)
 		{
-			log_verbose(p, log_prefix, " current_residual_sheet_scores", " dominant_label=", dominant_label,
-						" evaluated_sheets=", residual_sheet_scores.size(), " candidate_sheets=", candidate_sheet_count,
-						" threshold=", score_threshold, " threshold_enabled=",
-						(threshold_enabled ? "true" : "false"), " forced_delete_max_face_count=",
-						forced_delete_max_face_count, " threshold_disabled_delete_face_count_limit=",
-						threshold_disabled_delete_face_count_limit, '\n');
+			log_verbose(p, log_prefix, " current_residual_sheet_scores", " evaluated_sheets=",
+						residual_sheet_scores.size(), " delete_face_count_leq=", forced_delete_max_face_count, '\n');
 			for (const ResidualSheetScoreEntry& entry : residual_sheet_scores)
 			{
-				const char* action = "keep";
-				if (entry.delete_sheet)
-				{
-					if (entry.delete_by_small_sheet && entry.delete_by_threshold)
-						action = "delete_small_sheet+threshold";
-					else if (entry.delete_by_small_sheet && entry.delete_by_threshold_disabled_face_limit)
-						action = "delete_small_sheet+threshold_disabled_face_limit";
-					else if (entry.delete_by_small_sheet)
-						action = "delete_small_sheet";
-					else if (entry.delete_by_threshold_disabled_face_limit)
-						action = "delete_threshold_disabled_face_limit";
-					else
-						action = "delete_threshold";
-				}
+				const char* action = entry.delete_sheet ? "delete_small_sheet" : "keep";
 				log_verbose(p, log_prefix, " residual_sheet_score", " sheet=", entry.sheet_label,
-							" dominant_label=", dominant_label, " face_count=", entry.face_count,
-							" residual_candidate=", (entry.is_residual_candidate ? "true" : "false"),
-							" non_manifold_edges=", entry.non_manifold_edge_count, " area=", entry.area, " score=",
-							entry.score, " threshold=", score_threshold, " threshold_enabled=",
-							(threshold_enabled ? "true" : "false"), " forced_small_sheet_delete=",
-							(entry.delete_by_small_sheet ? "true" : "false"),
-							" threshold_disabled_face_limit=",
-							(entry.delete_by_threshold_disabled_face_limit ? "true" : "false"),
-							" action=", action, '\n');
+							" face_count=", entry.face_count, " small_sheet_delete=",
+							(entry.delete_by_small_sheet ? "true" : "false"), " action=", action, '\n');
 			}
 		}
 
@@ -9156,14 +9073,13 @@ protected:
 		{
 			if (collect_verbose_stats)
 			{
-				log_verbose(p, log_prefix, " done", " dominant_label=", dominant_label, " candidate_sheets=",
-							candidate_sheet_count, " deleted_sheets=0", " candidate_non_manifold_edges=",
-							total_candidate_non_manifold_edges, " threshold=", score_threshold, '\n');
+				log_verbose(p, log_prefix, " done", " deleted_sheets=0", " delete_face_count_leq=",
+							forced_delete_max_face_count, '\n');
 			}
 			else
 			{
-				log_basic(p, log_prefix, " done", " dominant_label=", dominant_label, " deleted_sheets=0",
-						  " threshold=", score_threshold, '\n');
+				log_basic(p, log_prefix, " done", " deleted_sheets=0", " delete_face_count_leq=",
+						  forced_delete_max_face_count, '\n');
 			}
 			compute_edge_degree(p);
 			if (compute_skeleton_face_components_union_find(p, "[FaceComponentsUF-CompletionResidual-Final]", nullptr,
@@ -9189,17 +9105,16 @@ protected:
 
 		if (collect_verbose_stats)
 		{
-			log_verbose(p, log_prefix, " done", " dominant_label=", dominant_label, " candidate_sheets=",
-						candidate_sheet_count, " deleted_sheets=", deleted_sheet_count,
-						" candidate_non_manifold_edges=", total_candidate_non_manifold_edges, " threshold=",
-						score_threshold, " removed_faces=", deletion_stats.removed_faces, " removed_edges=",
+			log_verbose(p, log_prefix, " done", " deleted_sheets=", deleted_sheet_count, " delete_face_count_leq=",
+						forced_delete_max_face_count, " removed_faces=",
+						deletion_stats.removed_faces, " removed_edges=",
 						deletion_stats.removed_edges, " removed_vertices=", deletion_stats.removed_vertices,
 						" removed_tets=", deletion_stats.removed_tets, '\n');
 		}
 		else
 		{
-			log_basic(p, log_prefix, " done", " dominant_label=", dominant_label, " deleted_sheets=",
-					  deleted_sheet_count, " threshold=", score_threshold, " removed_faces=",
+			log_basic(p, log_prefix, " done", " deleted_sheets=", deleted_sheet_count, " delete_face_count_leq=",
+					  forced_delete_max_face_count, " removed_faces=",
 					  deletion_stats.removed_faces, " removed_edges=", deletion_stats.removed_edges,
 					  " removed_vertices=", deletion_stats.removed_vertices, " removed_tets=",
 					  deletion_stats.removed_tets, '\n');
@@ -14540,16 +14455,9 @@ protected:
 						if (!p.running_)
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
-							run_completion_residual_sheet_score_prune(
-								p, Scalar(p.completion_residual_sheet_score_threshold_), "[NMCompletionResidual]");
+							run_completion_residual_sheet_score_prune(p, "[NMCompletionResidual]");
 						}
 					}
-					ImGui::InputFloat("Completion residual score thres", &p.completion_residual_sheet_score_threshold_,
-									  0.001f, 0.01f, "%.6f");
-					if (p.completion_residual_sheet_score_threshold_ < -1.0f)
-						p.completion_residual_sheet_score_threshold_ = -1.0f;
-					ImGui::SameLine();
-					ImGui::TextUnformatted("<0 deletes all sheets with face_count < 10");
 					ImGui::SameLine();
 					if (ImGui::Button("Singular completion path"))
 					{

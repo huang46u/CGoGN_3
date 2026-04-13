@@ -134,7 +134,6 @@ struct BenchmarkPostprocessConfig
 	bool deg_face_deletion = false;
 	bool nm_two_layer_prune = false;
 	bool residual_prune = false;
-	float residual_prune_threshold = -1.0f;
 	bool face_post_processing = false;
 };
 

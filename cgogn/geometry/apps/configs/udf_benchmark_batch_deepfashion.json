@@ -59,7 +59,6 @@
     "deg_face_deletion": false,
     "nm_two_layer_prune": true,
     "residual_prune": true,
-    "residual_prune_threshold": 1,
     "face_post_processing": false
   },
   "benchmark": {
