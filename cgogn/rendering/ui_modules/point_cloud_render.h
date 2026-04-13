@@ -356,7 +356,7 @@ protected:
 			if (p.render_vertices_)
 			{
 				if (!p.vertex_radius_)
-					need_update |= ImGui::SliderFloat("Size##vertices", &(p.vertex_scale_factor_), 0.1f, 2.0f);
+					need_update |= ImGui::SliderFloat("Size##vertices", &(p.vertex_scale_factor_), 0.001f, 2.0f);
 
 				ImGui::TextUnformatted("Colors");
 				ImGui::BeginGroup();
