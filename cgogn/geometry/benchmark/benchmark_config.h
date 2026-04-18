@@ -20,6 +20,12 @@ enum class InputMode
 	NeuralUDF
 };
 
+enum class InputGeometryType
+{
+	PointCloud,
+	Mesh
+};
+
 enum class NeuralModelType
 {
 	UDF,
@@ -30,12 +36,6 @@ enum class DistanceMode
 {
 	LineQuadricDistance,
 	LineQuadricDistanceFreeRadius
-};
-
-enum class SphereCorrectionMode
-{
-	Always,
-	OnSplit
 };
 
 enum class AutoSplitMode
@@ -60,11 +60,13 @@ enum class BridsonCandidateMode
 struct BenchmarkInputConfig
 {
 	InputMode mode = InputMode::PointCloud;
+	InputGeometryType geometry_type = InputGeometryType::PointCloud;
 	std::string input_path;
 	std::string surface_path;
 	std::string neural_udf_model_path;
 	NeuralModelType neural_model_type = NeuralModelType::UDF;
 	InitialMAMode initial_ma_mode_override = InitialMAMode::Auto;
+	bool ma_flip_prune = true;
 };
 
 struct BenchmarkSamplingConfig
@@ -103,8 +105,6 @@ struct BenchmarkOptimizationConfig
 	float sqem_fix_radius_scale = 1.0f;
 	bool udf_center_enabled = false;
 	float udf_center_lambda = 0.10f;
-	bool sphere_correction = false;
-	SphereCorrectionMode sphere_correction_mode = SphereCorrectionMode::Always;
 	bool lock_skeleton_connectivity = false;
 	bool auto_stop = false;
 };
@@ -147,6 +147,7 @@ struct BenchmarkOutputConfig
 {
 	std::string skeleton_ply;
 	std::string timing_json;
+	bool save_face_components = false;
 };
 
 struct BenchmarkBatchConfig
@@ -184,9 +185,9 @@ bool is_batch_benchmark_config(const BenchmarkConfig& config);
 bool is_batch_case_completed(const BenchmarkConfig& config);
 
 std::string to_string(InputMode value);
+std::string to_string(InputGeometryType value);
 std::string to_string(NeuralModelType value);
 std::string to_string(DistanceMode value);
-std::string to_string(SphereCorrectionMode value);
 std::string to_string(AutoSplitMode value);
 std::string to_string(InitialMAMode value);
 std::string to_string(BridsonCandidateMode value);

@@ -218,9 +218,9 @@ public:
 		return context_.udf_training.headless_collect_counts(points);
 	}
 
-	void export_skeleton_ply_prepared(Points& points, const std::string& filename)
+	void export_skeleton_ply_prepared(Points& points, const std::string& filename, bool save_face_components = false)
 	{
-		context_.udf_training.headless_export_skeleton_ply_prepared(points, filename);
+		context_.udf_training.headless_export_skeleton_ply_prepared(points, filename, save_face_components);
 	}
 
 private:

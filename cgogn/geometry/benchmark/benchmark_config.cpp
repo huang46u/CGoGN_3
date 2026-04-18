@@ -4,6 +4,7 @@
 #include <boost/property_tree/ptree.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <stdexcept>
 #include <vector>
@@ -132,6 +133,15 @@ InputMode parse_input_mode(const std::string& value)
 	fail_config("unsupported `input.mode`: " + value);
 }
 
+InputGeometryType parse_input_geometry_type(const std::string& value)
+{
+	if (value == "point_cloud")
+		return InputGeometryType::PointCloud;
+	if (value == "mesh")
+		return InputGeometryType::Mesh;
+	fail_config("unsupported `input.geometry_type`: " + value);
+}
+
 NeuralModelType parse_neural_model_type(const std::string& value)
 {
 	if (value == "udf")
@@ -148,15 +158,6 @@ DistanceMode parse_distance_mode(const std::string& value)
 	if (value == "line_quadric_distance_free_r" || value == "line_quadric_distance_free_radius")
 		return DistanceMode::LineQuadricDistanceFreeRadius;
 	fail_config("unsupported `optimization.distance_mode`: " + value);
-}
-
-SphereCorrectionMode parse_correction_mode(const std::string& value)
-{
-	if (value == "always")
-		return SphereCorrectionMode::Always;
-	if (value == "on_split")
-		return SphereCorrectionMode::OnSplit;
-	fail_config("unsupported `optimization.sphere_correction_mode`: " + value);
 }
 
 AutoSplitMode parse_auto_split_mode(const std::string& value)
@@ -188,6 +189,65 @@ BridsonCandidateMode parse_bridson_candidate_mode(const std::string& value)
 	fail_config("unsupported `sampling.bridson.candidate_mode`: " + value);
 }
 
+std::string normalize_extension(std::string ext)
+{
+	std::transform(ext.begin(), ext.end(), ext.begin(),
+				   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	if (!ext.empty() && ext.front() != '.')
+		ext.insert(ext.begin(), '.');
+	return ext;
+}
+
+bool is_supported_point_cloud_extension(const std::string& ext)
+{
+	return normalize_extension(ext) == ".ply";
+}
+
+bool is_supported_mesh_extension(const std::string& ext)
+{
+	const std::string normalized = normalize_extension(ext);
+	return normalized == ".obj" || normalized == ".ply" || normalized == ".off" || normalized == ".stl";
+}
+
+void validate_geometry_extension(const std::string& field_name, const std::string& extension, InputGeometryType geometry_type)
+{
+	if (extension.empty())
+		return;
+	if (geometry_type == InputGeometryType::PointCloud)
+	{
+		if (!is_supported_point_cloud_extension(extension))
+			fail_config("`" + field_name +
+						"` must be `.ply` when `input.geometry_type` is `point_cloud`; got: " + extension);
+		return;
+	}
+	if (!is_supported_mesh_extension(extension))
+		fail_config("`" + field_name +
+					"` must use one of `.obj`, `.ply`, `.off`, `.stl` when `input.geometry_type` is `mesh`; got: " +
+					extension);
+}
+
+void validate_geometry_path(const std::string& field_name, const std::string& path, InputGeometryType geometry_type)
+{
+	if (path.empty())
+		return;
+	validate_geometry_extension(field_name, fs::path(path).extension().string(), geometry_type);
+}
+
+InputGeometryType default_geometry_type(const BenchmarkConfig& config)
+{
+	switch (config.input.mode)
+	{
+	case InputMode::PointCloud:
+		return InputGeometryType::PointCloud;
+	case InputMode::SurfaceMesh:
+		return InputGeometryType::Mesh;
+	case InputMode::NeuralUDF:
+	default:
+		return (!config.input.surface_path.empty() || !config.batch.surface_directory.empty()) ? InputGeometryType::Mesh
+																						: InputGeometryType::PointCloud;
+	}
+}
+
 } // namespace
 
 std::string to_string(InputMode value)
@@ -204,6 +264,11 @@ std::string to_string(InputMode value)
 	}
 }
 
+std::string to_string(InputGeometryType value)
+{
+	return value == InputGeometryType::Mesh ? "mesh" : "point_cloud";
+}
+
 std::string to_string(NeuralModelType value)
 {
 	return value == NeuralModelType::MF ? "mf" : "udf";
@@ -213,11 +278,6 @@ std::string to_string(DistanceMode value)
 {
 	return value == DistanceMode::LineQuadricDistanceFreeRadius ? "line_quadric_distance_free_r"
 																 : "line_quadric_distance_fix_r";
-}
-
-std::string to_string(SphereCorrectionMode value)
-{
-	return value == SphereCorrectionMode::OnSplit ? "on_split" : "always";
 }
 
 std::string to_string(AutoSplitMode value)
@@ -258,6 +318,7 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	config.config_path = config_path.string();
 
 	const ptree& input = root.get_child("input");
+	const auto geometry_type_raw = input.get_optional<std::string>("geometry_type");
 	config.input.mode = parse_input_mode(require_value<std::string>(input, "mode"));
 	config.input.input_path = resolve_config_relative_path(config_directory, get_value<std::string>(input, "input_path", ""));
 	config.input.surface_path = resolve_config_relative_path(config_directory, get_value<std::string>(input, "surface_path", ""));
@@ -265,6 +326,7 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		resolve_config_relative_path(config_directory, get_value<std::string>(input, "neural_udf_model_path", ""));
 	config.input.initial_ma_mode_override =
 		parse_initial_ma_mode(get_value<std::string>(input, "initial_ma_mode_override", "auto"));
+	config.input.ma_flip_prune = get_value<bool>(input, "ma_flip_prune", true);
 	if (auto neural_type = input.get_optional<std::string>("neural_model_type"))
 		config.input.neural_model_type = parse_neural_model_type(*neural_type);
 
@@ -326,9 +388,6 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	config.optimization.sqem_fix_radius_scale = require_value<float>(optimization, "sqem_fix_radius_scale");
 	config.optimization.udf_center_enabled = get_value<bool>(optimization, "udf_center_enabled", false);
 	config.optimization.udf_center_lambda = get_value<float>(optimization, "udf_center_lambda", 0.10f);
-	config.optimization.sphere_correction = get_value<bool>(optimization, "sphere_correction", false);
-	config.optimization.sphere_correction_mode = parse_correction_mode(
-		get_value<std::string>(optimization, "sphere_correction_mode", "always"));
 	config.optimization.lock_skeleton_connectivity =
 		get_value<bool>(optimization, "lock_skeleton_connectivity", false);
 	config.optimization.auto_stop = get_value<bool>(optimization, "auto_stop", false);
@@ -384,11 +443,15 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 			resolve_config_relative_path(config_directory, get_value<std::string>(*batch, "timing_directory", ""));
 	}
 
+	config.input.geometry_type =
+		geometry_type_raw ? parse_input_geometry_type(*geometry_type_raw) : default_geometry_type(config);
+
 	const ptree& output = root.get_child("output");
 	config.output.skeleton_ply =
 		resolve_config_relative_path(config_directory, get_value<std::string>(output, "skeleton_ply", ""));
 	config.output.timing_json =
 		resolve_config_relative_path(config_directory, get_value<std::string>(output, "timing_json", ""));
+	config.output.save_face_components = get_value<bool>(output, "save_face_components", false);
 
 	if (config.benchmark.num_measure_runs != 1)
 		fail_config("`benchmark.num_measure_runs` is reserved in v1 and must be `1`");
@@ -399,6 +462,10 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		if (!fs::exists(config.input.neural_udf_model_path))
 			fail_config("neural model does not exist: " + config.input.neural_udf_model_path);
 	}
+	if (config.input.mode == InputMode::PointCloud && config.input.geometry_type != InputGeometryType::PointCloud)
+		fail_config("`input.geometry_type` must be `point_cloud` when `input.mode` is `point_cloud`");
+	if (config.input.mode == InputMode::SurfaceMesh && config.input.geometry_type != InputGeometryType::Mesh)
+		fail_config("`input.geometry_type` must be `mesh` when `input.mode` is `surface_mesh`");
 	if (config.batch.enabled)
 	{
 		if (config.batch.input_directory.empty())
@@ -407,10 +474,33 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 			fail_config("`batch.output_directory` is required when `batch.enabled` is true");
 		if (config.input.mode == InputMode::NeuralUDF && config.batch.neural_udf_model_directory.empty())
 			fail_config("`batch.neural_udf_model_directory` is required when `input.mode` is `neural_udf`");
+		validate_geometry_extension("batch.input_extension", config.batch.input_extension, config.input.geometry_type);
+		if (config.input.geometry_type == InputGeometryType::PointCloud && !config.batch.surface_directory.empty())
+			fail_config("`batch.surface_directory` is only valid when `input.geometry_type` is `mesh`");
+		if (!config.batch.surface_directory.empty())
+			validate_geometry_extension("batch.surface_extension", config.batch.surface_extension, InputGeometryType::Mesh);
 	}
 	else if (config.input.input_path.empty() && config.input.surface_path.empty())
 	{
 		fail_config("one of `input.input_path` or `input.surface_path` must be provided");
+	}
+	else
+	{
+		if (config.input.geometry_type == InputGeometryType::PointCloud)
+		{
+			if (config.input.input_path.empty())
+				fail_config("`input.input_path` is required when `input.geometry_type` is `point_cloud`");
+			validate_geometry_path("input.input_path", config.input.input_path, InputGeometryType::PointCloud);
+		}
+		else
+		{
+			const bool use_surface_path = !config.input.surface_path.empty();
+			const std::string& mesh_path = use_surface_path ? config.input.surface_path : config.input.input_path;
+			const char* mesh_field = use_surface_path ? "input.surface_path" : "input.input_path";
+			if (mesh_path.empty())
+				fail_config("one of `input.input_path` or `input.surface_path` must be provided when `input.geometry_type` is `mesh`");
+			validate_geometry_path(mesh_field, mesh_path, InputGeometryType::Mesh);
+		}
 	}
 	if (config.sampling.bridson.sample_radius <= 0.0f)
 		fail_config("`sampling.bridson.sample_radius` must be > 0");
@@ -486,7 +576,7 @@ std::vector<BenchmarkConfig> expand_batch_benchmark_configs(const BenchmarkConfi
 		config.input.surface_path.clear();
 		config.input.neural_udf_model_path.clear();
 
-		if (!config.batch.surface_directory.empty())
+		if (config.input.geometry_type == InputGeometryType::Mesh && !config.batch.surface_directory.empty())
 			config.input.surface_path = find_surface_file_for_case(config.batch, stem).string();
 
 		if (config.input.mode == InputMode::NeuralUDF)

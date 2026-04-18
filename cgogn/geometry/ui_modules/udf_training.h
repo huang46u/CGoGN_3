@@ -22,8 +22,6 @@
 #include <cgogn/geometry/types/spatial_grid.h>
 #include <cgogn/geometry/types/neural_field_forward.h>
 #include <cgogn/geometry/types/vector_traits.h>
-#include <cgogn/geometry/types/fast_winding_number_traits.h>
-#include <cgogn/geometry/types/fast_winding_number.h>
 #include <cgogn/io/point/export_options.h>
 #include <cgogn/io/surface/export_options.h>
 #include <cgogn/io/surface/ply.h>
@@ -38,7 +36,6 @@
 #include <Eigen/Sparse>
 
 #include <libacc/bvh_tree.h>
-#include <libacc/bvh_tree_spheres.h>
 #include <libacc/kd_tree.h>
 
 // import CGAL
@@ -98,9 +95,6 @@ public:
 	using NMFace = typename mesh_traits<NONMANIFOLD>::Face;
 	using NMEdge = typename mesh_traits<NONMANIFOLD>::Edge;
 
-	using PointTraits = geometry::FWN_Point_Traits<POINTS>;
-	template <int ORDER>
-	using PointFWN = geometry::Fast_Winding_Number<PointTraits, ORDER>;
 	template <typename T>
 	using PAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
 	template <typename T>
@@ -117,11 +111,6 @@ public:
 		MAX_NB_SPHERES
 	};
 
-	enum CorrectionMode : uint32
-	{
-		CORRECT_ALWAYS,
-		CORRECT_ON_SPLIT
-	};
 	enum DistanceMode : uint32
 	{
 		LINE_QUADRIC_DISTANCE,
@@ -224,13 +213,6 @@ private:
 		float32 samples_jitter_pos_pct_ = 0.5f;
 		float32 samples_jitter_normal_sigma_ = 0.02f;
 
-		std::unique_ptr<acc::BVHTreeSpheres<uint32, Vec3>> samples_wn_bvh_;
-		std::vector<Vec3> samples_wn_bvh_centers_;
-		std::vector<Scalar> samples_wn_bvh_radii_;
-		std::unique_ptr<PointFWN<3>> samples_winding_number_;
-		std::vector<PVertex> samples_wn_vertices_;
-		Scalar beta_ = Scalar(2.0);
-
 		acc::KDTree<3, uint32>* samples_kdtree_ = nullptr; // KDTree of alpha-expanding samples
 		std::vector<PVertex> samples_kdtree_vertices_;	   // Vertices of alpha-expanding samples in KDTree order
 		acc::KDTree<3, uint32>* samples_ma_kdtree_ = nullptr; // KDTree of sample medial-axis positions
@@ -259,6 +241,7 @@ private:
 		};
 		NeuralProjectionWorkspace neural_projection_workspace_;
 		bool filter_positive_projection_ = false;
+		bool ma_flip_prune_enabled_ = false;
 		std::vector<uint8_t> last_projection_keep_mask_;
 		size_t last_projection_batch_size_ = 0;
 		size_t last_projection_batch_iterations_ = 0;
@@ -322,8 +305,6 @@ private:
 
 		float32 filter_radius_threshold_ = 0.0f;
 
-		bool sphere_correction_ = false;
-		CorrectionMode sphere_correction_mode_ = CORRECT_ALWAYS;
 		bool lock_skeleton_connectivity_ = false;
 		DistanceMode distance_mode_ = LINE_QUADRIC_DISTANCE;
 		bool use_local_clusters_ = false;
@@ -465,9 +446,8 @@ public:
 		OutputVerbosity output_verbosity_ = OUTPUT_NORMAL;
 		uint32 initial_nb_spheres_ = 1;
 		InitialMAMode initial_ma_mode_override_ = INITIAL_MA_AUTO;
+		bool ma_flip_prune_enabled_ = true;
 		float32 filter_radius_threshold_ = 0.0f;
-		bool sphere_correction_ = false;
-		CorrectionMode sphere_correction_mode_ = CORRECT_ALWAYS;
 		bool lock_skeleton_connectivity_ = false;
 		DistanceMode distance_mode_ = LINE_QUADRIC_DISTANCE;
 		bool use_local_clusters_ = false;
@@ -682,9 +662,8 @@ public:
 		if (options.verbose_)
 			p.output_verbosity_ = OUTPUT_VERBOSE;
 		p.initial_ma_mode_override_ = options.initial_ma_mode_override_;
+		p.ma_flip_prune_enabled_ = options.ma_flip_prune_enabled_;
 		p.filter_radius_threshold_ = options.filter_radius_threshold_;
-		p.sphere_correction_ = options.sphere_correction_;
-		p.sphere_correction_mode_ = options.sphere_correction_mode_;
 		p.lock_skeleton_connectivity_ = options.lock_skeleton_connectivity_;
 		p.distance_mode_ = options.distance_mode_;
 		p.use_local_clusters_ = options.use_local_clusters_;
@@ -786,7 +765,6 @@ public:
 	void headless_compute_fitting_primitives_prepared(PointsParameters& p)
 	{
 		compute_samples_area(p);
-		compute_winding_numbers(p);
 		compute_quadrics(p);
 	}
 
@@ -855,13 +833,6 @@ public:
 					update_sphere_line_quadric_distance_fix_radius(p, v);
 				return true;
 			});
-			if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
-			{
-				parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-					correct_sphere(p, v);
-					return true;
-				});
-			}
 			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 				(*p.spheres_do_not_split_)[index_of(*p.spheres_, v)] = false;
 				return true;
@@ -1195,7 +1166,8 @@ public:
 		return any_selected && samples_ok && samples_normal_color_ok && spheres_ok && skeleton_ok;
 	}
 
-	void headless_export_skeleton_ply_prepared(PointsParameters& p, const std::string& filename)
+	void headless_export_skeleton_ply_prepared(PointsParameters& p, const std::string& filename,
+											   bool save_face_components = false)
 	{
 		if (!p.skeleton_ || !p.skeleton_position_ || !p.skeleton_radius_ || !p.spheres_ || !p.spheres_radius_)
 			return;
@@ -1212,12 +1184,19 @@ public:
 
 		io::SurfaceExportAttributeSelection<NONMANIFOLD> export_attributes;
 		export_attributes.vertex_attributes.push_back(p.skeleton_radius_);
+		if (save_face_components)
+		{
+			mark_skeleton_face_components_union_find(p, "[FaceComponentsExport]");
+			if (p.skeleton_face_component_color_)
+				export_attributes.face_attributes.push_back(p.skeleton_face_component_color_);
+		}
 		io::export_PLY(*p.skeleton_, p.skeleton_position_.get(), filename, &export_attributes);
 	}
 
-	void headless_export_skeleton_ply_prepared(POINTS& points, const std::string& filename)
+	void headless_export_skeleton_ply_prepared(POINTS& points, const std::string& filename,
+											   bool save_face_components = false)
 	{
-		headless_export_skeleton_ply_prepared(points_parameters_[&points], filename);
+		headless_export_skeleton_ply_prepared(points_parameters_[&points], filename, save_face_components);
 	}
 
 	void reset_headless_state()
@@ -2747,7 +2726,11 @@ public:
 
 		NeuralFieldForward udf = make_neural_field_forward(p);
 		auto traits = RaySamplerConfig::make(udf);
+		const bool prev_filter_positive_projection = p.filter_positive_projection_;
+		if (p.neural_model_type_ == NEURAL_MODEL_MF)
+			p.filter_positive_projection_ = true;
 		load_alpha_samples_to_mesh_bridson_impl(p, traits, udf.device(), "neural_udf", geometry::RaySamplerNeural{});
+		p.filter_positive_projection_ = prev_filter_positive_projection;
 	}
 
 	void load_alpha_samples_to_mesh_impl(PointsParameters& p, geometry::RaySamplerSurface)
@@ -3009,8 +2992,6 @@ public:
 		clear_knn_hover(p);
 		p.knn_hover_locked_ = false;
 		p.fitting_data_computed_ = false;
-		p.samples_winding_number_.reset();
-		p.samples_wn_bvh_.reset();
 		p.samples_jitter_backup_valid_ = false;
 		p.samples_position_backup_.clear();
 		p.samples_normal_backup_.clear();
@@ -3124,8 +3105,6 @@ public:
 		clear_knn_hover(p);
 		p.knn_hover_locked_ = false;
 		p.fitting_data_computed_ = false;
-		p.samples_winding_number_.reset();
-		p.samples_wn_bvh_.reset();
 		p.samples_jitter_backup_valid_ = false;
 		p.samples_position_backup_.clear();
 		p.samples_normal_backup_.clear();
@@ -3461,8 +3440,6 @@ private:
 		compute_initial_medial_axis(p);
 		log_basic(p, "Computing KNN and Area...", '\n');
 		compute_samples_area(p); // Compute KNN and Area for samples
-		log_basic(p, "Computing Winding Numbers...", '\n');
-		compute_winding_numbers(p);
 		log_basic(p, "Computing Quadrics...", '\n');
 		compute_quadrics(p);
 
@@ -3556,7 +3533,6 @@ private:
 			// Let MA stabilization finish before rebuilding fitting primitives.
 			compute_initial_medial_axis(p);
 			compute_samples_area(p); // updates samples_knn_ and samples_area_
-			compute_winding_numbers(p);
 			compute_quadrics(p);
 			log_basic(p, "[KNNRebuild] fitting-dependent attributes refreshed.", '\n');
 		}
@@ -3751,34 +3727,6 @@ private:
 		});
 		// MA positions changed; keep MA-KDTree in sync for MF topology scoring.
 		build_kdtree(p);
-	}
-
-	void compute_winding_numbers(PointsParameters& p)
-	{
-		uint32 nb_samples = nb_cells<PVertex>(*p.samples_mesh_);
-		p.samples_wn_bvh_centers_.clear();
-		p.samples_wn_bvh_radii_.clear();
-		p.samples_wn_vertices_.clear();
-		p.samples_wn_bvh_centers_.reserve(nb_samples);
-		p.samples_wn_bvh_radii_.reserve(nb_samples);
-		p.samples_wn_vertices_.reserve(nb_samples);
-
-		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			p.samples_wn_vertices_.push_back(v);
-			p.samples_wn_bvh_centers_.push_back((*p.samples_position_)[v_idx]);
-			Scalar area = (*p.samples_area_)[v_idx];
-			Scalar radius = std::sqrt(area / M_PI);
-			p.samples_wn_bvh_radii_.push_back(radius);
-			return true;
-		});
-
-		p.samples_wn_bvh_ = std::make_unique<acc::BVHTreeSpheres<uint32, Vec3>>(p.samples_wn_bvh_centers_, p.samples_wn_bvh_radii_);
-
-		PointTraits samples_wn_traits(*p.samples_mesh_, p.samples_wn_bvh_.get(), p.samples_wn_vertices_,
-								 p.samples_position_.get(), p.samples_normal_.get(),
-								 p.samples_area_.get());
-		p.samples_winding_number_ = std::make_unique<PointFWN<3>>(*p.samples_wn_bvh_, samples_wn_traits, p.beta_);
 	}
 
 	void compute_quadrics(PointsParameters& p)
@@ -4018,8 +3966,6 @@ private:
 	void invalidate_samples_after_input_change(PointsParameters& p)
 	{
 		p.fitting_data_computed_ = false;
-		p.samples_winding_number_.reset();
-		p.samples_wn_bvh_.reset();
 		p.samples_jitter_backup_valid_ = false;
 		p.samples_position_backup_.clear();
 		p.samples_normal_backup_.clear();
@@ -4127,8 +4073,6 @@ private:
 		});
 
 		p.fitting_data_computed_ = false;
-		p.samples_winding_number_.reset();
-		p.samples_wn_bvh_.reset();
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
 	}
 
@@ -4161,8 +4105,6 @@ private:
 
 		refresh_sample_normals_color(p);
 		p.fitting_data_computed_ = false;
-		p.samples_winding_number_.reset();
-		p.samples_wn_bvh_.reset();
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
 	}
@@ -4186,8 +4128,6 @@ private:
 
 		refresh_sample_normals_color(p);
 		p.fitting_data_computed_ = false;
-		p.samples_winding_number_.reset();
-		p.samples_wn_bvh_.reset();
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
@@ -4238,8 +4178,6 @@ private:
 
 		// Resampling from a point cloud invalidates cached fitting data and samples.
 		p.fitting_data_computed_ = false;
-		p.samples_winding_number_.reset();
-		p.samples_wn_bvh_.reset();
 		p.samples_jitter_backup_valid_ = false;
 		p.samples_position_backup_.clear();
 		p.samples_normal_backup_.clear();
@@ -4462,22 +4400,22 @@ private:
 
 		run_shrinking_ball_for_all();
 
-		// Post-process on shrinking-ball centers:
+		// Optional post-process on shrinking-ball centers:
 		// - UDF model: retry/delete only if udf(center) > 1.2 * alpha.
 		// - Surface mesh / point cloud: retry if distance(center) > alpha; still > alpha -> delete sample.
 		// - MF model: retry if sdf(center) > 0 or udf(center) > alpha; after flip, delete if sdf(center) > 0
 		//   or udf(center) > alpha.
-		uint32 flipped_normals = 0;
-		uint32 flip_triggered_points = 0;
-		uint32 deleted_samples = 0;
-		std::vector<uint32> flipped_vertex_indices;
-		std::function<uint32(const std::vector<PVertex>&)> prune_vertices_by_current_centers;
-		const Scalar udf_center_prune_threshold = udf_model ? (Scalar(1.2) * p.alpha_) : p.alpha_;
-		const bool supports_center_retry_prune =
-			mf_model || p.input_mode_ == INPUT_SURFACE_MESH || p.input_mode_ == INPUT_POINT_CLOUD ||
-			(p.input_mode_ == INPUT_NEURAL_UDF && p.neural_udf_loaded_);
-		if (supports_center_retry_prune)
+		if (p.ma_flip_prune_enabled_)
 		{
+			uint32 flipped_normals = 0;
+			uint32 flip_triggered_points = 0;
+			uint32 deleted_samples = 0;
+			std::vector<uint32> flipped_vertex_indices;
+			std::function<uint32(const std::vector<PVertex>&)> prune_vertices_by_current_centers;
+			const Scalar udf_center_prune_threshold = udf_model ? (Scalar(1.2) * p.alpha_) : p.alpha_;
+			const bool supports_center_retry_prune =
+				mf_model || p.input_mode_ == INPUT_SURFACE_MESH || p.input_mode_ == INPUT_POINT_CLOUD ||
+				(p.input_mode_ == INPUT_NEURAL_UDF && p.neural_udf_loaded_);
 			auto eval_mf_values_sdf = [&](const std::vector<Vec3>& query_points, std::vector<Scalar>& out_values,
 										  std::vector<Scalar>& out_sdf) -> bool {
 				out_values.clear();
@@ -4526,157 +4464,160 @@ private:
 				return true;
 			};
 
-			auto eval_center_scores = [&](const std::vector<Vec3>& query_points, std::vector<Scalar>& out_values,
-									 std::vector<Scalar>& out_sdf) -> bool {
-				out_sdf.clear();
-				if (mf_model)
-					return eval_mf_values_sdf(query_points, out_values, out_sdf);
-				return eval_topology_score_values(p, query_points, out_values);
-			};
+			if (supports_center_retry_prune)
+			{
+				auto eval_center_scores = [&](const std::vector<Vec3>& query_points, std::vector<Scalar>& out_values,
+										  std::vector<Scalar>& out_sdf) -> bool {
+					out_sdf.clear();
+					if (mf_model)
+						return eval_mf_values_sdf(query_points, out_values, out_sdf);
+					return eval_topology_score_values(p, query_points, out_values);
+				};
 
-			prune_vertices_by_current_centers = [&](const std::vector<PVertex>& candidate_vertices) -> uint32 {
-				std::vector<PVertex> active_vertices;
-				std::vector<Vec3> active_centers;
-				active_vertices.reserve(candidate_vertices.size());
-				active_centers.reserve(candidate_vertices.size());
-				for (PVertex v : candidate_vertices)
-				{
+				prune_vertices_by_current_centers = [&](const std::vector<PVertex>& candidate_vertices) -> uint32 {
+					std::vector<PVertex> active_vertices;
+					std::vector<Vec3> active_centers;
+					active_vertices.reserve(candidate_vertices.size());
+					active_centers.reserve(candidate_vertices.size());
+					for (PVertex v : candidate_vertices)
+					{
+						const uint32 vid = index_of(*p.samples_mesh_, v);
+						if (vid == INVALID_INDEX)
+							continue;
+						active_vertices.push_back(v);
+						active_centers.push_back((*p.samples_ma_position_)[vid]);
+					}
+					if (active_vertices.empty())
+						return 0;
+
+					std::vector<Scalar> current_score;
+					std::vector<Scalar> current_sdf;
+					const bool eval_ok = eval_center_scores(active_centers, current_score, current_sdf);
+					if (!eval_ok || current_score.size() != active_centers.size())
+						return 0;
+
+					std::unordered_set<uint32> deleted_ids;
+					deleted_ids.reserve(active_vertices.size());
+					uint32 removed_count = 0;
+					for (size_t i = 0; i < active_vertices.size(); ++i)
+					{
+						bool should_delete = false;
+						if (mf_model)
+						{
+							if ((i < current_sdf.size() && current_sdf[i] > Scalar(0)) || current_score[i] > p.alpha_)
+								should_delete = true;
+						}
+						else
+						{
+							if (current_score[i] > udf_center_prune_threshold)
+								should_delete = true;
+						}
+						if (!should_delete)
+							continue;
+
+						const uint32 vid = index_of(*p.samples_mesh_, active_vertices[i]);
+						if (vid == INVALID_INDEX || !deleted_ids.insert(vid).second)
+							continue;
+						remove_vertex(*p.samples_mesh_, active_vertices[i]);
+						++removed_count;
+					}
+					return removed_count;
+				};
+
+				std::vector<PVertex> vertices;
+				std::vector<Vec3> centers;
+				vertices.reserve(nb_cells<PVertex>(*p.samples_mesh_));
+				centers.reserve(nb_cells<PVertex>(*p.samples_mesh_));
+				foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
 					const uint32 vid = index_of(*p.samples_mesh_, v);
 					if (vid == INVALID_INDEX)
-						continue;
-					active_vertices.push_back(v);
-					active_centers.push_back((*p.samples_ma_position_)[vid]);
-				}
-				if (active_vertices.empty())
-					return 0;
+						return true;
+					vertices.push_back(v);
+					centers.push_back((*p.samples_ma_position_)[vid]);
+					return true;
+				});
 
-				std::vector<Scalar> current_score;
-				std::vector<Scalar> current_sdf;
-				const bool eval_ok = eval_center_scores(active_centers, current_score, current_sdf);
-				if (!eval_ok || current_score.size() != active_centers.size())
-					return 0;
+				std::vector<Scalar> score_values;
+				std::vector<Scalar> sdf_values;
+				const bool eval_ok = eval_center_scores(centers, score_values, sdf_values);
 
-				std::unordered_set<uint32> deleted_ids;
-				deleted_ids.reserve(active_vertices.size());
-				uint32 removed_count = 0;
-				for (size_t i = 0; i < active_vertices.size(); ++i)
+				if (eval_ok && score_values.size() == centers.size())
 				{
-					bool should_delete = false;
 					if (mf_model)
 					{
-						if ((i < current_sdf.size() && current_sdf[i] > Scalar(0)) || current_score[i] > p.alpha_)
-							should_delete = true;
+						const size_t debug_n = std::min<size_t>(20, score_values.size());
+						for (size_t i = 0; is_verbose_logging_enabled(p) && i < debug_n; ++i)
+						{
+							const Scalar sdf_i = (i < sdf_values.size()) ? sdf_values[i] : Scalar(0);
+							log_verbose(
+								p, "[MAFlipPrune][MF] center_udf#", i, " udf=", score_values[i], " sdf=", sdf_i, '\n');
+						}
 					}
-					else
+
+					std::vector<PVertex> need_retry;
+					need_retry.reserve(vertices.size() / 8 + 1);
+					for (size_t i = 0; i < vertices.size(); ++i)
 					{
-						if (current_score[i] > udf_center_prune_threshold)
-							should_delete = true;
+						const bool by_udf = (score_values[i] > udf_center_prune_threshold);
+						const bool by_mf_sdf = mf_model && i < sdf_values.size() && (sdf_values[i] > Scalar(0));
+						const bool trigger_retry = mf_model ? (by_mf_sdf || by_udf) : by_udf;
+						if (trigger_retry)
+							need_retry.push_back(vertices[i]);
 					}
-					if (!should_delete)
-						continue;
+					flip_triggered_points += static_cast<uint32>(need_retry.size());
+					flipped_vertex_indices.reserve(need_retry.size());
 
-					const uint32 vid = index_of(*p.samples_mesh_, active_vertices[i]);
-					if (vid == INVALID_INDEX || !deleted_ids.insert(vid).second)
-						continue;
-					remove_vertex(*p.samples_mesh_, active_vertices[i]);
-					++removed_count;
-				}
-				return removed_count;
-			};
-
-			std::vector<PVertex> vertices;
-			std::vector<Vec3> centers;
-			vertices.reserve(nb_cells<PVertex>(*p.samples_mesh_));
-			centers.reserve(nb_cells<PVertex>(*p.samples_mesh_));
-			foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
-				const uint32 vid = index_of(*p.samples_mesh_, v);
-				if (vid == INVALID_INDEX)
-					return true;
-				vertices.push_back(v);
-				centers.push_back((*p.samples_ma_position_)[vid]);
-				return true;
-			});
-
-			std::vector<Scalar> score_values;
-			std::vector<Scalar> sdf_values;
-			const bool eval_ok = eval_center_scores(centers, score_values, sdf_values);
-
-			if (eval_ok && score_values.size() == centers.size())
-			{
-				if (mf_model)
-				{
-					const size_t debug_n = std::min<size_t>(20, score_values.size());
-					for (size_t i = 0; is_verbose_logging_enabled(p) && i < debug_n; ++i)
+					for (PVertex v : need_retry)
 					{
-						const Scalar sdf_i = (i < sdf_values.size()) ? sdf_values[i] : Scalar(0);
-						log_verbose(
-							p, "[MAFlipPrune][MF] center_udf#", i, " udf=", score_values[i], " sdf=", sdf_i, '\n');
+						const uint32 vid = index_of(*p.samples_mesh_, v);
+						if (vid == INVALID_INDEX)
+							continue;
+						Vec3 n = (*p.samples_normal_)[vid];
+						if (n.squaredNorm() > min_norm)
+						{
+							n.normalize();
+							(*p.samples_normal_)[vid] = -n;
+							flipped_vertex_indices.push_back(vid);
+							++flipped_normals;
+						}
+						run_shrinking_ball_for_vertex(v);
 					}
-				}
 
-				std::vector<PVertex> need_retry;
-				need_retry.reserve(vertices.size() / 8 + 1);
-				for (size_t i = 0; i < vertices.size(); ++i)
-				{
-					const bool by_udf = (score_values[i] > udf_center_prune_threshold);
-					const bool by_mf_sdf = mf_model && i < sdf_values.size() && (sdf_values[i] > Scalar(0));
-					const bool trigger_retry = mf_model ? (by_mf_sdf || by_udf) : by_udf;
-					if (trigger_retry)
-						need_retry.push_back(vertices[i]);
+					deleted_samples += prune_vertices_by_current_centers(need_retry);
 				}
-				flip_triggered_points += static_cast<uint32>(need_retry.size());
-				flipped_vertex_indices.reserve(need_retry.size());
-
-				for (PVertex v : need_retry)
-				{
-					const uint32 vid = index_of(*p.samples_mesh_, v);
-					if (vid == INVALID_INDEX)
-						continue;
-					Vec3 n = (*p.samples_normal_)[vid];
-					if (n.squaredNorm() > min_norm)
-					{
-						n.normalize();
-						(*p.samples_normal_)[vid] = -n;
-						flipped_vertex_indices.push_back(vid);
-						++flipped_normals;
-					}
-					run_shrinking_ball_for_vertex(v);
-				}
-
-				deleted_samples += prune_vertices_by_current_centers(need_retry);
 			}
-		}
 
-		if (deleted_samples > 0)
-		{
-			// Sample connectivity changed; refresh the geometry needed to stabilize MA first.
-			build_kdtree(p);
-			if (nb_cells<PVertex>(*p.samples_mesh_) > 0 && !flipped_vertex_indices.empty())
+			if (deleted_samples > 0)
 			{
-				std::vector<PVertex> surviving_flipped_vertices;
-				surviving_flipped_vertices.reserve(flipped_vertex_indices.size());
-				for (uint32 vid : flipped_vertex_indices)
+				// Sample connectivity changed; refresh the geometry needed to stabilize MA first.
+				build_kdtree(p);
+				if (nb_cells<PVertex>(*p.samples_mesh_) > 0 && !flipped_vertex_indices.empty())
 				{
-					PVertex v = of_index<PVertex>(*p.samples_mesh_, vid);
-					if (v.is_valid())
-						surviving_flipped_vertices.push_back(v);
-				}
+					std::vector<PVertex> surviving_flipped_vertices;
+					surviving_flipped_vertices.reserve(flipped_vertex_indices.size());
+					for (uint32 vid : flipped_vertex_indices)
+					{
+						PVertex v = of_index<PVertex>(*p.samples_mesh_, vid);
+						if (v.is_valid())
+							surviving_flipped_vertices.push_back(v);
+					}
 
-				recompute_samples_normals_pca_for_vertices(p, surviving_flipped_vertices);
-				for (PVertex v : surviving_flipped_vertices)
-					run_shrinking_ball_for_vertex(v);
-				if (prune_vertices_by_current_centers)
-					deleted_samples += prune_vertices_by_current_centers(surviving_flipped_vertices);
+					recompute_samples_normals_pca_for_vertices(p, surviving_flipped_vertices);
+					for (PVertex v : surviving_flipped_vertices)
+						run_shrinking_ball_for_vertex(v);
+					if (prune_vertices_by_current_centers)
+						deleted_samples += prune_vertices_by_current_centers(surviving_flipped_vertices);
+				}
+				points_provider_->emit_connectivity_changed(*p.samples_mesh_);
+				log_basic(p, "[MAFlipPrune] flip_triggered_points=", flip_triggered_points, " flipped_normals=",
+						  flipped_normals, " deleted_samples=", deleted_samples, " remaining_samples=",
+						  nb_cells<PVertex>(*p.samples_mesh_), '\n');
 			}
-			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-			log_basic(p, "[MAFlipPrune] flip_triggered_points=", flip_triggered_points, " flipped_normals=",
-					  flipped_normals, " deleted_samples=", deleted_samples, " remaining_samples=",
-					  nb_cells<PVertex>(*p.samples_mesh_), '\n');
-		}
-		else if (flip_triggered_points > 0 || flipped_normals > 0)
-		{
-			log_basic(p, "[MAFlipPrune] flip_triggered_points=", flip_triggered_points, " flipped_normals=",
-					  flipped_normals, " deleted_samples=0", '\n');
+			else if (flip_triggered_points > 0 || flipped_normals > 0)
+			{
+				log_basic(p, "[MAFlipPrune] flip_triggered_points=", flip_triggered_points, " flipped_normals=",
+						  flipped_normals, " deleted_samples=0", '\n');
+			}
 		}
 
 		// MA positions changed; keep MA-KDTree in sync for MF topology scoring.
@@ -5844,29 +5785,6 @@ private:
 
 		// update_sphere_line_quadric_distance_fix_radius(p, sphere);
 	}
-	void correct_sphere(PointsParameters& p, PVertex v)
-	{
-		uint32 v_index = index_of(*p.spheres_, v);
-
-		Vec3& c = (*p.spheres_position_)[v_index];
-		Scalar& r = (*p.spheres_radius_)[v_index];
-
-		bool inside = p.samples_winding_number_->is_inside(c);
-
-		std::pair<uint32, Scalar> k_res;
-		p.samples_kdtree_->find_nn(c, &k_res);
-		uint32 k_idx = index_of(*p.samples_mesh_, p.samples_kdtree_vertices_[k_res.first]);
-		Vec3 closest_pos = (*p.samples_position_)[k_idx];
-		Vec3 dir = (closest_pos - c).normalized();
-		if (!inside)
-			dir = -dir;
-
-		c = closest_pos - dir * p.alpha_;
-		r = p.alpha_;
-
-		(*p.spheres_position_)[v_index] = c;
-		(*p.spheres_radius_)[v_index] = r;
-	}
 	void update_spheres_batch_with_projection(PointsParameters& p)
 	{
 		compute_clusters(p);
@@ -6029,15 +5947,6 @@ private:
 			return true;
 		});
 
-		// Sphere correction
-		if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
-		{
-			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-				correct_sphere(p, v);
-				return true;
-			});
-		}
-
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			(*p.spheres_do_not_split_)[index_of(*p.spheres_, v)] = false;
 			return true;
@@ -6168,16 +6077,6 @@ private:
 			return;
 		}
 
-		auto correct_spheres_on_split_if_needed = [&]() {
-			if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ON_SPLIT)
-			{
-				parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-					correct_sphere(p, v);
-					return true;
-				});
-			}
-		};
-
 		switch (p.auto_split_mode_)
 		{
 		case ERROR_THRESHOLD: {
@@ -6185,7 +6084,6 @@ private:
 				break;
 
 			compute_skeleton(p, true);
-			correct_spheres_on_split_if_needed();
 
 			const uint32 to_split_max =
 				std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)), p.auto_split_max_per_iter_error_);
@@ -6200,7 +6098,6 @@ private:
 				break;
 
 			compute_skeleton(p, true);
-			correct_spheres_on_split_if_needed();
 
 			const uint32 to_split_max =
 				std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)), p.auto_split_max_per_iter_max_);
@@ -6226,14 +6123,6 @@ private:
 				update_sphere_line_quadric_distance_fix_radius(p, v);
 			return true;
 		});
-
-		if (p.sphere_correction_ && p.sphere_correction_mode_ == CORRECT_ALWAYS)
-		{
-			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-				correct_sphere(p, v);
-				return true;
-			});
-		}
 
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			(*p.spheres_do_not_split_)[index_of(*p.spheres_, v)] = false;
@@ -14319,6 +14208,7 @@ protected:
 		{
 			ImGui::Separator();
 			static uint32 init_max_nb_spheres = 1;
+			ImGui::Checkbox("Enable MAFlipPrune", &p.ma_flip_prune_enabled_);
 			if (ImGui::Button("Compute Fitting Data (MA: Displacement)"))
 			{
 				compute_fitting_data_with_initial_ma_mode(p, INITIAL_MA_DISPLACEMENT, true);
@@ -14684,28 +14574,6 @@ protected:
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							visualize_singular_chain_completion_paths(
 								p, "[SingularCompletionSelected]", p.completion_debug_sheet_label_);
-						}
-					}
-
-					ImGui::Checkbox("Sphere correction step", &p.sphere_correction_);
-					if (p.sphere_correction_)
-					{
-						ImGui::RadioButton("Always", (int*)&p.sphere_correction_mode_, CORRECT_ALWAYS);
-						ImGui::SameLine();
-						ImGui::RadioButton("On split", (int*)&p.sphere_correction_mode_, CORRECT_ON_SPLIT);
-					}
-
-					if (ImGui::Button("Correct spheres"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-					parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-								correct_sphere(p, v);
-								return true;
-							});
-							compute_spheres_error(p);
-							update_render_data(p);
 						}
 					}
 

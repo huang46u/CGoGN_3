@@ -34,8 +34,6 @@
     "sqem_fix_radius_scale": 1.0,
     "udf_center_enabled": false,
     "udf_center_lambda": 0.1,
-    "sphere_correction": false,
-    "sphere_correction_mode": "always",
     "lock_skeleton_connectivity": false,
     "auto_stop": true
   },

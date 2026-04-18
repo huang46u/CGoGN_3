@@ -29,6 +29,13 @@ double seconds_from_milliseconds(double value_ms)
 	return value_ms / 1000.0;
 }
 
+std::string geometry_input_path_for_run(const BenchmarkConfig& config)
+{
+	if (config.input.geometry_type == InputGeometryType::Mesh && !config.input.surface_path.empty())
+		return config.input.surface_path;
+	return config.input.input_path;
+}
+
 constexpr const char* BENCHMARK_POINTS_MESH_NAME = "__benchmark_input_points";
 constexpr const char* BENCHMARK_SURFACE_MESH_NAME = "__benchmark_input_surface";
 
@@ -84,10 +91,7 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 		options.initial_ma_mode_override_ = Training::INITIAL_MA_AUTO;
 		break;
 	}
-	options.sphere_correction_ = config.optimization.sphere_correction;
-	options.sphere_correction_mode_ = (config.optimization.sphere_correction_mode == SphereCorrectionMode::OnSplit)
-										  ? Training::CORRECT_ON_SPLIT
-										  : Training::CORRECT_ALWAYS;
+	options.ma_flip_prune_enabled_ = config.input.ma_flip_prune;
 	options.lock_skeleton_connectivity_ = config.optimization.lock_skeleton_connectivity;
 	options.distance_mode_ = (config.optimization.distance_mode == DistanceMode::LineQuadricDistanceFreeRadius)
 								 ? Training::LINE_QUADRIC_DISTANCE_FREE_RADIUS
@@ -152,7 +156,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	Core core(context);
 	BenchmarkResult result;
 	result.input_mode = to_string(config.input.mode);
-	result.input_path = !config.input.input_path.empty() ? config.input.input_path : config.input.surface_path;
+	result.input_path = geometry_input_path_for_run(config);
 	result.seed = config.initialization.seed;
 
 	Points* points = nullptr;
@@ -165,25 +169,26 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 			ScopedBenchmarkTimer timer(result.timing.input_loading_ms);
 			const bool normalize_for_udf =
 				(config.input.mode == InputMode::NeuralUDF && config.input.neural_model_type == NeuralModelType::UDF);
+			const std::string geometry_input_path = geometry_input_path_for_run(config);
 			switch (config.input.mode)
 			{
 			case InputMode::PointCloud:
-				points = &core.reload_point_cloud_input(BENCHMARK_POINTS_MESH_NAME, config.input.input_path, normalize_for_udf);
+				points = &core.reload_point_cloud_input(BENCHMARK_POINTS_MESH_NAME, geometry_input_path, normalize_for_udf);
 				break;
 			case InputMode::SurfaceMesh:
-				core.reload_surface_input(BENCHMARK_SURFACE_MESH_NAME, config.input.input_path, normalize_for_udf);
+				core.reload_surface_input(BENCHMARK_SURFACE_MESH_NAME, geometry_input_path, normalize_for_udf);
 				points = &core.create_empty_points_input(BENCHMARK_POINTS_MESH_NAME);
 				break;
 			case InputMode::NeuralUDF:
-				if (!config.input.surface_path.empty())
+				if (config.input.geometry_type == InputGeometryType::Mesh)
 				{
-					core.reload_surface_input(BENCHMARK_SURFACE_MESH_NAME, config.input.surface_path, normalize_for_udf);
+					core.reload_surface_input(BENCHMARK_SURFACE_MESH_NAME, geometry_input_path, normalize_for_udf);
 					points = &core.create_empty_points_input(BENCHMARK_POINTS_MESH_NAME);
 				}
 				else
 				{
-					points = &core.reload_point_cloud_input(BENCHMARK_POINTS_MESH_NAME, config.input.input_path,
-															 normalize_for_udf);
+					points =
+						&core.reload_point_cloud_input(BENCHMARK_POINTS_MESH_NAME, geometry_input_path, normalize_for_udf);
 				}
 				break;
 			}
@@ -311,7 +316,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 		log_stage("export_begin");
 		{
 			ScopedBenchmarkTimer timer(result.timing.export_ms);
-			core.export_skeleton_ply_prepared(*points, config.output.skeleton_ply);
+			core.export_skeleton_ply_prepared(*points, config.output.skeleton_ply, config.output.save_face_components);
 			if (!std::filesystem::exists(config.output.skeleton_ply))
 				throw std::runtime_error("Skeleton export did not create file: " + config.output.skeleton_ply);
 		}
@@ -372,7 +377,10 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	benchmark_config.put("sampling.recompute_normals_after_sampling", config.sampling.recompute_normals_after_sampling);
 	benchmark_config.put("initialization.initial_nb_spheres", config.initialization.initial_nb_spheres);
 	benchmark_config.put("initialization.init_min_cover_points", config.initialization.init_min_cover_points);
+	benchmark_config.put("input.geometry_type", to_string(config.input.geometry_type));
 	benchmark_config.put("input.initial_ma_mode_override", to_string(config.input.initial_ma_mode_override));
+	benchmark_config.put("input.ma_flip_prune", config.input.ma_flip_prune);
+	benchmark_config.put("output.save_face_components", config.output.save_face_components);
 	benchmark_config.put("auto_split.enabled", config.auto_split.enabled);
 	benchmark_config.put("optimization.max_iterations_without_autosplit",
 						 config.optimization.max_iterations_without_autosplit);
