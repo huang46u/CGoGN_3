@@ -225,6 +225,16 @@ target_link_libraries(constriction
 	${CMAKE_DL_LIBS}
 )
 
+add_executable(shapenet_obj_to_normalized_ply shapenet_obj_to_normalized_ply.cpp)
+target_link_libraries(shapenet_obj_to_normalized_ply
+	cgogn::geometry
+	cgogn::core
+	cgogn::io
+	${CMAKE_DL_LIBS}
+)
+set_property(TARGET shapenet_obj_to_normalized_ply PROPERTY CXX_STANDARD 17)
+set_property(TARGET shapenet_obj_to_normalized_ply PROPERTY CXX_STANDARD_REQUIRED ON)
+
 if(APPLE)
 	find_library(CORE_FOUNDATION CoreFoundation)
 	find_library(CARBON Carbon)
