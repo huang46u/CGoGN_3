@@ -92,6 +92,7 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 		break;
 	}
 	options.ma_flip_prune_enabled_ = config.input.ma_flip_prune;
+	options.ma_flip_prune_alpha_factor_ = config.input.ma_flip_prune_alpha_factor;
 	options.lock_skeleton_connectivity_ = config.optimization.lock_skeleton_connectivity;
 	options.distance_mode_ = (config.optimization.distance_mode == DistanceMode::LineQuadricDistanceFreeRadius)
 								 ? Training::LINE_QUADRIC_DISTANCE_FREE_RADIUS
@@ -125,6 +126,7 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 	options.bridson_outer_radius_scale_ = config.sampling.bridson.outer_radius_scale;
 	options.bridson_seed_warmup_iterations_ = config.sampling.bridson.warmup_iterations;
 	options.sample_iterations_ = config.sampling.bridson.sample_iterations;
+	options.alpha_projection_max_iterations_ = config.sampling.bridson.alpha_projection_max_iterations;
 	options.knn_k_ = config.sampling.knn_k;
 	options.seed_ = config.initialization.seed;
 	options.bridson_parent_batch_size_ = config.sampling.bridson.parent_batch_size;
@@ -374,12 +376,15 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	benchmark_config.put("sampling.apply_filtering", config.sampling.apply_filtering);
 	benchmark_config.put("sampling.bridson.candidate_mode", to_string(config.sampling.bridson.candidate_mode));
 	benchmark_config.put("sampling.bridson.outer_radius_scale", config.sampling.bridson.outer_radius_scale);
+	benchmark_config.put("sampling.bridson.alpha_projection_max_iterations",
+						 config.sampling.bridson.alpha_projection_max_iterations);
 	benchmark_config.put("sampling.recompute_normals_after_sampling", config.sampling.recompute_normals_after_sampling);
 	benchmark_config.put("initialization.initial_nb_spheres", config.initialization.initial_nb_spheres);
 	benchmark_config.put("initialization.init_min_cover_points", config.initialization.init_min_cover_points);
 	benchmark_config.put("input.geometry_type", to_string(config.input.geometry_type));
 	benchmark_config.put("input.initial_ma_mode_override", to_string(config.input.initial_ma_mode_override));
 	benchmark_config.put("input.ma_flip_prune", config.input.ma_flip_prune);
+	benchmark_config.put("input.ma_flip_prune_alpha_factor", config.input.ma_flip_prune_alpha_factor);
 	benchmark_config.put("output.save_face_components", config.output.save_face_components);
 	benchmark_config.put("auto_split.enabled", config.auto_split.enabled);
 	benchmark_config.put("optimization.max_iterations_without_autosplit",

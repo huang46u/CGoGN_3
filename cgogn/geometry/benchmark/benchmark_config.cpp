@@ -327,6 +327,8 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	config.input.initial_ma_mode_override =
 		parse_initial_ma_mode(get_value<std::string>(input, "initial_ma_mode_override", "auto"));
 	config.input.ma_flip_prune = get_value<bool>(input, "ma_flip_prune", true);
+	config.input.ma_flip_prune_alpha_factor =
+		get_value<float>(input, "ma_flip_prune_alpha_factor", config.input.ma_flip_prune_alpha_factor);
 	if (auto neural_type = input.get_optional<std::string>("neural_model_type"))
 		config.input.neural_model_type = parse_neural_model_type(*neural_type);
 
@@ -368,6 +370,8 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		get_value<int>(*bridson, "warmup_iterations", defaults.warmup_iterations);
 	config.sampling.bridson.sample_iterations =
 		get_value<int>(*bridson, "sample_iterations", defaults.sample_iterations);
+	config.sampling.bridson.alpha_projection_max_iterations =
+		get_value<int>(*bridson, "alpha_projection_max_iterations", defaults.alpha_projection_max_iterations);
 	config.sampling.bridson.parent_batch_size =
 		get_value<int>(*bridson, "parent_batch_size", defaults.parent_batch_size);
 	config.sampling.bridson.max_samples = get_value<int>(*bridson, "max_samples", defaults.max_samples);
@@ -510,10 +514,15 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		fail_config("`sampling.bridson.warmup_iterations` must be > 0");
 	if (config.sampling.bridson.sample_iterations <= 0)
 		fail_config("`sampling.bridson.sample_iterations` must be > 0");
+	if (config.sampling.bridson.alpha_projection_max_iterations < 1 ||
+		config.sampling.bridson.alpha_projection_max_iterations > 30)
+		fail_config("`sampling.bridson.alpha_projection_max_iterations` must be in [1, 30]");
 	if (config.sampling.bridson.parent_batch_size <= 0)
 		fail_config("`sampling.bridson.parent_batch_size` must be > 0");
 	if (config.sampling.bridson.max_samples <= 0)
 		fail_config("`sampling.bridson.max_samples` must be > 0");
+	if (config.input.ma_flip_prune_alpha_factor < 1.0f || config.input.ma_flip_prune_alpha_factor > 5.0f)
+		fail_config("`input.ma_flip_prune_alpha_factor` must be in [1.0, 5.0]");
 	if (!config.batch.enabled && config.output.skeleton_ply.empty())
 		fail_config("`output.skeleton_ply` is required in single-run mode");
 	if (config.initialization.initial_nb_spheres == 0)

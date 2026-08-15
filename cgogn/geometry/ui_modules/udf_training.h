@@ -242,6 +242,7 @@ private:
 		NeuralProjectionWorkspace neural_projection_workspace_;
 		bool filter_positive_projection_ = false;
 		bool ma_flip_prune_enabled_ = false;
+		Scalar ma_flip_prune_alpha_factor_ = Scalar(1);
 		std::vector<uint8_t> last_projection_keep_mask_;
 		size_t last_projection_batch_size_ = 0;
 		size_t last_projection_batch_iterations_ = 0;
@@ -348,6 +349,7 @@ private:
 		float32 bridson_outer_radius_scale_ = 1.25f;
 		int bridson_seed_warmup_iterations_ = 2;
 		int sample_iterations_ = 12; // Candidates generated per active parent
+		int alpha_projection_max_iterations_ = 1;
 		int bridson_parent_batch_size_ = 8192;
 		int bridson_max_samples_ = 4000000;
 		int knn_k_ = 10;
@@ -447,6 +449,7 @@ public:
 		uint32 initial_nb_spheres_ = 1;
 		InitialMAMode initial_ma_mode_override_ = INITIAL_MA_AUTO;
 		bool ma_flip_prune_enabled_ = true;
+		float ma_flip_prune_alpha_factor_ = 1.0f;
 		float32 filter_radius_threshold_ = 0.0f;
 		bool lock_skeleton_connectivity_ = false;
 		DistanceMode distance_mode_ = LINE_QUADRIC_DISTANCE;
@@ -475,6 +478,7 @@ public:
 		float32 bridson_outer_radius_scale_ = 2.0f;
 		int bridson_seed_warmup_iterations_ = 2;
 		int sample_iterations_ = 30;
+		int alpha_projection_max_iterations_ = 1;
 		int bridson_parent_batch_size_ = 8192;
 		int bridson_max_samples_ = 4000000;
 		int knn_k_ = 10;
@@ -663,6 +667,7 @@ public:
 			p.output_verbosity_ = OUTPUT_VERBOSE;
 		p.initial_ma_mode_override_ = options.initial_ma_mode_override_;
 		p.ma_flip_prune_enabled_ = options.ma_flip_prune_enabled_;
+		p.ma_flip_prune_alpha_factor_ = options.ma_flip_prune_alpha_factor_;
 		p.filter_radius_threshold_ = options.filter_radius_threshold_;
 		p.lock_skeleton_connectivity_ = options.lock_skeleton_connectivity_;
 		p.distance_mode_ = options.distance_mode_;
@@ -691,6 +696,7 @@ public:
 		p.bridson_outer_radius_scale_ = std::max(options.bridson_outer_radius_scale_, 1.0f);
 		p.bridson_seed_warmup_iterations_ = std::max(1, options.bridson_seed_warmup_iterations_);
 		p.sample_iterations_ = options.sample_iterations_;
+		p.alpha_projection_max_iterations_ = std::max(1, std::min(30, options.alpha_projection_max_iterations_));
 		p.bridson_parent_batch_size_ = options.bridson_parent_batch_size_;
 		p.bridson_max_samples_ = options.bridson_max_samples_;
 		p.knn_k_ = options.knn_k_;
@@ -2568,9 +2574,10 @@ public:
 			bridson_projected_points += raw_candidates.size();
 			++bridson_projection_batches;
 			const auto bridson_project_start_time = std::chrono::steady_clock::now();
+			const int alpha_projection_max_iters = std::max(1, std::min(30, p.alpha_projection_max_iterations_));
 			const bool projection_ok = project_points_to_alpha_impl(
-				p, raw_candidates, bbox_min, bbox_max, projected_candidates, projected_normals, tag, 1,
-				&projected_errors);
+				p, raw_candidates, bbox_min, bbox_max, projected_candidates, projected_normals, tag,
+				alpha_projection_max_iters, &projected_errors);
 			const auto bridson_project_end_time = std::chrono::steady_clock::now();
 			bridson_project_s +=
 				std::chrono::duration<double>(bridson_project_end_time - bridson_project_start_time).count();
@@ -4413,6 +4420,8 @@ private:
 			std::vector<uint32> flipped_vertex_indices;
 			std::function<uint32(const std::vector<PVertex>&)> prune_vertices_by_current_centers;
 			const Scalar udf_center_prune_threshold = udf_model ? (Scalar(1.2) * p.alpha_) : p.alpha_;
+			const Scalar mf_center_prune_threshold =
+				p.alpha_ * std::max(Scalar(1), std::min(Scalar(5), p.ma_flip_prune_alpha_factor_));
 			const bool supports_center_retry_prune =
 				mf_model || p.input_mode_ == INPUT_SURFACE_MESH || p.input_mode_ == INPUT_POINT_CLOUD ||
 				(p.input_mode_ == INPUT_NEURAL_UDF && p.neural_udf_loaded_);
@@ -4504,7 +4513,8 @@ private:
 						bool should_delete = false;
 						if (mf_model)
 						{
-							if ((i < current_sdf.size() && current_sdf[i] > Scalar(0)) || current_score[i] > p.alpha_)
+							if ((i < current_sdf.size() && current_sdf[i] > Scalar(0)) ||
+								current_score[i] > mf_center_prune_threshold)
 								should_delete = true;
 						}
 						else
@@ -4558,7 +4568,9 @@ private:
 					need_retry.reserve(vertices.size() / 8 + 1);
 					for (size_t i = 0; i < vertices.size(); ++i)
 					{
-						const bool by_udf = (score_values[i] > udf_center_prune_threshold);
+						const bool by_udf =
+							mf_model ? (score_values[i] > mf_center_prune_threshold)
+									 : (score_values[i] > udf_center_prune_threshold);
 						const bool by_mf_sdf = mf_model && i < sdf_values.size() && (sdf_values[i] > Scalar(0));
 						const bool trigger_retry = mf_model ? (by_mf_sdf || by_udf) : by_udf;
 						if (trigger_retry)
@@ -8903,6 +8915,35 @@ protected:
 		const size_t forced_delete_max_face_count = 2;
 		const bool collect_basic_stats = is_basic_logging_enabled(p);
 		const bool collect_verbose_stats = is_verbose_logging_enabled(p);
+		auto sheet_has_vertex_connected_to_isolated_edge = [&](const std::vector<uint32>& face_ids) -> bool {
+			std::unordered_set<uint32> visited_vertex_ids;
+			visited_vertex_ids.reserve(face_ids.size() * 3);
+			for (uint32 face_id : face_ids)
+			{
+				if (face_id == INVALID_INDEX)
+					continue;
+				const NMFace f = of_index<NMFace>(*p.skeleton_, face_id);
+				if (!f.is_valid() || index_of(*p.skeleton_, f) != face_id)
+					continue;
+				const std::vector<NMVertex> vertices = incident_vertices(*p.skeleton_, f);
+				for (const NMVertex& v : vertices)
+				{
+					if (!v.is_valid())
+						continue;
+					const uint32 vertex_id = index_of(*p.skeleton_, v);
+					if (vertex_id == INVALID_INDEX || !visited_vertex_ids.insert(vertex_id).second)
+						continue;
+					for (const NMEdge& e : incident_edges(*p.skeleton_, v))
+					{
+						if (!e.is_valid())
+							continue;
+						if (incident_faces(*p.skeleton_, e).empty())
+							return true;
+					}
+				}
+			}
+			return false;
+		};
 
 		struct ResidualSheetScoreEntry
 		{
@@ -8910,6 +8951,7 @@ protected:
 			size_t face_count = 0;
 			bool delete_sheet = false;
 			bool delete_by_small_sheet = false;
+			bool keep_by_isolated_edge_guard = false;
 		};
 
 		uint32 deleted_sheet_count = 0;
@@ -8925,14 +8967,17 @@ protected:
 
 			const size_t face_count = it_faces->second.size();
 			const bool delete_by_small_sheet = (face_count <= forced_delete_max_face_count);
-			const bool delete_sheet = delete_by_small_sheet;
+			const bool keep_by_isolated_edge_guard =
+				delete_by_small_sheet && sheet_has_vertex_connected_to_isolated_edge(it_faces->second);
+			const bool delete_sheet = delete_by_small_sheet && !keep_by_isolated_edge_guard;
 			if (collect_verbose_stats)
 			{
 				residual_sheet_scores.push_back(ResidualSheetScoreEntry{
 					sheet_label,
 					face_count,
 					delete_sheet,
-					delete_by_small_sheet});
+					delete_by_small_sheet,
+					keep_by_isolated_edge_guard});
 			}
 
 			if (!delete_sheet)
@@ -8951,10 +8996,13 @@ protected:
 						residual_sheet_scores.size(), " delete_face_count_leq=", forced_delete_max_face_count, '\n');
 			for (const ResidualSheetScoreEntry& entry : residual_sheet_scores)
 			{
-				const char* action = entry.delete_sheet ? "delete_small_sheet" : "keep";
+				const char* action =
+					entry.delete_sheet ? "delete_small_sheet" :
+					(entry.keep_by_isolated_edge_guard ? "keep_isolated_edge_guard" : "keep");
 				log_verbose(p, log_prefix, " residual_sheet_score", " sheet=", entry.sheet_label,
 							" face_count=", entry.face_count, " small_sheet_delete=",
-							(entry.delete_by_small_sheet ? "true" : "false"), " action=", action, '\n');
+							(entry.delete_by_small_sheet ? "true" : "false"), " isolated_edge_guard=",
+							(entry.keep_by_isolated_edge_guard ? "true" : "false"), " action=", action, '\n');
 			}
 		}
 
@@ -14091,6 +14139,11 @@ protected:
 			ImGui::InputInt("Parent Batch Size", &p.bridson_parent_batch_size_, 256, 1024);
 			ImGui::InputInt("Max Samples", &p.bridson_max_samples_, 10000, 100000);
 			ImGui::InputInt("Candidates Per Parent", &p.sample_iterations_, 1, 10);
+			ImGui::InputInt("Alpha Projection Iterations", &p.alpha_projection_max_iterations_, 1, 5);
+			if (p.alpha_projection_max_iterations_ < 1)
+				p.alpha_projection_max_iterations_ = 1;
+			if (p.alpha_projection_max_iterations_ > 30)
+				p.alpha_projection_max_iterations_ = 30;
 			ImGui::Text("Derived Grid Cell Size: %.6f", static_cast<float>(derived_bridson_grid_cell_size(p)));
 			ImGui::InputInt("Eval Batch Size", &p.batch_size_, 256, 1024);
 			ImGui::InputInt("Ray Batch Size", &p.ray_sampler_batch_size_, 256, 2048);
@@ -14209,6 +14262,9 @@ protected:
 			ImGui::Separator();
 			static uint32 init_max_nb_spheres = 1;
 			ImGui::Checkbox("Enable MAFlipPrune", &p.ma_flip_prune_enabled_);
+			float ma_flip_prune_alpha_factor = static_cast<float>(p.ma_flip_prune_alpha_factor_);
+			if (ImGui::SliderFloat("MAFlipPrune MF Alpha Factor", &ma_flip_prune_alpha_factor, 1.0f, 5.0f, "%.2f"))
+				p.ma_flip_prune_alpha_factor_ = Scalar(ma_flip_prune_alpha_factor);
 			if (ImGui::Button("Compute Fitting Data (MA: Displacement)"))
 			{
 				compute_fitting_data_with_initial_ma_mode(p, INITIAL_MA_DISPLACEMENT, true);

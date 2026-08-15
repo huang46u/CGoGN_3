@@ -67,6 +67,7 @@ struct BenchmarkInputConfig
 	NeuralModelType neural_model_type = NeuralModelType::UDF;
 	InitialMAMode initial_ma_mode_override = InitialMAMode::Auto;
 	bool ma_flip_prune = true;
+	float ma_flip_prune_alpha_factor = 1.0f;
 };
 
 struct BenchmarkSamplingConfig
@@ -78,6 +79,7 @@ struct BenchmarkSamplingConfig
 		float outer_radius_scale = 2.0f;
 		int warmup_iterations = 2;
 		int sample_iterations = 30;
+		int alpha_projection_max_iterations = 1;
 		int parent_batch_size = 8192;
 		int max_samples = 4000000;
 	};
