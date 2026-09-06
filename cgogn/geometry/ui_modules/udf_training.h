@@ -10917,9 +10917,29 @@ protected:
 		std::unordered_set<uint32> edge_ids;
 	};
 
-	K5DetectionResult detect_k5_cells(PointsParameters& p)
+	struct DenseFiveVertexDetectionResult
 	{
-		K5DetectionResult result;
+		uint32 exact_k5_count = 0;
+		uint32 k5_minus_1_count = 0;
+		uint32 independent_exact_k5_count = 0;
+		uint32 independent_k5_minus_1_count = 0;
+		std::vector<std::array<uint32, 5>> exact_k5_regions;
+		std::vector<std::array<uint32, 5>> k5_minus_1_regions;
+		std::vector<std::array<uint32, 5>> independent_exact_k5_regions;
+		std::vector<std::array<uint32, 5>> independent_k5_minus_1_regions;
+		std::unordered_set<uint32> exact_k5_face_ids;
+		std::unordered_set<uint32> exact_k5_edge_ids;
+		std::unordered_set<uint32> k5_minus_1_face_ids;
+		std::unordered_set<uint32> k5_minus_1_edge_ids;
+		std::unordered_set<uint32> independent_exact_k5_face_ids;
+		std::unordered_set<uint32> independent_exact_k5_edge_ids;
+		std::unordered_set<uint32> independent_k5_minus_1_face_ids;
+		std::unordered_set<uint32> independent_k5_minus_1_edge_ids;
+	};
+
+	DenseFiveVertexDetectionResult detect_k5_and_k5_minus_1_cells(PointsParameters& p)
+	{
+		DenseFiveVertexDetectionResult result;
 		if (!p.skeleton_)
 			return result;
 
@@ -10934,21 +10954,11 @@ protected:
 			return key;
 		};
 
-		std::vector<uint32> vertex_ids;
-		vertex_ids.reserve(nb_cells<NMVertex>(*p.skeleton_));
 		std::unordered_map<uint32, std::unordered_set<uint32>> adjacency;
 		adjacency.reserve(nb_cells<NMVertex>(*p.skeleton_));
 		std::unordered_map<uint64, uint32> edge_pair_to_id;
 		edge_pair_to_id.reserve(nb_cells<NMEdge>(*p.skeleton_) * 2 + 1);
-
-		foreach_cell(*p.skeleton_, [&](NMVertex v) -> bool {
-			const uint32 idv = index_of(*p.skeleton_, v);
-			if (idv != INVALID_INDEX)
-				vertex_ids.push_back(idv);
-			return true;
-		});
-		std::sort(vertex_ids.begin(), vertex_ids.end());
-		vertex_ids.erase(std::unique(vertex_ids.begin(), vertex_ids.end()), vertex_ids.end());
+		std::map<std::array<uint32, 3>, uint32> face_key_to_id;
 
 		foreach_cell(*p.skeleton_, [&](NMEdge e) -> bool {
 			const uint32 ide = index_of(*p.skeleton_, e);
@@ -10967,61 +10977,6 @@ protected:
 			return true;
 		});
 
-		if (vertex_ids.size() < 5)
-			return result;
-
-		auto has_edge = [&](uint32 a, uint32 b) -> bool {
-			auto it = adjacency.find(a);
-			if (it == adjacency.end())
-				return false;
-			return it->second.find(b) != it->second.end();
-		};
-
-		const size_t n = vertex_ids.size();
-		for (size_t ia = 0; ia < n; ++ia)
-		{
-			const uint32 a = vertex_ids[ia];
-			for (size_t ib = ia + 1; ib < n; ++ib)
-			{
-				const uint32 b = vertex_ids[ib];
-				if (!has_edge(a, b))
-					continue;
-				for (size_t ic = ib + 1; ic < n; ++ic)
-				{
-					const uint32 c = vertex_ids[ic];
-					if (!has_edge(a, c) || !has_edge(b, c))
-						continue;
-					for (size_t id = ic + 1; id < n; ++id)
-					{
-						const uint32 d = vertex_ids[id];
-						if (!has_edge(a, d) || !has_edge(b, d) || !has_edge(c, d))
-							continue;
-						for (size_t ie = id + 1; ie < n; ++ie)
-						{
-							const uint32 e = vertex_ids[ie];
-							if (!has_edge(a, e) || !has_edge(b, e) || !has_edge(c, e) || !has_edge(d, e))
-								continue;
-
-							const std::array<uint32, 5> clique = {a, b, c, d, e};
-							result.cliques.push_back(clique);
-
-							for (uint32 i = 0; i < 5; ++i)
-							{
-								for (uint32 j = i + 1; j < 5; ++j)
-								{
-									const auto it_eid = edge_pair_to_id.find(make_edge_key(clique[i], clique[j]));
-									if (it_eid != edge_pair_to_id.end())
-										result.edge_ids.insert(it_eid->second);
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		std::map<std::array<uint32, 3>, uint32> face_key_to_id;
-		face_key_to_id.clear();
 		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
 			const uint32 idf = index_of(*p.skeleton_, f);
 			if (idf == INVALID_INDEX)
@@ -11038,22 +10993,177 @@ protected:
 			return true;
 		});
 
-		for (const auto& clique : result.cliques)
+		std::set<std::array<uint32, 5>> seen_region_keys;
+		for (const auto& tet_entry : p.skeleton_tets_)
 		{
+			const Tet& tet = tet_entry.second;
+			std::array<uint32, 4> base_vertices = {INVALID_INDEX, INVALID_INDEX, INVALID_INDEX, INVALID_INDEX};
+			uint32 base_vertex_count = 0;
+			for (uint32 face_index = 0; face_index < 4; ++face_index)
+			{
+				const NMFace face = tet.faces[face_index];
+				if (!face.is_valid())
+					continue;
+				for (NMVertex vertex : incident_vertices(*p.skeleton_, face))
+				{
+					const uint32 vertex_id = index_of(*p.skeleton_, vertex);
+					if (vertex_id == INVALID_INDEX ||
+						std::find(base_vertices.begin(), base_vertices.begin() + base_vertex_count, vertex_id) !=
+							base_vertices.begin() + base_vertex_count)
+						continue;
+					if (base_vertex_count < 4)
+						base_vertices[base_vertex_count++] = vertex_id;
+				}
+			}
+			if (base_vertex_count != 4)
+				continue;
+			std::sort(base_vertices.begin(), base_vertices.end());
+
+			std::unordered_map<uint32, uint32> fifth_vertex_connection_count;
+			for (uint32 base_vertex : base_vertices)
+			{
+				const auto adjacency_it = adjacency.find(base_vertex);
+				if (adjacency_it == adjacency.end())
+					continue;
+				for (uint32 neighbor : adjacency_it->second)
+				{
+					if (!std::binary_search(base_vertices.begin(), base_vertices.end(), neighbor))
+						++fifth_vertex_connection_count[neighbor];
+				}
+			}
+
+			for (const auto& candidate : fifth_vertex_connection_count)
+			{
+				if (candidate.second < 3)
+					continue;
+
+				std::array<uint32, 5> region = {
+					base_vertices[0], base_vertices[1], base_vertices[2], base_vertices[3], candidate.first};
+				std::sort(region.begin(), region.end());
+				if (!seen_region_keys.insert(region).second)
+					continue;
+
+				const bool is_exact_k5 = candidate.second == 4;
+				auto& face_id_set = is_exact_k5 ? result.exact_k5_face_ids : result.k5_minus_1_face_ids;
+				auto& edge_id_set = is_exact_k5 ? result.exact_k5_edge_ids : result.k5_minus_1_edge_ids;
+				if (is_exact_k5)
+				{
+					++result.exact_k5_count;
+					result.exact_k5_regions.push_back(region);
+				}
+				else
+				{
+					++result.k5_minus_1_count;
+					result.k5_minus_1_regions.push_back(region);
+				}
+
+				for (uint32 i = 0; i < 5; ++i)
+				{
+					for (uint32 j = i + 1; j < 5; ++j)
+					{
+						const auto edge_it = edge_pair_to_id.find(make_edge_key(region[i], region[j]));
+						if (edge_it != edge_pair_to_id.end())
+							edge_id_set.insert(edge_it->second);
+					}
+				}
+
+				for (uint32 i = 0; i < 5; ++i)
+				{
+					for (uint32 j = i + 1; j < 5; ++j)
+					{
+						for (uint32 k = j + 1; k < 5; ++k)
+						{
+							const auto face_it = face_key_to_id.find(make_face_key(region[i], region[j], region[k]));
+							if (face_it != face_key_to_id.end())
+								face_id_set.insert(face_it->second);
+						}
+					}
+				}
+			}
+		}
+
+		std::unordered_map<uint64, uint32> edge_region_count;
+		edge_region_count.reserve((result.exact_k5_regions.size() + result.k5_minus_1_regions.size()) * 10);
+		auto count_region_edges = [&](const std::array<uint32, 5>& region) {
+			for (uint32 i = 0; i < 5; ++i)
+			{
+				for (uint32 j = i + 1; j < 5; ++j)
+				{
+					const uint64 edge_key = make_edge_key(region[i], region[j]);
+					if (edge_pair_to_id.find(edge_key) != edge_pair_to_id.end())
+						++edge_region_count[edge_key];
+				}
+			}
+		};
+		for (const auto& region : result.exact_k5_regions)
+			count_region_edges(region);
+		for (const auto& region : result.k5_minus_1_regions)
+			count_region_edges(region);
+
+		auto append_independent_region = [&](const std::array<uint32, 5>& region, bool is_exact_k5) {
+			for (uint32 i = 0; i < 5; ++i)
+			{
+				for (uint32 j = i + 1; j < 5; ++j)
+				{
+					const uint64 edge_key = make_edge_key(region[i], region[j]);
+					const auto count_it = edge_region_count.find(edge_key);
+					if (count_it != edge_region_count.end() && count_it->second > 1)
+						return;
+				}
+			}
+
+			auto& face_ids = is_exact_k5 ? result.independent_exact_k5_face_ids
+									 : result.independent_k5_minus_1_face_ids;
+			auto& edge_ids = is_exact_k5 ? result.independent_exact_k5_edge_ids
+									 : result.independent_k5_minus_1_edge_ids;
+			if (is_exact_k5)
+			{
+				++result.independent_exact_k5_count;
+				result.independent_exact_k5_regions.push_back(region);
+			}
+			else
+			{
+				++result.independent_k5_minus_1_count;
+				result.independent_k5_minus_1_regions.push_back(region);
+			}
+
+			for (uint32 i = 0; i < 5; ++i)
+			{
+				for (uint32 j = i + 1; j < 5; ++j)
+				{
+					const auto edge_it = edge_pair_to_id.find(make_edge_key(region[i], region[j]));
+					if (edge_it != edge_pair_to_id.end())
+						edge_ids.insert(edge_it->second);
+				}
+			}
 			for (uint32 i = 0; i < 5; ++i)
 			{
 				for (uint32 j = i + 1; j < 5; ++j)
 				{
 					for (uint32 k = j + 1; k < 5; ++k)
 					{
-						const auto it_f = face_key_to_id.find(make_face_key(clique[i], clique[j], clique[k]));
-						if (it_f != face_key_to_id.end())
-							result.face_ids.insert(it_f->second);
+						const auto face_it = face_key_to_id.find(make_face_key(region[i], region[j], region[k]));
+						if (face_it != face_key_to_id.end())
+							face_ids.insert(face_it->second);
 					}
 				}
 			}
-		}
+		};
+		for (const auto& region : result.exact_k5_regions)
+			append_independent_region(region, true);
+		for (const auto& region : result.k5_minus_1_regions)
+			append_independent_region(region, false);
 
+		return result;
+	}
+
+	K5DetectionResult detect_k5_cells(PointsParameters& p)
+	{
+		const DenseFiveVertexDetectionResult dense_regions = detect_k5_and_k5_minus_1_cells(p);
+		K5DetectionResult result;
+		result.cliques = dense_regions.exact_k5_regions;
+		result.face_ids = dense_regions.exact_k5_face_ids;
+		result.edge_ids = dense_regions.exact_k5_edge_ids;
 		return result;
 	}
 
@@ -11084,7 +11194,7 @@ protected:
 		return stats;
 	}
 
-	void mark_k5_color(PointsParameters& p)
+	void mark_k5_color(PointsParameters& p, bool independent_only = true)
 	{
 		if (!p.skeleton_ || !p.skeleton_face_k5_color_ || !p.skeleton_edge_k5_color_)
 		{
@@ -11092,28 +11202,51 @@ protected:
 			return;
 		}
 
-		const K5DetectionResult k5_info = detect_k5_cells(p);
+		const DenseFiveVertexDetectionResult k5_info = detect_k5_and_k5_minus_1_cells(p);
+		const auto& mask_exact_face_ids =
+			independent_only ? k5_info.independent_exact_k5_face_ids : k5_info.exact_k5_face_ids;
+		const auto& mask_exact_edge_ids =
+			independent_only ? k5_info.independent_exact_k5_edge_ids : k5_info.exact_k5_edge_ids;
+		const auto& mask_k5_minus_1_face_ids =
+			independent_only ? k5_info.independent_k5_minus_1_face_ids : k5_info.k5_minus_1_face_ids;
+		const auto& mask_k5_minus_1_edge_ids =
+			independent_only ? k5_info.independent_k5_minus_1_edge_ids : k5_info.k5_minus_1_edge_ids;
 		const Vec3 default_face_color(0.08, 0.08, 0.08);
-		const Vec3 k5_face_color(0.05, 0.85, 0.95);
-		const Vec3 k5_deg2_face_color(1.0, 0.55, 0.15);
+		const Vec3 exact_k5_face_color(0.05, 0.85, 0.95);
+		const Vec3 k5_minus_1_face_color(1.0, 0.55, 0.15);
+		const Vec3 overlap_face_color(0.95, 0.25, 0.85);
 		const Vec3 default_edge_color(0.08, 0.08, 0.08);
-		const Vec3 k5_edge_color(0.0, 0.9, 0.75);
-		uint32 deg2eq2_face_count = 0;
+		const Vec3 exact_k5_edge_color(0.0, 0.9, 0.75);
+		const Vec3 k5_minus_1_edge_color(1.0, 0.7, 0.2);
+		const Vec3 overlap_edge_color(0.95, 0.35, 0.9);
+		uint32 exact_face_count = 0;
+		uint32 k5_minus_1_face_count = 0;
+		uint32 overlap_face_count = 0;
+		uint32 exact_edge_count = 0;
+		uint32 k5_minus_1_edge_count = 0;
+		uint32 overlap_edge_count = 0;
 
 		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
 			Vec3 c = default_face_color;
 			const uint32 idf = index_of(*p.skeleton_, f);
-			if (idf != INVALID_INDEX && k5_info.face_ids.find(idf) != k5_info.face_ids.end())
+			if (idf != INVALID_INDEX)
 			{
-				const FaceEdgeDegreeStats stats = compute_face_edge_degree_stats(p, f);
-				if (stats.deg2_count == 2)
+				const bool in_exact = mask_exact_face_ids.find(idf) != mask_exact_face_ids.end();
+				const bool in_k5_minus_1 = mask_k5_minus_1_face_ids.find(idf) != mask_k5_minus_1_face_ids.end();
+				if (in_exact && in_k5_minus_1)
 				{
-					c = k5_deg2_face_color;
-					++deg2eq2_face_count;
+					c = overlap_face_color;
+					++overlap_face_count;
 				}
-				else
+				else if (in_exact)
 				{
-					c = k5_face_color;
+					c = exact_k5_face_color;
+					++exact_face_count;
+				}
+				else if (in_k5_minus_1)
+				{
+					c = k5_minus_1_face_color;
+					++k5_minus_1_face_count;
 				}
 			}
 			value<Vec3>(*p.skeleton_, p.skeleton_face_k5_color_, f) = c;
@@ -11122,8 +11255,26 @@ protected:
 		foreach_cell(*p.skeleton_, [&](NMEdge e) -> bool {
 			Vec3 c = default_edge_color;
 			const uint32 ide = index_of(*p.skeleton_, e);
-			if (ide != INVALID_INDEX && k5_info.edge_ids.find(ide) != k5_info.edge_ids.end())
-				c = k5_edge_color;
+			if (ide != INVALID_INDEX)
+			{
+				const bool in_exact = mask_exact_edge_ids.find(ide) != mask_exact_edge_ids.end();
+				const bool in_k5_minus_1 = mask_k5_minus_1_edge_ids.find(ide) != mask_k5_minus_1_edge_ids.end();
+				if (in_exact && in_k5_minus_1)
+				{
+					c = overlap_edge_color;
+					++overlap_edge_count;
+				}
+				else if (in_exact)
+				{
+					c = exact_k5_edge_color;
+					++exact_edge_count;
+				}
+				else if (in_k5_minus_1)
+				{
+					c = k5_minus_1_edge_color;
+					++k5_minus_1_edge_count;
+				}
+			}
 			value<Vec3>(*p.skeleton_, p.skeleton_edge_k5_color_, e) = c;
 			return true;
 		});
@@ -11131,8 +11282,13 @@ protected:
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_k5_color_.get());
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_k5_color_.get());
 
-		log_basic(p, "[K5Mask] k5_count=", k5_info.cliques.size(), " k5_faces=", k5_info.face_ids.size(),
-				  " k5_edges=", k5_info.edge_ids.size(), " deg2eq2_faces=", deg2eq2_face_count, '\n');
+		log_basic(p, "[K5Mask] mode=", (independent_only ? "independent" : "all"), " exact_k5_regions=",
+				  k5_info.exact_k5_count, " k5_minus_1_regions=",
+				  k5_info.k5_minus_1_count, " independent_exact_k5_regions=",
+				  k5_info.independent_exact_k5_count, " independent_k5_minus_1_regions=",
+				  k5_info.independent_k5_minus_1_count, " exact_faces=", exact_face_count, " k5_minus_1_faces=",
+				  k5_minus_1_face_count, " overlap_faces=", overlap_face_count, " exact_edges=", exact_edge_count,
+				  " k5_minus_1_edges=", k5_minus_1_edge_count, " overlap_edges=", overlap_edge_count, '\n');
 	}
 
 	void mark_boundary_tets_color(PointsParameters& p)
@@ -12934,6 +13090,487 @@ protected:
 		}
 	}
 
+	struct IndependentDenseFiveVertexRepairSeed
+	{
+		std::array<PVertex, 5> spheres;
+		bool exact_k5 = false;
+	};
+
+	struct IndependentDenseFiveVertexRepairStats
+	{
+		uint32 snapshotted_regions = 0;
+		uint32 regions_with_isolated_nm_edges = 0;
+		uint32 repaired_regions = 0;
+		uint32 added_spheres = 0;
+		uint32 added_faces = 0;
+		uint32 skipped_missing_vertices = 0;
+		uint32 skipped_adjacent_nm_edges = 0;
+		uint32 skipped_unsafe_external_faces = 0;
+		uint32 skipped_degenerate_geometry = 0;
+	};
+
+	bool is_live_sphere_vertex(PointsParameters& p, const PVertex& sphere, uint32& sphere_index)
+	{
+		sphere_index = INVALID_INDEX;
+		if (!p.spheres_ || !sphere.is_valid() || sphere.dart_.index_ >= p.spheres_->darts_.maximum_index())
+			return false;
+		sphere_index = index_of(*p.spheres_, sphere);
+		return sphere_index != INVALID_INDEX;
+	}
+
+	bool is_live_skeleton_vertex(PointsParameters& p, const NMVertex& vertex, uint32& vertex_index)
+	{
+		vertex_index = INVALID_INDEX;
+		if (!p.skeleton_ || !vertex.is_valid())
+			return false;
+		vertex_index = index_of(*p.skeleton_, vertex);
+		return vertex_index != INVALID_INDEX;
+	}
+
+	std::vector<IndependentDenseFiveVertexRepairSeed> collect_independent_dense_five_vertex_repair_seeds(
+		PointsParameters& p, const DenseFiveVertexDetectionResult& detection)
+	{
+		std::vector<IndependentDenseFiveVertexRepairSeed> seeds;
+		seeds.reserve(detection.independent_exact_k5_regions.size() +
+					  detection.independent_k5_minus_1_regions.size());
+		if (!p.skeleton_ || !p.spheres_ || !p.skeleton_source_sphere_)
+			return seeds;
+
+		auto append_regions = [&](const std::vector<std::array<uint32, 5>>& regions, bool exact_k5) {
+			for (const auto& region : regions)
+			{
+				IndependentDenseFiveVertexRepairSeed seed;
+				seed.exact_k5 = exact_k5;
+				bool valid = true;
+				for (uint32 i = 0; i < 5; ++i)
+				{
+					const NMVertex vertex = of_index<NMVertex>(*p.skeleton_, region[i]);
+					uint32 current_vertex_index = INVALID_INDEX;
+					if (!is_live_skeleton_vertex(p, vertex, current_vertex_index) || current_vertex_index != region[i])
+					{
+						valid = false;
+						break;
+					}
+					const PVertex sphere = value<PVertex>(*p.skeleton_, p.skeleton_source_sphere_, vertex);
+					uint32 sphere_index = INVALID_INDEX;
+					if (!is_live_sphere_vertex(p, sphere, sphere_index))
+					{
+						valid = false;
+						break;
+					}
+					seed.spheres[i] = sphere;
+				}
+				if (valid)
+					seeds.push_back(seed);
+			}
+		};
+		append_regions(detection.independent_exact_k5_regions, true);
+		append_regions(detection.independent_k5_minus_1_regions, false);
+		return seeds;
+	}
+
+	bool find_skeleton_edge_between(PointsParameters& p, const NMVertex& a, const NMVertex& b, NMEdge& out_edge)
+	{
+		out_edge = NMEdge();
+		if (!p.skeleton_ || !a.is_valid() || !b.is_valid() || a == b)
+			return false;
+		for (NMEdge edge : incident_edges(*p.skeleton_, a))
+		{
+			if (!edge.is_valid())
+				continue;
+			const std::vector<NMVertex> edge_vertices = incident_vertices(*p.skeleton_, edge);
+			if (edge_vertices.size() == 2 &&
+				((edge_vertices[0] == a && edge_vertices[1] == b) ||
+				 (edge_vertices[0] == b && edge_vertices[1] == a)))
+			{
+				out_edge = edge;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool face_is_inside_vertex_set(PointsParameters& p, const NMFace& face,
+								   const std::unordered_set<uint32>& vertex_ids)
+	{
+		if (!p.skeleton_ || !face.is_valid())
+			return false;
+		const std::vector<NMVertex> vertices = incident_vertices(*p.skeleton_, face);
+		if (vertices.size() != 3)
+			return false;
+		for (NMVertex vertex : vertices)
+		{
+			const uint32 vertex_id = index_of(*p.skeleton_, vertex);
+			if (vertex_id == INVALID_INDEX || vertex_ids.find(vertex_id) == vertex_ids.end())
+				return false;
+		}
+		return true;
+	}
+
+	enum class IndependentDenseFiveVertexRepairResult
+	{
+		Repaired,
+		MissingVertices,
+		NoNonManifoldEdges,
+		AdjacentNonManifoldEdges,
+		UnsafeExternalFaces,
+		DegenerateGeometry
+	};
+
+	IndependentDenseFiveVertexRepairResult repair_independent_dense_five_vertex_region(
+		PointsParameters& p, const IndependentDenseFiveVertexRepairSeed& seed, uint32& out_added_faces)
+	{
+		out_added_faces = 0;
+		if (!p.spheres_ || !p.spheres_position_ || !p.spheres_radius_ || !p.spheres_neighbor_clusters_ ||
+			!p.spheres_skeleton_vertex_ || !p.skeleton_ || !p.skeleton_position_ || !p.skeleton_radius_ ||
+			!p.skeleton_source_sphere_ || !p.incident_tets_)
+			return IndependentDenseFiveVertexRepairResult::MissingVertices;
+
+		std::array<uint32, 5> sphere_ids;
+		std::array<NMVertex, 5> vertices;
+		std::array<uint32, 5> vertex_ids;
+		std::array<Vec3, 5> positions;
+		Scalar average_radius = Scalar(0);
+		Vec3 centroid = Vec3::Zero();
+		std::unordered_set<uint32> region_vertex_ids;
+		region_vertex_ids.reserve(8);
+		for (uint32 i = 0; i < 5; ++i)
+		{
+			if (!is_live_sphere_vertex(p, seed.spheres[i], sphere_ids[i]))
+				return IndependentDenseFiveVertexRepairResult::MissingVertices;
+			vertices[i] = (*p.spheres_skeleton_vertex_)[sphere_ids[i]];
+			if (!is_live_skeleton_vertex(p, vertices[i], vertex_ids[i]))
+				return IndependentDenseFiveVertexRepairResult::MissingVertices;
+			if (value<PVertex>(*p.skeleton_, p.skeleton_source_sphere_, vertices[i]) != seed.spheres[i])
+				return IndependentDenseFiveVertexRepairResult::MissingVertices;
+			positions[i] = (*p.spheres_position_)[sphere_ids[i]];
+			centroid += positions[i];
+			average_radius += (*p.spheres_radius_)[sphere_ids[i]];
+			region_vertex_ids.insert(vertex_ids[i]);
+		}
+		if (region_vertex_ids.size() != 5)
+			return IndependentDenseFiveVertexRepairResult::MissingVertices;
+		centroid /= Scalar(5);
+		average_radius /= Scalar(5);
+		if (!centroid.allFinite() || !std::isfinite(static_cast<double>(average_radius)) || average_radius <= Scalar(0))
+			return IndependentDenseFiveVertexRepairResult::DegenerateGeometry;
+
+		auto make_edge_key = [](uint32 a, uint32 b) -> uint64 {
+			if (a > b)
+				std::swap(a, b);
+			return (uint64(a) << 32) | uint64(b);
+		};
+		std::unordered_map<uint64, NMEdge> region_edges;
+		region_edges.reserve(16);
+		std::unordered_set<uint32> region_nm_edge_ids;
+		region_nm_edge_ids.reserve(16);
+		for (uint32 i = 0; i < 5; ++i)
+		{
+			for (uint32 j = i + 1; j < 5; ++j)
+			{
+				NMEdge edge;
+				if (!find_skeleton_edge_between(p, vertices[i], vertices[j], edge))
+					continue;
+				region_edges[make_edge_key(vertex_ids[i], vertex_ids[j])] = edge;
+				if (incident_faces(*p.skeleton_, edge).size() > 2)
+				{
+					const uint32 edge_id = index_of(*p.skeleton_, edge);
+					if (edge_id != INVALID_INDEX)
+						region_nm_edge_ids.insert(edge_id);
+				}
+			}
+		}
+		if (region_nm_edge_ids.empty())
+			return IndependentDenseFiveVertexRepairResult::NoNonManifoldEdges;
+
+		for (uint32 nm_edge_id : region_nm_edge_ids)
+		{
+			const NMEdge nm_edge = of_index<NMEdge>(*p.skeleton_, nm_edge_id);
+			if (!nm_edge.is_valid())
+				continue;
+			for (NMVertex endpoint : incident_vertices(*p.skeleton_, nm_edge))
+			{
+				for (NMEdge adjacent_edge : incident_edges(*p.skeleton_, endpoint))
+				{
+					if (!adjacent_edge.is_valid() || incident_faces(*p.skeleton_, adjacent_edge).size() <= 2)
+						continue;
+					const uint32 adjacent_edge_id = index_of(*p.skeleton_, adjacent_edge);
+					if (adjacent_edge_id != INVALID_INDEX &&
+						region_nm_edge_ids.find(adjacent_edge_id) == region_nm_edge_ids.end())
+						return IndependentDenseFiveVertexRepairResult::AdjacentNonManifoldEdges;
+				}
+			}
+		}
+
+		Eigen::Matrix<Scalar, 3, 3> covariance = Eigen::Matrix<Scalar, 3, 3>::Zero();
+		for (const Vec3& position : positions)
+		{
+			const Vec3 delta = position - centroid;
+			covariance += delta * delta.transpose();
+		}
+		Eigen::SelfAdjointEigenSolver<Eigen::Matrix<Scalar, 3, 3>> eigen_solver(covariance);
+		if (eigen_solver.info() != Eigen::Success ||
+			eigen_solver.eigenvalues()[1] <= std::numeric_limits<Scalar>::epsilon())
+			return IndependentDenseFiveVertexRepairResult::DegenerateGeometry;
+		const Vec3 axis_u = eigen_solver.eigenvectors().col(2);
+		const Vec3 axis_v = eigen_solver.eigenvectors().col(1);
+		std::array<uint32, 5> cyclic_order = {0, 1, 2, 3, 4};
+		std::sort(cyclic_order.begin(), cyclic_order.end(), [&](uint32 lhs, uint32 rhs) {
+			const Vec3 lhs_delta = positions[lhs] - centroid;
+			const Vec3 rhs_delta = positions[rhs] - centroid;
+			const Scalar lhs_angle = std::atan2(lhs_delta.dot(axis_v), lhs_delta.dot(axis_u));
+			const Scalar rhs_angle = std::atan2(rhs_delta.dot(axis_v), rhs_delta.dot(axis_u));
+			return lhs_angle < rhs_angle;
+		});
+		Scalar max_radial_squared = Scalar(0);
+		for (const Vec3& position : positions)
+			max_radial_squared = std::max(max_radial_squared, (position - centroid).squaredNorm());
+		const Scalar fan_area_epsilon =
+			std::max(std::numeric_limits<Scalar>::epsilon(), max_radial_squared * Scalar(1e-10));
+		for (uint32 i = 0; i < 5; ++i)
+		{
+			const Vec3 radial_a = positions[cyclic_order[i]] - centroid;
+			const Vec3 radial_b = positions[cyclic_order[(i + 1) % 5]] - centroid;
+			if (radial_a.cross(radial_b).norm() <= fan_area_epsilon)
+				return IndependentDenseFiveVertexRepairResult::DegenerateGeometry;
+		}
+
+		std::unordered_set<uint64> cycle_edge_keys;
+		cycle_edge_keys.reserve(8);
+		for (uint32 i = 0; i < 5; ++i)
+		{
+			const uint32 a = cyclic_order[i];
+			const uint32 b = cyclic_order[(i + 1) % 5];
+			cycle_edge_keys.insert(make_edge_key(vertex_ids[a], vertex_ids[b]));
+		}
+
+		std::unordered_set<uint32> internal_face_ids;
+		internal_face_ids.reserve(16);
+		foreach_cell(*p.skeleton_, [&](NMFace face) -> bool {
+			if (face_is_inside_vertex_set(p, face, region_vertex_ids))
+			{
+				const uint32 face_id = index_of(*p.skeleton_, face);
+				if (face_id != INVALID_INDEX)
+					internal_face_ids.insert(face_id);
+			}
+			return true;
+		});
+		if (internal_face_ids.empty())
+			return IndependentDenseFiveVertexRepairResult::UnsafeExternalFaces;
+
+		for (const auto& edge_entry : region_edges)
+		{
+			uint32 external_face_count = 0;
+			for (NMFace face : incident_faces(*p.skeleton_, edge_entry.second))
+			{
+				const uint32 face_id = index_of(*p.skeleton_, face);
+				if (face_id == INVALID_INDEX || internal_face_ids.find(face_id) == internal_face_ids.end())
+					++external_face_count;
+			}
+			if (cycle_edge_keys.find(edge_entry.first) == cycle_edge_keys.end())
+			{
+				if (external_face_count != 0)
+					return IndependentDenseFiveVertexRepairResult::UnsafeExternalFaces;
+			}
+			else if (external_face_count > 1)
+			{
+				return IndependentDenseFiveVertexRepairResult::UnsafeExternalFaces;
+			}
+		}
+
+		for (uint32 i = 0; i < 5; ++i)
+		{
+			for (uint32 j = i + 1; j < 5; ++j)
+			{
+				for (uint32 k = j + 1; k < 5; ++k)
+				{
+					NMFaceKey face_key = {sphere_ids[i], sphere_ids[j], sphere_ids[k]};
+					std::sort(face_key.begin(), face_key.end());
+					p.skeleton_faces_map_.erase(face_key);
+				}
+			}
+		}
+		SkeletonFaceDeletionStats deletion_stats;
+		SkeletonFaceDeletionOptions deletion_options;
+		deletion_options.remove_incident_orphan_edges_immediately = false;
+		deletion_options.remove_global_orphan_elements_after_batch = false;
+		if (!delete_skeleton_face_id_set(p, internal_face_ids, deletion_stats, deletion_options))
+			return IndependentDenseFiveVertexRepairResult::UnsafeExternalFaces;
+
+		for (const auto& edge_entry : region_edges)
+		{
+			if (cycle_edge_keys.find(edge_entry.first) != cycle_edge_keys.end())
+				continue;
+			if (edge_entry.second.is_valid() && incident_faces(*p.skeleton_, edge_entry.second).empty())
+				remove_edge(*p.skeleton_, edge_entry.second);
+		}
+
+		for (uint32 i = 0; i < 5; ++i)
+		{
+			for (uint32 j = i + 1; j < 5; ++j)
+			{
+				const uint64 edge_key = make_edge_key(vertex_ids[i], vertex_ids[j]);
+				const bool is_cycle_edge = cycle_edge_keys.find(edge_key) != cycle_edge_keys.end();
+				if (is_cycle_edge)
+				{
+					(*p.spheres_neighbor_clusters_)[sphere_ids[i]].insert(seed.spheres[j]);
+					(*p.spheres_neighbor_clusters_)[sphere_ids[j]].insert(seed.spheres[i]);
+				}
+				else
+				{
+					(*p.spheres_neighbor_clusters_)[sphere_ids[i]].erase(seed.spheres[j]);
+					(*p.spheres_neighbor_clusters_)[sphere_ids[j]].erase(seed.spheres[i]);
+				}
+			}
+		}
+
+		const PVertex center_sphere = add_vertex(*p.spheres_);
+		const uint32 center_sphere_id = index_of(*p.spheres_, center_sphere);
+		(*p.spheres_position_)[center_sphere_id] = centroid;
+		(*p.spheres_radius_)[center_sphere_id] = average_radius;
+		if (p.spheres_color_)
+			(*p.spheres_color_)[center_sphere_id] = Vec4(0.95, 0.25, 0.15, 1.0);
+		if (p.spheres_cluster_)
+			(*p.spheres_cluster_)[center_sphere_id].clear();
+		if (p.spheres_cluster_area_)
+			(*p.spheres_cluster_area_)[center_sphere_id] = Scalar(0);
+		if (p.spheres_cluster_color_)
+			(*p.spheres_cluster_color_)[center_sphere_id] = Vec4(0.95, 0.25, 0.15, 1.0);
+		if (p.spheres_parent_)
+			(*p.spheres_parent_)[center_sphere_id] = PVertex();
+		if (p.spheres_do_not_split_)
+			(*p.spheres_do_not_split_)[center_sphere_id] = true;
+		if (p.spheres_error_)
+			(*p.spheres_error_)[center_sphere_id] = Scalar(0);
+		if (p.spheres_error_not_normalized_)
+			(*p.spheres_error_not_normalized_)[center_sphere_id] = Scalar(0);
+		if (p.spheres_sqem_lambda_)
+			(*p.spheres_sqem_lambda_)[center_sphere_id] = Scalar(p.sqem_update_lambda_full_);
+		(*p.spheres_neighbor_clusters_)[center_sphere_id].clear();
+		++p.nb_spheres_;
+
+		const NMVertex center_vertex = add_vertex(*p.skeleton_);
+		value<Vec3>(*p.skeleton_, p.skeleton_position_, center_vertex) = centroid;
+		value<Scalar>(*p.skeleton_, p.skeleton_radius_, center_vertex) = average_radius;
+		value<PVertex>(*p.skeleton_, p.skeleton_source_sphere_, center_vertex) = center_sphere;
+		(*p.spheres_skeleton_vertex_)[center_sphere_id] = center_vertex;
+
+		std::array<NMEdge, 5> cycle_edges;
+		std::array<NMEdge, 5> spoke_edges;
+		for (uint32 i = 0; i < 5; ++i)
+		{
+			const uint32 a = cyclic_order[i];
+			const uint32 b = cyclic_order[(i + 1) % 5];
+			if (!find_skeleton_edge_between(p, vertices[a], vertices[b], cycle_edges[i]))
+				cycle_edges[i] = add_edge(*p.skeleton_, vertices[a], vertices[b]);
+			spoke_edges[i] = add_edge(*p.skeleton_, center_vertex, vertices[a]);
+			(*p.spheres_neighbor_clusters_)[center_sphere_id].insert(seed.spheres[a]);
+			(*p.spheres_neighbor_clusters_)[sphere_ids[a]].insert(center_sphere);
+		}
+
+		for (uint32 i = 0; i < 5; ++i)
+		{
+			std::vector<NMEdge> face_edges = {cycle_edges[i], spoke_edges[i], spoke_edges[(i + 1) % 5]};
+			const NMFace new_face = add_face(*p.skeleton_, face_edges);
+			value<std::set<std::size_t>>(*p.skeleton_, p.incident_tets_, new_face).clear();
+			if (p.skeleton_face_color_)
+				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, new_face) = Vec3(0.0, 0.0, 0.0);
+			if (p.skeleton_face_k5_color_)
+				value<Vec3>(*p.skeleton_, p.skeleton_face_k5_color_, new_face) = Vec3(0.08, 0.08, 0.08);
+			NMFaceKey face_key = {sphere_ids[cyclic_order[i]], sphere_ids[cyclic_order[(i + 1) % 5]], center_sphere_id};
+			std::sort(face_key.begin(), face_key.end());
+			p.skeleton_faces_map_[face_key] = new_face;
+			++out_added_faces;
+		}
+
+		invalidate_skeleton_face_score_cache(p);
+		invalidate_topology_stage_snapshot(p);
+		return IndependentDenseFiveVertexRepairResult::Repaired;
+	}
+
+	IndependentDenseFiveVertexRepairStats repair_isolated_independent_dense_five_vertex_regions(
+		PointsParameters& p, const std::vector<IndependentDenseFiveVertexRepairSeed>& seeds)
+	{
+		IndependentDenseFiveVertexRepairStats stats;
+		stats.snapshotted_regions = static_cast<uint32>(seeds.size());
+		std::vector<IndependentDenseFiveVertexRepairSeed> live_seeds;
+		live_seeds.reserve(seeds.size());
+		for (const auto& seed : seeds)
+		{
+			bool all_vertices_live = true;
+			std::unordered_set<uint32> unique_skeleton_vertex_ids;
+			unique_skeleton_vertex_ids.reserve(8);
+			for (const PVertex& sphere : seed.spheres)
+			{
+				uint32 sphere_id = INVALID_INDEX;
+				if (!is_live_sphere_vertex(p, sphere, sphere_id))
+				{
+					all_vertices_live = false;
+					break;
+				}
+				const NMVertex vertex = (*p.spheres_skeleton_vertex_)[sphere_id];
+				uint32 vertex_id = INVALID_INDEX;
+				if (!is_live_skeleton_vertex(p, vertex, vertex_id) ||
+					value<PVertex>(*p.skeleton_, p.skeleton_source_sphere_, vertex) != sphere)
+				{
+					all_vertices_live = false;
+					break;
+				}
+				unique_skeleton_vertex_ids.insert(vertex_id);
+			}
+			if (all_vertices_live && unique_skeleton_vertex_ids.size() == 5)
+				live_seeds.push_back(seed);
+			else
+				++stats.skipped_missing_vertices;
+		}
+
+		for (const auto& seed : live_seeds)
+		{
+			uint32 added_faces = 0;
+			const IndependentDenseFiveVertexRepairResult result =
+				repair_independent_dense_five_vertex_region(p, seed, added_faces);
+			switch (result)
+			{
+				case IndependentDenseFiveVertexRepairResult::Repaired:
+					++stats.regions_with_isolated_nm_edges;
+					++stats.repaired_regions;
+					++stats.added_spheres;
+					stats.added_faces += added_faces;
+					break;
+				case IndependentDenseFiveVertexRepairResult::NoNonManifoldEdges:
+					break;
+				case IndependentDenseFiveVertexRepairResult::MissingVertices:
+					++stats.skipped_missing_vertices;
+					break;
+				case IndependentDenseFiveVertexRepairResult::AdjacentNonManifoldEdges:
+					++stats.skipped_adjacent_nm_edges;
+					break;
+				case IndependentDenseFiveVertexRepairResult::UnsafeExternalFaces:
+					++stats.regions_with_isolated_nm_edges;
+					++stats.skipped_unsafe_external_faces;
+					break;
+				case IndependentDenseFiveVertexRepairResult::DegenerateGeometry:
+					++stats.regions_with_isolated_nm_edges;
+					++stats.skipped_degenerate_geometry;
+					break;
+			}
+		}
+
+		if (stats.repaired_regions > 0)
+		{
+			compute_edge_degree(p);
+			non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
+			non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
+			non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_radius_.get());
+			points_provider_->emit_connectivity_changed(*p.spheres_);
+			points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_position_.get());
+			points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_radius_.get());
+			if (p.spheres_color_)
+				points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_color_.get());
+		}
+		return stats;
+	}
+
 	void run_topology_fix_pipeline(PointsParameters& p, bool run_deg_face_deletion)
 	{
 		if (!p.skeleton_ || !p.incident_tets_)
@@ -12942,12 +13579,17 @@ protected:
 			return;
 		}
 
-		// Temporarily disable K5-specific handling in the full topology-fix pipeline.
-		// run_k5_face_deletion(p);
+		const DenseFiveVertexDetectionResult dense_five_vertex_detection = detect_k5_and_k5_minus_1_cells(p);
+		const std::vector<IndependentDenseFiveVertexRepairSeed> independent_dense_repair_seeds =
+			collect_independent_dense_five_vertex_repair_seeds(p, dense_five_vertex_detection);
 
 		const std::unordered_set<uint32> tet_face_whitelist = collect_current_tet_face_id_whitelist(p);
 		log_basic(p, "[TopologyFull] start whitelist_tet_faces=", tet_face_whitelist.size(), " initial_tets=",
-				  p.skeleton_tets_.size(), " deg_face_deletion=", (run_deg_face_deletion ? "on" : "off"), '\n');
+				  p.skeleton_tets_.size(), " independent_k5=",
+				  dense_five_vertex_detection.independent_exact_k5_count, " independent_k5_minus_1=",
+				  dense_five_vertex_detection.independent_k5_minus_1_count, " repair_seeds=",
+				  independent_dense_repair_seeds.size(), " deg_face_deletion=",
+				  (run_deg_face_deletion ? "on" : "off"), '\n');
 		TopologyFixScoreCache score_cache;
 		if (!initialize_topology_fix_score_cache(p, score_cache, "[TopologyFull]"))
 			return;
@@ -12995,12 +13637,25 @@ protected:
 			}
 		}
 
+		const IndependentDenseFiveVertexRepairStats dense_repair_stats =
+			repair_isolated_independent_dense_five_vertex_regions(p, independent_dense_repair_seeds);
 		refresh_skeleton_topology_colors(p);
 		mark_boundary_tets_color(p);
-		visualize_skeleton_edge_udf_scores(p, &score_cache.edge_scores);
+		if (dense_repair_stats.repaired_regions > 0)
+			visualize_skeleton_edge_udf_scores(p);
+		else
+			visualize_skeleton_edge_udf_scores(p, &score_cache.edge_scores);
 		if (!p.skeleton_tets_.empty())
 			log_remaining_topology_fix_tet_diagnostics(p, tet_face_whitelist, run_deg_face_deletion);
-		log_basic(p, "[TopologyFull] done remaining_tets=", p.skeleton_tets_.size(), '\n');
+		log_basic(p, "[TopologyFull] done remaining_tets=", p.skeleton_tets_.size(), " repair_snapshots=",
+				  dense_repair_stats.snapshotted_regions, " isolated_nm_regions=",
+				  dense_repair_stats.regions_with_isolated_nm_edges, " repaired_regions=",
+				  dense_repair_stats.repaired_regions, " added_spheres=", dense_repair_stats.added_spheres,
+				  " added_faces=", dense_repair_stats.added_faces, " skipped_missing_vertices=",
+				  dense_repair_stats.skipped_missing_vertices, " skipped_adjacent_nm_edges=",
+				  dense_repair_stats.skipped_adjacent_nm_edges, " skipped_unsafe_external_faces=",
+				  dense_repair_stats.skipped_unsafe_external_faces, " skipped_degenerate_geometry=",
+				  dense_repair_stats.skipped_degenerate_geometry, '\n');
 	}
 
 	void run_complete_topology_fix_pipeline(PointsParameters& p)
@@ -14557,6 +15212,23 @@ protected:
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							mark_skeleton_face_components_union_find(p);
+						}
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Independent K5/K5-1 mask"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							mark_k5_color(p, true);
+						}
+					}
+					if (ImGui::Button("All K5/K5-1 mask"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							mark_k5_color(p, false);
 						}
 					}
 					if (ImGui::Button("K5 delete"))
