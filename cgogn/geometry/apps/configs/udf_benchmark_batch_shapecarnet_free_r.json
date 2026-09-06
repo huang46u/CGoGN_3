@@ -66,7 +66,7 @@
   "output": {},
   "batch": {
     "enabled": true,
-    "input_directory": "D:/Code/CGoGN_3/data/skeleton/udf/shapenetcar_200/model",
+    "input_directory": "D:/Code/CGoGN_3/data/skeleton/udf/shapenetcar_200/model_pc",
     "neural_udf_model_directory": "D:/Code/CGoGN_3/data/skeleton/udf/shapenetcar_200/weight",
     "input_extension": ".ply",
     "neural_udf_model_extension": ".pt",

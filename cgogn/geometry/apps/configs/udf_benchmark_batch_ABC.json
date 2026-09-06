@@ -4,7 +4,8 @@
     "geometry_type": "mesh",
     "neural_model_type": "mf",
     "initial_ma_mode_override": "shrinking_ball",
-    "ma_flip_prune": true
+    "ma_flip_prune": true,
+    "ma_flip_prune_alpha_factor": 1.0
   },
   "sampling": {
     "alpha": 0.0050,
@@ -21,6 +22,7 @@
       "outer_radius_scale": 1.25,
       "warmup_iterations": 2,
       "sample_iterations": 60,
+      "alpha_projection_max_iterations": 1,
       "parent_batch_size": 102,
       "max_samples": 10000000
     }
@@ -76,7 +78,7 @@
     "neural_udf_model_extension": ".pt",
     "recursive": false,
     "resume_from_existing": true,
-    "output_directory": "D:/Code/CGoGN_3/out/QMDF/ABC/skeleton",
-    "timing_directory": "D:/Code/CGoGN_3/out/QMDF/ABC/timing"
+    "output_directory": "D:/Code/UDF-Projects/Results/OffsetAxis/QMDF/ABC/skeleton",
+    "timing_directory": "D:/Code/UDF-Projects/Results/OffsetAxis/QMDF/ABC/timing"
   }
 }

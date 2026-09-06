@@ -15,11 +15,11 @@
     "udf_max_iterations": 3000,
     "bridson": {
       "sample_radius": 0.002,
-      "candidate_mode": "3d_shell",
-      "outer_radius_scale": 2.0,
+      "candidate_mode": "2d_plane",
+      "outer_radius_scale": 1.25,
       "warmup_iterations": 2,
-      "sample_iterations": 30,
-      "parent_batch_size": 8192,
+      "sample_iterations": 12,
+      "parent_batch_size": 1024,
       "max_samples": 4000000
     }
   },
@@ -72,7 +72,7 @@
     "neural_udf_model_extension": ".pt",
     "recursive": false,
     "resume_from_existing": true,
-    "output_directory": "D:/Code/CGoGN_3/out/deepfashion_free_r/skeleton",
-    "timing_directory": "D:/Code/CGoGN_3/out/deepfashion_free_r/timing"
+    "output_directory": "D:/Code/UDF-Projects/Results/OffsetAxis/deepfashion/skeleton",
+    "timing_directory": "D:/Code/UDF-Projects/Results/OffsetAxis/deepfashion/timing"
   }
 }

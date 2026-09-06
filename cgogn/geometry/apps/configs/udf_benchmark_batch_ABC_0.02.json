@@ -4,10 +4,11 @@
     "geometry_type": "mesh",
     "neural_model_type": "mf",
     "initial_ma_mode_override": "shrinking_ball",
-    "ma_flip_prune": true
+    "ma_flip_prune": true,
+    "ma_flip_prune_alpha_factor": 1.0
   },
   "sampling": {
-    "alpha": 0.0050,
+    "alpha": 0.0030,
     "knn_k": 10,
     "apply_filtering": false,
     "recompute_normals_after_sampling": true,
@@ -16,12 +17,13 @@
     "tol": 1e-6,
     "udf_max_iterations": 3000,
     "bridson": {
-      "sample_radius": 0.0020,
+      "sample_radius": 0.0010,
       "candidate_mode": "2d_plane",
       "outer_radius_scale": 1.25,
       "warmup_iterations": 2,
-      "sample_iterations": 120,
-      "parent_batch_size": 102,
+      "sample_iterations": 12,
+      "alpha_projection_max_iterations": 1,
+      "parent_batch_size": 1024,
       "max_samples": 10000000
     }
   },
@@ -58,7 +60,7 @@
     "topology_fix": true,
     "deg_face_deletion": false,
     "nm_two_layer_prune": false,
-    "residual_prune": true,
+    "residual_prune": false,
     "face_post_processing": false
   },
   "benchmark": {
@@ -70,13 +72,13 @@
   },
   "batch": {
     "enabled": true,
-    "input_directory": "D:/Code/CGoGN_3/data/skeleton/QMDF/organic/model",
-    "neural_udf_model_directory": "D:/Code/CGoGN_3/data/skeleton/QMDF/organic/weight",
-    "input_extension": ".off",
+    "input_directory": "D:/Code/CGoGN_3/data/skeleton/QMDF/ABC/model",
+    "neural_udf_model_directory": "D:/Code/CGoGN_3/data/skeleton/QMDF/ABC/weight",
+    "input_extension": ".obj",
     "neural_udf_model_extension": ".pt",
     "recursive": false,
     "resume_from_existing": true,
-    "output_directory": "D:/Code/UDF-Projects/Results/OffsetAxis/QMDF/organic/skeleton",
-    "timing_directory": "D:/Code/UDF-Projects/Results/OffsetAxis/QMDF/organic/timing"
+    "output_directory": "D:/Code/UDF-Projects/Results/OffsetAxis/QMDF/ABC0.02/skeleton",
+    "timing_directory": "D:/Code/UDF-Projects/Results/OffsetAxis/QMDF/ABC0.02/timing"
   }
 }

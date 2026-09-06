@@ -66,13 +66,13 @@
   "output": {},
   "batch": {
     "enabled": true,
-    "input_directory": "D:/Code/CGoGN_3/data/skeleton/udf/shapenetcar_200/model",
-    "neural_udf_model_directory": "D:/Code/CGoGN_3/data/skeleton/udf/shapenetcar_200/weight",
+    "input_directory": "D:/Code/CGoGN_3/data/skeleton/udf/shapecarnet/model",
+    "neural_udf_model_directory": "D:/Code/CGoGN_3/data/skeleton/udf/shapecarnet/weight",
     "input_extension": ".ply",
     "neural_udf_model_extension": ".pt",
     "recursive": false,
     "resume_from_existing": true,
-    "output_directory": "D:/Code/CGoGN_3/out/shapenetcar_200_fix_r/skeleton",
-    "timing_directory": "D:/Code/CGoGN_3/out/shapenetcar_200_fix_r/timing"
+    "output_directory": "D:/Code/CGoGN_3/out/shapecarnet_fix_r/skeleton",
+    "timing_directory": "D:/Code/CGoGN_3/out/shapecarnet_fix_r/timing"
   }
 }
