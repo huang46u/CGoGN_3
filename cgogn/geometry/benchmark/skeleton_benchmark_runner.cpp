@@ -9,6 +9,7 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
 
@@ -273,9 +274,53 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 		}
 		log_stage("sphere_init_end");
 
+		std::function<void(uint32)> observer;
+		if (!config.output.trace_directory.empty())
+		{
+			Points* snapshot = context.points_provider.has_mesh("trace_snapshot")
+				? context.points_provider.mesh("trace_snapshot") : context.points_provider.add_mesh("trace_snapshot");
+			get_or_add_attribute<Vec3, typename Core::PVertex>(*snapshot, "position");
+			core.prepare_points(*snapshot);
+			core.apply_options_prepared(*snapshot, options);
+			observer = [&, snapshot](uint32 iteration) {
+				auto& training = context.udf_training;
+				const auto before = training.headless_optimization_state_fingerprint(*points);
+				training.headless_copy_reconstruction_state_prepared(*points, *snapshot);
+				std::ostringstream label;
+				label << "iter_" << std::setfill('0') << std::setw(4) << iteration;
+				const auto dir = std::filesystem::path(config.output.trace_directory) / label.str();
+				training.headless_export_training_state_prepared(*snapshot, dir.string(), iteration == 0);
+				core.build_skeleton_prepared(*snapshot);
+				core.export_skeleton_ply_prepared(*snapshot, (dir / "mesh_raw.ply").string(), false);
+				if (config.postprocess.topology_fix)
+					core.run_topology_fix_prepared(*snapshot, config.postprocess.deg_face_deletion);
+				else if (config.postprocess.deg_face_deletion)
+					core.run_deg_face_deletion_prepared(*snapshot);
+				if (config.postprocess.nm_two_layer_prune)
+					core.run_nm_two_layer_prune_prepared(*snapshot);
+				if (config.postprocess.residual_prune)
+					core.run_completion_residual_prune_prepared(*snapshot);
+				if (config.postprocess.face_post_processing)
+					core.run_face_post_processing_prepared(*snapshot);
+				core.export_skeleton_ply_prepared(*snapshot, (dir / "mesh.ply").string(), config.output.save_face_components);
+				const auto after = training.headless_optimization_state_fingerprint(*points);
+				if (before != after)
+					throw std::runtime_error("Snapshot reconstruction modified live optimization state.");
+				boost::property_tree::ptree metadata;
+				metadata.put("iteration", iteration);
+				metadata.put("source_fingerprint_before", std::to_string(before));
+				metadata.put("source_fingerprint_after", std::to_string(after));
+				metadata.put("postprocessed", true);
+				metadata.put("source_spheres", core.collect_counts(*points).final_spheres_);
+				metadata.put("mesh_vertices", core.collect_counts(*snapshot).skeleton_vertices_);
+				boost::property_tree::write_json((dir / "state.json").string(), metadata);
+				std::cerr << "[Trace] saved " << label.str() << " (live state unchanged)" << std::endl;
+			};
+		}
+
 		log_stage("optimization_begin");
 		{
-			const auto stats = core.optimize_prepared(*points, config.benchmark.verbose);
+			const auto stats = core.optimize_prepared(*points, config.benchmark.verbose, observer);
 			result.timing.optimization_total_ms = stats.optimization_total_ms_;
 			result.timing.cluster_total_ms = stats.cluster_total_ms_;
 			result.timing.sphere_update_total_ms = stats.sphere_update_total_ms_;
@@ -284,6 +329,9 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 			result.timing.average_iteration_ms = stats.average_iteration_ms_;
 		}
 		log_stage("optimization_end");
+		if (observer)
+			context.udf_training.headless_export_training_state_prepared(*points,
+				(std::filesystem::path(config.output.trace_directory) / "optimized").string(), true);
 
 		log_stage("skeleton_begin");
 		{

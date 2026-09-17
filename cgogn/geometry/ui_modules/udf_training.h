@@ -48,6 +48,8 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <functional>
+#include <fstream>
 #include <limits>
 #include <mutex>
 #include <numeric>
@@ -790,7 +792,8 @@ public:
 		headless_init_spheres_prepared(points_parameters_[&points], max_nb_spheres);
 	}
 
-	HeadlessOptimizationStats headless_optimize_spheres_prepared(PointsParameters& p, bool verbose = false)
+	HeadlessOptimizationStats headless_optimize_spheres_prepared(PointsParameters& p, bool verbose = false,
+		const std::function<void(uint32)>& observer = {})
 	{
 		const OutputVerbosity output_verbosity = verbose ? OUTPUT_VERBOSE : p.output_verbosity_;
 		const Scalar convergence_eps = Scalar(1e-10);
@@ -812,6 +815,8 @@ public:
 		bool max_spheres_reached_once = false;
 		uint32 post_max_spheres_iterations = 0;
 		auto optimization_start = std::chrono::high_resolution_clock::now();
+		if (observer)
+			observer(0);
 
 		while (true)
 		{
@@ -857,6 +862,8 @@ public:
 			stats.split_total_ms_ += std::chrono::duration<float64, std::milli>(split_end - split_start).count();
 
 			++p.iteration_count_;
+			if (observer)
+				observer(p.iteration_count_);
 			log_basic(output_verbosity, "[HeadlessOptimize] iteration=", p.iteration_count_, " spheres=",
 					  p.nb_spheres_, " error=", p.total_error_, " diff=", p.total_error_diff_, '\n');
 
@@ -939,9 +946,10 @@ public:
 		return stats;
 	}
 
-	HeadlessOptimizationStats headless_optimize_spheres_prepared(POINTS& points, bool verbose = false)
+	HeadlessOptimizationStats headless_optimize_spheres_prepared(POINTS& points, bool verbose = false,
+		const std::function<void(uint32)>& observer = {})
 	{
-		return headless_optimize_spheres_prepared(points_parameters_[&points], verbose);
+		return headless_optimize_spheres_prepared(points_parameters_[&points], verbose, observer);
 	}
 	void headless_build_skeleton_prepared(PointsParameters& p)
 	{
@@ -1204,6 +1212,8 @@ public:
 	{
 		headless_export_skeleton_ply_prepared(points_parameters_[&points], filename, save_face_components);
 	}
+
+#include <cgogn/geometry/ui_modules/udf_training_trace.inl>
 
 	void reset_headless_state()
 	{

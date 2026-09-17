@@ -456,6 +456,8 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	config.output.timing_json =
 		resolve_config_relative_path(config_directory, get_value<std::string>(output, "timing_json", ""));
 	config.output.save_face_components = get_value<bool>(output, "save_face_components", false);
+	config.output.trace_directory =
+		resolve_config_relative_path(config_directory, get_value<std::string>(output, "trace_directory", ""));
 
 	if (config.benchmark.num_measure_runs != 1)
 		fail_config("`benchmark.num_measure_runs` is reserved in v1 and must be `1`");
@@ -523,6 +525,9 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		fail_config("`sampling.bridson.max_samples` must be > 0");
 	if (config.input.ma_flip_prune_alpha_factor < 1.0f || config.input.ma_flip_prune_alpha_factor > 5.0f)
 		fail_config("`input.ma_flip_prune_alpha_factor` must be in [1.0, 5.0]");
+	if (!config.output.trace_directory.empty() &&
+		(config.batch.enabled || config.input.mode == InputMode::PointCloud || config.benchmark.num_measure_runs != 1))
+		fail_config("trace_directory requires a single surface_mesh or neural_udf run with num_measure_runs=1");
 	if (!config.batch.enabled && config.output.skeleton_ply.empty())
 		fail_config("`output.skeleton_ply` is required in single-run mode");
 	if (config.initialization.initial_nb_spheres == 0)

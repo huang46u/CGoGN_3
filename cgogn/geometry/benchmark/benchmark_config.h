@@ -150,6 +150,7 @@ struct BenchmarkOutputConfig
 	std::string skeleton_ply;
 	std::string timing_json;
 	bool save_face_components = false;
+	std::string trace_directory;
 };
 
 struct BenchmarkBatchConfig

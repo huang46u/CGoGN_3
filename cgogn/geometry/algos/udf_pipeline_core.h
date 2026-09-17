@@ -178,9 +178,10 @@ public:
 		context_.udf_training.headless_init_spheres_prepared(points, max_nb_spheres);
 	}
 
-	typename Training::HeadlessOptimizationStats optimize_prepared(Points& points, bool verbose)
+	typename Training::HeadlessOptimizationStats optimize_prepared(Points& points, bool verbose,
+		const std::function<void(uint32)>& observer = {})
 	{
-		return context_.udf_training.headless_optimize_spheres_prepared(points, verbose);
+		return context_.udf_training.headless_optimize_spheres_prepared(points, verbose, observer);
 	}
 
 	void build_skeleton_prepared(Points& points)
