@@ -39,3 +39,5 @@ build
 /imgui.ini
 /CMakeSettings.json
 /data/
+/out
+*.md

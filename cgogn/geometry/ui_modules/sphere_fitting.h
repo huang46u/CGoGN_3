@@ -35,7 +35,10 @@
 #include <cgogn/geometry/algos/medial_axis.h>
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
+#include <cgogn/geometry/types/line_quadric.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
+
+#include <cgogn/modeling/algos/medial_skeleton_hausdorff.h>
 
 #include <Eigen/Sparse>
 #include <libacc/bvh_tree.h>
@@ -45,6 +48,7 @@
 #include <GLFW/glfw3.h>
 
 #include <boost/synapse/connect.hpp>
+#include <chrono>
 #include <set>
 
 namespace cgogn
@@ -55,10 +59,41 @@ namespace ui
 
 using geometry::Mat3;
 using geometry::Mat4;
+using geometry::Line_Quadric;
 using geometry::Scalar;
 using geometry::Spherical_Quadric;
 using geometry::Vec3;
 using geometry::Vec4;
+
+struct SphereFittingBatchOptions
+{
+	uint32 target_spheres = 50;
+	uint32 max_iterations = 1000;
+	uint32 timeout_seconds = 10;
+	uint32 hausdorff_surface_samples = 300000;
+	uint32 hausdorff_skeleton_resolution = 50;
+	uint32 random_seed = 1337;
+	bool use_line_quadric = false;
+};
+
+struct SphereFittingBatchResult
+{
+	double preprocess_seconds = 0.0;
+	double sphere_init_seconds = 0.0;
+	double fit_seconds = 0.0;
+	double eval_seconds = 0.0;
+	double total_seconds = 0.0;
+	uint32 sphere_count = 0;
+	uint32 iterations = 0;
+	Scalar surface_to_skeleton = 0.0;
+	Scalar skeleton_to_surface = 0.0;
+	Scalar symmetric = 0.0;
+	uint32 surface_sample_count = 0;
+	uint32 skeleton_sample_count = 0;
+	bool converged = false;
+	bool timed_out = false;
+	bool iteration_limited = false;
+};
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD>
 class SphereFitting : public ViewModule
@@ -113,6 +148,7 @@ class SphereFitting : public ViewModule
 		std::shared_ptr<SAttribute<Scalar>> surface_face_area_ = nullptr;
 		std::shared_ptr<SAttribute<std::vector<SVertex>>> surface_vertex_knn_ = nullptr;
 		std::shared_ptr<SAttribute<Spherical_Quadric>> surface_vertex_quadric_ = nullptr;
+		std::shared_ptr<SAttribute<Line_Quadric>> surface_vertex_line_quadric_ = nullptr;
 		std::shared_ptr<SAttribute<Vec3>> medial_axis_position_ = nullptr;
 		std::shared_ptr<SAttribute<Scalar>> medial_axis_radius_ = nullptr;
 		std::shared_ptr<SAttribute<SVertex>> medial_axis_secondary_vertex_ = nullptr;
@@ -148,6 +184,10 @@ class SphereFitting : public ViewModule
 
 		NONMANIFOLD* skeleton_;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_position_ = nullptr;
+		std::shared_ptr<NMAttribute<Scalar>> skeleton_radius_ = nullptr;
+		modeling::MedialSkeletonHausdorffResult hausdorff_result_;
+		uint32 hausdorff_surface_samples_ = 10000;
+		uint32 hausdorff_skeleton_resolution_ = 50;
 
 		float32 filter_radius_threshold_ = 0.0f;
 		float32 filter_angle_threshold_ = 0.0f;
@@ -159,6 +199,7 @@ class SphereFitting : public ViewModule
 		// bool auto_split_outside_spheres_ = false;
 
 		bool use_sqem_term_ = true;
+		bool use_line_quadric_ = false;
 
 		bool sphere_correction_ = true;
 		CorrectionMode sphere_correction_mode_ = CORRECT_ALWAYS;
@@ -254,7 +295,9 @@ public:
 		parallel_foreach_cell(*p.surface_, [&](SVertex v) -> bool {
 			uint32 v_index = index_of(*p.surface_, v);
 			Spherical_Quadric& q = (*p.surface_vertex_quadric_)[v_index];
+			Line_Quadric& line_q = (*p.surface_vertex_line_quadric_)[v_index];
 			q.clear();
+			line_q.clear();
 			const Vec3& pos = (*p.surface_vertex_position_)[v_index];
 			if (p.point_cloud_mode_)
 			{
@@ -272,6 +315,10 @@ public:
 			}
 			else
 			{
+				const Scalar vertex_area = (*p.surface_vertex_area_surf_)[v_index];
+				if (std::isfinite(vertex_area) && vertex_area > 0.0)
+					line_q += Line_Quadric(pos, (*p.surface_vertex_normal_)[v_index]) * vertex_area;
+
 				foreach_incident_face(*p.surface_, v, [&](SFace f) -> bool {
 					const Vec3& n = value<Vec3>(*p.surface_, p.surface_face_normal_, f);
 					Scalar a = value<Scalar>(*p.surface_, p.surface_face_area_, f) / 3.0;
@@ -423,6 +470,7 @@ public:
 		// initialize SQEM quadrics
 
 		p.surface_vertex_quadric_ = get_or_add_attribute<Spherical_Quadric, SVertex>(s, "quadric");
+		p.surface_vertex_line_quadric_ = get_or_add_attribute<Line_Quadric, SVertex>(s, "line_quadric");
 		compute_quadrics(p);
 
 		// compute shrinking balls for the surface vertices
@@ -481,6 +529,7 @@ public:
 		if (!p.skeleton_)
 			p.skeleton_ = non_manifold_provider_->add_mesh(surface_provider_->mesh_name(s) + "_skeleton");
 		p.skeleton_position_ = get_or_add_attribute<Vec3, NMVertex>(*p.skeleton_, "position");
+		p.skeleton_radius_ = get_or_add_attribute<Scalar, NMVertex>(*p.skeleton_, "radius");
 
 		// if we already have spheres, we need to recompute the clusters and errors
 		// (cleans out surface vertex sphere data)
@@ -643,6 +692,74 @@ public:
 
 		if (!p.running_)
 			update_render_data(p);
+	}
+
+	SphereFittingBatchResult run_batch(SURFACE& s, const SphereFittingBatchOptions& options)
+	{
+		SurfaceParameters& p = surface_parameters_[&s];
+		SphereFittingBatchResult result;
+		if (!p.initialized_ || options.target_spheres == 0)
+			return result;
+
+		p.use_sqem_term_ = true;
+		p.use_line_quadric_ = options.use_line_quadric;
+		p.sphere_correction_ = true;
+		p.sphere_correction_mode_ = CORRECT_ALWAYS;
+		p.auto_split_ = true;
+		p.auto_stop_ = true;
+		p.auto_split_mode_ = MAX_NB_SPHERES;
+		p.auto_split_max_nb_spheres_ = options.target_spheres;
+		p.iteration_count_ = 0;
+		p.total_error_diff_ = 0.0;
+		p.last_total_error_ = std::numeric_limits<Scalar>::max();
+		p.stopping_ = false;
+
+		const auto init_start = std::chrono::steady_clock::now();
+		p.running_ = true;
+		init_spheres(s, 1);
+		const auto fit_start = std::chrono::steady_clock::now();
+		result.sphere_init_seconds = std::chrono::duration<double>(fit_start - init_start).count();
+
+		const auto deadline = fit_start + std::chrono::seconds(options.timeout_seconds);
+		while (p.iteration_count_ < options.max_iterations)
+		{
+			update_spheres(p);
+			++p.iteration_count_;
+			if (p.nb_spheres_ >= options.target_spheres && p.total_error_diff_ < 1e-5)
+			{
+				result.converged = true;
+				break;
+			}
+			if (std::chrono::steady_clock::now() >= deadline)
+			{
+				result.timed_out = true;
+				break;
+			}
+		}
+		if (!result.converged && !result.timed_out && p.iteration_count_ >= options.max_iterations)
+			result.iteration_limited = true;
+		result.iterations = p.iteration_count_;
+		result.sphere_count = p.nb_spheres_;
+		const auto eval_start = std::chrono::steady_clock::now();
+		p.running_ = false;
+		compute_skeleton(p);
+		modeling::MedialSkeletonHausdorffOptions hausdorff_options;
+		hausdorff_options.surface_sample_count = options.hausdorff_surface_samples;
+		hausdorff_options.skeleton_sample_resolution = options.hausdorff_skeleton_resolution;
+		hausdorff_options.random_seed = options.random_seed;
+		p.hausdorff_result_ = modeling::compute_medial_skeleton_hausdorff(
+			*p.surface_, p.surface_vertex_position_.get(), p.surface_face_area_.get(), *p.skeleton_,
+			p.skeleton_position_.get(), p.skeleton_radius_.get(), p.surface_bvh_, hausdorff_options);
+		const auto end = std::chrono::steady_clock::now();
+		result.fit_seconds = std::chrono::duration<double>(eval_start - fit_start).count();
+		result.eval_seconds = std::chrono::duration<double>(end - eval_start).count();
+		result.total_seconds = std::chrono::duration<double>(end - init_start).count();
+		result.surface_to_skeleton = p.hausdorff_result_.surface_to_skeleton;
+		result.skeleton_to_surface = p.hausdorff_result_.skeleton_to_surface;
+		result.symmetric = p.hausdorff_result_.symmetric;
+		result.surface_sample_count = p.hausdorff_result_.surface_sample_count;
+		result.skeleton_sample_count = p.hausdorff_result_.skeleton_sample_count;
+		return result;
 	}
 
 	void compute_clusters(SurfaceParameters& p)
@@ -1127,6 +1244,40 @@ public:
 		(*p.spheres_radius_)[sphere_index] = r;
 	}
 
+	void update_sphere_sqem_line_quadric(SurfaceParameters& p, PVertex sphere)
+	{
+		if (p.point_cloud_mode_ || !p.surface_vertex_quadric_ || !p.surface_vertex_line_quadric_)
+			return;
+
+		const uint32 sphere_index = index_of(*p.spheres_, sphere);
+		const std::vector<SVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
+		if (cluster.empty())
+			return;
+
+		Spherical_Quadric spherical_quadric;
+		Line_Quadric line_quadric;
+		for (SVertex v : cluster)
+		{
+			const uint32 v_index = index_of(*p.surface_, v);
+			spherical_quadric += (*p.surface_vertex_quadric_)[v_index];
+			line_quadric += (*p.surface_vertex_line_quadric_)[v_index];
+		}
+
+		const Scalar lambda = p.sqem_update_lambda_;
+		const Mat4 A = spherical_quadric._A + lambda * line_quadric._A;
+		const Vec4 b = spherical_quadric._b + lambda * line_quadric._b;
+		if (!std::isfinite(lambda) || !A.allFinite() || !b.allFinite())
+			return;
+
+		Eigen::CompleteOrthogonalDecomposition<Mat4> solver(A);
+		const Vec4 candidate = solver.solve(b);
+		if (!candidate.allFinite() || !(candidate[3] > 0.0))
+			return;
+
+		(*p.spheres_position_)[sphere_index] = candidate.head<3>();
+		(*p.spheres_radius_)[sphere_index] = candidate[3];
+	}
+
 	void correct_sphere(SurfaceParameters& p, PVertex v)
 	{
 		uint32 v_index = index_of(*p.spheres_, v);
@@ -1189,7 +1340,9 @@ public:
 		// }
 		// case SQEM: {
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			if (p.use_sqem_term_)
+			if (p.use_sqem_term_ && p.use_line_quadric_ && !p.point_cloud_mode_)
+				update_sphere_sqem_line_quadric(p, v);
+			else if (p.use_sqem_term_)
 				update_sphere_sqem(p, v);
 			else
 				update_sphere_euclidean(p, v);
@@ -1420,6 +1573,7 @@ public:
 			uint32 pv_index = index_of(*p.spheres_, pv);
 			NMVertex nmv = add_vertex(*p.skeleton_);
 			value<Vec3>(*p.skeleton_, p.skeleton_position_, nmv) = (*p.spheres_position_)[pv_index];
+			value<Scalar>(*p.skeleton_, p.skeleton_radius_, nmv) = (*p.spheres_radius_)[pv_index];
 			(*spheres_skeleton_vertex_map)[pv_index] = nmv;
 			return true;
 		});
@@ -1473,6 +1627,16 @@ public:
 		});
 
 		remove_attribute<PVertex>(*p.spheres_, spheres_skeleton_vertex_map);
+	}
+
+	void compute_hausdorff_distance(SurfaceParameters& p)
+	{
+		modeling::MedialSkeletonHausdorffOptions options;
+		options.surface_sample_count = p.hausdorff_surface_samples_;
+		options.skeleton_sample_resolution = p.hausdorff_skeleton_resolution_;
+		p.hausdorff_result_ = modeling::compute_medial_skeleton_hausdorff(
+			*p.surface_, p.surface_vertex_position_.get(), p.surface_face_area_.get(), *p.skeleton_,
+			p.skeleton_position_.get(), p.skeleton_radius_.get(), p.surface_bvh_, options);
 	}
 
 protected:
@@ -1748,6 +1912,8 @@ protected:
 				// ImGui::Checkbox("Auto split outside spheres", &p.auto_split_outside_spheres_);
 
 				ImGui::Checkbox("Use SQEM term", &p.use_sqem_term_);
+				if (p.use_sqem_term_ && !p.point_cloud_mode_)
+					ImGui::Checkbox("Use line quadric distance", &p.use_line_quadric_);
 
 				if (ImGui::Button("Update spheres"))
 				{
@@ -1846,6 +2012,26 @@ protected:
 					if (!p.running_)
 						update_render_data(p);
 				}
+
+				ImGui::Separator();
+
+				ImGui::Text("Approximate Hausdorff distance");
+				ImGui::InputScalar("Surface samples", ImGuiDataType_U32, &p.hausdorff_surface_samples_);
+				ImGui::InputScalar("Skeleton sampling resolution", ImGuiDataType_U32,
+					&p.hausdorff_skeleton_resolution_);
+				if (ImGui::Button("Compute bidirectional Hausdorff"))
+				{
+					if (!p.running_)
+					{
+						std::lock_guard<std::mutex> lock(p.mutex_);
+						compute_hausdorff_distance(p);
+					}
+				}
+				ImGui::Text("Surface -> Skeleton: %f", p.hausdorff_result_.surface_to_skeleton);
+				ImGui::Text("Skeleton -> Surface: %f", p.hausdorff_result_.skeleton_to_surface);
+				ImGui::Text("Symmetric: %f", p.hausdorff_result_.symmetric);
+				ImGui::Text("Samples: %u surface / %u skeleton", p.hausdorff_result_.surface_sample_count,
+					p.hausdorff_result_.skeleton_sample_count);
 
 				ImGui::Separator();
 

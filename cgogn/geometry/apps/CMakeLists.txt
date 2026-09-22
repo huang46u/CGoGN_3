@@ -41,6 +41,17 @@ target_link_libraries(sphere_fitting
 	${CMAKE_DL_LIBS}
 )
 
+add_executable(sphere_fitting_batch sphere_fitting_batch.cpp)
+target_link_libraries(sphere_fitting_batch
+	cgogn::core
+	cgogn::ui
+	cgogn::io
+	cgogn::rendering
+	cgogn::modeling
+	Blossom5
+	${CMAKE_DL_LIBS}
+)
+
 add_executable(registration registration.cpp)
 target_link_libraries(registration
 	cgogn::core

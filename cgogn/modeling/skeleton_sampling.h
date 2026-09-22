@@ -42,8 +42,8 @@ public:
 	SkeletonSampler()
 		: bb_min_(std::numeric_limits<SCALAR>::max(), std::numeric_limits<SCALAR>::max(),
 				  std::numeric_limits<SCALAR>::max()),
-		  bb_max_(std::numeric_limits<SCALAR>::min(), std::numeric_limits<SCALAR>::min(),
-				  std::numeric_limits<SCALAR>::min())
+		  bb_max_(std::numeric_limits<SCALAR>::lowest(), std::numeric_limits<SCALAR>::lowest(),
+				  std::numeric_limits<SCALAR>::lowest())
 	{
 	}
 
@@ -390,7 +390,7 @@ public:
 	//}
 
 
-	void sample(SCALAR step, SCALAR epsi = SCALAR(0))
+	void sample(SCALAR step, SCALAR epsi = SCALAR(0), uint32 random_seed = uint32(std::random_device{}()))
 	{
 		using Future = std::future<void>;
 		std::vector<Future> futures;	
@@ -407,7 +407,7 @@ public:
 		bb_min_ -= VEC3(s2, s2, s2);
 
 		ThreadPool* pool = thread_pool();
-		uint32 nbthr = pool->nb_workers() / 3;
+		uint32 nbthr = std::max(uint32(1), pool->nb_workers() / 3);
 		SCALAR nstep = step * nbthr;
 
 		std::vector<std::thread*> th(3 * nbthr, nullptr);
@@ -419,10 +419,9 @@ public:
 		for (uint32 i = 0; i < nbthr; ++i)
 		{
 			samp[k].reserve(8192);
-			futures.push_back(pool->enqueue( [this, i, k, step, nstep, min_bb, max_bb, &samp]() {
-				thread_local std::random_device rd;
-				thread_local std::mt19937 gen(rd());
-				thread_local std::uniform_real_distribution<SCALAR> dis(-step / SCALAR(2), step / SCALAR(2));
+			futures.push_back(pool->enqueue( [this, i, k, step, nstep, min_bb, max_bb, random_seed, &samp]() {
+				std::mt19937 gen(random_seed + uint32(k));
+				std::uniform_real_distribution<SCALAR> dis(-step / SCALAR(2), step / SCALAR(2));
 
 				for (SCALAR y = min_bb[1] + step * i; y < max_bb[1]; y += nstep)
 					for (SCALAR x = min_bb[0] + step / 2; x < max_bb[0]; x += step)
@@ -431,10 +430,9 @@ public:
 			}));
 			k++;
 			samp[k].reserve(8192);
-			futures.push_back(pool->enqueue([this, i, k, step, nstep, min_bb, max_bb, &samp]() {
-				thread_local std::random_device rd;
-				thread_local std::mt19937 gen(rd());
-				thread_local std::uniform_real_distribution<SCALAR> dis(-step / SCALAR(2), step / SCALAR(2));
+			futures.push_back(pool->enqueue([this, i, k, step, nstep, min_bb, max_bb, random_seed, &samp]() {
+				std::mt19937 gen(random_seed + uint32(k));
+				std::uniform_real_distribution<SCALAR> dis(-step / SCALAR(2), step / SCALAR(2));
 				for (SCALAR x = min_bb[0] + step * i; x < max_bb[0]; x += nstep)
 					for (SCALAR z = min_bb[2] + step / 2; z < max_bb[2]; z += step)
 						inter_skeleton(VEC3{x + dis(gen), min_bb[1], z + dis(gen)},
@@ -442,10 +440,9 @@ public:
 			}));
 			k++;
 			samp[k].reserve(8192);
-			futures.push_back(pool->enqueue([this, i, k, step, nstep, min_bb, max_bb, &samp]() {
-				thread_local std::random_device rd;
-				thread_local std::mt19937 gen(rd());
-				thread_local std::uniform_real_distribution<SCALAR> dis(-step / SCALAR(2), step / SCALAR(2));
+			futures.push_back(pool->enqueue([this, i, k, step, nstep, min_bb, max_bb, random_seed, &samp]() {
+				std::mt19937 gen(random_seed + uint32(k));
+				std::uniform_real_distribution<SCALAR> dis(-step / SCALAR(2), step / SCALAR(2));
 				for (SCALAR y = min_bb[1] + step * i; y < max_bb[1]; y += nstep)
 					for (SCALAR z = min_bb[2] + step / 2; z < max_bb[2]; z += step)
 						inter_skeleton(VEC3{min_bb[0], y + dis(gen), z + dis(gen)},
