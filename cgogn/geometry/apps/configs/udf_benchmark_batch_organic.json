@@ -3,7 +3,6 @@
     "mode": "neural_udf",
     "geometry_type": "mesh",
     "neural_model_type": "mf",
-    "initial_ma_mode_override": "shrinking_ball",
     "ma_flip_prune": true
   },
   "sampling": {

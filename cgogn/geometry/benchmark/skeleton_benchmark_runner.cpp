@@ -78,19 +78,6 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 	typename Training::HeadlessBenchmarkOptions options;
 	options.verbose_ = config.benchmark.verbose;
 	options.initial_nb_spheres_ = config.initialization.initial_nb_spheres;
-	switch (config.input.initial_ma_mode_override)
-	{
-	case InitialMAMode::Displacement:
-		options.initial_ma_mode_override_ = Training::INITIAL_MA_DISPLACEMENT;
-		break;
-	case InitialMAMode::ShrinkingBall:
-		options.initial_ma_mode_override_ = Training::INITIAL_MA_SHRINKING_BALL;
-		break;
-	case InitialMAMode::Auto:
-	default:
-		options.initial_ma_mode_override_ = Training::INITIAL_MA_AUTO;
-		break;
-	}
 	options.ma_flip_prune_enabled_ = config.input.ma_flip_prune;
 	options.ma_flip_prune_alpha_factor_ = config.input.ma_flip_prune_alpha_factor;
 	options.lock_skeleton_connectivity_ = config.optimization.lock_skeleton_connectivity;
@@ -367,7 +354,6 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	benchmark_config.put("initialization.initial_nb_spheres", config.initialization.initial_nb_spheres);
 	benchmark_config.put("initialization.init_min_cover_points", config.initialization.init_min_cover_points);
 	benchmark_config.put("input.geometry_type", to_string(config.input.geometry_type));
-	benchmark_config.put("input.initial_ma_mode_override", to_string(config.input.initial_ma_mode_override));
 	benchmark_config.put("input.ma_flip_prune", config.input.ma_flip_prune);
 	benchmark_config.put("input.ma_flip_prune_alpha_factor", config.input.ma_flip_prune_alpha_factor);
 	benchmark_config.put("output.save_face_components", config.output.save_face_components);

@@ -124,12 +124,6 @@ public:
 		NEURAL_MODEL_UDF,
 		NEURAL_MODEL_MF
 	};
-	enum InitialMAMode : uint32
-	{
-		INITIAL_MA_AUTO,
-		INITIAL_MA_DISPLACEMENT,
-		INITIAL_MA_SHRINKING_BALL
-	};
 	enum OutputVerbosity : uint32
 	{
 		OUTPUT_MUTE,
@@ -163,7 +157,6 @@ private:
 		torch::jit::Module neural_udf_model_;
 		std::string neural_udf_model_path_ = "";
 		NeuralModelType neural_model_type_ = NEURAL_MODEL_UDF;
-		InitialMAMode initial_ma_mode_override_ = INITIAL_MA_AUTO;
 		bool udf_input_normalized_ = false;
 		const void* udf_normalized_source_ = nullptr;
 
@@ -389,7 +382,6 @@ public:
 		bool verbose_ = true;
 		OutputVerbosity output_verbosity_ = OUTPUT_NORMAL;
 		uint32 initial_nb_spheres_ = 1;
-		InitialMAMode initial_ma_mode_override_ = INITIAL_MA_AUTO;
 		bool ma_flip_prune_enabled_ = true;
 		float ma_flip_prune_alpha_factor_ = 1.0f;
 		float32 filter_radius_threshold_ = 0.0f;
@@ -586,7 +578,6 @@ public:
 		p.output_verbosity_ = options.output_verbosity_;
 		if (options.verbose_)
 			p.output_verbosity_ = OUTPUT_VERBOSE;
-		p.initial_ma_mode_override_ = options.initial_ma_mode_override_;
 		p.ma_flip_prune_enabled_ = options.ma_flip_prune_enabled_;
 		p.ma_flip_prune_alpha_factor_ = options.ma_flip_prune_alpha_factor_;
 		p.filter_radius_threshold_ = options.filter_radius_threshold_;
@@ -2324,78 +2315,11 @@ private:
 		log_basic(p, "Computing Quadrics...", '\n');
 		compute_quadrics(p);
 
-		if (is_verbose_logging_enabled(p) && p.neural_udf_loaded_ && p.samples_ma_position_)
-		{
-			NeuralFieldForward udf = make_neural_field_forward(p);
-			if (udf.is_loaded())
-			{
-				std::vector<Vec3> medial_positions;
-				medial_positions.reserve(nb_cells<PVertex>(*p.samples_mesh_));
-				foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-					uint32 v_idx = index_of(*p.samples_mesh_, v);
-					medial_positions.push_back((*p.samples_ma_position_)[v_idx]);
-					return true;
-				});
-
-				const size_t check_n = std::min<size_t>(30, medial_positions.size());
-				if (check_n > 0)
-				{
-					std::vector<size_t> indices(medial_positions.size());
-					std::iota(indices.begin(), indices.end(), size_t(0));
-					std::mt19937 gen(p.seed_ + 2024);
-					std::shuffle(indices.begin(), indices.end(), gen);
-
-					std::vector<Vec3> check_medial_points;
-					check_medial_points.reserve(check_n);
-					std::vector<Vec3> check_sample_points;
-					check_sample_points.reserve(check_n);
-					for (size_t i = 0; i < check_n; ++i)
-					{
-						size_t idx = indices[i];
-						check_medial_points.push_back(medial_positions[idx]);
-						check_sample_points.push_back((*p.samples_position_)[static_cast<uint32>(idx)]);
-					}
-
-					BatchUDFResult medial_res = udf.forward_batch_with_grad(check_medial_points);
-					BatchUDFResult sample_res = udf.forward_batch_with_grad(check_sample_points);
-					if (medial_res.ok && sample_res.ok && medial_res.values.size() == check_n &&
-						sample_res.values.size() == check_n && medial_res.gradients.size() == check_n &&
-						sample_res.gradients.size() == check_n)
-					{
-						log_verbose(p, "Medial UDF check (random ", check_n, "):", '\n');
-						for (size_t i = 0; i < check_n; ++i)
-						{
-							const Scalar medial_udf = medial_res.values[i];
-							const Scalar sample_udf = sample_res.values[i];
-							const Scalar medial_grad_norm = medial_res.gradients[i].norm();
-							const Scalar sample_grad_norm = sample_res.gradients[i].norm();
-							log_verbose(p, "  ", i, ": medial_udf=", medial_udf, " | sample_udf=", sample_udf,
-									 " | sample_udf-alpha=", (sample_udf - p.alpha_), " | medial_grad_norm=",
-									 medial_grad_norm, " | sample_grad_norm=", sample_grad_norm, '\n');
-						}
-					}
-					else
-					{
-						log_error(p, "Medial UDF check failed (forward_batch).", '\n');
-					}
-				}
-			}
-		}
-
 		log_basic(p, "Fitting Data Computed.", '\n');
 
 		p.fitting_data_computed_ = true;
 	}
 
-	void compute_fitting_data_with_initial_ma_mode(PointsParameters& p, InitialMAMode mode, bool force_recompute)
-	{
-		const InitialMAMode prev_mode = p.initial_ma_mode_override_;
-		p.initial_ma_mode_override_ = mode;
-		if (force_recompute)
-			p.fitting_data_computed_ = false;
-		compute_fitting_data(p);
-		p.initial_ma_mode_override_ = prev_mode;
-	}
 	void build_kdtree(PointsParameters& p)
 	{
 		if (p.samples_kdtree_)
@@ -2748,50 +2672,7 @@ private:
 		const bool neural_input = (p.input_mode_ == INPUT_NEURAL_UDF && p.neural_udf_loaded_);
 		const bool mf_model = neural_input && (p.neural_model_type_ == NEURAL_MODEL_MF);
 		const bool udf_model = neural_input && (p.neural_model_type_ == NEURAL_MODEL_UDF);
-		const bool force_displacement = (p.initial_ma_mode_override_ == INITIAL_MA_DISPLACEMENT);
-		const bool force_shrinking_ball = (p.initial_ma_mode_override_ == INITIAL_MA_SHRINKING_BALL);
-		const bool use_displacement = force_displacement || (!force_shrinking_ball && udf_model);
-
-		// UDF model (or forced displacement mode): direct MA initialization.
-		if (use_displacement)
-		{
-			parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
-				if (!v.is_valid())
-					return true;
-				const uint32 v_idx = index_of(*p.samples_mesh_, v);
-				if (v_idx == INVALID_INDEX)
-					return true;
-
-				const Vec3& pt = (*p.samples_position_)[v_idx];
-				Vec3 n = (*p.samples_normal_)[v_idx];
-				if (n.squaredNorm() > min_norm)
-					n.normalize();
-				else
-					n = Vec3(0, 0, 1);
-
-				const Vec3 c = pt - n * fallback_radius;
-				PVertex secondary;
-				if (p.samples_kdtree_ && !p.samples_kdtree_vertices_.empty())
-				{
-					const Vec3 q = c - n * fallback_radius;
-					std::pair<uint32, Scalar> knn_res;
-					p.samples_kdtree_->find_nn(q, &knn_res);
-					if (knn_res.first < p.samples_kdtree_vertices_.size())
-						secondary = p.samples_kdtree_vertices_[knn_res.first];
-				}
-
-				(*p.samples_ma_position_)[v_idx] = c;
-				(*p.samples_ma_radius_)[v_idx] = fallback_radius;
-				(*p.samples_ma_secondary_vertex_)[v_idx] = secondary;
-				return true;
-			});
-
-			// Keep MA-KDTree in sync for MF/UDF topology scoring paths.
-			build_kdtree(p);
-			return;
-		}
-
-		// MF model (and non-neural fallback): shrinking-ball based MA initialization.
+		// All input modes use shrinking-ball medial-axis initialization.
 		const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(10), Scalar(0));
 
 		auto run_shrinking_ball_for_vertex = [&](PVertex v) -> bool {
@@ -3003,17 +2884,6 @@ private:
 
 				if (eval_ok && score_values.size() == centers.size())
 				{
-					if (mf_model)
-					{
-						const size_t debug_n = std::min<size_t>(20, score_values.size());
-						for (size_t i = 0; is_verbose_logging_enabled(p) && i < debug_n; ++i)
-						{
-							const Scalar sdf_i = (i < sdf_values.size()) ? sdf_values[i] : Scalar(0);
-							log_verbose(
-								p, "[MAFlipPrune][MF] center_udf#", i, " udf=", score_values[i], " sdf=", sdf_i, '\n');
-						}
-					}
-
 					std::vector<PVertex> need_retry;
 					need_retry.reserve(vertices.size() / 8 + 1);
 					for (size_t i = 0; i < vertices.size(); ++i)
@@ -12824,14 +12694,10 @@ protected:
 			float ma_flip_prune_alpha_factor = static_cast<float>(p.ma_flip_prune_alpha_factor_);
 			if (ImGui::SliderFloat("MAFlipPrune MF Alpha Factor", &ma_flip_prune_alpha_factor, 1.0f, 5.0f, "%.2f"))
 				p.ma_flip_prune_alpha_factor_ = Scalar(ma_flip_prune_alpha_factor);
-			if (ImGui::Button("Compute Fitting Data (MA: Displacement)"))
+			if (ImGui::Button("Compute Fitting Data"))
 			{
-				compute_fitting_data_with_initial_ma_mode(p, INITIAL_MA_DISPLACEMENT, true);
-				update_render_data(p);
-			}
-			if (ImGui::Button("Compute Fitting Data (MA: Shrinking Ball)"))
-			{
-				compute_fitting_data_with_initial_ma_mode(p, INITIAL_MA_SHRINKING_BALL, true);
+				p.fitting_data_computed_ = false;
+				compute_fitting_data(p);
 				update_render_data(p);
 			}
 			const bool sphere_fit_ready = p.fitting_data_computed_;

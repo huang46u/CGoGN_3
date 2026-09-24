@@ -170,17 +170,6 @@ AutoSplitMode parse_auto_split_mode(const std::string& value)
 	fail_config("unsupported `auto_split.mode`: " + value);
 }
 
-InitialMAMode parse_initial_ma_mode(const std::string& value)
-{
-	if (value == "auto")
-		return InitialMAMode::Auto;
-	if (value == "displacement")
-		return InitialMAMode::Displacement;
-	if (value == "shrinking_ball")
-		return InitialMAMode::ShrinkingBall;
-	fail_config("unsupported `input.initial_ma_mode_override`: " + value);
-}
-
 std::string normalize_extension(std::string ext)
 {
 	std::transform(ext.begin(), ext.end(), ext.begin(),
@@ -277,20 +266,6 @@ std::string to_string(AutoSplitMode value)
 	return value == AutoSplitMode::MaxNbSpheres ? "max_nb_spheres" : "error_threshold";
 }
 
-std::string to_string(InitialMAMode value)
-{
-	switch (value)
-	{
-	case InitialMAMode::Displacement:
-		return "displacement";
-	case InitialMAMode::ShrinkingBall:
-		return "shrinking_ball";
-	case InitialMAMode::Auto:
-	default:
-		return "auto";
-	}
-}
-
 BenchmarkConfig load_benchmark_config(const std::string& path)
 {
 	const fs::path config_path = fs::absolute(path).lexically_normal();
@@ -311,8 +286,9 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	config.input.surface_path = resolve_config_relative_path(config_directory, get_value<std::string>(input, "surface_path", ""));
 	config.input.neural_udf_model_path =
 		resolve_config_relative_path(config_directory, get_value<std::string>(input, "neural_udf_model_path", ""));
-	config.input.initial_ma_mode_override =
-		parse_initial_ma_mode(get_value<std::string>(input, "initial_ma_mode_override", "auto"));
+	if (const auto initial_ma_mode = input.get_optional<std::string>("initial_ma_mode_override");
+		initial_ma_mode && *initial_ma_mode != "shrinking_ball")
+		fail_config("`input.initial_ma_mode_override` is fixed to `shrinking_ball`; remove the key or update its value");
 	config.input.ma_flip_prune = get_value<bool>(input, "ma_flip_prune", true);
 	config.input.ma_flip_prune_alpha_factor =
 		get_value<float>(input, "ma_flip_prune_alpha_factor", config.input.ma_flip_prune_alpha_factor);

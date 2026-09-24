@@ -44,13 +44,6 @@ enum class AutoSplitMode
 	MaxNbSpheres
 };
 
-enum class InitialMAMode
-{
-	Auto,
-	Displacement,
-	ShrinkingBall
-};
-
 struct BenchmarkInputConfig
 {
 	InputMode mode = InputMode::PointCloud;
@@ -59,7 +52,6 @@ struct BenchmarkInputConfig
 	std::string surface_path;
 	std::string neural_udf_model_path;
 	NeuralModelType neural_model_type = NeuralModelType::UDF;
-	InitialMAMode initial_ma_mode_override = InitialMAMode::Auto;
 	bool ma_flip_prune = true;
 	float ma_flip_prune_alpha_factor = 1.0f;
 };
@@ -178,7 +170,6 @@ std::string to_string(InputGeometryType value);
 std::string to_string(NeuralModelType value);
 std::string to_string(DistanceMode value);
 std::string to_string(AutoSplitMode value);
-std::string to_string(InitialMAMode value);
 
 } // namespace benchmark
 
