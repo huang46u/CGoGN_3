@@ -653,7 +653,7 @@ public:
 	{
 		log_basic(p, "Headless sample normal recompute after sampling: ",
 				  (p.recompute_sample_normals_after_sampling_ ? "true" : "false"), '\n');
-		rebuild_sample_spatial_indices(p);
+		build_kdtree(p);
 		if (p.recompute_sample_normals_after_sampling_)
 		{
 			log_basic(p, "Recomputing sampled normals with PCA after sampling...", '\n');
@@ -683,7 +683,7 @@ public:
 
 	void headless_compute_fitting_primitives_prepared(PointsParameters& p)
 	{
-		rebuild_sample_spatial_indices(p);
+		build_kdtree(p);
 		compute_samples_area(p);
 		compute_quadrics(p);
 	}
@@ -1355,7 +1355,7 @@ public:
 	void finalize_sample_mesh_after_sampling(PointsParameters& p)
 	{
 		log_basic(p, "Building KDTree for sampled points...", '\n');
-		rebuild_sample_spatial_indices(p);
+		build_kdtree(p);
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
 		log_basic(p, "Alpha level set sampling complete. Ready for fitting.", '\n');
 	}
@@ -1446,7 +1446,7 @@ public:
 		if (p.points_ && p.position_ && source == p.points_)
 		{
 			geometry::normalize_centered(*p.position_);
-			rebuild_input_spatial_index(p);
+			rebuild_input_kdtree(p);
 			compute_input_normals(p);
 			points_provider_->emit_attribute_changed(*p.points_, p.position_.get());
 			points_provider_->emit_attribute_changed(*p.points_, p.normal_.get());
@@ -2026,7 +2026,7 @@ public:
 		}
 
 		recompute_samples_normals_from_current_input(p);
-		rebuild_sample_spatial_indices(p);
+		build_kdtree(p);
 		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
@@ -2311,7 +2311,7 @@ private:
 		}
 
 		log_basic(p, "Building KDTree...", '\n');
-		rebuild_sample_spatial_indices(p);
+		build_kdtree(p);
 		if (p.recompute_sample_normals_after_sampling_)
 		{
 			log_basic(p, "Recomputing Normals (PCA)...", '\n');
@@ -2319,7 +2319,7 @@ private:
 		}
 		log_basic(p, "Computing Initial Medial Axis...", '\n');
 		compute_initial_medial_axis(p);
-		rebuild_sample_spatial_indices(p);
+		build_kdtree(p);
 		log_basic(p, "Computing KNN and Area...", '\n');
 		compute_samples_area(p); // Compute KNN and Area for samples
 		log_basic(p, "Computing Quadrics...", '\n');
@@ -2397,7 +2397,7 @@ private:
 		compute_fitting_data(p);
 		p.initial_ma_mode_override_ = prev_mode;
 	}
-	void rebuild_sample_spatial_indices(PointsParameters& p)
+	void build_kdtree(PointsParameters& p)
 	{
 		if (p.samples_kdtree_)
 			delete p.samples_kdtree_;
@@ -2539,7 +2539,7 @@ private:
 		});
 	}
 
-	void rebuild_input_spatial_index(PointsParameters& p)
+	void rebuild_input_kdtree(PointsParameters& p)
 	{
 		if (p.input_kdtree_)
 			delete p.input_kdtree_;
@@ -2621,7 +2621,7 @@ private:
 			});
 
 			// Keep MA-KDTree in sync for MF/UDF topology scoring paths.
-			rebuild_sample_spatial_indices(p);
+			build_kdtree(p);
 			return;
 		}
 
@@ -2886,7 +2886,7 @@ private:
 			if (deleted_samples > 0)
 			{
 				// Sample connectivity changed; refresh the geometry needed to stabilize MA first.
-				rebuild_sample_spatial_indices(p);
+				build_kdtree(p);
 				if (nb_cells<PVertex>(*p.samples_mesh_) > 0 && !flipped_vertex_indices.empty())
 				{
 					std::vector<PVertex> surviving_flipped_vertices;
@@ -2917,7 +2917,7 @@ private:
 		}
 
 		// MA positions changed; keep MA-KDTree in sync for MF topology scoring.
-		rebuild_sample_spatial_indices(p);
+		build_kdtree(p);
 	}
 
 	// MF post-process: search along opposite normal direction for minimal mf-abs(sdf)
@@ -3536,7 +3536,7 @@ private:
 				return false;
 			}
 			if (!p.samples_ma_kdtree_ || p.samples_ma_kdtree_vertices_.empty())
-				rebuild_sample_spatial_indices(p);
+				build_kdtree(p);
 			if (!p.samples_ma_kdtree_ || p.samples_ma_kdtree_vertices_.empty())
 			{
 				log_error(p, log_prefix, " MA KDTree unavailable (no valid ma_position / ma_radius). ",
@@ -3570,7 +3570,7 @@ private:
 		if (p.input_mode_ == INPUT_POINT_CLOUD)
 		{
 			if ((!p.input_kdtree_ || p.input_kdtree_vertices_.empty()) && p.points_ && p.position_)
-				rebuild_input_spatial_index(p);
+				rebuild_input_kdtree(p);
 			if (!p.input_kdtree_ || p.input_kdtree_vertices_.empty() || !p.points_ || !p.position_)
 			{
 				log_error(p, log_prefix, " requires a valid input KDTree for point-cloud distance evaluation.", '\n');
@@ -3740,7 +3740,7 @@ private:
 		if (!p.samples_mesh_ || !p.samples_ma_radius_)
 			return false;
 		if (!p.samples_kdtree_ || p.samples_kdtree_vertices_.empty())
-			rebuild_sample_spatial_indices(p);
+			build_kdtree(p);
 		if (!p.samples_kdtree_ || p.samples_kdtree_vertices_.empty())
 			return false;
 
