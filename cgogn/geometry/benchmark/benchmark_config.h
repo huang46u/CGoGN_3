@@ -79,7 +79,6 @@ struct BenchmarkSamplingConfig
 		float outer_radius_scale = 2.0f;
 		int warmup_iterations = 2;
 		int sample_iterations = 30;
-		int alpha_projection_max_iterations = 1;
 		int parent_batch_size = 8192;
 		int max_samples = 4000000;
 	};

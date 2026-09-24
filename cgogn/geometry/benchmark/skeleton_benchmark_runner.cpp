@@ -126,7 +126,6 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 	options.bridson_outer_radius_scale_ = config.sampling.bridson.outer_radius_scale;
 	options.bridson_seed_warmup_iterations_ = config.sampling.bridson.warmup_iterations;
 	options.sample_iterations_ = config.sampling.bridson.sample_iterations;
-	options.alpha_projection_max_iterations_ = config.sampling.bridson.alpha_projection_max_iterations;
 	options.knn_k_ = config.sampling.knn_k;
 	options.seed_ = config.initialization.seed;
 	options.bridson_parent_batch_size_ = config.sampling.bridson.parent_batch_size;
@@ -376,8 +375,6 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	benchmark_config.put("sampling.apply_filtering", config.sampling.apply_filtering);
 	benchmark_config.put("sampling.bridson.candidate_mode", to_string(config.sampling.bridson.candidate_mode));
 	benchmark_config.put("sampling.bridson.outer_radius_scale", config.sampling.bridson.outer_radius_scale);
-	benchmark_config.put("sampling.bridson.alpha_projection_max_iterations",
-						 config.sampling.bridson.alpha_projection_max_iterations);
 	benchmark_config.put("sampling.recompute_normals_after_sampling", config.sampling.recompute_normals_after_sampling);
 	benchmark_config.put("initialization.initial_nb_spheres", config.initialization.initial_nb_spheres);
 	benchmark_config.put("initialization.init_min_cover_points", config.initialization.init_min_cover_points);

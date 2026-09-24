@@ -18,7 +18,6 @@
     "bridson": {
       "sample_radius": 0.0010,
       "candidate_mode": "2d_plane",
-      "alpha_projection_max_iterations": 2,
       "outer_radius_scale": 1.25,
       "warmup_iterations": 2,
       "sample_iterations": 120,

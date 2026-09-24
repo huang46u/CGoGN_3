@@ -22,7 +22,6 @@
       "outer_radius_scale": 1.25,
       "warmup_iterations": 2,
       "sample_iterations": 60,
-      "alpha_projection_max_iterations": 1,
       "parent_batch_size": 102,
       "max_samples": 10000000
     }

@@ -370,8 +370,12 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		get_value<int>(*bridson, "warmup_iterations", defaults.warmup_iterations);
 	config.sampling.bridson.sample_iterations =
 		get_value<int>(*bridson, "sample_iterations", defaults.sample_iterations);
-	config.sampling.bridson.alpha_projection_max_iterations =
-		get_value<int>(*bridson, "alpha_projection_max_iterations", defaults.alpha_projection_max_iterations);
+	if (auto alpha_projection_iterations = bridson->get_optional<int>("alpha_projection_max_iterations"))
+	{
+		if (*alpha_projection_iterations != 1)
+			fail_config("`sampling.bridson.alpha_projection_max_iterations` has been removed; alpha projection now "
+						"uses 1 iteration. Remove this field or set it to 1.");
+	}
 	config.sampling.bridson.parent_batch_size =
 		get_value<int>(*bridson, "parent_batch_size", defaults.parent_batch_size);
 	config.sampling.bridson.max_samples = get_value<int>(*bridson, "max_samples", defaults.max_samples);
@@ -514,9 +518,6 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		fail_config("`sampling.bridson.warmup_iterations` must be > 0");
 	if (config.sampling.bridson.sample_iterations <= 0)
 		fail_config("`sampling.bridson.sample_iterations` must be > 0");
-	if (config.sampling.bridson.alpha_projection_max_iterations < 1 ||
-		config.sampling.bridson.alpha_projection_max_iterations > 30)
-		fail_config("`sampling.bridson.alpha_projection_max_iterations` must be in [1, 30]");
 	if (config.sampling.bridson.parent_batch_size <= 0)
 		fail_config("`sampling.bridson.parent_batch_size` must be > 0");
 	if (config.sampling.bridson.max_samples <= 0)
