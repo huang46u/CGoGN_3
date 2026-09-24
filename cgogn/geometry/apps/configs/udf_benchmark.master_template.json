@@ -88,8 +88,6 @@
   },
   "optimization": {
     "distance_mode": "line_quadric_distance_fix_r",
-    "use_local_clusters": false,
-    "local_cluster_connectivity_refresh_interval": 10,
     "max_iterations_without_autosplit": 300,
     "max_iterations_after_reaching_max_spheres": 100,
     "sqem_update_lambda_full": 0.05,
@@ -97,7 +95,6 @@
     "sqem_fix_radius_scale": 1.0,
     "udf_center_enabled": false,
     "udf_center_lambda": 0.1,
-    "lock_skeleton_connectivity": false,
     "auto_stop": false
   },
   "auto_split": {

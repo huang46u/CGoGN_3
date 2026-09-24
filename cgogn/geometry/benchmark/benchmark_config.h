@@ -77,8 +77,6 @@ struct BenchmarkSamplingConfig
 struct BenchmarkOptimizationConfig
 {
 	DistanceMode distance_mode = DistanceMode::LineQuadricDistance;
-	bool use_local_clusters = false;
-	unsigned int local_cluster_connectivity_refresh_interval = 10;
 	unsigned int max_iterations_without_autosplit = 300;
 	unsigned int max_iterations_after_reaching_max_spheres = 100;
 	float sqem_update_lambda_full = 0.05f;
@@ -86,7 +84,6 @@ struct BenchmarkOptimizationConfig
 	float sqem_fix_radius_scale = 1.0f;
 	bool udf_center_enabled = false;
 	float udf_center_lambda = 0.10f;
-	bool lock_skeleton_connectivity = false;
 	bool auto_stop = false;
 };
 

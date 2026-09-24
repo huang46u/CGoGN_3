@@ -250,10 +250,7 @@ private:
 
 		float32 filter_radius_threshold_ = 0.0f;
 
-		bool lock_skeleton_connectivity_ = false;
 		DistanceMode distance_mode_ = LINE_QUADRIC_DISTANCE;
-		bool use_local_clusters_ = false;
-		uint32 local_cluster_connectivity_refresh_interval_ = 10;
 		bool auto_stop_ = false;
 		uint32 max_iterations_without_autosplit_ = 300;
 		uint32 max_iterations_after_reaching_max_spheres_ = 100;
@@ -383,10 +380,7 @@ public:
 		bool ma_flip_prune_enabled_ = true;
 		float ma_flip_prune_alpha_factor_ = 1.0f;
 		float32 filter_radius_threshold_ = 0.0f;
-		bool lock_skeleton_connectivity_ = false;
 		DistanceMode distance_mode_ = LINE_QUADRIC_DISTANCE;
-		bool use_local_clusters_ = false;
-		uint32 local_cluster_connectivity_refresh_interval_ = 10;
 		bool auto_stop_ = false;
 		uint32 max_iterations_without_autosplit_ = 300;
 		uint32 max_iterations_after_reaching_max_spheres_ = 100;
@@ -578,10 +572,7 @@ public:
 		p.ma_flip_prune_enabled_ = options.ma_flip_prune_enabled_;
 		p.ma_flip_prune_alpha_factor_ = options.ma_flip_prune_alpha_factor_;
 		p.filter_radius_threshold_ = options.filter_radius_threshold_;
-		p.lock_skeleton_connectivity_ = options.lock_skeleton_connectivity_;
 		p.distance_mode_ = options.distance_mode_;
-		p.use_local_clusters_ = options.use_local_clusters_;
-		p.local_cluster_connectivity_refresh_interval_ = options.local_cluster_connectivity_refresh_interval_;
 		p.auto_stop_ = options.auto_stop_;
 		p.max_iterations_without_autosplit_ = options.max_iterations_without_autosplit_;
 		p.max_iterations_after_reaching_max_spheres_ = options.max_iterations_after_reaching_max_spheres_;
@@ -684,7 +675,9 @@ public:
 		auto& p = points_parameters_[&points];
 		clear(*p.spheres_);
 		init_spheres_from_samples(p);
-		compute_clusters_full(p);
+		if (p.samples_sphere_)
+			p.samples_sphere_->fill(PVertex());
+		compute_clusters_local(p);
 	}
 
 	HeadlessOptimizationStats headless_optimize_spheres_prepared(PointsParameters& p, bool verbose = false)
@@ -2955,7 +2948,9 @@ private:
 	{
 		points_provider_->clear_mesh(*p.spheres_);
 		init_spheres_from_samples(p);
-		compute_clusters_full(p);
+		if (p.samples_sphere_)
+			p.samples_sphere_->fill(PVertex());
+		compute_clusters_local(p);
 
 		if (!p.running_)
 		{
@@ -3135,86 +3130,14 @@ private:
 		return true;
 	}
 
-	void compute_clusters_full(PointsParameters& p)
-	{
-		SphereFitData data;
-		if (!get_sphere_fit_data(p, data))
-			return;
-		std::atomic<uint64> invalid_sphere_candidates(0);
-		std::atomic<uint64> nonfinite_distance_candidates(0);
-		std::atomic<uint64> unassigned_samples(0);
-		// clean cluster affectation
-		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*p.spheres_, v);
-			(*p.spheres_cluster_)[v_index].clear();
-			(*p.spheres_cluster_area_)[v_index] = 0.0;
-			return true;
-		});
-		data.sphere->fill(PVertex());
-
-		if (p.nb_spheres_ == 0)
-			return;
-
-		parallel_foreach_cell(*data.mesh, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*data.mesh, v);
-			// if (!(*p.medial_axis_selected_)[v_index])
-			// 	return true;
-
-			Scalar a = (*data.area)[v_index];
-
-			Scalar min_distance = std::numeric_limits<Scalar>::max();
-			PVertex closest_sphere;
-			uint32 closest_sphere_index = INVALID_INDEX;
-
-			foreach_cell(*p.spheres_, [&](PVertex pv) {
-				uint32 pv_index = index_of(*p.spheres_, pv);
-				if (!is_valid_sphere_for_clustering(p, pv_index))
-				{
-					++invalid_sphere_candidates;
-					return true;
-				}
-				const Vec3& center = (*p.spheres_position_)[pv_index];
-				Scalar radius = (*p.spheres_radius_)[pv_index];
-
-				Scalar dist_sqem = (*data.quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
-				Scalar dist_other = (*data.line_quadric)[v_index].eval(center);
-				Scalar dist = dist_sqem + sphere_sqem_lambda(p, pv_index) * dist_other;
-				if (!std::isfinite(static_cast<double>(dist)))
-				{
-					++nonfinite_distance_candidates;
-					return true;
-				}
-				if (dist < min_distance)
-				{
-					min_distance = dist;
-					closest_sphere = pv;
-					closest_sphere_index = pv_index;
-				}
-				return true;
-			});
-
-			(*data.sphere)[v_index] = closest_sphere;
-			if (!closest_sphere.is_valid() || closest_sphere_index == INVALID_INDEX)
-			{
-				++unassigned_samples;
-				return true;
-			}
-
-			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
-			(*p.spheres_cluster_)[closest_sphere_index].push_back(v);
-			(*p.spheres_cluster_area_)[closest_sphere_index] += a;
-
-			return true;
-		});
-		if (invalid_sphere_candidates.load() > 0 || nonfinite_distance_candidates.load() > 0 || unassigned_samples.load() > 0)
-		{
-			log_error(p, "[ClusterFullGuard] invalid_sphere_candidates=", invalid_sphere_candidates.load(),
-					  " nonfinite_distance_candidates=", nonfinite_distance_candidates.load(),
-					  " unassigned_samples=", unassigned_samples.load(), '\n');
-		}
-	}
 	void compute_clusters_local(PointsParameters& p)
 	{
+		if (p.nb_spheres_ == 0)
+		{
+			if (p.samples_sphere_)
+				p.samples_sphere_->fill(PVertex());
+			return;
+		}
 		SphereFitData data;
 		if (!get_sphere_fit_data(p, data))
 			return;
@@ -3227,9 +3150,6 @@ private:
 			(*p.spheres_cluster_area_)[v_index] = 0.0;
 			return true;
 		});
-
-		if (p.nb_spheres_ == 0)
-			return;
 
 		parallel_foreach_cell(*data.mesh, [&](PVertex v) -> bool {
 			uint32 v_index = index_of(*data.mesh, v);
@@ -3237,33 +3157,17 @@ private:
 			Scalar a = (*data.area)[v_index];
 			PVertex cluster_sphere = (*data.sphere)[v_index];
 			const uint32 cs_index = cluster_sphere.is_valid() ? index_of(*p.spheres_, cluster_sphere) : INVALID_INDEX;
-			std::set<PVertex> neighbors_spheres;
-			if (cs_index != INVALID_INDEX)
-			{
-				neighbors_spheres = (*p.spheres_neighbor_clusters_)[cs_index];
-				neighbors_spheres.insert(cluster_sphere);
-			}
-			else
-			{
-				// Cached sample-to-sphere ownership may be stale after topology edits that removed spheres.
-				// Fall back to a per-sample global search instead of forcing the sample into sphere 0.
-				foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
-					neighbors_spheres.insert(pv);
-					return true;
-				});
-			}
 
 			Scalar min_distance = std::numeric_limits<Scalar>::max();
 			PVertex closest_sphere;
 			uint32 closest_sphere_index = INVALID_INDEX;
 
-			for (PVertex pv : neighbors_spheres)
-			{
+			auto evaluate_candidate = [&](PVertex pv) {
 				uint32 pv_index = index_of(*p.spheres_, pv);
 				if (!is_valid_sphere_for_clustering(p, pv_index))
 				{
 					++invalid_sphere_candidates;
-					continue;
+					return;
 				}
 				const Vec3& center = (*p.spheres_position_)[pv_index];
 				Scalar radius = (*p.spheres_radius_)[pv_index];
@@ -3274,7 +3178,7 @@ private:
 				if (!std::isfinite(static_cast<double>(dist)))
 				{
 					++nonfinite_distance_candidates;
-					continue;
+					return;
 				}
 				if (dist < min_distance)
 				{
@@ -3282,6 +3186,33 @@ private:
 					closest_sphere = pv;
 					closest_sphere_index = pv_index;
 				}
+			};
+
+			if (cs_index != INVALID_INDEX && is_valid_sphere_for_clustering(p, cs_index))
+			{
+				const std::set<PVertex>& neighbor_spheres = (*p.spheres_neighbor_clusters_)[cs_index];
+				bool owner_evaluated = false;
+				for (PVertex pv : neighbor_spheres)
+				{
+					if (!owner_evaluated && cluster_sphere < pv)
+					{
+						evaluate_candidate(cluster_sphere);
+						owner_evaluated = true;
+					}
+					if (pv == cluster_sphere)
+						owner_evaluated = true;
+					evaluate_candidate(pv);
+				}
+				if (!owner_evaluated)
+					evaluate_candidate(cluster_sphere);
+			}
+			else
+			{
+				// Invalid or uninitialized ownership requires a global search.
+				foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
+					evaluate_candidate(pv);
+					return true;
+				});
 			}
 
 			(*data.sphere)[v_index] = closest_sphere;
@@ -3305,17 +3236,9 @@ private:
 		}
 	}
 
-	bool should_use_local_clusters(const PointsParameters& p, bool force_local = false)
+	void compute_clusters(PointsParameters& p)
 	{
-		return force_local || p.use_local_clusters_ || p.auto_split_;
-	}
-
-	void compute_clusters(PointsParameters& p, bool force_local = false)
-	{
-		if (should_use_local_clusters(p, force_local))
-			compute_clusters_local(p);
-		else
-			compute_clusters_full(p);
+		compute_clusters_local(p);
 		prune_empty_clusters(p);
 		refresh_sphere_sqem_lambda_cache(p);
 	}
@@ -3340,114 +3263,6 @@ private:
 				remove_sphere(p, v);
 		}
 	}
-	// Power distance clustering: d_power(p, sphere) = |p - center|^2 - radius^2
-	void compute_power_cluster(PointsParameters& p)
-	{
-		SphereFitData data;
-		if (!get_sphere_fit_data(p, data))
-			return;
-		std::atomic<uint64> invalid_sphere_candidates(0);
-		std::atomic<uint64> nonfinite_distance_candidates(0);
-		std::atomic<uint64> unassigned_samples(0);
-		// clean cluster affectation
-		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*p.spheres_, v);
-			(*p.spheres_cluster_)[v_index].clear();
-			(*p.spheres_cluster_area_)[v_index] = 0.0;
-			return true;
-		});
-		data.sphere->fill(PVertex());
-
-		if (p.nb_spheres_ == 0)
-			return;
-
-		parallel_foreach_cell(*data.mesh, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*data.mesh, v);
-			Scalar a = (*data.area)[v_index];
-			const Vec3& vp = (*data.position)[v_index];
-
-			Scalar min_power_distance = std::numeric_limits<Scalar>::max();
-			PVertex closest_sphere;
-			uint32 closest_sphere_index = INVALID_INDEX;
-
-			foreach_cell(*p.spheres_, [&](PVertex pv) {
-				uint32 pv_index = index_of(*p.spheres_, pv);
-				if (!is_valid_sphere_for_clustering(p, pv_index))
-				{
-					++invalid_sphere_candidates;
-					return true;
-				}
-				const Vec3& center = (*p.spheres_position_)[pv_index];
-				Scalar radius = (*p.spheres_radius_)[pv_index];
-
-				// Power distance: |p - center|^2 - radius^2
-				Scalar dist_sq = (vp - center).squaredNorm();
-				Scalar power_dist = dist_sq - radius * radius;
-				if (!std::isfinite(static_cast<double>(power_dist)))
-				{
-					++nonfinite_distance_candidates;
-					return true;
-				}
-
-				if (power_dist < min_power_distance)
-				{
-					min_power_distance = power_dist;
-					closest_sphere = pv;
-					closest_sphere_index = pv_index;
-				}
-				return true;
-			});
-
-			(*data.sphere)[v_index] = closest_sphere;
-			if (!closest_sphere.is_valid() || closest_sphere_index == INVALID_INDEX)
-			{
-				++unassigned_samples;
-				return true;
-			}
-
-			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
-			(*p.spheres_cluster_)[closest_sphere_index].push_back(v);
-			(*p.spheres_cluster_area_)[closest_sphere_index] += a;
-
-			return true;
-		});
-		if (invalid_sphere_candidates.load() > 0 || nonfinite_distance_candidates.load() > 0 || unassigned_samples.load() > 0)
-		{
-			log_error(p, "[PowerClusterGuard] invalid_sphere_candidates=", invalid_sphere_candidates.load(),
-					  " nonfinite_distance_candidates=", nonfinite_distance_candidates.load(),
-					  " unassigned_samples=", unassigned_samples.load(), '\n');
-		}
-		prune_empty_clusters(p);
-
-		//// remove small clusters
-		// foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-		//	uint32 v_idx = index_of(*p.spheres_, v);
-		//	std::vector<PVertex>& cluster = (*p.spheres_cluster_)[v_idx];
-		//	if (cluster.size() < 4)
-		//	{
-		//		for (PVertex sv : cluster) {
-		//			uint32 sv_idx = index_of(*p.samples_mesh_, sv);
-		//			(*p.samples_sphere_)[sv_idx] = PVertex();
-		//		}
-		//		remove_vertex(*p.spheres_, v);
-		//		p.nb_spheres_--;
-		//	}
-		//	return true;
-		// });
-	}
-
-	// Power distance clustering for alpha-inside points (uses original alpha-inside positions).
-	// Power distance clustering for alpha-inside points into main clusters (uses original alpha-inside positions).
-	// Use power-based clusters to compute sphere neighbors and build skeleton
-	void compute_skeleton_power(PointsParameters& p, bool only_neighbors = false)
-	{
-		// First compute power clusters
-		compute_power_cluster(p);
-
-		// Then build skeleton using the power-based cluster assignments
-		compute_skeleton(p, only_neighbors);
-	}
-
 	void compute_spheres_error(PointsParameters& p)
 	{
 		SphereFitData data;
@@ -3956,10 +3771,7 @@ private:
 	}
 	bool should_refresh_local_connectivity(const PointsParameters& p)
 	{
-		if (!should_use_local_clusters(p) || p.lock_skeleton_connectivity_)
-			return false;
-		const uint32 interval = std::max<uint32>(1, p.local_cluster_connectivity_refresh_interval_);
-		return (p.iteration_count_ % interval) == 0;
+		return (p.iteration_count_ % 10) == 0;
 	}
 
 	struct AutoSplitHeapEntry
@@ -4072,8 +3884,7 @@ private:
 
 	void run_auto_split_iteration(PointsParameters& p)
 	{
-		if (!(p.auto_split_ && !p.lock_skeleton_connectivity_ &&
-			  (p.total_error_diff_ < Scalar(1e-5) || p.iteration_count_ % 10 == 0)))
+		if (!(p.auto_split_ && (p.total_error_diff_ < Scalar(1e-5) || p.iteration_count_ % 10 == 0)))
 		{
 			return;
 		}
@@ -4236,36 +4047,32 @@ private:
 		if (!get_sphere_fit_data(p, data))
 			return;
 		auto knn_attr = data.knn;
-		const bool rebuild_neighbors = !p.lock_skeleton_connectivity_;
 		if (!data.mesh || !data.sphere)
 			return;
-		if (rebuild_neighbors && !knn_attr)
+		if (!knn_attr)
 			return;
-		if (rebuild_neighbors)
-		{
-			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-				uint32 v_index = index_of(*p.spheres_, v);
-				(*p.spheres_neighbor_clusters_)[v_index].clear();
-				return true;
-			});
+		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*p.spheres_, v);
+			(*p.spheres_neighbor_clusters_)[v_index].clear();
+			return true;
+		});
 
-			foreach_cell(*data.mesh, [&](PVertex v) -> bool {
-				uint32 v_index = index_of(*data.mesh, v);
-				PVertex v_sphere = (*data.sphere)[v_index];
-				for (PVertex w : (*knn_attr)[v_index])
+		foreach_cell(*data.mesh, [&](PVertex v) -> bool {
+			uint32 v_index = index_of(*data.mesh, v);
+			PVertex v_sphere = (*data.sphere)[v_index];
+			for (PVertex w : (*knn_attr)[v_index])
+			{
+				PVertex w_sphere = (*data.sphere)[index_of(*data.mesh, w)];
+				if (v_sphere.is_valid() && w_sphere.is_valid() && v_sphere != w_sphere)
 				{
-					PVertex w_sphere = (*data.sphere)[index_of(*data.mesh, w)];
-					if (v_sphere.is_valid() && w_sphere.is_valid() && v_sphere != w_sphere)
-					{
-						uint32 v_index = index_of(*p.spheres_, v_sphere);
-						uint32 w_index = index_of(*p.spheres_, w_sphere);
-						(*p.spheres_neighbor_clusters_)[v_index].insert(w_sphere);
-						(*p.spheres_neighbor_clusters_)[w_index].insert(v_sphere);
-					}
+					uint32 v_index = index_of(*p.spheres_, v_sphere);
+					uint32 w_index = index_of(*p.spheres_, w_sphere);
+					(*p.spheres_neighbor_clusters_)[v_index].insert(w_sphere);
+					(*p.spheres_neighbor_clusters_)[w_index].insert(v_sphere);
 				}
-				return true;
-			});
-		}
+			}
+			return true;
+		});
 
 		if (only_neighbors)
 			return;
@@ -12310,37 +12117,8 @@ protected:
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
 
-		if (p.lock_skeleton_connectivity_ && p.skeleton_ && p.skeleton_position_ && p.spheres_ && p.spheres_position_)
-		{
-			invalidate_skeleton_face_score_cache(p);
-			uint32 updated_locked_vertices = 0;
-			uint32 missing_locked_vertices = 0;
-			foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
-				const uint32 sphere_index = index_of(*p.spheres_, pv);
-				const NMVertex nmv =
-					(p.spheres_skeleton_vertex_ && sphere_index != INVALID_INDEX) ? (*p.spheres_skeleton_vertex_)[sphere_index]
-																			 : NMVertex();
-				if (!nmv.is_valid())
-				{
-					++missing_locked_vertices;
-					return true;
-				}
-				(*p.skeleton_position_)[index_of(*p.skeleton_, nmv)] = (*p.spheres_position_)[sphere_index];
-				++updated_locked_vertices;
-				return true;
-			});
-			if (missing_locked_vertices > 0)
-			{
-				log_basic(p, "[SkeletonLock] preserved existing connectivity while skipping missing skeleton vertices"
-						 " updated_vertices=", updated_locked_vertices, " missing_vertices=", missing_locked_vertices,
-						 '\n');
-			}
-		}
-		else
-		{
-			compute_skeleton(p);
-			non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
-		}
+		compute_skeleton(p);
+		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
 	}
 
@@ -12574,7 +12352,7 @@ protected:
 			{
 				std::lock_guard<std::mutex> lock(p.mutex_);
 				split_sphere(p, picked_sphere_);
-				compute_clusters(p, true);
+				compute_clusters(p);
 				compute_spheres_error(p);
 				if (!p.running_)
 					update_render_data(p);
@@ -12731,8 +12509,6 @@ protected:
 					ImGui::RadioButton("Line Quadric (fix r)", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE);
 					ImGui::SameLine();
 					ImGui::RadioButton("Line Quadric (free r)", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE_FREE_RADIUS);
-					if (ImGui::Button(p.lock_skeleton_connectivity_ ? "Skeleton: Locked" : "Skeleton: Unlocked"))
-						p.lock_skeleton_connectivity_ = !p.lock_skeleton_connectivity_;
 
 					if (ImGui::Button("Update spheres"))
 					{
@@ -12745,37 +12521,6 @@ protected:
 						}
 					}
 
-					if (ImGui::Button("Compute clusters"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							compute_clusters(p);
-							compute_spheres_error(p);
-							update_render_data(p);
-						}
-					}
-					ImGui::SameLine();
-					if (ImGui::Button(p.use_local_clusters_ ? "Cluster Mode: Neighbor" : "Cluster Mode: Global"))
-						p.use_local_clusters_ = !p.use_local_clusters_;
-					if (p.use_local_clusters_)
-					{
-						ImGui::InputScalar("Neighbor refresh/iter", ImGuiDataType_U32,
-							&p.local_cluster_connectivity_refresh_interval_);
-						if (p.local_cluster_connectivity_refresh_interval_ < 1)
-							p.local_cluster_connectivity_refresh_interval_ = 1;
-					}
-					ImGui::SameLine();
-					if (ImGui::Button("Power Cluster"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							compute_power_cluster(p);
-							compute_spheres_error(p);
-							update_render_data(p);
-						}
-					}
 
 					if (ImGui::Button("Build Skeleton"))
 					{
@@ -12783,17 +12528,6 @@ protected:
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							compute_skeleton(p);
-							update_render_data(p);
-							non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
-						}
-					}
-					ImGui::SameLine();
-					if (ImGui::Button("Power Skeleton"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							compute_skeleton_power(p);
 							update_render_data(p);
 							non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 						}
@@ -13122,7 +12856,7 @@ protected:
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
 						split_sphere(p, p.max_error_sphere_);
-						compute_clusters(p, true);
+						compute_clusters(p);
 						compute_spheres_error(p);
 						if (!p.running_)
 							update_render_data(p);

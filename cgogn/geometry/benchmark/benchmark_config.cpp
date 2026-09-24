@@ -365,9 +365,12 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	const ptree& optimization = root.get_child("optimization");
 	config.optimization.distance_mode =
 		parse_distance_mode(require_value<std::string>(optimization, "distance_mode"));
-	config.optimization.use_local_clusters = get_value<bool>(optimization, "use_local_clusters", false);
-	config.optimization.local_cluster_connectivity_refresh_interval =
-		get_value<unsigned int>(optimization, "local_cluster_connectivity_refresh_interval", 10u);
+	if (auto use_local_clusters = optimization.get_optional<bool>("use_local_clusters");
+		use_local_clusters && !*use_local_clusters)
+		fail_config("`optimization.use_local_clusters` is fixed to true; remove the legacy field or set it to true.");
+	if (auto refresh_interval = optimization.get_optional<unsigned int>("local_cluster_connectivity_refresh_interval");
+		refresh_interval && *refresh_interval != 10)
+		fail_config("`optimization.local_cluster_connectivity_refresh_interval` is fixed to 10; remove the legacy field or set it to 10.");
 	config.optimization.max_iterations_without_autosplit =
 		get_value<unsigned int>(optimization, "max_iterations_without_autosplit", 300u);
 	config.optimization.max_iterations_after_reaching_max_spheres =
@@ -378,8 +381,9 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	config.optimization.sqem_fix_radius_scale = require_value<float>(optimization, "sqem_fix_radius_scale");
 	config.optimization.udf_center_enabled = get_value<bool>(optimization, "udf_center_enabled", false);
 	config.optimization.udf_center_lambda = get_value<float>(optimization, "udf_center_lambda", 0.10f);
-	config.optimization.lock_skeleton_connectivity =
-		get_value<bool>(optimization, "lock_skeleton_connectivity", false);
+	if (auto lock_skeleton_connectivity = optimization.get_optional<bool>("lock_skeleton_connectivity");
+		lock_skeleton_connectivity && *lock_skeleton_connectivity)
+		fail_config("`optimization.lock_skeleton_connectivity` was removed; remove the legacy field or set it to false.");
 	config.optimization.auto_stop = get_value<bool>(optimization, "auto_stop", false);
 
 	const ptree& auto_split = root.get_child("auto_split");

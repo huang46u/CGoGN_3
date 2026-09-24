@@ -79,13 +79,9 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 	options.verbose_ = config.benchmark.verbose;
 	options.ma_flip_prune_enabled_ = config.input.ma_flip_prune;
 	options.ma_flip_prune_alpha_factor_ = config.input.ma_flip_prune_alpha_factor;
-	options.lock_skeleton_connectivity_ = config.optimization.lock_skeleton_connectivity;
 	options.distance_mode_ = (config.optimization.distance_mode == DistanceMode::LineQuadricDistanceFreeRadius)
 								 ? Training::LINE_QUADRIC_DISTANCE_FREE_RADIUS
 								 : Training::LINE_QUADRIC_DISTANCE;
-	options.use_local_clusters_ = config.optimization.use_local_clusters;
-	options.local_cluster_connectivity_refresh_interval_ =
-		config.optimization.local_cluster_connectivity_refresh_interval;
 	options.auto_stop_ = config.optimization.auto_stop;
 	options.max_iterations_without_autosplit_ = config.optimization.max_iterations_without_autosplit;
 	options.max_iterations_after_reaching_max_spheres_ = config.optimization.max_iterations_after_reaching_max_spheres;
