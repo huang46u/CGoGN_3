@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <stdexcept>
 #include <vector>
@@ -180,15 +181,6 @@ InitialMAMode parse_initial_ma_mode(const std::string& value)
 	fail_config("unsupported `input.initial_ma_mode_override`: " + value);
 }
 
-BridsonCandidateMode parse_bridson_candidate_mode(const std::string& value)
-{
-	if (value == "3d_shell" || value == "shell" || value == "3d")
-		return BridsonCandidateMode::Shell3D;
-	if (value == "2d_plane" || value == "2d_tangent_ring" || value == "plane" || value == "2d")
-		return BridsonCandidateMode::Plane2D;
-	fail_config("unsupported `sampling.bridson.candidate_mode`: " + value);
-}
-
 std::string normalize_extension(std::string ext)
 {
 	std::transform(ext.begin(), ext.end(), ext.begin(),
@@ -299,11 +291,6 @@ std::string to_string(InitialMAMode value)
 	}
 }
 
-std::string to_string(BridsonCandidateMode value)
-{
-	return value == BridsonCandidateMode::Plane2D ? "2d_plane" : "3d_shell";
-}
-
 BenchmarkConfig load_benchmark_config(const std::string& path)
 {
 	const fs::path config_path = fs::absolute(path).lexically_normal();
@@ -349,7 +336,7 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	}
 	if (sampling.find("num_alpha_samples") != sampling.not_found())
 	{
-		fail_config("`sampling.num_alpha_samples` has been removed; use `sampling.bridson.max_samples`");
+		fail_config("`sampling.num_alpha_samples` has been removed; alpha sampling now uses a fixed maximum.");
 	}
 	if (sampling.find("neural_bridson") != sampling.not_found())
 	{
@@ -363,22 +350,41 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	const auto& defaults = default_sampling.bridson;
 	config.sampling.bridson.sample_radius = get_value<float>(*bridson, "sample_radius", defaults.sample_radius);
 	if (auto candidate_mode = bridson->get_optional<std::string>("candidate_mode"))
-		config.sampling.bridson.candidate_mode = parse_bridson_candidate_mode(*candidate_mode);
-	config.sampling.bridson.outer_radius_scale =
-		get_value<float>(*bridson, "outer_radius_scale", defaults.outer_radius_scale);
-	config.sampling.bridson.warmup_iterations =
-		get_value<int>(*bridson, "warmup_iterations", defaults.warmup_iterations);
-	config.sampling.bridson.sample_iterations =
-		get_value<int>(*bridson, "sample_iterations", defaults.sample_iterations);
+	{
+		if (*candidate_mode != "2d_plane")
+			fail_config("`sampling.bridson.candidate_mode` is fixed to `2d_plane`; update this legacy field.");
+	}
+	if (auto outer_radius_scale = bridson->get_optional<float>("outer_radius_scale"))
+	{
+		if (std::abs(*outer_radius_scale - 1.25f) > 1e-6f)
+			fail_config("`sampling.bridson.outer_radius_scale` is fixed to 1.25; update this legacy field.");
+	}
+	if (auto warmup_iterations = bridson->get_optional<int>("warmup_iterations"))
+	{
+		if (*warmup_iterations != 2)
+			fail_config("`sampling.bridson.warmup_iterations` is fixed to 2; update this legacy field.");
+	}
+	if (auto sample_iterations = bridson->get_optional<int>("sample_iterations"))
+	{
+		if (*sample_iterations != 12)
+			fail_config("`sampling.bridson.sample_iterations` is fixed to 12; update this legacy field.");
+	}
 	if (auto alpha_projection_iterations = bridson->get_optional<int>("alpha_projection_max_iterations"))
 	{
 		if (*alpha_projection_iterations != 1)
 			fail_config("`sampling.bridson.alpha_projection_max_iterations` has been removed; alpha projection now "
 						"uses 1 iteration. Remove this field or set it to 1.");
 	}
-	config.sampling.bridson.parent_batch_size =
-		get_value<int>(*bridson, "parent_batch_size", defaults.parent_batch_size);
-	config.sampling.bridson.max_samples = get_value<int>(*bridson, "max_samples", defaults.max_samples);
+	if (auto parent_batch_size = bridson->get_optional<int>("parent_batch_size"))
+	{
+		if (*parent_batch_size != 1024)
+			fail_config("`sampling.bridson.parent_batch_size` is fixed to 1024; update this legacy field.");
+	}
+	if (auto max_samples = bridson->get_optional<int>("max_samples"))
+	{
+		if (*max_samples != 10000000)
+			fail_config("`sampling.bridson.max_samples` is fixed to 10000000; update this legacy field.");
+	}
 
 	const ptree& optimization = root.get_child("optimization");
 	config.optimization.distance_mode =
@@ -512,16 +518,6 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	}
 	if (config.sampling.bridson.sample_radius <= 0.0f)
 		fail_config("`sampling.bridson.sample_radius` must be > 0");
-	if (config.sampling.bridson.outer_radius_scale < 1.0f)
-		fail_config("`sampling.bridson.outer_radius_scale` must be >= 1");
-	if (config.sampling.bridson.warmup_iterations <= 0)
-		fail_config("`sampling.bridson.warmup_iterations` must be > 0");
-	if (config.sampling.bridson.sample_iterations <= 0)
-		fail_config("`sampling.bridson.sample_iterations` must be > 0");
-	if (config.sampling.bridson.parent_batch_size <= 0)
-		fail_config("`sampling.bridson.parent_batch_size` must be > 0");
-	if (config.sampling.bridson.max_samples <= 0)
-		fail_config("`sampling.bridson.max_samples` must be > 0");
 	if (config.input.ma_flip_prune_alpha_factor < 1.0f || config.input.ma_flip_prune_alpha_factor > 5.0f)
 		fail_config("`input.ma_flip_prune_alpha_factor` must be in [1.0, 5.0]");
 	if (!config.batch.enabled && config.output.skeleton_ply.empty())

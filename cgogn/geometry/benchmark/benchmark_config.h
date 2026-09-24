@@ -51,12 +51,6 @@ enum class InitialMAMode
 	ShrinkingBall
 };
 
-enum class BridsonCandidateMode
-{
-	Shell3D,
-	Plane2D
-};
-
 struct BenchmarkInputConfig
 {
 	InputMode mode = InputMode::PointCloud;
@@ -75,12 +69,6 @@ struct BenchmarkSamplingConfig
 	struct BridsonConfig
 	{
 		float sample_radius = 0.0025f;
-		BridsonCandidateMode candidate_mode = BridsonCandidateMode::Shell3D;
-		float outer_radius_scale = 2.0f;
-		int warmup_iterations = 2;
-		int sample_iterations = 30;
-		int parent_batch_size = 8192;
-		int max_samples = 4000000;
 	};
 
 	float alpha = 0.005f;
@@ -191,7 +179,6 @@ std::string to_string(NeuralModelType value);
 std::string to_string(DistanceMode value);
 std::string to_string(AutoSplitMode value);
 std::string to_string(InitialMAMode value);
-std::string to_string(BridsonCandidateMode value);
 
 } // namespace benchmark
 

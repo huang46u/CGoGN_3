@@ -14,13 +14,7 @@
     "tol": 1e-6,
     "udf_max_iterations": 3000,
     "bridson": {
-      "sample_radius": 0.002,
-      "candidate_mode": "3d_shell",
-      "outer_radius_scale": 2.0,
-      "warmup_iterations": 2,
-      "sample_iterations": 30,
-      "parent_batch_size": 8192,
-      "max_samples": 5000000
+      "sample_radius": 0.002
     }
   },
   "optimization": {

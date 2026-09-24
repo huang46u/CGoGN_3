@@ -10,6 +10,7 @@
 #include <cgogn/geometry/algos/length.h>
 #include <cgogn/geometry/algos/medial_axis.h>
 #include <cgogn/geometry/algos/udf/alpha_projection.h>
+#include <cgogn/geometry/algos/udf/alpha_sampling.h>
 #include <cgogn/geometry/algos/udf/neural_alpha_projection.h>
 #include <cgogn/geometry/algos/udf/neural_field_query.h>
 #include <cgogn/geometry/algos/udf/spatial_query.h>
@@ -140,11 +141,6 @@ public:
 		OUTPUT_MUTE,
 		OUTPUT_NORMAL,
 		OUTPUT_VERBOSE
-	};
-	enum BridsonCandidateMode : uint32
-	{
-		BRIDSON_CANDIDATE_3D_SHELL,
-		BRIDSON_CANDIDATE_2D_TANGENT_RING
 	};
 
 private:
@@ -321,12 +317,6 @@ private:
 		// Sampling Parameters
 		float alpha_ = 0.005f;
 		float sample_radius_ = 0.0025f;
-		BridsonCandidateMode bridson_candidate_mode_ = BRIDSON_CANDIDATE_3D_SHELL;
-		float32 bridson_outer_radius_scale_ = 1.25f;
-		int bridson_seed_warmup_iterations_ = 2;
-		int sample_iterations_ = 12; // Candidates generated per active parent
-		int bridson_parent_batch_size_ = 8192;
-		int bridson_max_samples_ = 4000000;
 		int knn_k_ = 10;
 		int seed_ = 42;
 		float sample_grid_cell_size_ = 0.0025f;
@@ -448,12 +438,6 @@ public:
 		uint32 init_min_cover_points_ = 10;
 		float alpha_ = 0.005f;
 		float sample_radius_ = 0.0025f;
-		BridsonCandidateMode bridson_candidate_mode_ = BRIDSON_CANDIDATE_3D_SHELL;
-		float32 bridson_outer_radius_scale_ = 2.0f;
-		int bridson_seed_warmup_iterations_ = 2;
-		int sample_iterations_ = 30;
-		int bridson_parent_batch_size_ = 8192;
-		int bridson_max_samples_ = 4000000;
 		int knn_k_ = 10;
 		int seed_ = 42;
 		int poisson_eliminate_target_samples_ = 0;
@@ -512,18 +496,6 @@ public:
 		case 1:
 		default:
 			return OUTPUT_NORMAL;
-		}
-	}
-
-	static const char* bridson_candidate_mode_label(BridsonCandidateMode mode)
-	{
-		switch (mode)
-		{
-		case BRIDSON_CANDIDATE_2D_TANGENT_RING:
-			return "2d_tangent_ring";
-		case BRIDSON_CANDIDATE_3D_SHELL:
-		default:
-			return "3d_shell";
 		}
 	}
 
@@ -664,15 +636,9 @@ public:
 		p.init_min_cover_points_ = options.init_min_cover_points_;
 		p.alpha_ = options.alpha_;
 		p.sample_radius_ = options.sample_radius_;
-		p.bridson_candidate_mode_ = options.bridson_candidate_mode_;
-		p.bridson_outer_radius_scale_ = std::max(options.bridson_outer_radius_scale_, 1.0f);
-		p.bridson_seed_warmup_iterations_ = std::max(1, options.bridson_seed_warmup_iterations_);
-		p.sample_iterations_ = options.sample_iterations_;
-		p.bridson_parent_batch_size_ = options.bridson_parent_batch_size_;
-		p.bridson_max_samples_ = options.bridson_max_samples_;
 		p.knn_k_ = options.knn_k_;
 		p.seed_ = options.seed_;
-		p.sample_grid_cell_size_ = derived_bridson_grid_cell_size(p);
+		p.sample_grid_cell_size_ = std::max(p.sample_radius_ / std::sqrt(Scalar(3.0)), Scalar(1e-8));
 		p.poisson_eliminate_target_samples_ = options.poisson_eliminate_target_samples_;
 		p.batch_size_ = options.batch_size_;
 		p.ray_sampler_batch_size_ = options.ray_sampler_batch_size_;
@@ -1525,71 +1491,11 @@ public:
 		p.udf_normalized_source_ = source;
 	}
 
-	static constexpr uint32 invalid_active_slot_ = std::numeric_limits<uint32>::max();
-
-	Scalar derived_bridson_grid_cell_size(const PointsParameters& p) const
-	{
-		const Scalar denom = std::sqrt(Scalar(3.0));
-		const Scalar cell = p.sample_radius_ / denom;
-		return std::max(cell, Scalar(1e-8));
-	}
-
-	Scalar bridson_outer_radius_scale(const PointsParameters& p) const
-	{
-		return std::max(Scalar(1.0), Scalar(p.bridson_outer_radius_scale_));
-	}
 	bool compute_neural_gradients_gpu(PointsParameters& p, const std::vector<Vec3>& points, std::vector<Vec3>& normals)
 	{
-		normals.clear();
-		if (points.empty())
-			return true;
-
-		const size_t grad_batch_size = static_cast<size_t>(std::max(1, p.batch_size_));
-		geometry::detail::ensure_neural_projection_workspace(
-			p.neural_projection_workspace_, std::min(points.size(), grad_batch_size), device_);
-		auto& ws = p.neural_projection_workspace_;
-		normals.assign(points.size(), Vec3(0, 0, 1));
-
 		NeuralFieldForward udf = make_neural_field_forward(p);
-		for (size_t offset = 0; offset < points.size(); offset += grad_batch_size)
-		{
-			const size_t chunk_size = std::min(grad_batch_size, points.size() - offset);
-			const int64_t count = static_cast<int64_t>(chunk_size);
-			torch::Tensor cpu_points = ws.points_cpu_.narrow(0, 0, count);
-			auto pts_acc = cpu_points.accessor<float, 2>();
-			for (size_t i = 0; i < chunk_size; ++i)
-			{
-				const Vec3& pt = points[offset + i];
-				pts_acc[static_cast<long>(i)][0] = static_cast<float>(pt.x());
-				pts_acc[static_cast<long>(i)][1] = static_cast<float>(pt.y());
-				pts_acc[static_cast<long>(i)][2] = static_cast<float>(pt.z());
-			}
-
-			torch::Tensor gpu_points = ws.points_gpu_.narrow(0, 0, count);
-			gpu_points.copy_(cpu_points);
-
-			auto [values, grad] = udf.forward_values_grad_gpu(gpu_points);
-			if (!values.defined() || !grad.defined())
-				return false;
-			if (grad.dim() != 2 || grad.size(0) != count || grad.size(1) != 3)
-				return false;
-
-			torch::Tensor grad_cpu = ws.grad_cpu_.narrow(0, 0, count);
-			grad_cpu.copy_(grad);
-			auto grad_acc = grad_cpu.accessor<float, 2>();
-			for (size_t i = 0; i < chunk_size; ++i)
-			{
-				Vec3 n(static_cast<Scalar>(grad_acc[static_cast<long>(i)][0]),
-					   static_cast<Scalar>(grad_acc[static_cast<long>(i)][1]),
-					   static_cast<Scalar>(grad_acc[static_cast<long>(i)][2]));
-				if (n.squaredNorm() < Scalar(1e-12))
-					n = Vec3(0, 0, 1);
-				else
-					n.normalize();
-				normals[offset + i] = n;
-			}
-		}
-		return true;
+		return geometry::evaluate_udf_normals(udf, points, static_cast<size_t>(std::max(1, p.batch_size_)),
+									  p.neural_projection_workspace_, normals);
 	}
 	bool project_points_to_alpha_impl(PointsParameters& p, const std::vector<Vec3>& points, const Vec3& bbox_min,
 									  const Vec3& bbox_max, std::vector<Vec3>& projected_points,
@@ -1762,88 +1668,6 @@ public:
 		return true;
 	}
 
-	void build_stable_tangent_basis(const Vec3& normal_in, Vec3& tangent_u, Vec3& tangent_v) const
-	{
-		Vec3 n = normal_in;
-		if (n.squaredNorm() < Scalar(1e-12))
-			n = Vec3(0, 0, 1);
-		else
-			n.normalize();
-		Vec3 ref = (std::abs(n.z()) < Scalar(0.9)) ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
-		tangent_u = n.cross(ref);
-		if (tangent_u.squaredNorm() < Scalar(1e-12))
-			tangent_u = n.cross(Vec3(1, 0, 0));
-		tangent_u.normalize();
-		tangent_v = n.cross(tangent_u);
-		if (tangent_v.squaredNorm() < Scalar(1e-12))
-			tangent_v = Vec3(0, 1, 0);
-		else
-			tangent_v.normalize();
-	}
-
-	Vec3 sample_tangent_annulus_candidate(const Vec3& center, const Vec3& normal, Scalar radius,
-										  Scalar outer_radius_scale, std::uniform_real_distribution<Scalar>& uni,
-										  std::mt19937& gen) const
-	{
-		Vec3 tangent_u, tangent_v;
-		build_stable_tangent_basis(normal, tangent_u, tangent_v);
-		const Scalar outer_radius_sq = outer_radius_scale * outer_radius_scale;
-		const Scalar annulus_radius = radius * std::sqrt(Scalar(1.0) + (outer_radius_sq - Scalar(1.0)) * uni(gen));
-		const Scalar theta = Scalar(2.0 * M_PI) * uni(gen);
-		return center + annulus_radius * (std::cos(theta) * tangent_u + std::sin(theta) * tangent_v);
-	}
-
-	Vec3 sample_spherical_shell_candidate(const Vec3& center, Scalar radius, Scalar outer_radius_scale,
-										   std::uniform_real_distribution<Scalar>& uni, std::mt19937& gen) const
-	{
-		const Scalar z = Scalar(1.0) - Scalar(2.0) * uni(gen);
-		const Scalar theta = Scalar(2.0 * M_PI) * uni(gen);
-		const Scalar xy_scale = std::sqrt(std::max(Scalar(0.0), Scalar(1.0) - z * z));
-		const Vec3 direction(xy_scale * std::cos(theta), xy_scale * std::sin(theta), z);
-		const Scalar outer_radius_cube = outer_radius_scale * outer_radius_scale * outer_radius_scale;
-		const Scalar shell_radius =
-			radius * std::cbrt(Scalar(1.0) + (outer_radius_cube - Scalar(1.0)) * uni(gen));
-		return center + shell_radius * direction;
-	}
-
-	Vec3 sample_bridson_candidate(const Vec3& center, const Vec3& normal, Scalar radius,
-								  BridsonCandidateMode mode, Scalar outer_radius_scale,
-								  std::uniform_real_distribution<Scalar>& uni, std::mt19937& gen) const
-	{
-		switch (mode)
-		{
-		case BRIDSON_CANDIDATE_2D_TANGENT_RING:
-			return sample_tangent_annulus_candidate(center, normal, radius, outer_radius_scale, uni, gen);
-		case BRIDSON_CANDIDATE_3D_SHELL:
-		default:
-			return sample_spherical_shell_candidate(center, radius, outer_radius_scale, uni, gen);
-		}
-	}
-
-	void sample_active_parent_indices(const std::vector<uint32>& active_indices, size_t batch_size, std::mt19937& gen,
-									  std::vector<uint32>& selected_samples) const
-	{
-		selected_samples.clear();
-		const size_t active_count = active_indices.size();
-		if (active_count == 0)
-			return;
-
-		const size_t pick_count = std::min(batch_size, active_count);
-		selected_samples.reserve(pick_count);
-		std::unordered_map<size_t, size_t> remap;
-		remap.reserve(pick_count * 2);
-		for (size_t i = 0; i < pick_count; ++i)
-		{
-			std::uniform_int_distribution<size_t> dis(i, active_count - 1);
-			const size_t j = dis(gen);
-			const size_t mapped_j = remap.count(j) ? remap[j] : j;
-			const size_t mapped_i = remap.count(i) ? remap[i] : i;
-			remap[j] = mapped_i;
-			remap[i] = mapped_j;
-			selected_samples.push_back(active_indices[mapped_j]);
-		}
-	}
-
 	void materialize_samples_to_mesh(PointsParameters& p, const std::vector<Vec3>& positions,
 									 const std::vector<Vec3>& normals)
 	{
@@ -1871,12 +1695,11 @@ public:
 
 	template <typename Traits, typename Tag>
 	void load_alpha_samples_to_mesh_bridson_impl(PointsParameters& p, Traits& traits, const torch::Device& device,
-												 const char* mode_label, Tag tag)
+											 const char* mode_label, Tag tag)
 	{
-		const auto sampling_start_time = std::chrono::steady_clock::now();
 		if (p.sample_radius_ <= Scalar(0))
 		{
-			log_error(p, "Sample radius must be positive for batched Bridson saturation sampling.", '\n');
+			log_error(p, "Sample radius must be positive for alpha level set sampling.", '\n');
 			return;
 		}
 		if (!traits.is_ready())
@@ -1884,13 +1707,6 @@ public:
 			log_error(p, "Sampling traits are not ready. Cannot sample alpha level set.", '\n');
 			return;
 		}
-
-		const Scalar bridson_grid_cell_size = derived_bridson_grid_cell_size(p);
-		const Scalar outer_radius_scale = bridson_outer_radius_scale(p);
-		log_basic(p, "Sampling alpha=", p.alpha_, " level set with batched Bridson saturation (", mode_label,
-				  "). radius=", p.sample_radius_, " candidate=", bridson_candidate_mode_label(p.bridson_candidate_mode_),
-				  " outer_scale=", outer_radius_scale, " grid_cell=", bridson_grid_cell_size, '\n');
-
 		RaySamplerParams ray_params = make_ray_params(p);
 		if (!p.ray_sampler_)
 			p.ray_sampler_ = std::make_unique<RaySampler>(ray_params, device);
@@ -1899,289 +1715,36 @@ public:
 			p.ray_sampler_->set_params(ray_params);
 			p.ray_sampler_->set_device(device);
 		}
-
 		auto [bbox_min, bbox_max] = compute_sampling_bbox(p);
-		log_basic(p, mode_label, " sampling bbox: min(", bbox_min.transpose(), "), max(", bbox_max.transpose(), ")",
-				  '\n');
-
-		std::mt19937 gen(p.seed_);
-		std::unique_ptr<SpatialGrid> global_grid = std::make_unique<SpatialGrid>(bridson_grid_cell_size);
-		std::vector<Vec3> accepted_positions;
-		std::vector<Vec3> accepted_normals;
-		std::vector<uint32> active_indices;
-		std::vector<uint32> active_slot_of_sample;
-		std::vector<uint32> selected_parents;
-		std::vector<Vec3> raw_candidates;
-		std::vector<Vec3> projected_candidates;
-		std::vector<Vec3> projected_normals;
-		bool bridson_progress_live = false;
-		size_t last_logged_accepted_total = std::numeric_limits<size_t>::max();
-		size_t last_logged_active_total = std::numeric_limits<size_t>::max();
-		double warmup_rays_s = 0.0;
-		double warmup_seed_normals_s = 0.0;
-		double bridson_loop_s = 0.0;
-		double bridson_project_s = 0.0;
-		double bridson_grid_check_s = 0.0;
-		size_t bridson_projected_points = 0;
-		size_t bridson_projection_batches = 0;
-		const size_t parent_batch_size = static_cast<size_t>(std::max(1, p.bridson_parent_batch_size_));
-		const size_t max_samples = static_cast<size_t>(std::max(1, p.bridson_max_samples_));
-		const size_t seed_outer_iterations =
-			static_cast<size_t>(std::max(1, p.bridson_seed_warmup_iterations_));
-		const size_t seed_rays_per_round =
-			static_cast<size_t>(std::max(1, p.ray_sampler_batch_size_)) * seed_outer_iterations;
-		const size_t initial_reserve = std::max(seed_rays_per_round, parent_batch_size) * size_t(4);
-		accepted_positions.reserve(initial_reserve);
-		accepted_normals.reserve(initial_reserve);
-		active_indices.reserve(initial_reserve);
-		active_slot_of_sample.reserve(initial_reserve);
-		raw_candidates.reserve(parent_batch_size * static_cast<size_t>(std::max(1, p.sample_iterations_)));
-		projected_candidates.reserve(parent_batch_size * static_cast<size_t>(std::max(1, p.sample_iterations_)));
-		projected_normals.reserve(parent_batch_size * static_cast<size_t>(std::max(1, p.sample_iterations_)));
-		auto add_sample = [&](const Vec3& pos, const Vec3& normal) {
-			uint32 sample_idx = static_cast<uint32>(accepted_positions.size());
-			Vec3 n = normal;
-			if (n.squaredNorm() < Scalar(1e-12))
-				n = Vec3(0, 0, 1);
-			else
-				n.normalize();
-			accepted_positions.push_back(pos);
-			accepted_normals.push_back(n);
-			active_slot_of_sample.push_back(static_cast<uint32>(active_indices.size()));
-			active_indices.push_back(sample_idx);
-			global_grid->insert(pos, sample_idx);
-		};
-
-		auto remove_active_sample = [&](uint32 sample_idx) {
-			if (sample_idx >= active_slot_of_sample.size())
-				return;
-			const uint32 slot = active_slot_of_sample[sample_idx];
-			if (slot == invalid_active_slot_ || slot >= active_indices.size())
-				return;
-			const uint32 last_sample = active_indices.back();
-			active_indices[slot] = last_sample;
-			active_slot_of_sample[last_sample] = slot;
-			active_indices.pop_back();
-			active_slot_of_sample[sample_idx] = invalid_active_slot_;
-		};
-
-		auto finish_bridson_progress = [&]() {
-			if (!bridson_progress_live)
-				return;
-			log_basic(p, '\n');
-			bridson_progress_live = false;
-		};
-
-		auto print_bridson_progress = [&]() {
-			if (!is_basic_logging_enabled(p))
-				return;
-			const size_t accepted_total = accepted_positions.size();
-			const size_t active_total = active_indices.size();
-			if (accepted_total == last_logged_accepted_total && active_total == last_logged_active_total)
-				return;
-			std::cout << "\r[BridsonSampling:" << mode_label << "] accepted_total=" << accepted_total
-					  << " active_total=" << active_total << std::flush;
-			bridson_progress_live = true;
-			last_logged_accepted_total = accepted_total;
-			last_logged_active_total = active_total;
-		};
-		auto log_bridson_timing = [&](double elapsed_s) {
-			log_basic(p, "[BridsonTiming:", mode_label, "] warmup_rays_s=", warmup_rays_s,
-					  " warmup_seed_normals_s=", warmup_seed_normals_s, " bridson_loop_s=", bridson_loop_s,
-					  " bridson_projected_points=", bridson_projected_points,
-					  " bridson_projection_batches=", bridson_projection_batches,
-					  " bridson_project_s=", bridson_project_s, " bridson_grid_check_s=", bridson_grid_check_s,
-					  " total_s=", elapsed_s, '\n');
-		};
-		auto sample_seed_round = [&]() -> size_t {
-			finish_bridson_progress();
-			size_t added = 0;
-			const int warmup_iterations = std::max(1, p.bridson_seed_warmup_iterations_);
-			if (accepted_positions.size() < max_samples)
-			{
-				SpatialGrid working_grid(bridson_grid_cell_size);
-				for (uint32 sample_idx = 0; sample_idx < accepted_positions.size(); ++sample_idx)
-					working_grid.insert(accepted_positions[sample_idx], sample_idx);
-
-				bool used_sdf_filter = false;
-				const auto warmup_rays_start_time = std::chrono::steady_clock::now();
-				std::vector<Vec3> seed_points = p.ray_sampler_->sample_alpha_level_set_rays_fixed_iterations(
-					traits, warmup_iterations, &working_grid, p.sample_radius_, bbox_min, bbox_max, &accepted_positions,
-					&used_sdf_filter);
-				const auto warmup_rays_end_time = std::chrono::steady_clock::now();
-				warmup_rays_s +=
-					std::chrono::duration<double>(warmup_rays_end_time - warmup_rays_start_time).count();
-				const size_t total_seed_hits = seed_points.size();
-				if (!seed_points.empty())
-				{
-					const size_t remaining_slots = max_samples - accepted_positions.size();
-					if (seed_points.size() > remaining_slots)
-						seed_points.resize(remaining_slots);
-
-					std::vector<Vec3> seed_normals;
-					std::vector<uint8_t> seed_keep_mask;
-					const auto warmup_seed_normals_start_time = std::chrono::steady_clock::now();
-					const bool normals_ok =
-						compute_alpha_point_normals_impl(p, seed_points, seed_normals, seed_keep_mask, tag);
-					const auto warmup_seed_normals_end_time = std::chrono::steady_clock::now();
-					warmup_seed_normals_s += std::chrono::duration<double>(
-						warmup_seed_normals_end_time - warmup_seed_normals_start_time)
-												 .count();
-					if (!normals_ok)
-					{
-						log_error(p, "Failed to compute Bridson seed normals.", '\n');
-						return added;
-					}
-					if (seed_normals.size() != seed_points.size() || seed_keep_mask.size() != seed_points.size())
-					{
-						log_error(p, "Bridson seed normal batch shape mismatch.", '\n');
-						return added;
-					}
-					std::vector<Vec3> accepted_seed_points;
-					std::vector<Vec3> accepted_seed_normals;
-					accepted_seed_points.reserve(seed_points.size());
-					accepted_seed_normals.reserve(seed_points.size());
-					for (size_t i = 0; i < seed_points.size(); ++i)
-					{
-						if (!seed_points[i].allFinite() || seed_keep_mask[i] == 0 || !seed_normals[i].allFinite())
-							continue;
-						if (accepted_positions.size() >= max_samples)
-							break;
-						accepted_seed_points.push_back(seed_points[i]);
-						accepted_seed_normals.push_back(seed_normals[i]);
-					}
-					if (!accepted_seed_points.empty())
-					{
-						for (size_t i = 0; i < accepted_seed_points.size(); ++i)
-						{
-							add_sample(accepted_seed_points[i], accepted_seed_normals[i]);
-							++added;
-						}
-					}
-				}
-
-				log_basic(p, "[BridsonSeed:", mode_label, "] iterations=", p.bridson_seed_warmup_iterations_,
-						  " rays_per_iter=", p.ray_sampler_batch_size_, " seed_hits=", total_seed_hits,
-						  " added=", added, " total=", accepted_positions.size(), " active=", active_indices.size(),
-						  " sdf_filter=", (used_sdf_filter ? "true" : "false"), '\n');
-			}
-			return added;
-		};
-
-		sample_seed_round();
-		const size_t candidates_per_parent = static_cast<size_t>(std::max(1, p.sample_iterations_));
-		const auto bridson_loop_start_time = std::chrono::steady_clock::now();
-
-		while (accepted_positions.size() < max_samples && !active_indices.empty())
+		geometry::AlphaSamplingParameters parameters;
+		parameters.sample_radius = p.sample_radius_;
+		parameters.seed = p.seed_;
+		parameters.ray_sampler_batch_size = static_cast<size_t>(std::max(1, p.ray_sampler_batch_size_));
+		parameters.bbox_min = bbox_min;
+		parameters.bbox_max = bbox_max;
+		geometry::AlphaSamplingResult result = geometry::sample_alpha_level_set(
+			traits, *p.ray_sampler_, parameters,
+			[&](const std::vector<Vec3>& points, std::vector<Vec3>& normals, std::vector<uint8_t>& keep_mask) {
+				return compute_alpha_point_normals_impl(p, points, normals, keep_mask, tag);
+			},
+			[&](const std::vector<Vec3>& points, std::vector<Vec3>& projected_points, std::vector<Vec3>& normals,
+				std::vector<uint8_t>& keep_mask) {
+				return project_points_to_alpha_impl(p, points, bbox_min, bbox_max, projected_points, normals, keep_mask, tag, 1);
+			});
+		p.samples_spatial_grid_ = std::move(result.spatial_grid);
+		if (!result.success)
+			log_error(p, "Alpha level set sampling failed for ", mode_label, ".", '\n');
+		if (result.positions.empty())
 		{
-			sample_active_parent_indices(active_indices, parent_batch_size, gen, selected_parents);
-			raw_candidates.clear();
-			raw_candidates.reserve(selected_parents.size() * candidates_per_parent);
-			std::uniform_real_distribution<Scalar> uniform(Scalar(0), Scalar(1));
-			for (uint32 parent_idx : selected_parents)
-			{
-				for (size_t candidate_idx = 0; candidate_idx < candidates_per_parent; ++candidate_idx)
-					raw_candidates.push_back(
-						sample_bridson_candidate(accepted_positions[parent_idx], accepted_normals[parent_idx],
-												p.sample_radius_, p.bridson_candidate_mode_, outer_radius_scale, uniform, gen));
-			}
-
-			bridson_projected_points += raw_candidates.size();
-			++bridson_projection_batches;
-			const auto bridson_project_start_time = std::chrono::steady_clock::now();
-			std::vector<uint8_t> projected_keep_mask;
-			const bool projection_ok = project_points_to_alpha_impl(
-				p, raw_candidates, bbox_min, bbox_max, projected_candidates, projected_normals,
-				projected_keep_mask, tag, 1);
-			const auto bridson_project_end_time = std::chrono::steady_clock::now();
-			bridson_project_s +=
-				std::chrono::duration<double>(bridson_project_end_time - bridson_project_start_time).count();
-			if (!projection_ok)
-			{
-				finish_bridson_progress();
-				log_error(p, "Batched Bridson projection failed.", '\n');
-				break;
-			}
-			if (projected_candidates.size() != raw_candidates.size() || projected_normals.size() != raw_candidates.size() ||
-				projected_keep_mask.size() != raw_candidates.size())
-			{
-				finish_bridson_progress();
-				log_error(p, "Projected candidate batch shape mismatch.", '\n');
-				break;
-			}
-
-			for (size_t parent_batch_idx = 0; parent_batch_idx < selected_parents.size(); ++parent_batch_idx)
-			{
-				if (accepted_positions.size() >= max_samples)
-					break;
-				const uint32 parent_idx = selected_parents[parent_batch_idx];
-				bool parent_found_new_sample = false;
-				const size_t candidate_begin = parent_batch_idx * candidates_per_parent;
-				for (size_t candidate_offset = 0; candidate_offset < candidates_per_parent; ++candidate_offset)
-				{
-					if (accepted_positions.size() >= max_samples)
-						break;
-					const size_t candidate_index = candidate_begin + candidate_offset;
-					const Vec3& child_pos = projected_candidates[candidate_index];
-					const Vec3& child_normal = projected_normals[candidate_index];
-					const Vec3& raw_candidate = raw_candidates[candidate_index];
-					bool accept = projected_keep_mask[candidate_index] != 0;
-					if (accept)
-					{
-						const Scalar projection_dist = (child_pos - raw_candidate).norm();
-						if (accept && projection_dist > p.sample_radius_)
-							accept = false;
-						if (accept)
-						{
-							const auto bridson_grid_check_start_time = std::chrono::steady_clock::now();
-							const bool grid_valid =
-								global_grid->is_valid_sample(child_pos, p.sample_radius_, accepted_positions);
-							const auto bridson_grid_check_end_time = std::chrono::steady_clock::now();
-							bridson_grid_check_s += std::chrono::duration<double>(
-								bridson_grid_check_end_time - bridson_grid_check_start_time)
-													   .count();
-							if (!grid_valid)
-								accept = false;
-						}
-					}
-					if (!accept)
-						continue;
-					add_sample(child_pos, child_normal);
-					parent_found_new_sample = true;
-					break;
-				}
-
-				if (!parent_found_new_sample)
-					remove_active_sample(parent_idx);
-			}
-			print_bridson_progress();
-		}
-		const auto bridson_loop_end_time = std::chrono::steady_clock::now();
-		bridson_loop_s = std::chrono::duration<double>(bridson_loop_end_time - bridson_loop_start_time).count();
-
-		if (accepted_positions.empty())
-		{
-			finish_bridson_progress();
 			if (p.samples_mesh_)
 				points_provider_->clear_mesh(*p.samples_mesh_);
-			p.samples_spatial_grid_ = std::move(global_grid);
 			points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-			const auto sampling_end_time = std::chrono::steady_clock::now();
-			const double elapsed_s = std::chrono::duration<double>(sampling_end_time - sampling_start_time).count();
-			log_bridson_timing(elapsed_s);
-			log_error(p, "Failed to generate any alpha level set samples with batched Bridson saturation. elapsed_s=",
-					  elapsed_s, '\n');
+			if (result.success)
+				log_error(p, "Failed to generate any alpha level set samples.", '\n');
 			return;
 		}
-
-		finish_bridson_progress();
-		const auto sampling_end_time = std::chrono::steady_clock::now();
-		const double elapsed_s = std::chrono::duration<double>(sampling_end_time - sampling_start_time).count();
-		log_basic(p, "[Bridson:", mode_label, "] accepted=", accepted_positions.size(),
-				  " remaining_active=", active_indices.size(), " elapsed_s=", elapsed_s, '\n');
-		log_bridson_timing(elapsed_s);
-		p.samples_spatial_grid_ = std::move(global_grid);
-		materialize_samples_to_mesh(p, accepted_positions, accepted_normals);
+		log_basic(p, "[AlphaSampling:", mode_label, "] accepted=", result.positions.size(), '\n');
+		materialize_samples_to_mesh(p, result.positions, result.normals);
 		finalize_sample_mesh_after_sampling(p);
 	}
 
@@ -3324,25 +2887,7 @@ private:
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
 	}
-	Vec3 random_sample_around(const Vec3& p, const Scalar radius, std::uniform_real_distribution<Scalar>& uni,
-							  std::mt19937& rng)
-	{
-		Scalar u = uni(rng);
-		Scalar v = uni(rng);
-		Scalar w = uni(rng);
 
-		Scalar R3 = radius * radius * radius;
-		Scalar r = std::cbrt(R3 + u * (8 * R3 - R3)); // r = pow((R^3 + u(8R^3 - R^3)), 1/3)
-
-		Scalar phi = v * 2.0 * M_PI;
-		Scalar theta = std::acos(1.0 - 2.0 * w);
-
-		Scalar x = r * std::sin(theta) * std::cos(phi);
-		Scalar y = r * std::sin(theta) * std::sin(phi);
-		Scalar z = r * std::cos(theta);
-
-		return p + Vec3(x, y, z);
-	}
 
 	Vec3 random_sample_in_sphere(const Vec3& p, const Scalar radius, std::uniform_real_distribution<Scalar>& uni,
 								 std::mt19937& rng)
@@ -3582,152 +3127,9 @@ private:
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
 	}
-	std::pair<Vec3, Vec3> project_and_normal(PointsParameters& p, const Vec3& sample_pos)
-	{
-		std::pair<uint32, Scalar> knn_res;
-		p.input_kdtree_->find_nn(sample_pos, &knn_res);
-		PVertex nn = p.input_kdtree_vertices_[knn_res.first];
-		Vec3 nn_pos = (*p.position_)[index_of(*p.points_, nn)];
-		Vec3 n = sample_pos - nn_pos;
-		const Scalar eps = Scalar(1e-12);
-		if (n.squaredNorm() < eps)
-		{
-			// Fallback to PCA normal when the sample coincides with its nearest neighbor.
-			std::vector<std::pair<uint32, Scalar>> knn_res_all;
-			p.input_kdtree_->find_nns(sample_pos, p.knn_k_, &knn_res_all);
-			std::vector<uint32> indices;
-			indices.reserve(knn_res_all.size());
-			for (const auto& res : knn_res_all)
-				indices.push_back(res.first);
-			n = compute_pca_normal(*p.points_, *p.position_, indices, p.input_kdtree_vertices_);
-		}
-		if (n.squaredNorm() < eps)
-			n = Vec3(0, 0, 1);
-		else
-			n.normalize();
-		Vec3 query = nn_pos + n * p.alpha_;
-		PVertex last_nn = PVertex();
-		do
-		{
-			p.input_kdtree_->find_nn(query, &knn_res);
-			nn = p.input_kdtree_vertices_[knn_res.first];
-			nn_pos = (*p.position_)[index_of(*p.points_, nn)];
-			Vec3 step_dir = query - nn_pos;
-			if (step_dir.squaredNorm() < eps)
-				step_dir = n;
-			step_dir.normalize();
-			query = nn_pos + step_dir * p.alpha_;
-			last_nn = nn;
-		} while (index_of(*p.points_, nn) != index_of(*p.points_, last_nn));
 
-		return {query, n};
-	}
 
-	void sample_points(PointsParameters& p)
-	{
 
-		// Resampling from a point cloud invalidates cached fitting data and samples.
-		p.fitting_data_computed_ = false;
-		p.samples_jitter_backup_valid_ = false;
-		p.samples_position_backup_.clear();
-		p.samples_normal_backup_.clear();
-		if (p.samples_mesh_)
-			points_provider_->clear_mesh(*p.samples_mesh_);
-
-		std::uniform_real_distribution<Scalar> uniform(0.0, 1.0);
-		std::mt19937 gen(p.seed_);
-
-		// Pick a random point from input as generator seed
-		std::uniform_int_distribution<uint32> uniform_idx(0, uint32(p.input_kdtree_vertices_.size() - 1));
-		uint32 rand_start_idx = uniform_idx(gen);
-		PVertex start_seed_vertex = p.input_kdtree_vertices_[rand_start_idx];
-		Vec3 generator = (*p.position_)[index_of(*p.points_, start_seed_vertex)];
-		// Jitter the initial generator to avoid zero-length projection direction.
-		Scalar jitter_radius =Scalar(0.001);
-		if (jitter_radius > Scalar(0))
-		{
-			Vec3 jitter(uniform(gen) * Scalar(2.0) - Scalar(1.0),
-						uniform(gen) * Scalar(2.0) - Scalar(1.0),
-						uniform(gen) * Scalar(2.0) - Scalar(1.0));
-			if (jitter.squaredNorm() > Scalar(0))
-			{
-				jitter.normalize();
-				generator += jitter * jitter_radius;
-			}
-		}
-
-		// --- Spatial Grid Optimization ---
-		SpatialGrid grid(p.sample_radius_);
-
-		PVertex start_vertex = add_vertex(*p.samples_mesh_);
-		uint32 start_idx = index_of(*p.samples_mesh_, start_vertex);
-		auto [pos, normal] = project_and_normal(p, generator);
-		(*p.samples_position_)[start_idx] = pos;
-		(*p.samples_normal_)[start_idx] = normal;
-
-		grid.insert(pos, start_idx);
-
-		std::vector<PVertex> active_list = {start_vertex};
-
-		uint32 count = 1;
-
-		while (!active_list.empty())
-		{
-			int rand_index = rand() % active_list.size();
-			PVertex current_vertex = active_list[rand_index];
-			uint32 current_idx = index_of(*p.samples_mesh_, current_vertex);
-			Vec3 current_pos = (*p.samples_position_)[current_idx];
-			bool found_new_sample = false;
-			for (uint32 i = 0; i < p.sample_iterations_ && !found_new_sample; i++)
-			{
-				Vec3 sample_pos = random_sample_around(current_pos, p.sample_radius_, uniform, gen);
-				auto [pos, normal] = project_and_normal(p, sample_pos);
-
-				// Check using spatial grid (Poisson disk constraint)
-				if (grid.is_valid_sample(pos, p.sample_radius_, *p.samples_position_))
-				{
-					// Verify distance to input cloud >= epsilon
-					std::pair<uint32, Scalar> input_nn_res;
-					p.input_kdtree_->find_nn(pos, &input_nn_res);
-					if (input_nn_res.second < p.alpha_)
-						continue; // Reject: too close to input surface
-
-					PVertex new_vertex = add_vertex(*p.samples_mesh_);
-					uint32 new_idx = index_of(*p.samples_mesh_, new_vertex);
-
-					(*p.samples_position_)[new_idx] = pos;
-					(*p.samples_normal_)[new_idx] = normal;
-
-					grid.insert(pos, new_idx);
-
-					active_list.push_back(new_vertex);
-					count++;
-					found_new_sample = true;
-					if (is_verbose_logging_enabled(p) && count % 100 == 0)
-						log_verbose(p, "Sampled point ", count, "\r");
-				}
-			}
-			if (!found_new_sample)
-			{
-				active_list[rand_index] = active_list.back();
-				active_list.pop_back();
-			}
-		}
-
-		log_basic(p, "Building Final KDTree...", '\n');
-		build_kdtree(p);
-
-		// Compute normal color
-		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			const Vec3& n = (*p.samples_normal_)[v_idx];
-			(*p.samples_normal_color_)[v_idx] =
-				Vec4((n.x() + 1.0) * 0.5, (n.y() + 1.0) * 0.5, (n.z() + 1.0) * 0.5, 1.0);
-			return true;
-		});
-
-		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-	}
 	// --- Initial Medial Axis ---
 
 	void compute_initial_medial_axis(PointsParameters& p)
@@ -13893,26 +13295,6 @@ protected:
 		{
 			ImGui::InputFloat("Alpha", &p.alpha_, 0.001f, 0.1f, "%.4f");
 			ImGui::InputFloat("Sample Radius", &p.sample_radius_, 0.001f, 0.01f, "%.4f");
-			ImGui::Text("Candidate Domain");
-			if (ImGui::RadioButton("3D Shell", p.bridson_candidate_mode_ == BRIDSON_CANDIDATE_3D_SHELL))
-				p.bridson_candidate_mode_ = BRIDSON_CANDIDATE_3D_SHELL;
-			ImGui::SameLine();
-			if (ImGui::RadioButton("2D Tangent Ring", p.bridson_candidate_mode_ == BRIDSON_CANDIDATE_2D_TANGENT_RING))
-				p.bridson_candidate_mode_ = BRIDSON_CANDIDATE_2D_TANGENT_RING;
-			ImGui::InputFloat("Outer Radius Scale", &p.bridson_outer_radius_scale_, 0.05f, 0.25f, "%.3f");
-			if (p.bridson_outer_radius_scale_ < 1.0f)
-				p.bridson_outer_radius_scale_ = 1.0f;
-			ImGui::Text("Candidate radius range: [%.3f R, %.3f R] (outer=%.6f)", 1.0f, p.bridson_outer_radius_scale_,
-						static_cast<float>(p.sample_radius_ * p.bridson_outer_radius_scale_));
-			ImGui::InputInt("Warmup Iterations", &p.bridson_seed_warmup_iterations_, 1, 4);
-			if (p.bridson_seed_warmup_iterations_ < 1)
-				p.bridson_seed_warmup_iterations_ = 1;
-			ImGui::Text("Seed phase: %d ray iterations x batch %d", p.bridson_seed_warmup_iterations_,
-						p.ray_sampler_batch_size_);
-			ImGui::InputInt("Parent Batch Size", &p.bridson_parent_batch_size_, 256, 1024);
-			ImGui::InputInt("Max Samples", &p.bridson_max_samples_, 10000, 100000);
-			ImGui::InputInt("Candidates Per Parent", &p.sample_iterations_, 1, 10);
-			ImGui::Text("Derived Grid Cell Size: %.6f", static_cast<float>(derived_bridson_grid_cell_size(p)));
 			ImGui::InputInt("Eval Batch Size", &p.batch_size_, 256, 1024);
 			ImGui::InputInt("Ray Batch Size", &p.ray_sampler_batch_size_, 256, 2048);
 			ImGui::InputInt("Max Iterations", &p.udf_max_iterations_, 1000, 8000);

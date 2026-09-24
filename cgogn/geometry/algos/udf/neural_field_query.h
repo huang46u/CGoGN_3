@@ -2,6 +2,7 @@
 #define CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_FIELD_QUERY_H_
 
 #include <cgogn/geometry/types/neural_field_forward.h>
+#include <cgogn/geometry/algos/udf/neural_alpha_projection.h>
 
 #include <algorithm>
 #include <cmath>
@@ -66,6 +67,58 @@ inline bool evaluate_udf_value_and_gradient(const NeuralFieldForward& field, con
 	value = result.first;
 	gradient = result.second;
 	return std::isfinite(value) && gradient.allFinite();
+}
+
+inline bool evaluate_udf_normals(const NeuralFieldForward& field, const std::vector<Vec3>& points, size_t batch_size,
+								NeuralProjectionWorkspace& workspace, std::vector<Vec3>& normals)
+{
+	normals.clear();
+	if (points.empty())
+		return true;
+	if (!field.is_loaded())
+		return false;
+
+	const size_t batch = std::max<size_t>(1, batch_size);
+	detail::ensure_neural_projection_workspace(workspace, std::min(points.size(), batch), field.device());
+	normals.assign(points.size(), Vec3(0, 0, 1));
+	for (size_t offset = 0; offset < points.size(); offset += batch)
+	{
+		const size_t count = std::min(batch, points.size() - offset);
+		const int64_t tensor_count = static_cast<int64_t>(count);
+		torch::Tensor points_cpu = workspace.points_cpu_.narrow(0, 0, tensor_count);
+		auto points_acc = points_cpu.accessor<float, 2>();
+		for (size_t i = 0; i < count; ++i)
+		{
+			const Vec3& point = points[offset + i];
+			points_acc[static_cast<long>(i)][0] = static_cast<float>(point.x());
+			points_acc[static_cast<long>(i)][1] = static_cast<float>(point.y());
+			points_acc[static_cast<long>(i)][2] = static_cast<float>(point.z());
+		}
+
+		torch::Tensor points_gpu = workspace.points_gpu_.narrow(0, 0, tensor_count);
+		points_gpu.copy_(points_cpu);
+		auto [values, gradients] = field.forward_values_grad_gpu(points_gpu);
+		if (!values.defined() || !gradients.defined())
+			return false;
+		if (gradients.dim() != 2 || gradients.size(0) != tensor_count || gradients.size(1) != 3)
+			return false;
+
+		torch::Tensor gradients_cpu = workspace.grad_cpu_.narrow(0, 0, tensor_count);
+		gradients_cpu.copy_(gradients);
+		auto gradients_acc = gradients_cpu.accessor<float, 2>();
+		for (size_t i = 0; i < count; ++i)
+		{
+			Vec3 normal(static_cast<Scalar>(gradients_acc[static_cast<long>(i)][0]),
+						static_cast<Scalar>(gradients_acc[static_cast<long>(i)][1]),
+						static_cast<Scalar>(gradients_acc[static_cast<long>(i)][2]));
+			if (normal.squaredNorm() < Scalar(1e-12))
+				normal = Vec3(0, 0, 1);
+			else
+				normal.normalize();
+			normals[offset + i] = normal;
+		}
+	}
+	return true;
 }
 
 } // namespace geometry
