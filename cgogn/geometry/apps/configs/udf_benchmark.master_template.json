@@ -15,14 +15,6 @@
         "udf",
         "mf"
       ],
-      "optimization.distance_mode.canonical": [
-        "line_quadric_distance_fix_r",
-        "line_quadric_distance_free_r"
-      ],
-      "optimization.distance_mode.accepted_aliases": [
-        "line_quadric_distance",
-        "line_quadric_distance_free_radius"
-      ],
       "auto_split.mode": [
         "error_threshold",
         "max_nb_spheres"
@@ -87,14 +79,9 @@
     }
   },
   "optimization": {
-    "distance_mode": "line_quadric_distance_fix_r",
     "max_iterations_without_autosplit": 300,
     "max_iterations_after_reaching_max_spheres": 100,
-    "sqem_update_lambda_full": 0.05,
     "sqem_update_lambda_line_plane": 0.2,
-    "sqem_fix_radius_scale": 1.0,
-    "udf_center_enabled": false,
-    "udf_center_lambda": 0.1,
     "auto_stop": false
   },
   "auto_split": {

@@ -79,9 +79,6 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 	options.verbose_ = config.benchmark.verbose;
 	options.ma_flip_prune_enabled_ = config.input.ma_flip_prune;
 	options.ma_flip_prune_alpha_factor_ = config.input.ma_flip_prune_alpha_factor;
-	options.distance_mode_ = (config.optimization.distance_mode == DistanceMode::LineQuadricDistanceFreeRadius)
-								 ? Training::LINE_QUADRIC_DISTANCE_FREE_RADIUS
-								 : Training::LINE_QUADRIC_DISTANCE;
 	options.auto_stop_ = config.optimization.auto_stop;
 	options.max_iterations_without_autosplit_ = config.optimization.max_iterations_without_autosplit;
 	options.max_iterations_after_reaching_max_spheres_ = config.optimization.max_iterations_after_reaching_max_spheres;
@@ -93,11 +90,7 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 	options.auto_split_ratio_ = config.auto_split.ratio;
 	options.auto_split_max_per_iter_error_ = config.auto_split.max_per_iter_error;
 	options.auto_split_max_per_iter_max_ = config.auto_split.max_per_iter_max;
-	options.sqem_update_lambda_full_ = config.optimization.sqem_update_lambda_full;
 	options.sqem_update_lambda_line_plane_ = config.optimization.sqem_update_lambda_line_plane;
-	options.sqem_fix_radius_scale_ = config.optimization.sqem_fix_radius_scale;
-	options.udf_center_enabled_ = config.optimization.udf_center_enabled;
-	options.udf_center_lambda_ = config.optimization.udf_center_lambda;
 	options.init_dilation_constant_ = config.initialization.init_dilation_constant;
 	options.alpha_ = config.sampling.alpha;
 	options.sample_radius_ = config.sampling.bridson.sample_radius;

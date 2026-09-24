@@ -32,12 +32,6 @@ enum class NeuralModelType
 	MF
 };
 
-enum class DistanceMode
-{
-	LineQuadricDistance,
-	LineQuadricDistanceFreeRadius
-};
-
 enum class AutoSplitMode
 {
 	ErrorThreshold,
@@ -76,14 +70,9 @@ struct BenchmarkSamplingConfig
 
 struct BenchmarkOptimizationConfig
 {
-	DistanceMode distance_mode = DistanceMode::LineQuadricDistance;
 	unsigned int max_iterations_without_autosplit = 300;
 	unsigned int max_iterations_after_reaching_max_spheres = 100;
-	float sqem_update_lambda_full = 0.05f;
 	float sqem_update_lambda_line_plane = 0.20f;
-	float sqem_fix_radius_scale = 1.0f;
-	bool udf_center_enabled = false;
-	float udf_center_lambda = 0.10f;
 	bool auto_stop = false;
 };
 
@@ -163,7 +152,6 @@ bool is_batch_case_completed(const BenchmarkConfig& config);
 std::string to_string(InputMode value);
 std::string to_string(InputGeometryType value);
 std::string to_string(NeuralModelType value);
-std::string to_string(DistanceMode value);
 std::string to_string(AutoSplitMode value);
 
 } // namespace benchmark

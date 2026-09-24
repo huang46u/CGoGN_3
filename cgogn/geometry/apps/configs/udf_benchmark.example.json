@@ -23,14 +23,9 @@
     }
   },
   "optimization": {
-    "distance_mode": "line_quadric_distance_free_r",
     "max_iterations_without_autosplit": 150,
     "max_iterations_after_reaching_max_spheres": 100,
-    "sqem_update_lambda_full": 1.0,
-    "sqem_update_lambda_line_plane": 1.0,
-    "sqem_fix_radius_scale": 1.5,
-    "udf_center_enabled": false,
-    "udf_center_lambda": 0.1,
+    "sqem_update_lambda_line_plane": 0.2,
     "auto_stop": true
   },
   "auto_split": {

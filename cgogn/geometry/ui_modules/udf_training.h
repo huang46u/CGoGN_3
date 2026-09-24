@@ -74,8 +74,6 @@ using geometry::Mat4;
 using geometry::Scalar;
 using geometry::Spherical_Quadric;
 using geometry::Quadric;
-using geometry::SQEM_CASE;
-using geometry::SQEM_Condition_Info;
 using geometry::SpatialGrid;
 using geometry::BatchUDFResult;
 using geometry::NeuralFieldForward;
@@ -108,11 +106,6 @@ public:
 		MAX_NB_SPHERES
 	};
 
-	enum DistanceMode : uint32
-	{
-		LINE_QUADRIC_DISTANCE,
-		LINE_QUADRIC_DISTANCE_FREE_RADIUS
-	};
 	enum InputMode : uint32
 	{
 		INPUT_POINT_CLOUD,
@@ -208,7 +201,6 @@ private:
 		std::shared_ptr<PAttribute<bool>> spheres_do_not_split_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_not_normalized_ = nullptr;
-		std::shared_ptr<PAttribute<Scalar>> spheres_sqem_lambda_ = nullptr;
 		std::shared_ptr<PAttribute<NMVertex>> spheres_skeleton_vertex_ = nullptr;
 
 		// Skeleton
@@ -250,7 +242,6 @@ private:
 
 		float32 filter_radius_threshold_ = 0.0f;
 
-		DistanceMode distance_mode_ = LINE_QUADRIC_DISTANCE;
 		bool auto_stop_ = false;
 		uint32 max_iterations_without_autosplit_ = 300;
 		uint32 max_iterations_after_reaching_max_spheres_ = 100;
@@ -263,11 +254,7 @@ private:
 		uint32 auto_split_max_per_iter_max_ = 100;
 		bool error_as_spheres_color_ = false;
 		float32 spheres_transparency_ = 0.5f;
-		float32 sqem_update_lambda_full_ = 0.20f;
 		float32 sqem_update_lambda_line_plane_ = 0.20f;
-		float32 sqem_fix_radius_scale_ = 1.0f;
-		bool udf_center_enabled_ = false;
-		float32 udf_center_lambda_ = 0.10f;
 		bool export_samples_mesh_selected_ = true;
 		bool export_samples_mesh_normal_color_selected_ = false;
 		bool export_samples_spheres_selected_ = true;
@@ -380,7 +367,6 @@ public:
 		bool ma_flip_prune_enabled_ = true;
 		float ma_flip_prune_alpha_factor_ = 1.0f;
 		float32 filter_radius_threshold_ = 0.0f;
-		DistanceMode distance_mode_ = LINE_QUADRIC_DISTANCE;
 		bool auto_stop_ = false;
 		uint32 max_iterations_without_autosplit_ = 300;
 		uint32 max_iterations_after_reaching_max_spheres_ = 100;
@@ -391,11 +377,7 @@ public:
 		float32 auto_split_ratio_ = 0.2f;
 		uint32 auto_split_max_per_iter_error_ = 10;
 		uint32 auto_split_max_per_iter_max_ = 100;
-		float32 sqem_update_lambda_full_ = 0.20f;
 		float32 sqem_update_lambda_line_plane_ = 0.20f;
-		float32 sqem_fix_radius_scale_ = 1.0f;
-		bool udf_center_enabled_ = false;
-		float32 udf_center_lambda_ = 0.10f;
 		float32 init_dilation_constant_ = 0.001f;
 		float alpha_ = 0.005f;
 		float sample_radius_ = 0.0025f;
@@ -572,7 +554,6 @@ public:
 		p.ma_flip_prune_enabled_ = options.ma_flip_prune_enabled_;
 		p.ma_flip_prune_alpha_factor_ = options.ma_flip_prune_alpha_factor_;
 		p.filter_radius_threshold_ = options.filter_radius_threshold_;
-		p.distance_mode_ = options.distance_mode_;
 		p.auto_stop_ = options.auto_stop_;
 		p.max_iterations_without_autosplit_ = options.max_iterations_without_autosplit_;
 		p.max_iterations_after_reaching_max_spheres_ = options.max_iterations_after_reaching_max_spheres_;
@@ -583,11 +564,7 @@ public:
 		p.auto_split_ratio_ = options.auto_split_ratio_;
 		p.auto_split_max_per_iter_error_ = options.auto_split_max_per_iter_error_;
 		p.auto_split_max_per_iter_max_ = options.auto_split_max_per_iter_max_;
-		p.sqem_update_lambda_full_ = options.sqem_update_lambda_full_;
 		p.sqem_update_lambda_line_plane_ = options.sqem_update_lambda_line_plane_;
-		p.sqem_fix_radius_scale_ = options.sqem_fix_radius_scale_;
-		p.udf_center_enabled_ = options.udf_center_enabled_;
-		p.udf_center_lambda_ = options.udf_center_lambda_;
 		p.init_dilation_constant_ = options.init_dilation_constant_;
 		p.alpha_ = options.alpha_;
 		p.sample_radius_ = options.sample_radius_;
@@ -723,10 +700,7 @@ public:
 
 			auto update_start = std::chrono::high_resolution_clock::now();
 			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-				if (p.distance_mode_ == LINE_QUADRIC_DISTANCE_FREE_RADIUS)
-					update_sphere_line_quadric_distance_free_radius(p, v);
-				else
-					update_sphere_line_quadric_distance_fix_radius(p, v);
+				update_sphere_line_quadric_distance_free_radius(p, v);
 				return true;
 			});
 			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
@@ -1171,7 +1145,6 @@ public:
 			p.neural_udf_loaded_ = true;
 			p.neural_udf_model_path_ = model_path;
 			p.neural_model_type_ = model_type;
-			apply_sqem_defaults_by_model_type(p);
 			p.udf_input_normalized_ = false;
 			p.udf_normalized_source_ = nullptr;
 			p.input_mode_ = INPUT_NEURAL_UDF;
@@ -1221,83 +1194,6 @@ public:
 		return NeuralFieldForward(&p.neural_udf_model_, p.neural_udf_loaded_, device_);
 	}
 
-	void apply_sqem_defaults_by_model_type(PointsParameters& p)
-	{
-		p.sqem_fix_radius_scale_ = 1.0f;
-		p.sqem_update_lambda_full_ = 0.2f;
-		p.sqem_update_lambda_line_plane_ = 0.2f;
-	}
-
-	Scalar sqem_update_lambda_for_case(const PointsParameters& p, SQEM_CASE sqem_case) const
-	{
-		switch (sqem_case)
-		{
-		case SQEM_CASE::Case1_Full:
-			return Scalar(p.sqem_update_lambda_full_);
-		case SQEM_CASE::Case2_Line:
-		case SQEM_CASE::Case3_Plane:
-			return Scalar(p.sqem_update_lambda_line_plane_);
-		case SQEM_CASE::Case4_Degenerate:
-		default:
-			return Scalar(p.sqem_update_lambda_full_);
-		}
-	}
-
-	Scalar sqem_update_lambda_for_quadric(const PointsParameters& p, const Spherical_Quadric& q) const
-	{
-		Scalar sqem_r = Scalar(0);
-		return sqem_update_lambda_for_case(p, q.well_conditioned(sqem_r));
-	}
-
-	const char* sqem_case_label(SQEM_CASE sqem_case) const
-	{
-		switch (sqem_case)
-		{
-		case SQEM_CASE::Case1_Full:
-			return "Full";
-		case SQEM_CASE::Case2_Line:
-			return "Line";
-		case SQEM_CASE::Case3_Plane:
-			return "Plane";
-		case SQEM_CASE::Case4_Degenerate:
-		default:
-			return "Degenerate";
-		}
-	}
-
-	bool get_sphere_sqem_info(PointsParameters& p, PVertex sphere, SQEM_Condition_Info& sqem_info) const
-	{
-		if (!sphere.is_valid() || !p.samples_mesh_ || !p.samples_quadric_)
-			return false;
-
-		const uint32 sphere_index = index_of(*p.spheres_, sphere);
-		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
-		if (cluster.empty())
-			return false;
-
-		Spherical_Quadric q_classify;
-		bool has_sample = false;
-		for (PVertex v : cluster)
-		{
-			const uint32 v_index = index_of(*p.samples_mesh_, v);
-			q_classify += (*p.samples_quadric_)[v_index];
-			has_sample = true;
-		}
-		if (!has_sample)
-			return false;
-
-		sqem_info = q_classify.condition_info();
-		return true;
-	}
-
-	Scalar sphere_sqem_lambda(const PointsParameters& p, uint32 sphere_index) const
-	{
-		if (!p.spheres_sqem_lambda_)
-			return Scalar(p.sqem_update_lambda_full_);
-		const Scalar lambda = (*p.spheres_sqem_lambda_)[sphere_index];
-		return lambda > Scalar(0) ? lambda : Scalar(p.sqem_update_lambda_full_);
-	}
-
 	bool is_valid_sphere_for_clustering(const PointsParameters& p, uint32 sphere_index) const
 	{
 		if (!p.spheres_position_ || !p.spheres_radius_ || sphere_index == INVALID_INDEX)
@@ -1305,21 +1201,6 @@ public:
 		const Vec3& center = (*p.spheres_position_)[sphere_index];
 		const Scalar radius = (*p.spheres_radius_)[sphere_index];
 		return center.allFinite() && std::isfinite(static_cast<double>(radius)) && radius > Scalar(0);
-	}
-
-	void refresh_sphere_sqem_lambda_cache(PointsParameters& p)
-	{
-		if (!p.spheres_ || !p.spheres_sqem_lambda_)
-			return;
-		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			const uint32 v_index = index_of(*p.spheres_, v);
-			Scalar lambda = Scalar(p.sqem_update_lambda_full_);
-			SQEM_Condition_Info sqem_info;
-			if (get_sphere_sqem_info(p, v, sqem_info))
-				lambda = sqem_update_lambda_for_case(p, sqem_info.sqem_case);
-			(*p.spheres_sqem_lambda_)[v_index] = lambda;
-			return true;
-		});
 	}
 
 	template <typename Tag = RaySamplerTag>
@@ -2234,7 +2115,6 @@ private:
 		p.spheres_do_not_split_ = get_or_add_attribute<bool, PVertex>(*p.spheres_, "do_not_split");
 		p.spheres_error_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "error");
 		p.spheres_error_not_normalized_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "error_not_normalized");
-		p.spheres_sqem_lambda_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "sqem_lambda");
 		p.spheres_skeleton_vertex_ = get_or_add_attribute<NMVertex, PVertex>(*p.spheres_, "skeleton_vertex");
 
 		// Init Skeleton Mesh
@@ -2709,7 +2589,7 @@ private:
 			}
 
 			(*p.samples_ma_position_)[v_idx] = c;
-			const Scalar expected_radius = p.alpha_ * p.sqem_fix_radius_scale_;
+			const Scalar expected_radius = p.alpha_;
 			(*p.samples_ma_radius_)[v_idx] = (r > expected_radius) ? r : expected_radius;
 			(*p.samples_ma_secondary_vertex_)[v_idx] = secondary;
 			return true;
@@ -3174,7 +3054,7 @@ private:
 
 				Scalar dist_sqem = (*data.quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 				Scalar dist_other = (*data.line_quadric)[v_index].eval(center);
-				Scalar dist = dist_sqem + sphere_sqem_lambda(p, pv_index) * dist_other;
+				Scalar dist = dist_sqem + Scalar(p.sqem_update_lambda_line_plane_) * dist_other;
 				if (!std::isfinite(static_cast<double>(dist)))
 				{
 					++nonfinite_distance_candidates;
@@ -3240,7 +3120,6 @@ private:
 	{
 		compute_clusters_local(p);
 		prune_empty_clusters(p);
-		refresh_sphere_sqem_lambda_cache(p);
 	}
 
 	void prune_empty_clusters(PointsParameters& p)
@@ -3283,7 +3162,7 @@ private:
 					(*data.quadric)[sv_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 				// Don't multiply by area here since line quadric already incorporates it
 				Scalar dist_other = (*data.line_quadric)[sv_index].eval(center);
-				Scalar dist = dist_sqem + sphere_sqem_lambda(p, v_index) * dist_other;
+				Scalar dist = dist_sqem + Scalar(p.sqem_update_lambda_line_plane_) * dist_other;
 				if (data.error)
 					(*data.error)[sv_index] = dist;
 				cluster_error += dist;
@@ -3359,10 +3238,6 @@ private:
 			return Vec4(1.0, 2.0 - x2, 2.0 - x2, transparency);
 		}
 		return Vec4(1.0, 0.0, 0.0, transparency);
-	}
-	bool eval_udf_and_grad(PointsParameters& p, const Vec3& query_point, Scalar& value, Vec3& grad)
-	{
-		return geometry::evaluate_udf_value_and_gradient(make_neural_field_forward(p), query_point, value, grad);
 	}
 	bool eval_udf_values(PointsParameters& p, const std::vector<Vec3>& points, std::vector<Scalar>& out_values)
 	{
@@ -3502,84 +3377,6 @@ private:
 		return true;
 	}
 
-	void update_sphere_line_quadric_distance_fix_radius(PointsParameters& p, PVertex sphere)
-	{
-		SphereFitData data;
-		if (!get_sphere_fit_data(p, data))
-			return;
-		uint32 sphere_index = index_of(*p.spheres_, sphere);
-
-		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
-		if (cluster.empty())
-			return;
-		Vec3 c = (*p.spheres_position_)[sphere_index];
-		Scalar r = (*p.spheres_radius_)[sphere_index];
-		Spherical_Quadric q;
-		Line_Quadric lq;
-		Scalar area = 0.0;
-		Vec3 h;
-		h.setZero();
-		for (PVertex v : cluster)
-		{
-			uint32 v_index = index_of(*data.mesh, v);
-			Scalar weight = value<Scalar>(*data.mesh, data.area, v);
-			if (weight <= 0.0)
-				log_verbose(p, "Warning: sample with zero volume weight in sphere ", sphere_index, '\n');
-			q += (*data.quadric)[v_index] * weight;
-			h += weight * (*data.position)[v_index];
-			lq += (*data.line_quadric)[v_index] * weight;
-
-			area += weight;
-		}
-
-		/*Mat4 A = q._A;
-		Vec4 b = q._b;*/
-
-		Mat4 Ql = lq.get_quadric().matrix();
-		Mat3 Al = Ql.block<3, 3>(0, 0);
-		Vec3 bl = -Ql.block<3, 1>(0, 3);
-
-		/*Mat4 Al_ext = Mat4::Zero();
-		Al_ext.block<3, 3>(0, 0) = Al;
-		Vec4 bl_ext = Vec4::Zero();
-		bl_ext.head<3>() = bl;
-		Mat4 A_c = A + sqem_update_lambda_for_quadric(p, q) * Al_ext;
-		Vec4 b_c = b + sqem_update_lambda_for_quadric(p, q) * bl_ext;
-		Vec4 s = A_c.ldlt().solve(b_c);
-		c = s.head<3>();
-		r = s[3];*/
-		Mat3 As = q._A.block<3, 3>(0, 0);
-		Vec3 bs = q._b.head<3>();
-		Vec3 Asr = q._A.block<3, 1>(0, 3);
-
-		const Scalar update_lambda = sqem_update_lambda_for_quadric(p, q);
-		Mat3 A = As + update_lambda * Al;
-		Vec3 b = (bs + update_lambda * bl) - Asr * p.alpha_;
-
-		if (p.udf_center_enabled_)
-		{
-			Scalar f0;
-			Vec3 g;
-			if (eval_udf_and_grad(p, c, f0, g))
-			{
-				const Scalar g2 = g.squaredNorm();
-				const Scalar eps = Scalar(1e-12);
-				if (g2 > eps && area > Scalar(0))
-				{
-					const Scalar mu = Scalar(p.udf_center_lambda_) /** area*/;
-					const Scalar t = g.dot(c) - f0;
-					A.noalias() += mu * (g * g.transpose());
-					b.noalias() += mu * t * g;
-				}
-			}
-		}
-
-		c = A.ldlt().solve(b);
-		r = p.alpha_ * p.sqem_fix_radius_scale_;
-		(*p.spheres_position_)[sphere_index] = c;
-		(*p.spheres_radius_)[sphere_index] = r;
-	}
-
 	bool try_get_nearest_sample_ma_radius(PointsParameters& p, const Vec3& query, Scalar& out_radius)
 	{
 		if (!p.samples_mesh_ || !p.samples_ma_radius_)
@@ -3622,7 +3419,6 @@ private:
 		Vec3 c = (*p.spheres_position_)[sphere_index];
 		Spherical_Quadric q;
 		Line_Quadric lq;
-		Scalar area = Scalar(0);
 		for (PVertex v : cluster)
 		{
 			uint32 v_index = index_of(*data.mesh, v);
@@ -3634,7 +3430,6 @@ private:
 			}
 			q += (*data.quadric)[v_index] * weight;
 			lq += (*data.line_quadric)[v_index] * weight;
-			area += weight;
 		}
 
 		Mat4 Ql = lq.get_quadric().matrix();
@@ -3645,27 +3440,9 @@ private:
 		Vec3 bs = q._b.head<3>();
 		Vec3 Asr = q._A.block<3, 1>(0, 3);
 
-		const Scalar update_lambda = sqem_update_lambda_for_quadric(p, q);
+		const Scalar update_lambda = Scalar(p.sqem_update_lambda_line_plane_);
 		Mat3 A = As + update_lambda * Al;
 		Vec3 b = (bs + update_lambda * bl) - Asr * fixed_radius;
-
-		if (p.udf_center_enabled_)
-		{
-			Scalar f0;
-			Vec3 g;
-			if (eval_udf_and_grad(p, c, f0, g))
-			{
-				const Scalar g2 = g.squaredNorm();
-				const Scalar eps = Scalar(1e-12);
-				if (g2 > eps && area > Scalar(0))
-				{
-					const Scalar mu = Scalar(p.udf_center_lambda_);
-					const Scalar t = g.dot(c) - f0;
-					A.noalias() += mu * (g * g.transpose());
-					b.noalias() += mu * t * g;
-				}
-			}
-		}
 
 		c = A.ldlt().solve(b);
 		if (!c.allFinite())
@@ -3711,27 +3488,9 @@ private:
 		Vec4 bl_ext = Vec4::Zero();
 		bl_ext.head<3>() = bl;
 
-		const Scalar update_lambda = sqem_update_lambda_for_quadric(p, q);
+		const Scalar update_lambda = Scalar(p.sqem_update_lambda_line_plane_);
 		Mat4 A = q._A + update_lambda * Al_ext;
 		Vec4 b = q._b + update_lambda * bl_ext;
-		if (p.udf_center_enabled_)
-		{
-			const Vec3 c0 = (*p.spheres_position_)[sphere_index];
-			Scalar f0;
-			Vec3 g;
-			if (eval_udf_and_grad(p, c0, f0, g))
-			{
-				const Scalar g2 = g.squaredNorm();
-				const Scalar eps = Scalar(1e-12);
-				if (g2 > eps)
-				{
-					const Scalar mu = Scalar(p.udf_center_lambda_) /** weight_sum*/;
-					const Scalar t = g.dot(c0) - f0;
-					A.block<3, 3>(0, 0).noalias() += mu * (g * g.transpose());
-					b.head<3>().noalias() += mu * t * g;
-				}
-			}
-		}
 		Vec4 s = A.completeOrthogonalDecomposition().solve(b);
 		if (!s.allFinite())
 			return;
@@ -3748,26 +3507,6 @@ private:
 
 		(*p.spheres_position_)[sphere_index] = s.head<3>();
 		(*p.spheres_radius_)[sphere_index] = s[3];
-		return;
-
-		update_sphere_line_quadric_distance_fix_radius(p, sphere);
-
-		// if (s[3] > Scalar(0))
-		// {
-		// 	Scalar nearest_ma_radius = Scalar(0);
-		// 	const bool radius_too_large =
-		// 		try_get_nearest_sample_ma_radius(p, s.head<3>(), nearest_ma_radius) &&
-		// 		(s[3] > nearest_ma_radius * Scalar(1.5));
-		// 	if (radius_too_large)
-		// 	{
-		// 		update_sphere_line_quadric_distance_fix_current_radius(p, sphere, radius);
-		// 		return;
-		// 	}
-		// 	(*p.spheres_position_)[sphere_index] = s.head<3>();
-		// 	(*p.spheres_radius_)[sphere_index] = s[3];
-		// 	return;
-		// }
-		// update_sphere_line_quadric_distance_fix_radius(p, sphere);
 	}
 	bool should_refresh_local_connectivity(const PointsParameters& p)
 	{
@@ -3929,10 +3668,7 @@ private:
 		compute_clusters(p);
 
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			if (p.distance_mode_ == LINE_QUADRIC_DISTANCE_FREE_RADIUS)
-				update_sphere_line_quadric_distance_free_radius(p, v);
-			else
-				update_sphere_line_quadric_distance_fix_radius(p, v);
+			update_sphere_line_quadric_distance_free_radius(p, v);
 			return true;
 		});
 
@@ -4604,7 +4340,7 @@ private:
 			Scalar radius = (*p.spheres_radius_)[sphere_index];
 			Scalar dist_sqem = (*data.quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 			Scalar dist_other = (*data.line_quadric)[v_index].eval(center);
-			Scalar dist = dist_sqem + sphere_sqem_lambda(p, sphere_index) * dist_other;
+			Scalar dist = dist_sqem + Scalar(p.sqem_update_lambda_line_plane_) * dist_other;
 			return dist;
 		};
 
@@ -4634,7 +4370,6 @@ private:
 			(*p.spheres_cluster_)[closest_sphere_index].push_back(v);
 			(*p.spheres_cluster_area_)[closest_sphere_index] += a;
 		}
-		refresh_sphere_sqem_lambda_cache(p);
 	}
 
 	void redistribute_removed_sphere_cluster(PointsParameters& p, const std::vector<PVertex>& removed_cluster,
@@ -4645,7 +4380,6 @@ private:
 			return;
 		if (removed_cluster.empty() || p.nb_spheres_ == 0)
 		{
-			refresh_sphere_sqem_lambda_cache(p);
 			return;
 		}
 
@@ -4675,18 +4409,15 @@ private:
 
 		if (candidate_spheres.empty())
 		{
-			refresh_sphere_sqem_lambda_cache(p);
 			return;
 		}
-
-		refresh_sphere_sqem_lambda_cache(p);
 		auto eval_distance = [&](uint32 sample_index, uint32 sphere_index) -> Scalar {
 			const Vec3& center = (*p.spheres_position_)[sphere_index];
 			const Scalar radius = (*p.spheres_radius_)[sphere_index];
 			const Scalar dist_sqem =
 				(*data.quadric)[sample_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
 			const Scalar dist_other = (*data.line_quadric)[sample_index].eval(center);
-			return dist_sqem + sphere_sqem_lambda(p, sphere_index) * dist_other;
+			return dist_sqem + Scalar(p.sqem_update_lambda_line_plane_) * dist_other;
 		};
 
 		for (PVertex sample : removed_cluster)
@@ -4719,8 +4450,6 @@ private:
 			(*p.spheres_cluster_)[closest_sphere_index].push_back(sample);
 			(*p.spheres_cluster_area_)[closest_sphere_index] += (*data.area)[sample_index];
 		}
-
-		refresh_sphere_sqem_lambda_cache(p);
 	}
 
 protected:
@@ -11240,8 +10969,6 @@ protected:
 			(*p.spheres_error_)[center_sphere_id] = Scalar(0);
 		if (p.spheres_error_not_normalized_)
 			(*p.spheres_error_not_normalized_)[center_sphere_id] = Scalar(0);
-		if (p.spheres_sqem_lambda_)
-			(*p.spheres_sqem_lambda_)[center_sphere_id] = Scalar(p.sqem_update_lambda_full_);
 		(*p.spheres_neighbor_clusters_)[center_sphere_id].clear();
 		++p.nb_spheres_;
 
@@ -12484,32 +12211,7 @@ protected:
 						init_spheres(p);
 						update_render_data(p);
 					}
-
-					ImGui::SliderFloat("update lambda (Full)", &p.sqem_update_lambda_full_, 0.0f, 4.0f, "%.6f");
-					ImGui::SliderFloat("update lambda (Line/Plane)", &p.sqem_update_lambda_line_plane_, 0.0f, 4.0f,
-								   "%.6f");
-					const bool fix_r_mode = (p.distance_mode_ == LINE_QUADRIC_DISTANCE);
-					if (!fix_r_mode)
-						ImGui::BeginDisabled();
-					ImGui::SliderFloat("fix radius scale", &p.sqem_fix_radius_scale_, 1.0f, 5.0f, "%.3f");
-					if (!fix_r_mode)
-						ImGui::EndDisabled();
-
-					if (p.neural_udf_loaded_)
-					{
-						ImGui::Checkbox("UDF center term", &p.udf_center_enabled_);
-						if (p.udf_center_enabled_)
-							ImGui::SliderFloat("UDF lambda", &p.udf_center_lambda_, 0.0f, 2.0f, "%.6f");
-					}
-					else
-					{
-						ImGui::TextColored(ImVec4(1, 1, 0, 1), "UDF center term requires loaded model.");
-					}
-
-					ImGui::RadioButton("Line Quadric (fix r)", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE);
-					ImGui::SameLine();
-					ImGui::RadioButton("Line Quadric (free r)", (int*)&p.distance_mode_, LINE_QUADRIC_DISTANCE_FREE_RADIUS);
-
+					ImGui::SliderFloat("Update lambda", &p.sqem_update_lambda_line_plane_, 0.0f, 4.0f, "%.6f");
 					if (ImGui::Button("Update spheres"))
 					{
 						if (!p.running_)
@@ -12881,16 +12583,6 @@ protected:
 						ImGui::Text("Radius: %f", (*p.spheres_radius_)[picked_index]);
 						if (p.spheres_error_)
 							ImGui::Text("Error: %f", (*p.spheres_error_)[picked_index]);
-						SQEM_Condition_Info sqem_info;
-						if (get_sphere_sqem_info(p, picked_sphere_, sqem_info))
-						{
-							ImGui::Text("SQEM: %s", sqem_case_label(sqem_info.sqem_case));
-							ImGui::Text("SQEM sv: [%.3e, %.3e, %.3e, %.3e], rank=%d",
-									sqem_info.singular_values[0], sqem_info.singular_values[1],
-									sqem_info.singular_values[2], sqem_info.singular_values[3], sqem_info.rank);
-						}
-						else
-							ImGui::Text("SQEM: Unavailable");
 					}
 				}
 

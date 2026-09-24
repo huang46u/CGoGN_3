@@ -152,15 +152,6 @@ NeuralModelType parse_neural_model_type(const std::string& value)
 	fail_config("unsupported `input.neural_model_type`: " + value);
 }
 
-DistanceMode parse_distance_mode(const std::string& value)
-{
-	if (value == "line_quadric_distance_fix_r" || value == "line_quadric_distance")
-		return DistanceMode::LineQuadricDistance;
-	if (value == "line_quadric_distance_free_r" || value == "line_quadric_distance_free_radius")
-		return DistanceMode::LineQuadricDistanceFreeRadius;
-	fail_config("unsupported `optimization.distance_mode`: " + value);
-}
-
 AutoSplitMode parse_auto_split_mode(const std::string& value)
 {
 	if (value == "error_threshold")
@@ -253,12 +244,6 @@ std::string to_string(InputGeometryType value)
 std::string to_string(NeuralModelType value)
 {
 	return value == NeuralModelType::MF ? "mf" : "udf";
-}
-
-std::string to_string(DistanceMode value)
-{
-	return value == DistanceMode::LineQuadricDistanceFreeRadius ? "line_quadric_distance_free_r"
-																 : "line_quadric_distance_fix_r";
 }
 
 std::string to_string(AutoSplitMode value)
@@ -363,8 +348,16 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	}
 
 	const ptree& optimization = root.get_child("optimization");
-	config.optimization.distance_mode =
-		parse_distance_mode(require_value<std::string>(optimization, "distance_mode"));
+	if (auto distance_mode = optimization.get_optional<std::string>("distance_mode");
+		distance_mode && *distance_mode != "line_quadric_distance_free_r" &&
+		*distance_mode != "line_quadric_distance_free_radius")
+		fail_config("`optimization.distance_mode` is fixed to free radius; migrate this legacy value.");
+	if (auto fix_radius_scale = optimization.get_optional<float>("sqem_fix_radius_scale");
+		fix_radius_scale && *fix_radius_scale != 1.0f)
+		fail_config("`optimization.sqem_fix_radius_scale` is fixed to 1; migrate this legacy value.");
+	if (auto udf_center_enabled = optimization.get_optional<bool>("udf_center_enabled");
+		udf_center_enabled && *udf_center_enabled)
+		fail_config("`optimization.udf_center_enabled` was removed; migrate this config by disabling it.");
 	if (auto use_local_clusters = optimization.get_optional<bool>("use_local_clusters");
 		use_local_clusters && !*use_local_clusters)
 		fail_config("`optimization.use_local_clusters` is fixed to true; remove the legacy field or set it to true.");
@@ -375,12 +368,8 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		get_value<unsigned int>(optimization, "max_iterations_without_autosplit", 300u);
 	config.optimization.max_iterations_after_reaching_max_spheres =
 		get_value<unsigned int>(optimization, "max_iterations_after_reaching_max_spheres", 100u);
-	config.optimization.sqem_update_lambda_full = require_value<float>(optimization, "sqem_update_lambda_full");
 	config.optimization.sqem_update_lambda_line_plane =
 		require_value<float>(optimization, "sqem_update_lambda_line_plane");
-	config.optimization.sqem_fix_radius_scale = require_value<float>(optimization, "sqem_fix_radius_scale");
-	config.optimization.udf_center_enabled = get_value<bool>(optimization, "udf_center_enabled", false);
-	config.optimization.udf_center_lambda = get_value<float>(optimization, "udf_center_lambda", 0.10f);
 	if (auto lock_skeleton_connectivity = optimization.get_optional<bool>("lock_skeleton_connectivity");
 		lock_skeleton_connectivity && *lock_skeleton_connectivity)
 		fail_config("`optimization.lock_skeleton_connectivity` was removed; remove the legacy field or set it to false.");
