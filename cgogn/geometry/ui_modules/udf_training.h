@@ -9,6 +9,8 @@
 #include <cgogn/geometry/algos/fitting.h>
 #include <cgogn/geometry/algos/length.h>
 #include <cgogn/geometry/algos/medial_axis.h>
+#include <cgogn/geometry/algos/udf/neural_field_query.h>
+#include <cgogn/geometry/algos/udf/spatial_query.h>
 #include <cgogn/geometry/algos/normal.h>
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
@@ -1858,18 +1860,15 @@ public:
 		info = AlphaProjectionInfo{};
 		if (!selected_surface_ || !surface_position || !surface_bvh_)
 			return false;
-
-		std::pair<uint32, Vec3> cp;
-		if (!surface_bvh_->closest_point(sample_pos, &cp))
+		uint32 primitive_index;
+		if (!geometry::query_surface_closest_point(
+				*surface_bvh_, sample_pos, primitive_index, info.closest_point, info.distance))
 			return false;
-
-		info.closest_point = cp.second;
-		info.distance = (sample_pos - cp.second).norm();
-		info.normal = sample_pos - cp.second;
+		info.normal = sample_pos - info.closest_point;
 		if (info.normal.squaredNorm() < Scalar(1e-12))
 		{
-			if (cp.first < surface_bvh_faces_.size())
-				info.normal = geometry::normal(*selected_surface_, surface_bvh_faces_[cp.first], surface_position);
+			if (primitive_index < surface_bvh_faces_.size())
+				info.normal = geometry::normal(*selected_surface_, surface_bvh_faces_[primitive_index], surface_position);
 		}
 		if (info.normal.squaredNorm() < Scalar(1e-12))
 			info.normal = Vec3(0, 0, 1);
@@ -1885,17 +1884,15 @@ public:
 		info = AlphaProjectionInfo{};
 		if (!p.input_kdtree_ || !p.points_ || !p.position_ || p.input_kdtree_vertices_.empty())
 			return false;
-
-		std::pair<uint32, Scalar> knn_res;
-		if (!p.input_kdtree_->find_nn(sample_pos, &knn_res))
+		uint32 point_index;
+		if (!geometry::query_point_cloud_nearest_point(
+				*p.input_kdtree_, sample_pos, point_index, info.distance))
 			return false;
-		if (knn_res.first >= p.input_kdtree_vertices_.size())
+		if (point_index >= p.input_kdtree_vertices_.size())
 			return false;
-
-		const PVertex nearest_vertex = p.input_kdtree_vertices_[knn_res.first];
+		const PVertex nearest_vertex = p.input_kdtree_vertices_[point_index];
 		const uint32 nearest_index = index_of(*p.points_, nearest_vertex);
 		info.closest_point = (*p.position_)[nearest_index];
-		info.distance = knn_res.second;
 		info.normal = sample_pos - info.closest_point;
 		if (info.normal.squaredNorm() < Scalar(1e-12) && p.normal_)
 			info.normal = (*p.normal_)[nearest_index];
@@ -5341,66 +5338,15 @@ private:
 		}
 		return Vec4(1.0, 0.0, 0.0, transparency);
 	}
-
 	bool eval_udf_and_grad(PointsParameters& p, const Vec3& query_point, Scalar& value, Vec3& grad)
 	{
-		if (!p.neural_udf_loaded_)
-			return false;
-		NeuralFieldForward udf = make_neural_field_forward(p);
-		if (!udf.is_loaded())
-			return false;
-		auto res = udf.forward_point_with_grad(query_point);
-		value = res.first;
-		grad = res.second;
-		if (!std::isfinite(value) || !grad.allFinite())
-			return false;
-		return true;
+		return geometry::evaluate_udf_value_and_gradient(make_neural_field_forward(p), query_point, value, grad);
 	}
-
 	bool eval_udf_values(PointsParameters& p, const std::vector<Vec3>& points, std::vector<Scalar>& out_values)
 	{
-		out_values.clear();
-		out_values.resize(points.size(), Scalar(0));
-		if (points.empty())
-			return true;
-		if (!p.neural_udf_loaded_)
-			return false;
-		NeuralFieldForward udf = make_neural_field_forward(p);
-		if (!udf.is_loaded())
-			return false;
-
-		const size_t batch = std::max<size_t>(1, static_cast<size_t>(p.batch_size_));
-		for (size_t offset = 0; offset < points.size(); offset += batch)
-		{
-			const size_t count = std::min(batch, points.size() - offset);
-			auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-			if (device_.is_cuda())
-				cpu_opts = cpu_opts.pinned_memory(true);
-
-			torch::Tensor pts_cpu = torch::empty({static_cast<int64_t>(count), 3}, cpu_opts);
-			auto pts_acc = pts_cpu.accessor<float, 2>();
-			for (size_t i = 0; i < count; ++i)
-			{
-				const Vec3& pnt = points[offset + i];
-				pts_acc[static_cast<long>(i)][0] = static_cast<float>(pnt.x());
-				pts_acc[static_cast<long>(i)][1] = static_cast<float>(pnt.y());
-				pts_acc[static_cast<long>(i)][2] = static_cast<float>(pnt.z());
-			}
-
-			torch::Tensor pts = pts_cpu.to(device_);
-			torch::Tensor values = udf.forward_values_gpu(pts);
-			if (!values.defined())
-				return false;
-			if (values.dim() == 2 && values.size(1) == 1)
-				values = values.squeeze(1);
-			torch::Tensor values_cpu = values.to(torch::kCPU).contiguous();
-			auto values_acc = values_cpu.accessor<float, 1>();
-			for (size_t i = 0; i < count; ++i)
-				out_values[offset + i] = static_cast<Scalar>(values_acc[static_cast<long>(i)]);
-		}
-		return true;
+		return geometry::evaluate_udf_values(make_neural_field_forward(p), points,
+											std::max<size_t>(1, static_cast<size_t>(p.batch_size_)), out_values);
 	}
-
 	bool ensure_topology_score_backend(PointsParameters& p, const char* log_prefix = "[TopologyScore]")
 	{
 		const bool use_mf_ma_distance =
@@ -5480,10 +5426,14 @@ private:
 			{
 				for (size_t i = 0; i < points.size(); ++i)
 				{
-					std::pair<uint32, Vec3> cp;
-					if (!surface_bvh_->closest_point(points[i], &cp))
+					uint32 primitive_index;
+					Vec3 closest_point;
+					Scalar distance;
+					if (!geometry::query_surface_closest_point(
+							*surface_bvh_, points[i], primitive_index, closest_point, distance))
 						continue;
-					out_values[i] = (points[i] - cp.second).norm();
+					(void)primitive_index;
+					out_values[i] = distance;
 				}
 				return true;
 			}
@@ -5491,10 +5441,13 @@ private:
 			{
 				for (size_t i = 0; i < points.size(); ++i)
 				{
-					std::pair<uint32, Scalar> knn_res;
-					if (!p.input_kdtree_->find_nn(points[i], &knn_res))
+					uint32 point_index;
+					Scalar distance;
+					if (!geometry::query_point_cloud_nearest_point(
+							*p.input_kdtree_, points[i], point_index, distance))
 						continue;
-					const uint32 nn_idx = knn_res.first;
+					(void)distance;
+					const uint32 nn_idx = point_index;
 					if (nn_idx >= p.input_kdtree_vertices_.size())
 						continue;
 					const PVertex nn = p.input_kdtree_vertices_[nn_idx];

@@ -2,6 +2,7 @@
 #define CGOGN_GEOMETRY_TYPES_RAY_LEVEL_SET_SAMPLER_TRAITS_H_
 
 #include <cgogn/core/functions/mesh_info.h>
+#include <cgogn/geometry/algos/udf/spatial_query.h>
 #include <cgogn/geometry/types/neural_field_forward.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
@@ -94,10 +95,14 @@ struct SurfaceMeshRayTraits
 	{
 		if (!bvh)
 			return std::numeric_limits<Scalar>::max();
-		std::pair<uint32, Vec3> cp;
-		if (!bvh->closest_point(pos, &cp))
+		uint32 primitive_index;
+		Vec3 closest_point;
+		Scalar distance;
+		if (!query_surface_closest_point(*bvh, pos, primitive_index, closest_point, distance))
 			return std::numeric_limits<Scalar>::max();
-		return (pos - cp.second).norm();
+		(void)primitive_index;
+		(void)closest_point;
+		return distance;
 	}
 };
 
@@ -143,9 +148,14 @@ struct PointCloudRayTraits
 
 	Scalar eval_distance(const Vec3& pos) const
 	{
-		std::pair<uint32, Scalar> knn_res;
-		kdtree->find_nn(pos, &knn_res);
-		return knn_res.second;
+		if (!kdtree)
+			return std::numeric_limits<Scalar>::max();
+		uint32 point_index;
+		Scalar distance;
+		if (!query_point_cloud_nearest_point(*kdtree, pos, point_index, distance))
+			return std::numeric_limits<Scalar>::max();
+		(void)point_index;
+		return distance;
 
 	}
 };
