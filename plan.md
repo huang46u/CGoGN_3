@@ -1,4 +1,6 @@
-# Split UDF Training into Sample-Only + Alpha-Inside Executables
+# Archived Plan: Split UDF Training into Sample-Only + Alpha-Inside Executables
+
+> Superseded on 2026-09-23. `udf_training_alpha_inside` and its exclusive UI/debugger code are being removed and this plan must not be used as an implementation instruction. It is retained only as historical context.
 
 ## Summary
 Create a new executable `udf_training_alpha_inside` that performs optimization **only** on alpha_inside, while the existing `udf_training` becomes **sample-only** (all alpha_inside logic removed). Split the current `AlphaSetSphereDebugger` into two dedicated debuggers (samples vs alpha_inside). Produce `plan.md` at repo root with this plan before implementation.

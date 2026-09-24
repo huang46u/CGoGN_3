@@ -155,11 +155,6 @@ if (CGOGN_USE_CGAL)
     EXTRA_LIBS CGAL::CGAL
   )
 
-  cgogn_add_torch_executable(udf_training_alpha_inside
-    SOURCES udf_training_alpha_inside.cpp
-    EXTRA_LIBS CGAL::CGAL
-  )
-
   cgogn_add_torch_executable(udf_benchmark
     SOURCES
       udf_benchmark.cpp
