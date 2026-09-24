@@ -352,12 +352,6 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		distance_mode && *distance_mode != "line_quadric_distance_free_r" &&
 		*distance_mode != "line_quadric_distance_free_radius")
 		fail_config("`optimization.distance_mode` is fixed to free radius; migrate this legacy value.");
-	if (auto fix_radius_scale = optimization.get_optional<float>("sqem_fix_radius_scale");
-		fix_radius_scale && *fix_radius_scale != 1.0f)
-		fail_config("`optimization.sqem_fix_radius_scale` is fixed to 1; migrate this legacy value.");
-	if (auto udf_center_enabled = optimization.get_optional<bool>("udf_center_enabled");
-		udf_center_enabled && *udf_center_enabled)
-		fail_config("`optimization.udf_center_enabled` was removed; migrate this config by disabling it.");
 	if (auto use_local_clusters = optimization.get_optional<bool>("use_local_clusters");
 		use_local_clusters && !*use_local_clusters)
 		fail_config("`optimization.use_local_clusters` is fixed to true; remove the legacy field or set it to true.");
