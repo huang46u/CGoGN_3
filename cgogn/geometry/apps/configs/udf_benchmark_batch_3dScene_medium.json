@@ -43,9 +43,7 @@
   },
   "initialization": {
     "seed": 42,
-    "init_dilation_constant": 0.01,
-    "init_min_cover_points": 10,
-    "initial_nb_spheres": 100000
+    "init_dilation_constant": 0.01
   },
   "postprocess": {
     "topology_fix": true,

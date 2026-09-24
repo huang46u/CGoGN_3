@@ -395,9 +395,6 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	const ptree& initialization = root.get_child("initialization");
 	config.initialization.seed = require_value<int>(initialization, "seed");
 	config.initialization.init_dilation_constant = require_value<float>(initialization, "init_dilation_constant");
-	config.initialization.init_min_cover_points = require_value<unsigned int>(initialization, "init_min_cover_points");
-	config.initialization.initial_nb_spheres =
-		get_value<unsigned int>(initialization, "initial_nb_spheres", 1u);
 
 	if (auto postprocess = root.get_child_optional("postprocess"))
 	{
@@ -498,8 +495,6 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		fail_config("`input.ma_flip_prune_alpha_factor` must be in [1.0, 5.0]");
 	if (!config.batch.enabled && config.output.skeleton_ply.empty())
 		fail_config("`output.skeleton_ply` is required in single-run mode");
-	if (config.initialization.initial_nb_spheres == 0)
-		fail_config("`initialization.initial_nb_spheres` must be > 0");
 	if (config.optimization.max_iterations_without_autosplit == 0)
 		fail_config("`optimization.max_iterations_without_autosplit` must be > 0");
 	if (config.optimization.max_iterations_after_reaching_max_spheres == 0)

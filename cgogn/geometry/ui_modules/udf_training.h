@@ -285,7 +285,6 @@ private:
 		bool topology_enforce_tet_face_cap_ = true;
 		bool skeleton_face_score_normalize_by_area_ = false;
 		float32 init_dilation_constant_ = 0.001f;
-		uint32 init_min_cover_points_ = 10;
 		// Sampling Parameters
 		float alpha_ = 0.005f;
 		float sample_radius_ = 0.0025f;
@@ -381,7 +380,6 @@ public:
 	{
 		bool verbose_ = true;
 		OutputVerbosity output_verbosity_ = OUTPUT_NORMAL;
-		uint32 initial_nb_spheres_ = 1;
 		bool ma_flip_prune_enabled_ = true;
 		float ma_flip_prune_alpha_factor_ = 1.0f;
 		float32 filter_radius_threshold_ = 0.0f;
@@ -405,7 +403,6 @@ public:
 		bool udf_center_enabled_ = false;
 		float32 udf_center_lambda_ = 0.10f;
 		float32 init_dilation_constant_ = 0.001f;
-		uint32 init_min_cover_points_ = 10;
 		float alpha_ = 0.005f;
 		float sample_radius_ = 0.0025f;
 		int knn_k_ = 10;
@@ -601,7 +598,6 @@ public:
 		p.udf_center_enabled_ = options.udf_center_enabled_;
 		p.udf_center_lambda_ = options.udf_center_lambda_;
 		p.init_dilation_constant_ = options.init_dilation_constant_;
-		p.init_min_cover_points_ = options.init_min_cover_points_;
 		p.alpha_ = options.alpha_;
 		p.sample_radius_ = options.sample_radius_;
 		p.knn_k_ = options.knn_k_;
@@ -683,15 +679,12 @@ public:
 		headless_compute_fitting_primitives_prepared(points_parameters_[&points]);
 	}
 
-	void headless_init_spheres_prepared(PointsParameters& p, uint32 max_nb_spheres)
+	void headless_init_spheres_prepared(POINTS& points)
 	{
+		auto& p = points_parameters_[&points];
 		clear(*p.spheres_);
-		init_spheres_from_samples(p, max_nb_spheres);
-	}
-
-	void headless_init_spheres_prepared(POINTS& points, uint32 max_nb_spheres)
-	{
-		headless_init_spheres_prepared(points_parameters_[&points], max_nb_spheres);
+		init_spheres_from_samples(p);
+		compute_clusters_full(p);
 	}
 
 	HeadlessOptimizationStats headless_optimize_spheres_prepared(PointsParameters& p, bool verbose = false)
@@ -2958,10 +2951,11 @@ private:
 
 	// MF post-process: search along opposite normal direction for minimal mf-abs(sdf)
 
-	void init_spheres(PointsParameters& p, uint32 max_nb_spheres)
+	void init_spheres(PointsParameters& p)
 	{
 		points_provider_->clear_mesh(*p.spheres_);
-		init_spheres_from_samples(p, max_nb_spheres);
+		init_spheres_from_samples(p);
+		compute_clusters_full(p);
 
 		if (!p.running_)
 		{
@@ -2970,11 +2964,13 @@ private:
 		}
 	}
 
-	void init_spheres_from_samples(PointsParameters& p, uint32 max_nb_spheres)
+	void init_spheres_from_samples(PointsParameters& p)
 	{
 		if (!p.samples_mesh_ || !p.samples_position_ || !p.samples_knn_ || !p.samples_ma_position_ ||
 			!p.samples_ma_radius_ || !p.samples_ma_secondary_vertex_)
 			return;
+		constexpr uint32 min_cover_points = 10;
+		constexpr uint32 max_nb_spheres = 100000;
 		std::vector<PVertex> sorted_vertices;
 		uint32 max_sample_index = 0;
 		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
@@ -2996,7 +2992,6 @@ private:
 		});
 		auto covered = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__covered");
 		covered->fill(false);
-		const uint32 nb_samples = nb_cells<PVertex>(*p.samples_mesh_);
 		const std::size_t candidate_marks_size =
 			sorted_vertices.empty() ? std::size_t(0) : (static_cast<std::size_t>(max_sample_index) + 1);
 		std::vector<uint32> candidate_marks(candidate_marks_size, 0);
@@ -3090,7 +3085,7 @@ private:
 			}
 
 			const bool keep_sphere =
-				(candidate_cover.size() >= p.init_min_cover_points_) || (p.nb_spheres_ == 0 && !candidate_cover.empty());
+				(candidate_cover.size() >= min_cover_points) || (p.nb_spheres_ == 0 && !candidate_cover.empty());
 			if (!keep_sphere)
 				continue;
 
@@ -3108,7 +3103,6 @@ private:
 		if (skipped_invalid_ma_seeds > 0)
 			log_basic(p, "[InitSpheres] skipped_invalid_ma_seeds=", skipped_invalid_ma_seeds, '\n');
 
-		compute_clusters_full(p);
 	}
 
 	struct SphereFitData
@@ -12689,7 +12683,6 @@ protected:
 		else
 		{
 			ImGui::Separator();
-			static uint32 init_max_nb_spheres = 1;
 			ImGui::Checkbox("Enable MAFlipPrune", &p.ma_flip_prune_enabled_);
 			float ma_flip_prune_alpha_factor = static_cast<float>(p.ma_flip_prune_alpha_factor_);
 			if (ImGui::SliderFloat("MAFlipPrune MF Alpha Factor", &ma_flip_prune_alpha_factor, 1.0f, 5.0f, "%.2f"))
@@ -12707,12 +12700,10 @@ protected:
 				if (ImGui::CollapsingHeader("Sphere Fitting", ImGuiTreeNodeFlags_DefaultOpen))
 				{
 					ImGui::SliderFloat("Init dilation constant", &p.init_dilation_constant_, 0.001f, 0.01f, "%.4f");
-					ImGui::InputScalar("Init min cover points", ImGuiDataType_U32, &p.init_min_cover_points_);
-					ImGui::InputScalar("Init nb spheres", ImGuiDataType_U32, &init_max_nb_spheres);
 					if (ImGui::Button("Init spheres"))
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
-						init_spheres(p, init_max_nb_spheres);
+						init_spheres(p);
 						update_render_data(p);
 					}
 

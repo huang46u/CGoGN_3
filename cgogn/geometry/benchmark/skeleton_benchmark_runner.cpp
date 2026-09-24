@@ -77,7 +77,6 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 {
 	typename Training::HeadlessBenchmarkOptions options;
 	options.verbose_ = config.benchmark.verbose;
-	options.initial_nb_spheres_ = config.initialization.initial_nb_spheres;
 	options.ma_flip_prune_enabled_ = config.input.ma_flip_prune;
 	options.ma_flip_prune_alpha_factor_ = config.input.ma_flip_prune_alpha_factor;
 	options.lock_skeleton_connectivity_ = config.optimization.lock_skeleton_connectivity;
@@ -104,7 +103,6 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 	options.udf_center_enabled_ = config.optimization.udf_center_enabled;
 	options.udf_center_lambda_ = config.optimization.udf_center_lambda;
 	options.init_dilation_constant_ = config.initialization.init_dilation_constant;
-	options.init_min_cover_points_ = config.initialization.init_min_cover_points;
 	options.alpha_ = config.sampling.alpha;
 	options.sample_radius_ = config.sampling.bridson.sample_radius;
 	options.knn_k_ = config.sampling.knn_k;
@@ -247,7 +245,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 		log_stage("sphere_init_begin");
 		{
 			ScopedBenchmarkTimer timer(result.timing.sphere_initialization_ms);
-			core.init_spheres_prepared(*points, options.initial_nb_spheres_);
+			core.init_spheres_prepared(*points);
 		}
 		log_stage("sphere_init_end");
 
@@ -320,7 +318,6 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	std::cout << "Apply filtering: " << (config.sampling.apply_filtering ? "true" : "false") << std::endl;
 	std::cout << "Recompute normals after sampling: "
 			  << (config.sampling.recompute_normals_after_sampling ? "true" : "false") << std::endl;
-	std::cout << "Initial spheres: " << config.initialization.initial_nb_spheres << std::endl;
 	std::cout << "Topology fix: " << (config.postprocess.topology_fix ? "true" : "false") << std::endl;
 	std::cout << "Deg face deletion: " << (config.postprocess.deg_face_deletion ? "true" : "false") << std::endl;
 	std::cout << "NM two-layer prune: " << (config.postprocess.nm_two_layer_prune ? "true" : "false") << std::endl;
@@ -351,8 +348,7 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	boost::property_tree::ptree benchmark_config;
 	benchmark_config.put("sampling.apply_filtering", config.sampling.apply_filtering);
 	benchmark_config.put("sampling.recompute_normals_after_sampling", config.sampling.recompute_normals_after_sampling);
-	benchmark_config.put("initialization.initial_nb_spheres", config.initialization.initial_nb_spheres);
-	benchmark_config.put("initialization.init_min_cover_points", config.initialization.init_min_cover_points);
+	benchmark_config.put("initialization.init_dilation_constant", config.initialization.init_dilation_constant);
 	benchmark_config.put("input.geometry_type", to_string(config.input.geometry_type));
 	benchmark_config.put("input.ma_flip_prune", config.input.ma_flip_prune);
 	benchmark_config.put("input.ma_flip_prune_alpha_factor", config.input.ma_flip_prune_alpha_factor);

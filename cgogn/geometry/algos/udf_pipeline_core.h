@@ -173,9 +173,9 @@ public:
 		context_.udf_training.headless_compute_initial_medial_axis_prepared(points);
 	}
 
-	void init_spheres_prepared(Points& points, unsigned int max_nb_spheres)
+	void init_spheres_prepared(Points& points)
 	{
-		context_.udf_training.headless_init_spheres_prepared(points, max_nb_spheres);
+		context_.udf_training.headless_init_spheres_prepared(points);
 	}
 
 	typename Training::HeadlessOptimizationStats optimize_prepared(Points& points, bool verbose)

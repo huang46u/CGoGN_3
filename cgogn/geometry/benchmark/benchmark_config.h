@@ -105,8 +105,6 @@ struct BenchmarkInitializationConfig
 {
 	int seed = 42;
 	float init_dilation_constant = 0.001f;
-	unsigned int init_min_cover_points = 10;
-	unsigned int initial_nb_spheres = 1;
 };
 
 struct BenchmarkPostprocessConfig

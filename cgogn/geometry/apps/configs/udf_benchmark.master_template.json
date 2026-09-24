@@ -43,7 +43,6 @@
       "benchmark.num_measure_runs": "must be 1 in current loader",
       "input.geometry_type=point_cloud": "only .ply is accepted for input_path / batch.input_extension",
       "input.geometry_type=mesh": "accepted geometry formats are .obj, .ply, .off, .stl",
-      "initialization.initial_nb_spheres": "must be > 0",
       "optimization.max_iterations_without_autosplit": "must be > 0",
       "optimization.max_iterations_after_reaching_max_spheres": "must be > 0",
       "sampling.bridson.sample_radius": "must be > 0",
@@ -112,9 +111,7 @@
   },
   "initialization": {
     "seed": 42,
-    "init_dilation_constant": 0.001,
-    "init_min_cover_points": 10,
-    "initial_nb_spheres": 1
+    "init_dilation_constant": 0.001
   },
   "postprocess": {
     "topology_fix": false,
