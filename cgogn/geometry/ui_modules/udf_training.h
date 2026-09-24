@@ -13,7 +13,6 @@
 #include <cgogn/geometry/algos/udf/alpha_sampling.h>
 #include <cgogn/geometry/algos/udf/neural_alpha_projection.h>
 #include <cgogn/geometry/algos/udf/neural_field_query.h>
-#include <cgogn/geometry/algos/udf/sample_geometry.h>
 #include <cgogn/geometry/algos/udf/spatial_query.h>
 #include <cgogn/geometry/algos/normal.h>
 #include <cgogn/geometry/functions/angle.h>
@@ -2436,6 +2435,34 @@ private:
 		p.samples_ma_kdtree_ = points_ma.empty() ? nullptr : new acc::KDTree<3, uint32>(points_ma);
 	}
 
+	// Generic PCA normal computation for any point cloud mesh
+	template <typename MESH, typename POS_ATTR>
+	Vec3 compute_pca_normal(const MESH& mesh, const POS_ATTR& position, const std::vector<uint32>& indices,
+							const std::vector<typename mesh_traits<MESH>::Vertex>& kdtree_vertices)
+	{
+		using Vertex = typename mesh_traits<MESH>::Vertex;
+		if (indices.size() < 3)
+			return Vec3(0, 0, 1);
+
+		Vec3 centroid(0, 0, 0);
+		for (uint32 idx : indices)
+			centroid += position[index_of(mesh, kdtree_vertices[idx])];
+		centroid /= Scalar(indices.size());
+
+		Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+		for (uint32 idx : indices)
+		{
+			const Vertex v = kdtree_vertices[idx];
+			const Vec3 diff = position[index_of(mesh, v)] - centroid;
+			const Eigen::Vector3d point(diff[0], diff[1], diff[2]);
+			covariance += point * point.transpose();
+		}
+		covariance /= Scalar(indices.size());
+		const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
+		const Eigen::Vector3d normal = solver.eigenvectors().col(0);
+		return Vec3(normal[0], normal[1], normal[2]).normalized();
+	}
+
 	void compute_input_normals(PointsParameters& p)
 	{
 		if (!p.input_kdtree_ || !p.points_ || !p.position_ || !p.normal_ || !p.knn_)
@@ -2452,36 +2479,173 @@ private:
 				indices.push_back(res.first);
 				(*p.knn_)[v_idx].push_back(p.input_kdtree_vertices_[res.first]);
 			}
-			(*p.normal_)[v_idx] = geometry::estimate_pca_normal(*p.points_, *p.position_, indices,
-											p.input_kdtree_vertices_);
+			(*p.normal_)[v_idx] = compute_pca_normal(*p.points_, *p.position_, indices, p.input_kdtree_vertices_);
 			return true;
 		});
 	}
 
 	void compute_samples_area(PointsParameters& p)
 	{
+		// Compute KNN and Area on samples_mesh_
 		if (!p.samples_mesh_ || !p.samples_kdtree_)
 			return;
-		geometry::compute_sample_neighborhoods_and_areas(
-			*p.samples_mesh_, *p.samples_position_, *p.samples_normal_, *p.samples_area_, *p.samples_knn_,
-			*p.samples_kdtree_, p.samples_kdtree_vertices_,
-			geometry::SampleNeighborhoodParameters{p.knn_k_, static_cast<Scalar>(p.alpha_)});
+
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			const Vec3& pt = (*p.samples_position_)[v_idx];
+			std::vector<std::pair<uint32, Scalar>> knn_res;
+			p.samples_kdtree_->find_nns(pt, p.knn_k_ + 10, &knn_res);
+
+			(*p.samples_knn_)[v_idx].clear();
+			Scalar sum_dist = 0.0;
+			const Scalar eps = Scalar(1e-12);
+			const Scalar band = p.alpha_;
+			Vec3 n = (*p.samples_normal_)[v_idx];
+			const Scalar n2 = n.squaredNorm();
+			if (n2 > eps)
+				n /= std::sqrt(n2);
+			else
+				n = Vec3(0, 0, 1);
+			int kept = 0;
+			for (auto& res : knn_res)
+			{
+				if (p.samples_kdtree_vertices_[res.first] != v)
+				{
+					PVertex nb = p.samples_kdtree_vertices_[res.first];
+					uint32 nb_idx = index_of(*p.samples_mesh_, nb);
+					const Vec3& q = (*p.samples_position_)[nb_idx];
+					const Scalar dn = (q - pt).dot(n);
+					if (std::abs(dn) > band)
+						continue;
+					(*p.samples_knn_)[v_idx].push_back(nb);
+					sum_dist += res.second;
+					++kept;
+					if (kept >= p.knn_k_ + 1)
+						break;
+				}
+			}
+			if (kept == 0) // fall back
+			{
+				for (auto& res : knn_res)
+				{
+					if (p.samples_kdtree_vertices_[res.first] != v)
+					{
+						PVertex nb = p.samples_kdtree_vertices_[res.first];
+						(*p.samples_knn_)[v_idx].push_back(nb);
+						sum_dist += res.second;
+					}
+				}
+			}
+			// Normals are already computed/oriented in sample_points
+			(*p.samples_area_)[v_idx] = (sum_dist * sum_dist) / (2.0 * p.knn_k_); // Rough area estimate
+			return true;
+		});
 	}
 
 	void compute_quadrics(PointsParameters& p)
 	{
 		if (!p.samples_mesh_)
 			return;
-		geometry::compute_sample_quadrics(*p.samples_mesh_, *p.samples_position_, *p.samples_normal_,
-			*p.samples_area_, *p.samples_knn_, *p.samples_quadric_, *p.samples_line_quadric_, p.knn_k_);
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
+			uint32 v_idx = index_of(*p.samples_mesh_, v);
+			Spherical_Quadric& q = (*p.samples_quadric_)[v_idx];
+			Line_Quadric& lq = (*p.samples_line_quadric_)[v_idx];
+			q.clear();
+			lq.clear();
+			const Vec3& pos = (*p.samples_position_)[v_idx];
+			const Vec3& n = (*p.samples_normal_)[v_idx];
+			Scalar a = (*p.samples_area_)[v_idx] / (p.knn_k_ + 1.0);
+			q += Spherical_Quadric(Vec4(pos.x(), pos.y(), pos.z(), 0), Vec4(n.x(), n.y(), n.z(), 1)) * a;
+			lq += Line_Quadric(pos, n) * a;
+			for (PVertex vn : (*p.samples_knn_)[v_idx])
+			{
+				uint32 vn_idx = index_of(*p.samples_mesh_, vn);
+				const Vec3& pn = (*p.samples_position_)[vn_idx];
+				const Vec3& nn = (*p.samples_normal_)[vn_idx];
+				Scalar an = (*p.samples_area_)[vn_idx] / (p.knn_k_ + 1.0);
+				q += Spherical_Quadric(Vec4(pn.x(), pn.y(), pn.z(), 0), Vec4(nn.x(), nn.y(), nn.z(), 1)) * an;
+				lq += Line_Quadric(pn, nn) * an;
+			}
+			return true;
+		});
+	}
+
+	bool recompute_sample_normal_pca_for_vertex(PointsParameters& p, PVertex v)
+	{
+		if (!p.samples_mesh_ || !p.samples_kdtree_ || !p.samples_position_ || !p.samples_normal_ || !v.is_valid())
+			return false;
+
+		const int k = std::max(3, p.knn_k_);
+		const Scalar eps = Scalar(1e-12);
+		const uint32 v_idx = index_of(*p.samples_mesh_, v);
+		if (v_idx == INVALID_INDEX)
+			return false;
+		const Vec3& center = (*p.samples_position_)[v_idx];
+
+		std::vector<std::pair<uint32, Scalar>> knn_res;
+		p.samples_kdtree_->find_nns(center, k + 1, &knn_res);
+
+		std::vector<Vec3> neighbors;
+		neighbors.reserve(k);
+		for (const auto& res : knn_res)
+		{
+			PVertex nb = p.samples_kdtree_vertices_[res.first];
+			if (nb == v)
+				continue;
+			uint32 nb_idx = index_of(*p.samples_mesh_, nb);
+			neighbors.push_back((*p.samples_position_)[nb_idx]);
+			if (static_cast<int>(neighbors.size()) >= k)
+				break;
+		}
+		if (neighbors.size() < 3)
+			return false;
+
+		Vec3 mean(0, 0, 0);
+		for (const Vec3& q : neighbors)
+			mean += q;
+		mean /= Scalar(neighbors.size());
+
+		Eigen::Matrix<Scalar, 3, 3> cov = Eigen::Matrix<Scalar, 3, 3>::Zero();
+		for (const Vec3& q : neighbors)
+		{
+			Vec3 d = q - mean;
+			cov(0, 0) += d.x() * d.x();
+			cov(0, 1) += d.x() * d.y();
+			cov(0, 2) += d.x() * d.z();
+			cov(1, 1) += d.y() * d.y();
+			cov(1, 2) += d.y() * d.z();
+			cov(2, 2) += d.z() * d.z();
+		}
+		cov(1, 0) = cov(0, 1);
+		cov(2, 0) = cov(0, 2);
+		cov(2, 1) = cov(1, 2);
+
+		Eigen::SelfAdjointEigenSolver<Eigen::Matrix<Scalar, 3, 3>> solver(cov);
+		if (solver.info() != Eigen::Success)
+			return false;
+
+		Eigen::Matrix<Scalar, 3, 1> ev = solver.eigenvectors().col(0);
+		Vec3 n(ev(0), ev(1), ev(2));
+		Scalar n2 = n.squaredNorm();
+		if (n2 < eps)
+			return false;
+
+		Vec3 n0 = (*p.samples_normal_)[v_idx];
+		if (n0.squaredNorm() > eps && n.dot(n0) < Scalar(0))
+			n = -n;
+		n.normalize();
+		(*p.samples_normal_)[v_idx] = n;
+		return true;
 	}
 
 	void recompute_samples_normals_pca(PointsParameters& p)
 	{
 		if (!p.samples_mesh_ || !p.samples_kdtree_ || !p.samples_position_ || !p.samples_normal_)
 			return;
-		geometry::recompute_pca_normals(*p.samples_mesh_, *p.samples_position_, *p.samples_normal_,
-			*p.samples_kdtree_, p.samples_kdtree_vertices_, p.knn_k_);
+		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
+			recompute_sample_normal_pca_for_vertex(p, v);
+			return true;
+		});
 		refresh_sample_normals_color(p);
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
@@ -2492,19 +2656,21 @@ private:
 		if (!p.samples_mesh_ || !p.samples_kdtree_ || !p.samples_position_ || !p.samples_normal_ || vertices.empty())
 			return;
 		std::unordered_set<uint32> visited_ids;
-		std::vector<PVertex> unique_vertices;
-		unique_vertices.reserve(vertices.size());
+		std::vector<PVertex> updated_vertices;
+		updated_vertices.reserve(vertices.size());
 		for (PVertex v : vertices)
 		{
+			if (!v.is_valid())
+				continue;
 			const uint32 v_idx = index_of(*p.samples_mesh_, v);
-			if (v.is_valid() && v_idx != INVALID_INDEX && visited_ids.insert(v_idx).second)
-				unique_vertices.push_back(v);
+			if (v_idx == INVALID_INDEX || !visited_ids.insert(v_idx).second)
+				continue;
+			if (recompute_sample_normal_pca_for_vertex(p, v))
+				updated_vertices.push_back(v);
 		}
-		if (unique_vertices.empty())
+		if (updated_vertices.empty())
 			return;
-		geometry::recompute_pca_normals(*p.samples_mesh_, *p.samples_position_, *p.samples_normal_,
-			*p.samples_kdtree_, p.samples_kdtree_vertices_, p.knn_k_, &unique_vertices);
-		for (PVertex v : unique_vertices)
+		for (PVertex v : updated_vertices)
 		{
 			const uint32 v_idx = index_of(*p.samples_mesh_, v);
 			const Vec3& n = (*p.samples_normal_)[v_idx];
