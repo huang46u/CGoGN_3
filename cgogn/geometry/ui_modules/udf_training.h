@@ -225,12 +225,10 @@ private:
 		bool skeleton_face_score_cache_normalized_by_area_ = false;
 		bool skeleton_face_score_cache_covers_all_faces_ = false;
 
-		std::map<NMFaceKey, NMFace> skeleton_faces_map_;
 
 		std::unordered_map<std::size_t, Tet> skeleton_tets_;
 		bool topology_stage_snapshot_valid_ = false;
 		NONMANIFOLD* topology_stage_snapshot_mesh_ = nullptr;
-		std::map<NMFaceKey, NMFace> topology_stage_snapshot_faces_map_;
 		std::unordered_map<std::size_t, Tet> topology_stage_snapshot_tets_;
 
 		float32 filter_radius_threshold_ = 0.0f;
@@ -246,8 +244,6 @@ private:
 		// Filtering
 		float32 target_radius_ = 0.1f;
 		float32 radius_tolerance_ = 0.01f;
-		float32 skeleton_edge_udf_zero_tol_ = 1e-4f;
-		float32 skeleton_face_udf_zero_tol_ = 1e-4f;
 		bool topology_edge_stage_diffuse_ = true;
 		bool topology_enforce_tet_face_cap_ = true;
 		bool skeleton_face_score_normalize_by_area_ = false;
@@ -302,35 +298,7 @@ private:
 
 	struct Tet
 	{
-		std::size_t tet_id;
 		NMFace faces[4];
-
-		void print_tet_info(PointsParameters& p) const
-		{
-			if (p.output_verbosity_ != OUTPUT_VERBOSE)
-				return;
-			std::cout << "Tet ID: " << tet_id << "\n";
-			for (int i = 0; i < 4; ++i)
-			{
-				// print incidented edge incident faces
-				NMFace f = faces[i];
-				if (!f.is_valid())
-					continue;
-				uint32 idf = index_of(*p.skeleton_, f);
-				uint32 nb_tets = (*p.incident_tets_)[idf].size();
-				auto in_edges = incident_edges(*p.skeleton_, f);
-				std::cout << " Face " << i << " incident to " << nb_tets << " tets. \n";
-				for (const auto& edge : in_edges)
-				{
-					auto in_faces = incident_faces(*p.skeleton_, edge);
-					uint32 nb_faces = in_faces.size();
-					std::cout << "  Incident Edge (" << index_of(*p.skeleton_, edge) << ") with" << nb_faces
-							  << " faces ";
-				}
-
-				std::cout << "\n";
-			}
-		}
 	};
 
 public:
@@ -1819,12 +1787,12 @@ protected:
 				PointsParameters& p = points_parameters_[selected_points_];
 				if (p.running_ && p.preview_render_during_sphere_update_)
 				{
-					update_render_data(p, false, true);
+					update_render_data(p, false, true, true);
 					request_linked_views_update();
 				}
 				else if (p.pending_full_refresh_after_stop_)
 				{
-					update_render_data(p);
+					update_render_data(p, false, true, true);
 					request_linked_views_update();
 					p.pending_full_refresh_after_stop_ = false;
 				}
@@ -2706,7 +2674,6 @@ private:
 
 		if (!p.running_)
 		{
-			update_render_data(p);
 			set_post_init_sphere_render_state(p);
 		}
 	}
@@ -3390,7 +3357,7 @@ private:
 	{
 		auto cluster_start = std::chrono::high_resolution_clock::now();
 		if (should_refresh_local_connectivity(p))
-			compute_skeleton(p, true);
+			compute_sphere_neighbors(p);
 		compute_clusters(p);
 		auto cluster_end = std::chrono::high_resolution_clock::now();
 		if (stats)
@@ -3413,17 +3380,16 @@ private:
 		if (stats)
 			stats->error_total_ms_ +=
 				std::chrono::duration<float64, std::milli>(error_end - error_start).count();
-
-		if (!p.running_)
-			update_render_data(p);
 	}
 
 	void remove_sphere(PointsParameters& p, PVertex v)
 	{
+		uint32 v_index = INVALID_INDEX;
+		if (!is_live_sphere_vertex(p, v, v_index))
+			return;
 		SphereFitData data;
 		if (!get_sphere_fit_data(p, data))
 			return;
-		const uint32 v_index = index_of(*p.spheres_, v);
 		const std::vector<PVertex> removed_cluster = (*p.spheres_cluster_)[v_index];
 		std::set<PVertex> removed_neighbors;
 		if (p.spheres_neighbor_clusters_)
@@ -3477,8 +3443,6 @@ private:
 		PVertex linked_sphere;
 		if (p.skeleton_source_sphere_)
 			linked_sphere = value<PVertex>(*p.skeleton_, p.skeleton_source_sphere_, v);
-		else if (p.spheres_)
-			linked_sphere = of_index<PVertex>(*p.spheres_, skeleton_vertex_id);
 
 		if (linked_sphere.is_valid() && p.spheres_)
 		{
@@ -3511,7 +3475,7 @@ private:
 		}
 	};
 
-	void compute_skeleton(PointsParameters& p, bool only_neighbors = false)
+	void compute_sphere_neighbors(PointsParameters& p)
 	{
 		SphereFitData data;
 		if (!get_sphere_fit_data(p, data))
@@ -3544,12 +3508,20 @@ private:
 			return true;
 		});
 
-		if (only_neighbors)
-			return;
+	}
 
+	void compute_skeleton(PointsParameters& p)
+	{
+		compute_sphere_neighbors(p);
+		SphereFitData data;
+		if (!get_sphere_fit_data(p, data))
+			return;
+		auto knn_attr = data.knn;
+		if (!data.mesh || !data.sphere || !knn_attr)
+			return;
 		invalidate_skeleton_face_score_cache(p);
 		clear(*p.skeleton_);
-		p.skeleton_faces_map_.clear();
+		std::map<NMFaceKey, NMFace> skeleton_faces_map;
 		auto get_face_key = [](uint32 i1, uint32 i2, uint32 i3) -> NMFaceKey {
 			std::array<uint32, 3> key = {i1, i2, i3};
 			std::sort(key.begin(), key.end());
@@ -3624,7 +3596,7 @@ private:
 					edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv3)}]);
 					NMFace new_face = add_face(*p.skeleton_, edges);
 
-					p.skeleton_faces_map_[get_face_key(idx1, idx2, idx3)] = new_face;
+					skeleton_faces_map[get_face_key(idx1, idx2, idx3)] = new_face;
 
 					const std::set<PVertex>& ne_ne2 = (*p.spheres_neighbor_clusters_)[idx3];
 
@@ -3664,8 +3636,8 @@ private:
 
 			for (uint32 i = 0; i < 4; ++i)
 			{
-				auto it = p.skeleton_faces_map_.find(keys[i]);
-				if (it != p.skeleton_faces_map_.end())
+				auto it = skeleton_faces_map.find(keys[i]);
+				if (it != skeleton_faces_map.end())
 				{
 					NMFace f = it->second;
 					new_tet.faces[i] = f;
@@ -3675,7 +3647,6 @@ private:
 					value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.8, 0.5, 0.5);
 				}
 			}
-			new_tet.tet_id = tet_index;
 			p.skeleton_tets_.insert({tet_index, new_tet});
 			tet_index++;
 		}
@@ -3696,271 +3667,6 @@ private:
 		invalidate_topology_stage_snapshot(p);
 	}
 
-	void skeleton_geometry_filter(PointsParameters& p)
-	{
-		if (!ensure_topology_score_backend(p, "[GeometryFilter]"))
-		{
-			return;
-		}
-
-		compute_skeleton(p, true);
-		if (!p.spheres_ || !p.spheres_position_ || !p.spheres_neighbor_clusters_ || !p.skeleton_)
-			return;
-
-		auto get_face_key = [](uint32 i1, uint32 i2, uint32 i3) -> NMFaceKey {
-			std::array<uint32, 3> key = {i1, i2, i3};
-			std::sort(key.begin(), key.end());
-			return key;
-		};
-		auto edge_key = [](uint32 a, uint32 b) -> std::pair<uint32, uint32> {
-			return {std::min(a, b), std::max(a, b)};
-		};
-		std::set<std::pair<uint32, uint32>> edge_candidates_set;
-		std::vector<std::pair<uint32, uint32>> edge_candidates;
-		std::vector<Vec3> edge_midpoints;
-		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
-			const uint32 idx1 = index_of(*p.spheres_, pv);
-			const std::set<PVertex>& neighbors = (*p.spheres_neighbor_clusters_)[idx1];
-			for (PVertex neighbor : neighbors)
-			{
-				const uint32 idx2 = index_of(*p.spheres_, neighbor);
-				if (idx2 == INVALID_INDEX || idx1 == idx2)
-					continue;
-				const auto key = edge_key(idx1, idx2);
-				if (!edge_candidates_set.insert(key).second)
-					continue;
-				edge_candidates.push_back(key);
-				const Vec3& c1 = (*p.spheres_position_)[key.first];
-				const Vec3& c2 = (*p.spheres_position_)[key.second];
-				edge_midpoints.push_back((c1 + c2) * Scalar(0.5));
-			}
-			return true;
-		});
-
-		std::vector<Scalar> edge_udf_values;
-		if (!edge_midpoints.empty() && !eval_topology_score_values(p, edge_midpoints, edge_udf_values))
-		{
-			log_error(p, "Geometry filter failed: unable to evaluate topology score on edge midpoints.", '\n');
-			return;
-		}
-
-		std::set<std::pair<uint32, uint32>> kept_edges;
-		for (size_t i = 0; i < edge_candidates.size(); ++i)
-		{
-			if (std::abs(edge_udf_values[i]) <= Scalar(p.skeleton_edge_udf_zero_tol_))
-				kept_edges.insert(edge_candidates[i]);
-		}
-
-		std::set<NMFaceKey> face_seen;
-		std::vector<std::array<uint32, 3>> face_candidates;
-		std::vector<Vec3> face_centers;
-		std::vector<std::array<uint32, 4>> raw_tets;
-		std::set<std::array<uint32, 4>> raw_tet_seen;
-
-		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
-			const uint32 idx1 = index_of(*p.spheres_, pv);
-			const std::set<PVertex>& n_pv = (*p.spheres_neighbor_clusters_)[idx1];
-			for (const PVertex& ne1 : n_pv)
-			{
-				const uint32 idx2 = index_of(*p.spheres_, ne1);
-				if (idx2 == INVALID_INDEX || idx1 >= idx2)
-					continue;
-				const std::set<PVertex>& ne_ne1 = (*p.spheres_neighbor_clusters_)[idx2];
-				for (const PVertex& ne2 : ne_ne1)
-				{
-					if (n_pv.find(ne2) == n_pv.end())
-						continue;
-					const uint32 idx3 = index_of(*p.spheres_, ne2);
-					if (idx3 == INVALID_INDEX || idx2 >= idx3)
-						continue;
-
-					const NMFaceKey fkey = get_face_key(idx1, idx2, idx3);
-					if (face_seen.insert(fkey).second)
-					{
-						const bool e12 = kept_edges.find(edge_key(idx1, idx2)) != kept_edges.end();
-						const bool e13 = kept_edges.find(edge_key(idx1, idx3)) != kept_edges.end();
-						const bool e23 = kept_edges.find(edge_key(idx2, idx3)) != kept_edges.end();
-						if (e12 && e13 && e23)
-						{
-							face_candidates.push_back({idx1, idx2, idx3});
-							const Vec3& c1 = (*p.spheres_position_)[idx1];
-							const Vec3& c2 = (*p.spheres_position_)[idx2];
-							const Vec3& c3 = (*p.spheres_position_)[idx3];
-							face_centers.push_back((c1 + c2 + c3) / Scalar(3.0));
-						}
-					}
-
-					const std::set<PVertex>& ne_ne2 = (*p.spheres_neighbor_clusters_)[idx3];
-					for (const PVertex& ne3 : ne_ne2)
-					{
-						const uint32 idx4 = index_of(*p.spheres_, ne3);
-						if (idx4 == INVALID_INDEX || idx3 >= idx4)
-							continue;
-						const bool connected_v1 = (n_pv.find(ne3) != n_pv.end());
-						const bool connected_v2 = (ne_ne1.find(ne3) != ne_ne1.end());
-						if (!connected_v1 || !connected_v2)
-							continue;
-
-						std::array<uint32, 4> tet = {idx1, idx2, idx3, idx4};
-						std::sort(tet.begin(), tet.end());
-						if (raw_tet_seen.insert(tet).second)
-							raw_tets.push_back(tet);
-					}
-				}
-			}
-			return true;
-		});
-
-		std::vector<Scalar> face_udf_values;
-		if (!face_centers.empty() && !eval_topology_score_values(p, face_centers, face_udf_values))
-		{
-			log_error(p, "Geometry filter failed: unable to evaluate topology score on face centers.", '\n');
-			return;
-		}
-
-		std::set<NMFaceKey> kept_faces;
-		for (size_t i = 0; i < face_candidates.size(); ++i)
-		{
-			if (std::abs(face_udf_values[i]) <= Scalar(p.skeleton_face_udf_zero_tol_))
-				kept_faces.insert(get_face_key(face_candidates[i][0], face_candidates[i][1], face_candidates[i][2]));
-		}
-
-		invalidate_skeleton_face_score_cache(p);
-		clear(*p.skeleton_);
-		p.skeleton_faces_map_.clear();
-		if (p.spheres_skeleton_vertex_)
-		{
-			foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
-				const uint32 sphere_index = index_of(*p.spheres_, pv);
-				if (sphere_index != INVALID_INDEX)
-					(*p.spheres_skeleton_vertex_)[sphere_index] = NMVertex();
-				return true;
-			});
-		}
-		foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
-			const uint32 pv_index = index_of(*p.spheres_, pv);
-			const NMVertex nmv = add_vertex(*p.skeleton_);
-			(*p.skeleton_position_)[index_of(*p.skeleton_, nmv)] = (*p.spheres_position_)[pv_index];
-			if (p.spheres_skeleton_vertex_)
-				(*p.spheres_skeleton_vertex_)[pv_index] = nmv;
-			if (p.skeleton_source_sphere_)
-				value<PVertex>(*p.skeleton_, p.skeleton_source_sphere_, nmv) = pv;
-			return true;
-		});
-
-		std::unordered_map<std::pair<uint32, uint32>, NMEdge, edge_hash, edge_equal> edge_indices;
-		for (const auto& ekey : kept_edges)
-		{
-			const NMVertex v1 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[ekey.first] : NMVertex();
-			const NMVertex v2 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[ekey.second] : NMVertex();
-			if (!v1.is_valid() || !v2.is_valid() || v1 == v2)
-				continue;
-			const NMEdge e = add_edge(*p.skeleton_, v1, v2);
-			edge_indices[{index_of(*p.skeleton_, v1), index_of(*p.skeleton_, v2)}] = e;
-		}
-
-		auto find_edge = [&](uint32 a, uint32 b, NMEdge& out) -> bool {
-			auto it = edge_indices.find({a, b});
-			if (it == edge_indices.end() || !it->second.is_valid())
-				return false;
-			out = it->second;
-			return true;
-		};
-
-		for (const auto& f : face_candidates)
-		{
-			const NMFaceKey fkey = get_face_key(f[0], f[1], f[2]);
-			if (kept_faces.find(fkey) == kept_faces.end())
-				continue;
-
-			const NMVertex v1 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[f[0]] : NMVertex();
-			const NMVertex v2 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[f[1]] : NMVertex();
-			const NMVertex v3 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[f[2]] : NMVertex();
-			if (!v1.is_valid() || !v2.is_valid() || !v3.is_valid())
-				continue;
-
-			const uint32 i1 = index_of(*p.skeleton_, v1);
-			const uint32 i2 = index_of(*p.skeleton_, v2);
-			const uint32 i3 = index_of(*p.skeleton_, v3);
-			NMEdge e12, e23, e13;
-			if (!find_edge(i1, i2, e12) || !find_edge(i2, i3, e23) || !find_edge(i1, i3, e13))
-				continue;
-
-			std::vector<NMEdge> fedges;
-			fedges.reserve(3);
-			fedges.push_back(e12);
-			fedges.push_back(e23);
-			fedges.push_back(e13);
-			NMFace new_face = add_face(*p.skeleton_, fedges);
-			p.skeleton_faces_map_[fkey] = new_face;
-		}
-
-		p.skeleton_tets_.clear();
-		p.skeleton_tets_.reserve(raw_tets.size());
-		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
-			value<std::set<std::size_t>>(*p.skeleton_, p.incident_tets_, f).clear();
-			value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.0, 0.0, 0.0);
-			return true;
-		});
-
-		std::size_t tet_index = 0;
-		for (const auto& rt : raw_tets)
-		{
-			const uint32 v[4] = {rt[0], rt[1], rt[2], rt[3]};
-			const NMFaceKey keys[4] = {get_face_key(v[1], v[2], v[3]), get_face_key(v[0], v[2], v[3]),
-									   get_face_key(v[0], v[1], v[3]), get_face_key(v[0], v[1], v[2])};
-
-			std::array<NMFace, 4> tet_faces = {NMFace(), NMFace(), NMFace(), NMFace()};
-			bool complete_tet = true;
-			for (uint32 i = 0; i < 4; ++i)
-			{
-				auto it = p.skeleton_faces_map_.find(keys[i]);
-				if (it == p.skeleton_faces_map_.end())
-				{
-					complete_tet = false;
-					break;
-				}
-				tet_faces[i] = it->second;
-			}
-			if (!complete_tet)
-				continue;
-
-			Tet new_tet;
-			for (uint32 i = 0; i < 4; ++i)
-			{
-				new_tet.faces[i] = tet_faces[i];
-				value<std::set<size_t>>(*p.skeleton_, p.incident_tets_, tet_faces[i]).insert(tet_index);
-				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, tet_faces[i]) = Vec3(0.8, 0.5, 0.5);
-			}
-			new_tet.tet_id = tet_index;
-			p.skeleton_tets_.insert({tet_index, new_tet});
-			++tet_index;
-		}
-
-		parallel_foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
-			const auto in_tets = value<std::set<size_t>>(*p.skeleton_, p.incident_tets_, f);
-			if (in_tets.size() == 1)
-				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(1.0, 0.0, 0.0);
-			else if (in_tets.empty())
-				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.0, 0.0, 0.0);
-			return true;
-		});
-
-		parallel_foreach_cell(*p.skeleton_, [&](NMEdge e) -> bool {
-			value<Vec3>(*p.skeleton_, p.skeleton_edge_color_, e) = Vec3(0.0, 0.0, 0.0);
-			return true;
-		});
-		compute_edge_degree(p);
-
-		log_basic(p, "Geometry filter: edges ", edge_candidates.size(), " -> ", kept_edges.size(), ", faces ",
-				  face_candidates.size(), " -> ", kept_faces.size(), '\n');
-
-		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
-		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
-		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_non_manifold_color_.get());
-		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
-		invalidate_topology_stage_snapshot(p);
-	}
 
 	void inherit_sphere_neighbors(PointsParameters& p, PVertex parent, PVertex child)
 	{
@@ -9153,7 +8859,6 @@ protected:
 	void invalidate_topology_stage_snapshot(PointsParameters& p)
 	{
 		p.topology_stage_snapshot_valid_ = false;
-		p.topology_stage_snapshot_faces_map_.clear();
 		p.topology_stage_snapshot_tets_.clear();
 	}
 
@@ -9173,7 +8878,6 @@ protected:
 												  : non_manifold_provider_->add_mesh(snapshot_name);
 		}
 		non_manifold_provider_->copy_mesh(*p.topology_stage_snapshot_mesh_, *p.skeleton_);
-		p.topology_stage_snapshot_faces_map_ = p.skeleton_faces_map_;
 		p.topology_stage_snapshot_tets_ = p.skeleton_tets_;
 		p.topology_stage_snapshot_valid_ = true;
 		log_basic(p, "[TopologyStage] snapshot captured: faces=", nb_cells<NMFace>(*p.skeleton_), " tets=",
@@ -9190,7 +8894,6 @@ protected:
 		}
 		non_manifold_provider_->copy_mesh(*p.skeleton_, *p.topology_stage_snapshot_mesh_);
 		refresh_skeleton_attribute_handles(p);
-		p.skeleton_faces_map_ = p.topology_stage_snapshot_faces_map_;
 		p.skeleton_tets_ = p.topology_stage_snapshot_tets_;
 		return true;
 	}
@@ -10636,18 +10339,6 @@ protected:
 			}
 		}
 
-		for (uint32 i = 0; i < 5; ++i)
-		{
-			for (uint32 j = i + 1; j < 5; ++j)
-			{
-				for (uint32 k = j + 1; k < 5; ++k)
-				{
-					NMFaceKey face_key = {sphere_ids[i], sphere_ids[j], sphere_ids[k]};
-					std::sort(face_key.begin(), face_key.end());
-					p.skeleton_faces_map_.erase(face_key);
-				}
-			}
-		}
 		SkeletonFaceDeletionStats deletion_stats;
 		SkeletonFaceDeletionOptions deletion_options;
 		deletion_options.remove_incident_orphan_edges_immediately = false;
@@ -10731,9 +10422,6 @@ protected:
 				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, new_face) = Vec3(0.0, 0.0, 0.0);
 			if (p.skeleton_face_k5_color_)
 				value<Vec3>(*p.skeleton_, p.skeleton_face_k5_color_, new_face) = Vec3(0.08, 0.08, 0.08);
-			NMFaceKey face_key = {sphere_ids[cyclic_order[i]], sphere_ids[cyclic_order[(i + 1) % 5]], center_sphere_id};
-			std::sort(face_key.begin(), face_key.end());
-			p.skeleton_faces_map_[face_key] = new_face;
 			++out_added_faces;
 		}
 
@@ -11535,7 +11223,8 @@ protected:
 	}
 
 protected:
-	void update_render_data(PointsParameters& p, bool non_blocking_running_lock = false, bool full_refresh = true)
+	void update_render_data(PointsParameters& p, bool non_blocking_running_lock = false, bool full_refresh = true,
+						bool rebuild_skeleton = false)
 	{
 		std::unique_lock<std::mutex> lock(p.mutex_, std::defer_lock);
 		if (p.running_)
@@ -11575,7 +11264,8 @@ protected:
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
 
-		compute_skeleton(p);
+		if (rebuild_skeleton)
+			compute_skeleton(p);
 		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
 	}
@@ -11727,12 +11417,15 @@ protected:
 			Vec3 A{near_.x(), near_.y(), near_.z()};
 			Vec3 B{far_d.x(), far_d.y(), far_d.z()};
 
-			Vec3 picked_sphere_center;
+			picked_sphere_ = PVertex();
+			Vec3 picked_sphere_center = Vec3::Zero();
+			bool has_picked_sphere_center = false;
 			foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-				if (!picked_sphere_.is_valid())
+				if (!has_picked_sphere_center)
 				{
 					picked_sphere_ = v;
 					picked_sphere_center = (*p.spheres_position_)[index_of(*p.spheres_, picked_sphere_)];
+					has_picked_sphere_center = true;
 					return true;
 				}
 				const Vec3& sp = (*p.spheres_position_)[index_of(*p.spheres_, v)];
@@ -11752,15 +11445,16 @@ protected:
 				compute_clusters(p);
 				compute_spheres_error(p);
 				if (!p.running_)
-					update_render_data(p);
+					update_render_data(p, false, true, true);
 			}
 			else if (key_code == GLFW_KEY_D && picked_sphere_.is_valid())
 			{
 				std::lock_guard<std::mutex> lock(p.mutex_);
 				remove_sphere(p, picked_sphere_);
 				compute_spheres_error(p);
+				picked_sphere_ = PVertex();
 				if (!p.running_)
-					update_render_data(p);
+					update_render_data(p, false, true, true);
 			}
 		}
 	}
@@ -11879,7 +11573,7 @@ protected:
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
 						init_spheres(p);
-						update_render_data(p);
+						update_render_data(p, false, true, true);
 					}
 					ImGui::SliderFloat("Update lambda", &p.sqem_update_lambda_line_plane_, 0.0f, 4.0f, "%.6f");
 					if (ImGui::Button("Update spheres"))
@@ -11888,8 +11582,7 @@ protected:
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							update_spheres(p);
-							compute_spheres_error(p);
-							update_render_data(p);
+							update_render_data(p, false, true, true);
 						}
 					}
 
@@ -11900,8 +11593,7 @@ protected:
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							compute_skeleton(p);
-							update_render_data(p);
-							non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
+							update_render_data(p, false, true, false);
 						}
 					}
 					const bool samples_mesh_export_available =
@@ -11953,19 +11645,8 @@ protected:
 						ImGui::EndDisabled();
 					ImGui::SameLine();
 					ImGui::TextDisabled("Select one or more ready targets.");
-					ImGui::InputFloat("Edge UDF |0| tol", &p.skeleton_edge_udf_zero_tol_, 0.0f, 0.0f, "%.6f");
-					ImGui::InputFloat("Face UDF |0| tol", &p.skeleton_face_udf_zero_tol_, 0.0f, 0.0f, "%.6f");
 					ImGui::Checkbox("Face score normalize(area)", &p.skeleton_face_score_normalize_by_area_);
 					ImGui::Checkbox("Enforce tet face cap (<=2)", &p.topology_enforce_tet_face_cap_);
-					if (ImGui::Button("Geometry filter"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							skeleton_geometry_filter(p);
-						}
-					}
-					ImGui::SameLine();
 					if (ImGui::Button("Face stage filter"))
 					{
 						if (!p.running_)
@@ -12192,13 +11873,13 @@ protected:
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
 						if (!p.running_)
-							update_render_data(p);
+							update_render_data(p, false, false);
 					}
 					if (ImGui::SliderFloat("Transparency", &p.spheres_transparency_, 0.0f, 1.0f))
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
 						if (!p.running_)
-							update_render_data(p);
+							update_render_data(p, false, true, false);
 					}
 
 					if (ImGui::Button("Split max error sphere"))
@@ -12208,7 +11889,7 @@ protected:
 						compute_clusters(p);
 						compute_spheres_error(p);
 						if (!p.running_)
-							update_render_data(p);
+							update_render_data(p, false, true, true);
 					}
 
 					ImGui::Separator();
@@ -12220,10 +11901,12 @@ protected:
 					ImGui::Separator();
 
 					ImGui::Text("Pick the sphere under the mouse with I, split it with S, delete it with D");
+					uint32 picked_index = INVALID_INDEX;
+					if (picked_sphere_.is_valid() && !is_live_sphere_vertex(p, picked_sphere_, picked_index))
+						picked_sphere_ = PVertex();
 					if (picked_sphere_.is_valid())
 					{
 						ImGui::Text("Picked sphere:");
-						const uint32 picked_index = index_of(*p.spheres_, picked_sphere_);
 						const Vec3& sp = (*p.spheres_position_)[picked_index];
 						ImGui::Text("Index: %u", picked_index);
 						ImGui::Text("Center: (%f, %f, %f)", sp[0], sp[1], sp[2]);
