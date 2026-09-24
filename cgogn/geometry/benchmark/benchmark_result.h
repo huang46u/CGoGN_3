@@ -40,7 +40,6 @@ struct BenchmarkTiming
 	double cluster_total_ms = 0.0;
 	double sphere_update_total_ms = 0.0;
 	double error_total_ms = 0.0;
-	double split_total_ms = 0.0;
 	double skeleton_construction_ms = 0.0;
 	double postprocess_ms = 0.0;
 	double export_ms = 0.0;

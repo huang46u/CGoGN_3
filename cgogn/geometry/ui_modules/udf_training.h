@@ -100,12 +100,6 @@ public:
 	using SAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
 	using NMFaceKey = std::array<uint32, 3>;
 
-	enum AutoSplitMode : uint32
-	{
-		ERROR_THRESHOLD,
-		MAX_NB_SPHERES
-	};
-
 	enum InputMode : uint32
 	{
 		INPUT_POINT_CLOUD,
@@ -198,7 +192,6 @@ private:
 		std::shared_ptr<PAttribute<Vec4>> spheres_cluster_color_ = nullptr;
 		std::shared_ptr<PAttribute<std::set<PVertex>>> spheres_neighbor_clusters_ = nullptr;
 		std::shared_ptr<PAttribute<PVertex>> spheres_parent_ = nullptr;
-		std::shared_ptr<PAttribute<bool>> spheres_do_not_split_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_not_normalized_ = nullptr;
 		std::shared_ptr<PAttribute<NMVertex>> spheres_skeleton_vertex_ = nullptr;
@@ -242,16 +235,6 @@ private:
 
 		float32 filter_radius_threshold_ = 0.0f;
 
-		bool auto_stop_ = false;
-		uint32 max_iterations_without_autosplit_ = 300;
-		uint32 max_iterations_after_reaching_max_spheres_ = 100;
-		bool auto_split_ = false;
-		AutoSplitMode auto_split_mode_ = ERROR_THRESHOLD;
-		float32 auto_split_error_threshold_ = 0.00025f;
-		uint32 auto_split_max_nb_spheres_ = 500;
-		float32 auto_split_ratio_ = 0.2f;
-		uint32 auto_split_max_per_iter_error_ = 10;
-		uint32 auto_split_max_per_iter_max_ = 100;
 		bool error_as_spheres_color_ = false;
 		float32 spheres_transparency_ = 0.5f;
 		float32 sqem_update_lambda_line_plane_ = 0.20f;
@@ -301,7 +284,6 @@ private:
 		std::mutex mutex_;
 		bool running_ = false;
 		bool stopping_ = false;
-		bool manual_stop_requested_ = false;
 		bool preview_render_during_sphere_update_ = true;
 		bool pending_full_refresh_after_stop_ = false;
 		bool slow_down_ = true;
@@ -367,16 +349,6 @@ public:
 		bool ma_flip_prune_enabled_ = true;
 		float ma_flip_prune_alpha_factor_ = 1.0f;
 		float32 filter_radius_threshold_ = 0.0f;
-		bool auto_stop_ = false;
-		uint32 max_iterations_without_autosplit_ = 300;
-		uint32 max_iterations_after_reaching_max_spheres_ = 100;
-		bool auto_split_ = false;
-		AutoSplitMode auto_split_mode_ = ERROR_THRESHOLD;
-		float32 auto_split_error_threshold_ = 0.00025f;
-		uint32 auto_split_max_nb_spheres_ = 500;
-		float32 auto_split_ratio_ = 0.2f;
-		uint32 auto_split_max_per_iter_error_ = 10;
-		uint32 auto_split_max_per_iter_max_ = 100;
 		float32 sqem_update_lambda_line_plane_ = 0.20f;
 		float32 init_dilation_constant_ = 0.001f;
 		float alpha_ = 0.005f;
@@ -396,7 +368,6 @@ public:
 		float64 cluster_total_ms_ = 0.0;
 		float64 sphere_update_total_ms_ = 0.0;
 		float64 error_total_ms_ = 0.0;
-		float64 split_total_ms_ = 0.0;
 		float64 average_iteration_ms_ = 0.0;
 		uint32 optimization_iterations_ = 0;
 	};
@@ -554,16 +525,6 @@ public:
 		p.ma_flip_prune_enabled_ = options.ma_flip_prune_enabled_;
 		p.ma_flip_prune_alpha_factor_ = options.ma_flip_prune_alpha_factor_;
 		p.filter_radius_threshold_ = options.filter_radius_threshold_;
-		p.auto_stop_ = options.auto_stop_;
-		p.max_iterations_without_autosplit_ = options.max_iterations_without_autosplit_;
-		p.max_iterations_after_reaching_max_spheres_ = options.max_iterations_after_reaching_max_spheres_;
-		p.auto_split_ = options.auto_split_;
-		p.auto_split_mode_ = options.auto_split_mode_;
-		p.auto_split_error_threshold_ = options.auto_split_error_threshold_;
-		p.auto_split_max_nb_spheres_ = options.auto_split_max_nb_spheres_;
-		p.auto_split_ratio_ = options.auto_split_ratio_;
-		p.auto_split_max_per_iter_error_ = options.auto_split_max_per_iter_error_;
-		p.auto_split_max_per_iter_max_ = options.auto_split_max_per_iter_max_;
 		p.sqem_update_lambda_line_plane_ = options.sqem_update_lambda_line_plane_;
 		p.init_dilation_constant_ = options.init_dilation_constant_;
 		p.alpha_ = options.alpha_;
@@ -660,133 +621,46 @@ public:
 	HeadlessOptimizationStats headless_optimize_spheres_prepared(PointsParameters& p, bool verbose = false)
 	{
 		const OutputVerbosity output_verbosity = verbose ? OUTPUT_VERBOSE : p.output_verbosity_;
+		constexpr uint32 max_iterations = 150;
 		const Scalar convergence_eps = Scalar(1e-10);
 		const uint32 max_post_convergence_iterations = 10;
-		const uint32 max_iterations_without_autosplit = p.max_iterations_without_autosplit_;
-		const uint32 max_iterations_after_reaching_max_spheres = p.max_iterations_after_reaching_max_spheres_;
 		HeadlessOptimizationStats stats;
 		p.running_ = true;
 		p.stopping_ = false;
 		p.iteration_count_ = 0;
 		p.total_error_diff_ = 0.0;
 		p.last_total_error_ = std::numeric_limits<Scalar>::max();
-		p.manual_stop_requested_ = false;
 		p.pending_full_refresh_after_stop_ = false;
 
 		bool convergence_reached = false;
 		uint32 post_convergence_iterations = 0;
-		bool target_reached_reported = false;
-		bool max_spheres_reached_once = false;
-		uint32 post_max_spheres_iterations = 0;
 		auto optimization_start = std::chrono::high_resolution_clock::now();
-
-		while (true)
+		while (p.iteration_count_ < max_iterations)
 		{
-			auto iteration_start = std::chrono::high_resolution_clock::now();
-
-			if (should_refresh_local_connectivity(p))
-			{
-				auto cluster_refresh_start = std::chrono::high_resolution_clock::now();
-				compute_skeleton(p, true);
-				auto cluster_refresh_end = std::chrono::high_resolution_clock::now();
-				stats.cluster_total_ms_ +=
-					std::chrono::duration<float64, std::milli>(cluster_refresh_end - cluster_refresh_start).count();
-			}
-
-			auto cluster_start = std::chrono::high_resolution_clock::now();
-			compute_clusters(p);
-			auto cluster_end = std::chrono::high_resolution_clock::now();
-			stats.cluster_total_ms_ += std::chrono::duration<float64, std::milli>(cluster_end - cluster_start).count();
-
-			auto update_start = std::chrono::high_resolution_clock::now();
-			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-				update_sphere_line_quadric_distance_free_radius(p, v);
-				return true;
-			});
-			parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-				(*p.spheres_do_not_split_)[index_of(*p.spheres_, v)] = false;
-				return true;
-			});
-			auto update_end = std::chrono::high_resolution_clock::now();
-			stats.sphere_update_total_ms_ += std::chrono::duration<float64, std::milli>(update_end - update_start).count();
-
-			auto error_start = std::chrono::high_resolution_clock::now();
-			compute_spheres_error(p);
-			auto error_end = std::chrono::high_resolution_clock::now();
-			stats.error_total_ms_ += std::chrono::duration<float64, std::milli>(error_end - error_start).count();
-
-			auto split_start = std::chrono::high_resolution_clock::now();
-			run_auto_split_iteration(p);
-			auto split_end = std::chrono::high_resolution_clock::now();
-			stats.split_total_ms_ += std::chrono::duration<float64, std::milli>(split_end - split_start).count();
-
+			update_spheres(p, &stats);
 			++p.iteration_count_;
 			log_basic(output_verbosity, "[HeadlessOptimize] iteration=", p.iteration_count_, " spheres=",
 					  p.nb_spheres_, " error=", p.total_error_, " diff=", p.total_error_diff_, '\n');
 
-			if (p.auto_stop_)
+			if (p.total_error_diff_ < convergence_eps)
 			{
-				const bool converged = (p.total_error_diff_ < convergence_eps);
-				if (converged)
+				if (!convergence_reached)
 				{
-					if (!convergence_reached)
-					{
-						convergence_reached = true;
-						post_convergence_iterations = 0;
-						target_reached_reported = false;
-					}
-					else
-					{
-						++post_convergence_iterations;
-					}
-
-					bool reached_target = false;
-					switch (p.auto_split_mode_)
-					{
-					case ERROR_THRESHOLD:
-						reached_target = (p.max_error_ < p.auto_split_error_threshold_);
-						break;
-					case MAX_NB_SPHERES:
-						reached_target = (p.nb_spheres_ >= p.auto_split_max_nb_spheres_);
-						break;
-					}
-					if (reached_target)
-						target_reached_reported = true;
-					if (post_convergence_iterations >= max_post_convergence_iterations)
-						break;
-				}
-				else if (convergence_reached)
-				{
-					convergence_reached = false;
+					convergence_reached = true;
 					post_convergence_iterations = 0;
-					target_reached_reported = false;
 				}
-			}
-
-			if (p.auto_split_)
-			{
-				if (p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
+				else
 				{
-					if (!max_spheres_reached_once)
-					{
-						max_spheres_reached_once = true;
-						post_max_spheres_iterations = 0;
-					}
-					else
-					{
-						++post_max_spheres_iterations;
-					}
-					if (post_max_spheres_iterations >= max_iterations_after_reaching_max_spheres)
-						break;
+					++post_convergence_iterations;
 				}
+				if (post_convergence_iterations >= max_post_convergence_iterations)
+					break;
 			}
-			else if (p.iteration_count_ >= max_iterations_without_autosplit)
+			else if (convergence_reached)
 			{
-				break;
+				convergence_reached = false;
+				post_convergence_iterations = 0;
 			}
-
-			auto iteration_end = std::chrono::high_resolution_clock::now();
-			unused_parameters(iteration_start, iteration_end, target_reached_reported);
 		}
 
 		auto optimization_end = std::chrono::high_resolution_clock::now();
@@ -798,7 +672,6 @@ public:
 										 : 0.0;
 		p.running_ = false;
 		p.stopping_ = false;
-		p.manual_stop_requested_ = false;
 		p.pending_full_refresh_after_stop_ = false;
 		return stats;
 	}
@@ -2112,7 +1985,6 @@ private:
 		p.spheres_neighbor_clusters_ =
 			get_or_add_attribute<std::set<PVertex>, PVertex>(*p.spheres_, "neighbor_clusters");
 		p.spheres_parent_ = get_or_add_attribute<PVertex, PVertex>(*p.spheres_, "parent");
-		p.spheres_do_not_split_ = get_or_add_attribute<bool, PVertex>(*p.spheres_, "do_not_split");
 		p.spheres_error_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "error");
 		p.spheres_error_not_normalized_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "error_not_normalized");
 		p.spheres_skeleton_vertex_ = get_or_add_attribute<NMVertex, PVertex>(*p.spheres_, "skeleton_vertex");
@@ -3513,172 +3385,34 @@ private:
 		return (p.iteration_count_ % 10) == 0;
 	}
 
-	struct AutoSplitHeapEntry
+
+	void update_spheres(PointsParameters& p, HeadlessOptimizationStats* stats = nullptr)
 	{
-		Scalar error;
-		PVertex sphere;
-	};
-
-	struct AutoSplitHeapCompare
-	{
-		bool operator()(const AutoSplitHeapEntry& lhs, const AutoSplitHeapEntry& rhs) const
-		{
-			return lhs.error > rhs.error;
-		}
-	};
-
-	std::vector<PVertex> collect_auto_split_centers_with_heap(
-		PointsParameters& p,
-		uint32 max_split_count,
-		Scalar minimum_error,
-		bool enforce_minimum_error,
-		bool enforce_max_nb_spheres)
-	{
-		std::vector<PVertex> split_centers;
-		if (!p.spheres_ || !p.spheres_error_ || max_split_count == 0 || p.nb_spheres_ == 0)
-			return split_centers;
-
-		split_centers.reserve(max_split_count);
-		uint32 remaining_split_count = max_split_count;
-		while (remaining_split_count > 0)
-		{
-			if (enforce_max_nb_spheres && p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
-				break;
-
-			std::priority_queue<AutoSplitHeapEntry, std::vector<AutoSplitHeapEntry>, AutoSplitHeapCompare> candidate_heap;
-			foreach_cell(*p.spheres_, [&](PVertex sphere) -> bool {
-				const uint32 sphere_index = index_of(*p.spheres_, sphere);
-				if (sphere_index == INVALID_INDEX || (*p.spheres_do_not_split_)[sphere_index])
-					return true;
-
-				const Scalar error = (*p.spheres_error_)[sphere_index];
-				if (enforce_minimum_error && error < minimum_error)
-					return true;
-
-				if (candidate_heap.size() < remaining_split_count)
-				{
-					candidate_heap.push({error, sphere});
-				}
-				else if (error > candidate_heap.top().error)
-				{
-					candidate_heap.pop();
-					candidate_heap.push({error, sphere});
-				}
-				return true;
-			});
-
-			if (candidate_heap.empty())
-				break;
-
-			std::vector<AutoSplitHeapEntry> top_candidates;
-			top_candidates.reserve(candidate_heap.size());
-			while (!candidate_heap.empty())
-			{
-				top_candidates.push_back(candidate_heap.top());
-				candidate_heap.pop();
-			}
-			std::sort(top_candidates.begin(), top_candidates.end(), [&](const AutoSplitHeapEntry& lhs,
-															 const AutoSplitHeapEntry& rhs) {
-				return lhs.error > rhs.error;
-			});
-
-			bool made_progress = false;
-			for (const AutoSplitHeapEntry& entry : top_candidates)
-			{
-				if (remaining_split_count == 0)
-					break;
-				if (enforce_max_nb_spheres && p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
-					break;
-
-				const PVertex sphere = entry.sphere;
-				if (!sphere.is_valid())
-					continue;
-				const uint32 s_index = index_of(*p.spheres_, sphere);
-				if (s_index == INVALID_INDEX || (*p.spheres_do_not_split_)[s_index])
-					continue;
-
-				(*p.spheres_do_not_split_)[s_index] = true;
-				for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[s_index])
-				{
-					const uint32 neighbor_index = index_of(*p.spheres_, neighbor);
-					if (neighbor_index != INVALID_INDEX)
-						(*p.spheres_do_not_split_)[neighbor_index] = true;
-				}
-
-				PVertex new_sphere = split_sphere(p, sphere, true);
-				if (!new_sphere.is_valid())
-					continue;
-
-				split_centers.push_back(new_sphere);
-				--remaining_split_count;
-				made_progress = true;
-			}
-
-			if (!made_progress)
-				break;
-		}
-
-		return split_centers;
-	}
-
-	void run_auto_split_iteration(PointsParameters& p)
-	{
-		if (!(p.auto_split_ && (p.total_error_diff_ < Scalar(1e-5) || p.iteration_count_ % 10 == 0)))
-		{
-			return;
-		}
-
-		switch (p.auto_split_mode_)
-		{
-		case ERROR_THRESHOLD: {
-			if (p.max_error_ <= p.auto_split_error_threshold_)
-				break;
-
-			compute_skeleton(p, true);
-
-			const uint32 to_split_max =
-				std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)), p.auto_split_max_per_iter_error_);
-			std::vector<PVertex> split_centers = collect_auto_split_centers_with_heap(
-				p, to_split_max, Scalar(p.auto_split_error_threshold_), true, false);
-			if (!split_centers.empty())
-				recompute_clusters_local_neighborhoods(p, split_centers);
-		}
-		break;
-		case MAX_NB_SPHERES: {
-			if (p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
-				break;
-
-			compute_skeleton(p, true);
-
-			const uint32 to_split_max =
-				std::min(uint32(std::ceil(p.nb_spheres_ * p.auto_split_ratio_)), p.auto_split_max_per_iter_max_);
-			std::vector<PVertex> split_centers =
-				collect_auto_split_centers_with_heap(p, to_split_max, Scalar(0), false, true);
-			if (!split_centers.empty())
-				recompute_clusters_local_neighborhoods(p, split_centers);
-		}
-		break;
-		}
-	}
-
-	void update_spheres(PointsParameters& p)
-	{
+		auto cluster_start = std::chrono::high_resolution_clock::now();
 		if (should_refresh_local_connectivity(p))
 			compute_skeleton(p, true);
 		compute_clusters(p);
+		auto cluster_end = std::chrono::high_resolution_clock::now();
+		if (stats)
+			stats->cluster_total_ms_ +=
+				std::chrono::duration<float64, std::milli>(cluster_end - cluster_start).count();
 
+		auto update_start = std::chrono::high_resolution_clock::now();
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
 			update_sphere_line_quadric_distance_free_radius(p, v);
 			return true;
 		});
+		auto update_end = std::chrono::high_resolution_clock::now();
+		if (stats)
+			stats->sphere_update_total_ms_ +=
+				std::chrono::duration<float64, std::milli>(update_end - update_start).count();
 
-		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			(*p.spheres_do_not_split_)[index_of(*p.spheres_, v)] = false;
-			return true;
-		});
-
+		auto error_start = std::chrono::high_resolution_clock::now();
 		compute_spheres_error(p);
-		run_auto_split_iteration(p);
+		auto error_end = std::chrono::high_resolution_clock::now();
+		if (stats)
+			stats->error_total_ms_ +=
+				std::chrono::duration<float64, std::milli>(error_end - error_start).count();
 
 		if (!p.running_)
 			update_render_data(p);
@@ -4453,7 +4187,7 @@ private:
 	}
 
 protected:
-	PVertex split_sphere(PointsParameters& p, PVertex sphere, bool defer_local_recluster = false)
+	PVertex split_sphere(PointsParameters& p, PVertex sphere)
 	{
 		if (!sphere.is_valid())
 			return PVertex();
@@ -4497,8 +4231,7 @@ protected:
 
 		p.nb_spheres_++;
 		inherit_sphere_neighbors(p, sphere, new_sphere);
-		if (!defer_local_recluster)
-			recompute_clusters_local_neighborhood(p, new_sphere);
+		recompute_clusters_local_neighborhood(p, new_sphere);
 		return new_sphere;
 	}
 
@@ -10963,8 +10696,6 @@ protected:
 			(*p.spheres_cluster_color_)[center_sphere_id] = Vec4(0.95, 0.25, 0.15, 1.0);
 		if (p.spheres_parent_)
 			(*p.spheres_parent_)[center_sphere_id] = PVertex();
-		if (p.spheres_do_not_split_)
-			(*p.spheres_do_not_split_)[center_sphere_id] = true;
 		if (p.spheres_error_)
 			(*p.spheres_error_)[center_sphere_id] = Scalar(0);
 		if (p.spheres_error_not_normalized_)
@@ -11880,139 +11611,79 @@ protected:
 
 	void start_spheres_update(PointsParameters& p)
 	{
-		const Scalar convergence_eps = Scalar(1e-10);
-		const uint32 max_post_convergence_iterations = 10;
-		const uint32 max_iterations_without_autosplit = p.max_iterations_without_autosplit_;
-		const uint32 max_iterations_after_reaching_max_spheres = p.max_iterations_after_reaching_max_spheres_;
+		constexpr Scalar convergence_eps = Scalar(1e-10);
+		constexpr uint32 max_post_convergence_iterations = 10;
+		constexpr uint32 max_iterations = 150;
 		p.running_ = true;
+		p.stopping_ = false;
 		p.iteration_count_ = 0;
 		p.total_error_diff_ = 0.0;
 		p.last_total_error_ = std::numeric_limits<Scalar>::max();
-		p.manual_stop_requested_ = false;
 		p.pending_full_refresh_after_stop_ = false;
 
-		launch_thread([&, convergence_eps, max_post_convergence_iterations, max_iterations_without_autosplit,
-						  max_iterations_after_reaching_max_spheres]() {
+		launch_thread([&]() {
 			bool convergence_reached = false;
 			uint32 post_convergence_iterations = 0;
-			bool target_reached_reported = false;
-			bool max_spheres_reached_once = false;
-			uint32 post_max_spheres_iterations = 0;
 			auto start = std::chrono::high_resolution_clock::now();
-			while (true)
+			while (p.iteration_count_ < max_iterations)
 			{
 				{
-					log_basic(p, "Start Sphere update", '\n');
 					std::lock_guard<std::mutex> lock(p.mutex_);
-					update_spheres(p);
-					p.iteration_count_++;
+					if (!p.stopping_)
+					{
+						log_basic(p, "Start Sphere update", '\n');
+						update_spheres(p);
+						++p.iteration_count_;
+					}
 				}
+				if (p.stopping_)
+					break;
 				if (p.slow_down_)
 					std::this_thread::sleep_for(std::chrono::microseconds(1000000 / p.update_rate_));
 				else
 					std::this_thread::yield();
 
-				if (p.auto_stop_)
+				if (p.total_error_diff_ < convergence_eps)
 				{
-					const bool converged = (p.total_error_diff_ < convergence_eps);
-					if (converged)
+					if (!convergence_reached)
 					{
-						if (!convergence_reached)
-						{
-							convergence_reached = true;
-							post_convergence_iterations = 0;
-							log_basic(p, "Auto stop: error converged (Diff < ", convergence_eps,
-									  "), start post-convergence countdown (", max_post_convergence_iterations, ").",
-									  '\n');
-						}
-						else
-						{
-							++post_convergence_iterations;
-						}
-
-						bool reached_target = false;
-						switch (p.auto_split_mode_)
-						{
-						case ERROR_THRESHOLD:
-							if (p.max_error_ < p.auto_split_error_threshold_)
-								reached_target = true;
-							break;
-						case MAX_NB_SPHERES:
-							if (p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
-								reached_target = true;
-							break;
-						}
-
-						if (reached_target)
-						{
-							if (!target_reached_reported)
-							{
-								log_basic(p, "Auto stop: target reached under current auto-split mode.", '\n');
-								target_reached_reported = true;
-							}
-						}
-						if (post_convergence_iterations >= max_post_convergence_iterations)
-						{
-							log_basic(p, "Auto stop: reached max post-convergence iterations (",
-									  max_post_convergence_iterations, ").", '\n');
-							p.stopping_ = true;
-						}
-					}
-					else if (convergence_reached)
-					{
-						convergence_reached = false;
+						convergence_reached = true;
 						post_convergence_iterations = 0;
-						target_reached_reported = false;
+						log_basic(p, "Auto stop: error converged (Diff < ", convergence_eps,
+								  "), start post-convergence countdown (", max_post_convergence_iterations, ").", '\n');
 					}
-				}
-
-				if (p.auto_split_)
-				{
-					if (p.nb_spheres_ >= p.auto_split_max_nb_spheres_)
+					else
 					{
-						if (!max_spheres_reached_once)
-						{
-							max_spheres_reached_once = true;
-							post_max_spheres_iterations = 0;
-							log_basic(p, "Auto split stop: reached max spheres (", p.auto_split_max_nb_spheres_,
-									  "), start post-max countdown (", max_iterations_after_reaching_max_spheres, ").",
-									  '\n');
-						}
-						else
-						{
-							++post_max_spheres_iterations;
-						}
-
-						if (post_max_spheres_iterations >= max_iterations_after_reaching_max_spheres)
-						{
-							log_basic(p, "Auto split stop: reached max post-max-sphere iterations (",
-									  max_iterations_after_reaching_max_spheres, ").", '\n');
-							p.stopping_ = true;
-						}
+						++post_convergence_iterations;
+					}
+					if (post_convergence_iterations >= max_post_convergence_iterations)
+					{
+						log_basic(p, "Auto stop: reached max post-convergence iterations (",
+								  max_post_convergence_iterations, ").", '\n');
+						p.stopping_ = true;
 					}
 				}
-				else if (p.iteration_count_ >= max_iterations_without_autosplit)
+				else if (convergence_reached)
 				{
-					log_basic(p, "Stop: reached max iterations without auto split (",
-							  max_iterations_without_autosplit, ").", '\n');
+					convergence_reached = false;
+					post_convergence_iterations = 0;
+				}
+
+				if (p.iteration_count_ >= max_iterations)
+				{
+					log_basic(p, "Stop: reached max iterations (", max_iterations, ").", '\n');
 					p.stopping_ = true;
 				}
-
 				log_basic(p, "Iteration: ", p.iteration_count_, " | Spheres: ", p.nb_spheres_, " | Error: ",
 						  p.total_error_, " | Diff: ", p.total_error_diff_, '\n');
-
 				if (p.stopping_)
-				{
-					p.stopping_ = false;
-					p.running_ = false;
-					p.manual_stop_requested_ = false;
-					p.pending_full_refresh_after_stop_ = true;
 					break;
-				}
 			}
+			p.stopping_ = false;
+			p.running_ = false;
+			p.pending_full_refresh_after_stop_ = true;
 			auto end = std::chrono::high_resolution_clock::now();
-			log_basic(p, "Sphere optimizations time: ", std::chrono::duration<Scalar>(end - start).count(), "s",
-					  '\n');
+			log_basic(p, "Sphere optimizations time: ", std::chrono::duration<Scalar>(end - start).count(), "s", '\n');
 			log_basic(p, "Nb iterations: ", p.iteration_count_, '\n');
 		});
 
@@ -12021,7 +11692,6 @@ protected:
 
 	void stop_spheres_update(PointsParameters& p)
 	{
-		p.manual_stop_requested_ = true;
 		p.stopping_ = true;
 	}
 
@@ -12516,30 +12186,7 @@ protected:
 						if (ImGui::Button("Stop spheres update"))
 							stop_spheres_update(p);
 					}
-					ImGui::Checkbox("Auto stop", &p.auto_stop_);
-
 					ImGui::Separator();
-
-					ImGui::Checkbox("Auto split", &p.auto_split_);
-					if (p.auto_split_)
-					{
-						ImGui::RadioButton("Error threshold", (int*)&p.auto_split_mode_, ERROR_THRESHOLD);
-						ImGui::SameLine();
-						ImGui::RadioButton("Max nb sphere", (int*)&p.auto_split_mode_, MAX_NB_SPHERES);
-						if (p.auto_split_mode_ == ERROR_THRESHOLD)
-						{
-							ImGui::SliderFloat("Threshold", &p.auto_split_error_threshold_, 0.0f, 1.0f, "%.6f",
-											   ImGuiSliderFlags_Logarithmic);
-							ImGui::SliderFloat("Split ratio", &p.auto_split_ratio_, 0.0f, 1.0f, "%.3f");
-							ImGui::InputScalar("Max split/iter", ImGuiDataType_U32, &p.auto_split_max_per_iter_error_);
-						}
-						else
-						{
-							ImGui::InputScalar("Nb spheres", ImGuiDataType_U32, &p.auto_split_max_nb_spheres_);
-							ImGui::SliderFloat("Split ratio", &p.auto_split_ratio_, 0.0f, 1.0f, "%.3f");
-							ImGui::InputScalar("Max split/iter", ImGuiDataType_U32, &p.auto_split_max_per_iter_max_);
-						}
-					}
 
 					if (ImGui::Checkbox("Error as color", &p.error_as_spheres_color_))
 					{

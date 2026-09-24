@@ -79,17 +79,6 @@ typename Training::HeadlessBenchmarkOptions make_training_options(const Benchmar
 	options.verbose_ = config.benchmark.verbose;
 	options.ma_flip_prune_enabled_ = config.input.ma_flip_prune;
 	options.ma_flip_prune_alpha_factor_ = config.input.ma_flip_prune_alpha_factor;
-	options.auto_stop_ = config.optimization.auto_stop;
-	options.max_iterations_without_autosplit_ = config.optimization.max_iterations_without_autosplit;
-	options.max_iterations_after_reaching_max_spheres_ = config.optimization.max_iterations_after_reaching_max_spheres;
-	options.auto_split_ = config.auto_split.enabled;
-	options.auto_split_mode_ =
-		(config.auto_split.mode == AutoSplitMode::MaxNbSpheres) ? Training::MAX_NB_SPHERES : Training::ERROR_THRESHOLD;
-	options.auto_split_error_threshold_ = config.auto_split.error_threshold;
-	options.auto_split_max_nb_spheres_ = config.auto_split.max_nb_spheres;
-	options.auto_split_ratio_ = config.auto_split.ratio;
-	options.auto_split_max_per_iter_error_ = config.auto_split.max_per_iter_error;
-	options.auto_split_max_per_iter_max_ = config.auto_split.max_per_iter_max;
 	options.sqem_update_lambda_line_plane_ = config.optimization.sqem_update_lambda_line_plane;
 	options.init_dilation_constant_ = config.initialization.init_dilation_constant;
 	options.alpha_ = config.sampling.alpha;
@@ -245,7 +234,6 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 			result.timing.cluster_total_ms = stats.cluster_total_ms_;
 			result.timing.sphere_update_total_ms = stats.sphere_update_total_ms_;
 			result.timing.error_total_ms = stats.error_total_ms_;
-			result.timing.split_total_ms = stats.split_total_ms_;
 			result.timing.average_iteration_ms = stats.average_iteration_ms_;
 		}
 		log_stage("optimization_end");
@@ -342,11 +330,6 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	benchmark_config.put("input.ma_flip_prune", config.input.ma_flip_prune);
 	benchmark_config.put("input.ma_flip_prune_alpha_factor", config.input.ma_flip_prune_alpha_factor);
 	benchmark_config.put("output.save_face_components", config.output.save_face_components);
-	benchmark_config.put("auto_split.enabled", config.auto_split.enabled);
-	benchmark_config.put("optimization.max_iterations_without_autosplit",
-						 config.optimization.max_iterations_without_autosplit);
-	benchmark_config.put("optimization.max_iterations_after_reaching_max_spheres",
-						 config.optimization.max_iterations_after_reaching_max_spheres);
 	benchmark_config.put("postprocess.topology_fix", config.postprocess.topology_fix);
 	benchmark_config.put("postprocess.deg_face_deletion", config.postprocess.deg_face_deletion);
 	benchmark_config.put("postprocess.nm_two_layer_prune", config.postprocess.nm_two_layer_prune);
@@ -380,7 +363,6 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	timing.put("cluster_total", seconds_from_milliseconds(result.timing.cluster_total_ms));
 	timing.put("sphere_update_total", seconds_from_milliseconds(result.timing.sphere_update_total_ms));
 	timing.put("error_total", seconds_from_milliseconds(result.timing.error_total_ms));
-	timing.put("split_total", seconds_from_milliseconds(result.timing.split_total_ms));
 	timing.put("skeleton_construction", seconds_from_milliseconds(result.timing.skeleton_construction_ms));
 	timing.put("postprocess", seconds_from_milliseconds(result.timing.postprocess_ms));
 	timing.put("export", seconds_from_milliseconds(result.timing.export_ms));

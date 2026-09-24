@@ -32,12 +32,6 @@ enum class NeuralModelType
 	MF
 };
 
-enum class AutoSplitMode
-{
-	ErrorThreshold,
-	MaxNbSpheres
-};
-
 struct BenchmarkInputConfig
 {
 	InputMode mode = InputMode::PointCloud;
@@ -70,21 +64,7 @@ struct BenchmarkSamplingConfig
 
 struct BenchmarkOptimizationConfig
 {
-	unsigned int max_iterations_without_autosplit = 300;
-	unsigned int max_iterations_after_reaching_max_spheres = 100;
 	float sqem_update_lambda_line_plane = 0.20f;
-	bool auto_stop = false;
-};
-
-struct BenchmarkAutoSplitConfig
-{
-	bool enabled = false;
-	AutoSplitMode mode = AutoSplitMode::ErrorThreshold;
-	float error_threshold = 0.00025f;
-	unsigned int max_nb_spheres = 500;
-	float ratio = 0.2f;
-	unsigned int max_per_iter_error = 10;
-	unsigned int max_per_iter_max = 100;
 };
 
 struct BenchmarkInitializationConfig
@@ -136,7 +116,6 @@ struct BenchmarkConfig
 	BenchmarkInputConfig input;
 	BenchmarkSamplingConfig sampling;
 	BenchmarkOptimizationConfig optimization;
-	BenchmarkAutoSplitConfig auto_split;
 	BenchmarkInitializationConfig initialization;
 	BenchmarkPostprocessConfig postprocess;
 	BenchmarkRuntimeConfig benchmark;
@@ -152,7 +131,6 @@ bool is_batch_case_completed(const BenchmarkConfig& config);
 std::string to_string(InputMode value);
 std::string to_string(InputGeometryType value);
 std::string to_string(NeuralModelType value);
-std::string to_string(AutoSplitMode value);
 
 } // namespace benchmark
 

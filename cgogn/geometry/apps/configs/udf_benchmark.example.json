@@ -23,19 +23,7 @@
     }
   },
   "optimization": {
-    "max_iterations_without_autosplit": 150,
-    "max_iterations_after_reaching_max_spheres": 100,
-    "sqem_update_lambda_line_plane": 0.2,
-    "auto_stop": true
-  },
-  "auto_split": {
-    "enabled": false,
-    "mode": "error_threshold",
-    "error_threshold": 0.00025,
-    "max_nb_spheres": 500,
-    "ratio": 0.2,
-    "max_per_iter_error": 10,
-    "max_per_iter_max": 100
+    "sqem_update_lambda_line_plane": 0.2
   },
   "initialization": {
     "seed": 42,

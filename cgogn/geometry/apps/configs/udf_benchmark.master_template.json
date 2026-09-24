@@ -14,10 +14,6 @@
       "input.neural_model_type": [
         "udf",
         "mf"
-      ],
-      "auto_split.mode": [
-        "error_threshold",
-        "max_nb_spheres"
       ]
     },
     "boolean_fields_possible_values": [
@@ -35,12 +31,8 @@
       "benchmark.num_measure_runs": "must be 1 in current loader",
       "input.geometry_type=point_cloud": "only .ply is accepted for input_path / batch.input_extension",
       "input.geometry_type=mesh": "accepted geometry formats are .obj, .ply, .off, .stl",
-      "optimization.max_iterations_without_autosplit": "must be > 0",
-      "optimization.max_iterations_after_reaching_max_spheres": "must be > 0",
       "sampling.bridson.sample_radius": "must be > 0",
-      "input.ma_flip_prune_alpha_factor": "must be in [1.0, 5.0]",
-      "auto_split.error_threshold": "must be > 0 when auto_split.enabled = true and auto_split.mode = error_threshold",
-      "auto_split.max_nb_spheres": "must be > 0 when auto_split.enabled = true and auto_split.mode = max_nb_spheres"
+      "input.ma_flip_prune_alpha_factor": "must be in [1.0, 5.0]"
     },
     "notes": [
       "Single-run mode: set batch.enabled = false, then fill input.geometry_type plus input.input_path (or legacy input.surface_path for mesh) and output.skeleton_ply.",
@@ -79,19 +71,7 @@
     }
   },
   "optimization": {
-    "max_iterations_without_autosplit": 300,
-    "max_iterations_after_reaching_max_spheres": 100,
-    "sqem_update_lambda_line_plane": 0.2,
-    "auto_stop": false
-  },
-  "auto_split": {
-    "enabled": false,
-    "mode": "error_threshold",
-    "error_threshold": 0.00025,
-    "max_nb_spheres": 500,
-    "ratio": 0.2,
-    "max_per_iter_error": 10,
-    "max_per_iter_max": 100
+    "sqem_update_lambda_line_plane": 0.2
   },
   "initialization": {
     "seed": 42,

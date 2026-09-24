@@ -152,15 +152,6 @@ NeuralModelType parse_neural_model_type(const std::string& value)
 	fail_config("unsupported `input.neural_model_type`: " + value);
 }
 
-AutoSplitMode parse_auto_split_mode(const std::string& value)
-{
-	if (value == "error_threshold")
-		return AutoSplitMode::ErrorThreshold;
-	if (value == "max_nb_spheres")
-		return AutoSplitMode::MaxNbSpheres;
-	fail_config("unsupported `auto_split.mode`: " + value);
-}
-
 std::string normalize_extension(std::string ext)
 {
 	std::transform(ext.begin(), ext.end(), ext.begin(),
@@ -244,11 +235,6 @@ std::string to_string(InputGeometryType value)
 std::string to_string(NeuralModelType value)
 {
 	return value == NeuralModelType::MF ? "mf" : "udf";
-}
-
-std::string to_string(AutoSplitMode value)
-{
-	return value == AutoSplitMode::MaxNbSpheres ? "max_nb_spheres" : "error_threshold";
 }
 
 BenchmarkConfig load_benchmark_config(const std::string& path)
@@ -358,26 +344,11 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	if (auto refresh_interval = optimization.get_optional<unsigned int>("local_cluster_connectivity_refresh_interval");
 		refresh_interval && *refresh_interval != 10)
 		fail_config("`optimization.local_cluster_connectivity_refresh_interval` is fixed to 10; remove the legacy field or set it to 10.");
-	config.optimization.max_iterations_without_autosplit =
-		get_value<unsigned int>(optimization, "max_iterations_without_autosplit", 300u);
-	config.optimization.max_iterations_after_reaching_max_spheres =
-		get_value<unsigned int>(optimization, "max_iterations_after_reaching_max_spheres", 100u);
 	config.optimization.sqem_update_lambda_line_plane =
 		require_value<float>(optimization, "sqem_update_lambda_line_plane");
 	if (auto lock_skeleton_connectivity = optimization.get_optional<bool>("lock_skeleton_connectivity");
 		lock_skeleton_connectivity && *lock_skeleton_connectivity)
 		fail_config("`optimization.lock_skeleton_connectivity` was removed; remove the legacy field or set it to false.");
-	config.optimization.auto_stop = get_value<bool>(optimization, "auto_stop", false);
-
-	const ptree& auto_split = root.get_child("auto_split");
-	config.auto_split.enabled = get_value<bool>(auto_split, "enabled", false);
-	if (auto mode = auto_split.get_optional<std::string>("mode"))
-		config.auto_split.mode = parse_auto_split_mode(*mode);
-	config.auto_split.error_threshold = get_value<float>(auto_split, "error_threshold", 0.00025f);
-	config.auto_split.max_nb_spheres = get_value<unsigned int>(auto_split, "max_nb_spheres", 500u);
-	config.auto_split.ratio = get_value<float>(auto_split, "ratio", 0.2f);
-	config.auto_split.max_per_iter_error = get_value<unsigned int>(auto_split, "max_per_iter_error", 10u);
-	config.auto_split.max_per_iter_max = get_value<unsigned int>(auto_split, "max_per_iter_max", 100u);
 
 	const ptree& initialization = root.get_child("initialization");
 	config.initialization.seed = require_value<int>(initialization, "seed");
@@ -482,22 +453,6 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		fail_config("`input.ma_flip_prune_alpha_factor` must be in [1.0, 5.0]");
 	if (!config.batch.enabled && config.output.skeleton_ply.empty())
 		fail_config("`output.skeleton_ply` is required in single-run mode");
-	if (config.optimization.max_iterations_without_autosplit == 0)
-		fail_config("`optimization.max_iterations_without_autosplit` must be > 0");
-	if (config.optimization.max_iterations_after_reaching_max_spheres == 0)
-		fail_config("`optimization.max_iterations_after_reaching_max_spheres` must be > 0");
-	if (config.auto_split.enabled)
-	{
-		if (config.auto_split.mode == AutoSplitMode::ErrorThreshold)
-		{
-			if (config.auto_split.error_threshold <= 0.0f)
-				fail_config("`auto_split.error_threshold` must be > 0 when `auto_split.mode=error_threshold`");
-		}
-		else if (config.auto_split.max_nb_spheres == 0)
-		{
-			fail_config("`auto_split.max_nb_spheres` must be > 0 when `auto_split.mode=max_nb_spheres`");
-		}
-	}
 
 	return config;
 }
