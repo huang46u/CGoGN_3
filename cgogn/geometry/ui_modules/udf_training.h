@@ -15,6 +15,7 @@
 #include <cgogn/geometry/algos/udf/neural_field_query.h>
 #include <cgogn/geometry/algos/udf/sample_processing.h>
 #include <cgogn/geometry/algos/udf/spatial_query.h>
+#include <cgogn/geometry/algos/udf/spheres_optimizer.h>
 #include <cgogn/geometry/algos/normal.h>
 #include <cgogn/geometry/functions/angle.h>
 #include <cgogn/geometry/functions/distance.h>
@@ -98,6 +99,10 @@ public:
 	template <typename T>
 	using SAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
 	using NMFaceKey = std::array<uint32, 3>;
+	using SpheresOptimizerType = geometry::SpheresOptimizer<POINTS>;
+	using SpheresOptimizerData = typename SpheresOptimizerType::Data;
+	using SpheresOptimizerMetrics = typename SpheresOptimizerType::Metrics;
+	using SpheresOptimizerStatus = typename SpheresOptimizerType::Status;
 
 	enum InputMode : uint32
 	{
@@ -188,13 +193,14 @@ private:
 		std::shared_ptr<PAttribute<Scalar>> spheres_cluster_area_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> spheres_cluster_color_ = nullptr;
 		std::shared_ptr<PAttribute<std::set<PVertex>>> spheres_neighbor_clusters_ = nullptr;
-		std::shared_ptr<PAttribute<PVertex>> spheres_parent_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_not_normalized_ = nullptr;
 		std::shared_ptr<PAttribute<NMVertex>> spheres_skeleton_vertex_ = nullptr;
+		std::unique_ptr<SpheresOptimizerType> spheres_optimizer_;
 
 		// Skeleton
 		NONMANIFOLD* skeleton_ = nullptr;
+		bool skeleton_invalidated_ = false;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_position_ = nullptr;
 		std::shared_ptr<NMAttribute<Scalar>> skeleton_radius_ = nullptr;
 		std::shared_ptr<NMAttribute<std::set<std::size_t>>> incident_tets_ = nullptr;
@@ -248,7 +254,6 @@ private:
 		Scalar total_error_diff_ = 0.0;
 		Scalar min_error_ = 0.0;
 		Scalar max_error_ = 0.0;
-		PVertex max_error_sphere_ = PVertex();
 		OutputVerbosity output_verbosity_ = OUTPUT_NORMAL;
 
 		// Threading
@@ -560,62 +565,49 @@ public:
 	void headless_init_spheres_prepared(POINTS& points)
 	{
 		auto& p = points_parameters_[&points];
-		clear(*p.spheres_);
-		init_spheres_from_samples(p);
-		if (p.samples_sphere_)
-			p.samples_sphere_->fill(PVertex());
-		compute_clusters_local(p);
+		if (optimizer_for(p).initialize_from_samples(Scalar(p.init_dilation_constant_)))
+		{
+			p.skeleton_invalidated_ = true;
+			if (p.skeleton_)
+			{
+				clear(*p.skeleton_);
+				p.skeleton_tets_.clear();
+				if (p.spheres_skeleton_vertex_)
+					p.spheres_skeleton_vertex_->fill(NMVertex());
+			}
+		}
+		sync_optimizer_metrics(p);
 	}
 
 	HeadlessOptimizationStats headless_optimize_spheres_prepared(PointsParameters& p, bool verbose = false)
 	{
 		const OutputVerbosity output_verbosity = verbose ? OUTPUT_VERBOSE : p.output_verbosity_;
-		constexpr uint32 max_iterations = 150;
-		const Scalar convergence_eps = Scalar(1e-10);
-		const uint32 max_post_convergence_iterations = 10;
 		HeadlessOptimizationStats stats;
 		p.running_ = true;
 		p.stopping_ = false;
-		p.iteration_count_ = 0;
-		p.total_error_diff_ = 0.0;
-		p.last_total_error_ = std::numeric_limits<Scalar>::max();
+		auto& optimizer = optimizer_for(p);
+		optimizer.reset_optimization();
+		sync_optimizer_metrics(p);
 		p.pending_full_refresh_after_stop_ = false;
-
-		bool convergence_reached = false;
-		uint32 post_convergence_iterations = 0;
 		auto optimization_start = std::chrono::high_resolution_clock::now();
-		while (p.iteration_count_ < max_iterations)
+		SpheresOptimizerStatus status = SpheresOptimizerStatus::running;
+		while (status == SpheresOptimizerStatus::running)
 		{
-			update_spheres(p, &stats);
-			++p.iteration_count_;
+			status = optimizer.update_once(Scalar(p.sqem_update_lambda_line_plane_));
+			sync_optimizer_metrics(p);
+			if (optimizer.metrics().sphere_topology_changed)
+				p.skeleton_invalidated_ = true;
 			log_basic(output_verbosity, "[HeadlessOptimize] iteration=", p.iteration_count_, " spheres=",
 					  p.nb_spheres_, " error=", p.total_error_, " diff=", p.total_error_diff_, '\n');
-
-			if (p.total_error_diff_ < convergence_eps)
-			{
-				if (!convergence_reached)
-				{
-					convergence_reached = true;
-					post_convergence_iterations = 0;
-				}
-				else
-				{
-					++post_convergence_iterations;
-				}
-				if (post_convergence_iterations >= max_post_convergence_iterations)
-					break;
-			}
-			else if (convergence_reached)
-			{
-				convergence_reached = false;
-				post_convergence_iterations = 0;
-			}
 		}
 
 		auto optimization_end = std::chrono::high_resolution_clock::now();
 		stats.optimization_total_ms_ =
 			std::chrono::duration<float64, std::milli>(optimization_end - optimization_start).count();
-		stats.optimization_iterations_ = p.iteration_count_;
+		stats.cluster_total_ms_ = optimizer.metrics().cluster_total_ms;
+		stats.sphere_update_total_ms_ = optimizer.metrics().sphere_update_total_ms;
+		stats.error_total_ms_ = optimizer.metrics().error_total_ms;
+		stats.optimization_iterations_ = optimizer.metrics().iteration;
 		stats.average_iteration_ms_ = (p.iteration_count_ > 0)
 										 ? stats.optimization_total_ms_ / static_cast<float64>(p.iteration_count_)
 										 : 0.0;
@@ -669,9 +661,9 @@ public:
 		counts.input_vertices_ = (selected_surface_ ? nb_cells<SVertex>(*selected_surface_) : counts.input_points_);
 		counts.sample_points_ = p.samples_mesh_ ? nb_cells<PVertex>(*p.samples_mesh_) : 0;
 		counts.final_spheres_ = p.spheres_ ? nb_cells<PVertex>(*p.spheres_) : 0;
-		counts.skeleton_vertices_ = p.skeleton_ ? nb_cells<NMVertex>(*p.skeleton_) : 0;
-		counts.skeleton_edges_ = p.skeleton_ ? nb_cells<NMEdge>(*p.skeleton_) : 0;
-		counts.skeleton_faces_ = p.skeleton_ ? nb_cells<NMFace>(*p.skeleton_) : 0;
+		counts.skeleton_vertices_ = p.skeleton_ && !p.skeleton_invalidated_ ? nb_cells<NMVertex>(*p.skeleton_) : 0;
+		counts.skeleton_edges_ = p.skeleton_ && !p.skeleton_invalidated_ ? nb_cells<NMEdge>(*p.skeleton_) : 0;
+		counts.skeleton_faces_ = p.skeleton_ && !p.skeleton_invalidated_ ? nb_cells<NMFace>(*p.skeleton_) : 0;
 		counts.optimization_iterations_ = p.iteration_count_;
 		return counts;
 	}
@@ -825,7 +817,7 @@ public:
 	void headless_export_skeleton_ply_prepared(PointsParameters& p, const std::string& filename,
 											   bool save_face_components = false)
 	{
-		if (!p.skeleton_ || !p.skeleton_position_ || !p.skeleton_radius_ || !p.spheres_ || !p.spheres_radius_)
+		if (p.skeleton_invalidated_ || !p.skeleton_ || !p.skeleton_position_ || !p.skeleton_radius_ || !p.spheres_ || !p.spheres_radius_)
 			return;
 
 		if (!std::filesystem::path(filename).parent_path().empty())
@@ -888,7 +880,6 @@ public:
 		surface_bvh_dirty_ = false;
 
 		selected_points_ = nullptr;
-		picked_sphere_ = PVertex();
 		timer_connection_.reset();
 	}
 
@@ -1638,6 +1629,13 @@ protected:
 				}
 				else if (p.pending_full_refresh_after_stop_)
 				{
+					if (p.skeleton_invalidated_ && p.skeleton_)
+					{
+						clear(*p.skeleton_);
+						p.skeleton_tets_.clear();
+						if (p.spheres_skeleton_vertex_)
+							p.spheres_skeleton_vertex_->fill(NMVertex());
+					}
 					update_render_data(p, false, true, true);
 					request_linked_views_update();
 					p.pending_full_refresh_after_stop_ = false;
@@ -1799,7 +1797,6 @@ private:
 		p.spheres_cluster_area_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "cluster_area");
 		p.spheres_neighbor_clusters_ =
 			get_or_add_attribute<std::set<PVertex>, PVertex>(*p.spheres_, "neighbor_clusters");
-		p.spheres_parent_ = get_or_add_attribute<PVertex, PVertex>(*p.spheres_, "parent");
 		p.spheres_error_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "error");
 		p.spheres_error_not_normalized_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "error_not_normalized");
 		p.spheres_skeleton_vertex_ = get_or_add_attribute<NMVertex, PVertex>(*p.spheres_, "skeleton_vertex");
@@ -2356,382 +2353,24 @@ private:
 	void init_spheres(PointsParameters& p)
 	{
 		points_provider_->clear_mesh(*p.spheres_);
-		init_spheres_from_samples(p);
-		if (p.samples_sphere_)
-			p.samples_sphere_->fill(PVertex());
-		compute_clusters_local(p);
+		SpheresOptimizerType& optimizer = optimizer_for(p);
+		if (optimizer.initialize_from_samples(Scalar(p.init_dilation_constant_)))
+		{
+			p.skeleton_invalidated_ = true;
+			if (p.skeleton_)
+			{
+				clear(*p.skeleton_);
+				p.skeleton_tets_.clear();
+				if (p.spheres_skeleton_vertex_)
+					p.spheres_skeleton_vertex_->fill(NMVertex());
+			}
+		}
+		sync_optimizer_metrics(p);
 
 		if (!p.running_)
 		{
 			set_post_init_sphere_render_state(p);
 		}
-	}
-
-	void init_spheres_from_samples(PointsParameters& p)
-	{
-		if (!p.samples_mesh_ || !p.samples_position_ || !p.samples_knn_ || !p.samples_ma_position_ ||
-			!p.samples_ma_radius_ || !p.samples_ma_secondary_vertex_)
-			return;
-		constexpr uint32 min_cover_points = 10;
-		constexpr uint32 max_nb_spheres = 100000;
-		std::vector<PVertex> sorted_vertices;
-		uint32 max_sample_index = 0;
-		foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			sorted_vertices.push_back(v);
-			const uint32 idx = index_of(*p.samples_mesh_, v);
-			if (idx != INVALID_INDEX)
-				max_sample_index = std::max(max_sample_index, idx);
-			return true;
-		});
-		std::sort(sorted_vertices.begin(), sorted_vertices.end(), [&](PVertex a, PVertex b) {
-			// sort candidate spheres by decreasing radius
-			uint32 idx_a = index_of(*p.samples_mesh_, a);
-			uint32 idx_b = index_of(*p.samples_mesh_, b);
-			const Scalar ra = (idx_a != INVALID_INDEX) ? (*p.samples_ma_radius_)[idx_a] : Scalar(-1);
-			const Scalar rb = (idx_b != INVALID_INDEX) ? (*p.samples_ma_radius_)[idx_b] : Scalar(-1);
-			const Scalar safe_ra = std::isfinite(static_cast<double>(ra)) ? ra : Scalar(-1);
-			const Scalar safe_rb = std::isfinite(static_cast<double>(rb)) ? rb : Scalar(-1);
-			return safe_ra > safe_rb;
-		});
-		auto covered = get_or_add_attribute<bool, PVertex>(*p.samples_mesh_, "__covered");
-		covered->fill(false);
-		const std::size_t candidate_marks_size =
-			sorted_vertices.empty() ? std::size_t(0) : (static_cast<std::size_t>(max_sample_index) + 1);
-		std::vector<uint32> candidate_marks(candidate_marks_size, 0);
-		uint32 candidate_mark_token = 1;
-
-		p.nb_spheres_ = 0;
-		uint32 skipped_invalid_ma_seeds = 0;
-
-		for (PVertex v : sorted_vertices)
-		{
-			uint32 v_index = index_of(*p.samples_mesh_, v);
-			if (v_index == INVALID_INDEX)
-				continue;
-
-			if (p.nb_spheres_ >= max_nb_spheres)
-				break;
-
-			if ((*covered)[v_index])
-				continue;
-
-			const Vec3& vp = (*p.samples_ma_position_)[v_index];
-			Scalar vr = (*p.samples_ma_radius_)[v_index];
-			if (!vp.allFinite() || !std::isfinite(static_cast<double>(vr)) || vr <= Scalar(0))
-			{
-				++skipped_invalid_ma_seeds;
-				continue;
-			}
-			const Scalar dilation_radius = std::max<Scalar>(vr + Scalar(p.init_dilation_constant_), Scalar(0));
-			const Scalar dilation_radius_sq = dilation_radius * dilation_radius;
-			if (candidate_mark_token == std::numeric_limits<uint32>::max())
-			{
-				std::fill(candidate_marks.begin(), candidate_marks.end(), 0u);
-				candidate_mark_token = 1;
-			}
-			const uint32 current_mark = candidate_mark_token++;
-			std::vector<PVertex> candidate_cover;
-			candidate_cover.reserve(128);
-
-			auto flood_cover = [&](PVertex seed) {
-				if (!seed.is_valid())
-					return;
-				uint32 seed_idx = index_of(*p.samples_mesh_, seed);
-				if (seed_idx == INVALID_INDEX || seed_idx >= candidate_marks.size() || (*covered)[seed_idx] ||
-					candidate_marks[seed_idx] == current_mark)
-					return;
-
-				std::vector<PVertex> stack;
-				stack.reserve(128);
-				candidate_marks[seed_idx] = current_mark;
-				candidate_cover.push_back(seed);
-				stack.push_back(seed);
-				while (!stack.empty())
-				{
-					PVertex w = stack.back();
-					stack.pop_back();
-					uint32 w_idx = index_of(*p.samples_mesh_, w);
-					if (w_idx == INVALID_INDEX)
-						continue;
-
-					for (PVertex u : (*p.samples_knn_)[w_idx])
-					{
-						uint32 u_idx = index_of(*p.samples_mesh_, u);
-						if (u_idx == INVALID_INDEX || u_idx >= candidate_marks.size())
-							continue;
-						if (!(*covered)[u_idx] && candidate_marks[u_idx] != current_mark &&
-							((*p.samples_position_)[u_idx] - vp).squaredNorm() < dilation_radius_sq)
-						{
-							candidate_marks[u_idx] = current_mark;
-							candidate_cover.push_back(u);
-							stack.push_back(u);
-						}
-					}
-				}
-			};
-
-			flood_cover(v);
-
-			// Secondary seed can reach another lobe; skip if already covered to avoid redundant traversal.
-			PVertex secondary = (*p.samples_ma_secondary_vertex_)[v_index];
-			if (secondary.is_valid())
-			{
-				flood_cover(secondary);
-			}
-
-			for (PVertex covered_vertex : candidate_cover)
-			{
-				uint32 covered_index = index_of(*p.samples_mesh_, covered_vertex);
-				if (covered_index == INVALID_INDEX)
-					continue;
-				(*covered)[covered_index] = true;
-			}
-
-			const bool keep_sphere =
-				(candidate_cover.size() >= min_cover_points) || (p.nb_spheres_ == 0 && !candidate_cover.empty());
-			if (!keep_sphere)
-				continue;
-
-			PVertex sphere = add_vertex(*p.spheres_);
-			p.nb_spheres_++;
-			uint32 sphere_index = index_of(*p.spheres_, sphere);
-
-			(*p.spheres_position_)[sphere_index] = vp;
-			(*p.spheres_radius_)[sphere_index] = vr;
-			(*p.spheres_cluster_color_)[sphere_index] =
-				Vec4(0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0,
-					 0.5 + 0.5 * (rand() % 256) / 256.0, 1.0);
-		}
-		remove_attribute<PVertex>(*p.samples_mesh_, covered);
-		if (skipped_invalid_ma_seeds > 0)
-			log_basic(p, "[InitSpheres] skipped_invalid_ma_seeds=", skipped_invalid_ma_seeds, '\n');
-
-	}
-
-	struct SphereFitData
-	{
-		POINTS* mesh = nullptr;
-		std::shared_ptr<PAttribute<Vec3>> position = nullptr;
-		std::shared_ptr<PAttribute<Vec3>> normal = nullptr;
-		std::shared_ptr<PAttribute<Scalar>> area = nullptr;
-		std::shared_ptr<PAttribute<std::vector<PVertex>>> knn = nullptr;
-		std::shared_ptr<PAttribute<Spherical_Quadric>> quadric = nullptr;
-		std::shared_ptr<PAttribute<Line_Quadric>> line_quadric = nullptr;
-		std::shared_ptr<PAttribute<PVertex>> sphere = nullptr;
-		std::shared_ptr<PAttribute<Scalar>> error = nullptr;
-	};
-
-	bool get_sphere_fit_data(PointsParameters& p, SphereFitData& data)
-	{
-		data.mesh = p.samples_mesh_;
-		data.position = p.samples_position_;
-		data.normal = p.samples_normal_;
-		data.area = p.samples_area_;
-		data.knn = p.samples_knn_;
-		data.quadric = p.samples_quadric_;
-		data.line_quadric = p.samples_line_quadric_;
-		data.sphere = p.samples_sphere_;
-		data.error = p.samples_error_;
-
-		if (!data.mesh || !data.position || !data.area || !data.quadric || !data.line_quadric || !data.sphere)
-			return false;
-		return true;
-	}
-
-	void compute_clusters_local(PointsParameters& p)
-	{
-		if (p.nb_spheres_ == 0)
-		{
-			if (p.samples_sphere_)
-				p.samples_sphere_->fill(PVertex());
-			return;
-		}
-		SphereFitData data;
-		if (!get_sphere_fit_data(p, data))
-			return;
-		std::atomic<uint64> invalid_sphere_candidates(0);
-		std::atomic<uint64> nonfinite_distance_candidates(0);
-		std::atomic<uint64> unassigned_samples(0);
-		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*p.spheres_, v);
-			(*p.spheres_cluster_)[v_index].clear();
-			(*p.spheres_cluster_area_)[v_index] = 0.0;
-			return true;
-		});
-
-		parallel_foreach_cell(*data.mesh, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*data.mesh, v);
-
-			Scalar a = (*data.area)[v_index];
-			PVertex cluster_sphere = (*data.sphere)[v_index];
-			const uint32 cs_index = cluster_sphere.is_valid() ? index_of(*p.spheres_, cluster_sphere) : INVALID_INDEX;
-
-			Scalar min_distance = std::numeric_limits<Scalar>::max();
-			PVertex closest_sphere;
-			uint32 closest_sphere_index = INVALID_INDEX;
-
-			auto evaluate_candidate = [&](PVertex pv) {
-				uint32 pv_index = index_of(*p.spheres_, pv);
-				if (!is_valid_sphere_for_clustering(p, pv_index))
-				{
-					++invalid_sphere_candidates;
-					return;
-				}
-				const Vec3& center = (*p.spheres_position_)[pv_index];
-				Scalar radius = (*p.spheres_radius_)[pv_index];
-
-				Scalar dist_sqem = (*data.quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
-				Scalar dist_other = (*data.line_quadric)[v_index].eval(center);
-				Scalar dist = dist_sqem + Scalar(p.sqem_update_lambda_line_plane_) * dist_other;
-				if (!std::isfinite(static_cast<double>(dist)))
-				{
-					++nonfinite_distance_candidates;
-					return;
-				}
-				if (dist < min_distance)
-				{
-					min_distance = dist;
-					closest_sphere = pv;
-					closest_sphere_index = pv_index;
-				}
-			};
-
-			if (cs_index != INVALID_INDEX && is_valid_sphere_for_clustering(p, cs_index))
-			{
-				const std::set<PVertex>& neighbor_spheres = (*p.spheres_neighbor_clusters_)[cs_index];
-				bool owner_evaluated = false;
-				for (PVertex pv : neighbor_spheres)
-				{
-					if (!owner_evaluated && cluster_sphere < pv)
-					{
-						evaluate_candidate(cluster_sphere);
-						owner_evaluated = true;
-					}
-					if (pv == cluster_sphere)
-						owner_evaluated = true;
-					evaluate_candidate(pv);
-				}
-				if (!owner_evaluated)
-					evaluate_candidate(cluster_sphere);
-			}
-			else
-			{
-				// Invalid or uninitialized ownership requires a global search.
-				foreach_cell(*p.spheres_, [&](PVertex pv) -> bool {
-					evaluate_candidate(pv);
-					return true;
-				});
-			}
-
-			(*data.sphere)[v_index] = closest_sphere;
-			if (!closest_sphere.is_valid() || closest_sphere_index == INVALID_INDEX)
-			{
-				++unassigned_samples;
-				return true;
-			}
-
-			std::lock_guard<std::mutex> lock(spheres_mutex_[closest_sphere_index % spheres_mutex_.size()]);
-			(*p.spheres_cluster_)[closest_sphere_index].push_back(v);
-			(*p.spheres_cluster_area_)[closest_sphere_index] += a;
-
-			return true;
-		});
-		if (invalid_sphere_candidates.load() > 0 || nonfinite_distance_candidates.load() > 0 || unassigned_samples.load() > 0)
-		{
-			log_error(p, "[ClusterLocalGuard] invalid_sphere_candidates=", invalid_sphere_candidates.load(),
-					  " nonfinite_distance_candidates=", nonfinite_distance_candidates.load(),
-					  " unassigned_samples=", unassigned_samples.load(), '\n');
-		}
-	}
-
-	void compute_clusters(PointsParameters& p)
-	{
-		compute_clusters_local(p);
-		prune_empty_clusters(p);
-	}
-
-	void prune_empty_clusters(PointsParameters& p)
-	{
-		if (!p.spheres_ || p.nb_spheres_ == 0)
-			return;
-		std::vector<PVertex> to_remove;
-		to_remove.reserve(p.nb_spheres_);
-		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*p.spheres_, v);
-			if ((*p.spheres_cluster_)[v_index].empty())
-				to_remove.push_back(v);
-			return true;
-		});
-		if (to_remove.empty())
-			return;
-		for (PVertex v : to_remove)
-		{
-			if (v.is_valid())
-				remove_sphere(p, v);
-		}
-	}
-	void compute_spheres_error(PointsParameters& p)
-	{
-		SphereFitData data;
-		if (!get_sphere_fit_data(p, data))
-			return;
-				parallel_foreach_cell(*p.spheres_, [&](PVertex v) {
-			uint32 v_index = index_of(*p.spheres_, v);
-
-			const Vec3& center = (*p.spheres_position_)[v_index];
-			Scalar radius = (*p.spheres_radius_)[v_index];
-						const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[v_index];
-
-			Scalar cluster_error = 0.0;
-			for (PVertex sv : cluster)
-			{
-				uint32 sv_index = index_of(*data.mesh, sv);
-				Scalar dist_sqem =
-					(*data.quadric)[sv_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
-				// Don't multiply by area here since line quadric already incorporates it
-				Scalar dist_other = (*data.line_quadric)[sv_index].eval(center);
-				Scalar dist = dist_sqem + Scalar(p.sqem_update_lambda_line_plane_) * dist_other;
-				if (data.error)
-					(*data.error)[sv_index] = dist;
-				cluster_error += dist;
-			}
-
-			if ((*p.spheres_cluster_area_)[v_index] > 0)
-				(*p.spheres_error_)[v_index] = cluster_error / (*p.spheres_cluster_area_)[v_index];
-			else
-				(*p.spheres_error_)[v_index] = 0.0;
-
-			(*p.spheres_error_not_normalized_)[v_index] = cluster_error;
-
-			return true;
-		});
-
-		p.min_error_ = std::numeric_limits<Scalar>::max();
-		p.max_error_ = std::numeric_limits<Scalar>::min();
-		p.max_error_sphere_ = PVertex();
-		p.total_error_ = 0.0;
-		p.total_error_not_normalized_ = 0.0;
-
-		foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			uint32 v_idx = index_of(*p.spheres_, v);
-			Scalar error = (*p.spheres_error_)[v_idx];
-			Scalar error_not_normalized = (*p.spheres_error_not_normalized_)[v_idx];
-
-			if (error < p.min_error_)
-				p.min_error_ = error;
-			if (error > p.max_error_)
-			{
-				p.max_error_ = error;
-				p.max_error_sphere_ = v;
-			}
-			p.total_error_ += error;
-			p.total_error_not_normalized_ += error_not_normalized;
-			return true;
-		});
-
-		p.total_error_diff_ = std::abs(p.total_error_ - p.last_total_error_);
-		p.last_total_error_ = p.total_error_;
-
 	}
 
 	void update_spheres_color(PointsParameters& p)
@@ -2905,222 +2544,6 @@ private:
 		return true;
 	}
 
-	bool try_get_nearest_sample_ma_radius(PointsParameters& p, const Vec3& query, Scalar& out_radius)
-	{
-		if (!p.samples_mesh_ || !p.samples_ma_radius_)
-			return false;
-		if (!p.samples_kdtree_ || p.samples_kdtree_vertices_.empty())
-			build_kdtree(p);
-		if (!p.samples_kdtree_ || p.samples_kdtree_vertices_.empty())
-			return false;
-
-		std::pair<uint32, Scalar> knn_res;
-		p.samples_kdtree_->find_nn(query, &knn_res);
-		if (knn_res.first >= p.samples_kdtree_vertices_.size())
-			return false;
-
-		const uint32 sample_index = index_of(*p.samples_mesh_, p.samples_kdtree_vertices_[knn_res.first]);
-		if (sample_index == INVALID_INDEX)
-			return false;
-
-		const Scalar ma_radius = (*p.samples_ma_radius_)[sample_index];
-		if (!std::isfinite(ma_radius) || ma_radius <= Scalar(0))
-			return false;
-
-		out_radius = ma_radius;
-		return true;
-	}
-
-	void update_sphere_line_quadric_distance_fix_current_radius(PointsParameters& p, PVertex sphere, Scalar fixed_radius)
-	{
-		if (!std::isfinite(fixed_radius) || fixed_radius <= Scalar(0))
-			return;
-
-		SphereFitData data;
-		if (!get_sphere_fit_data(p, data))
-			return;
-		uint32 sphere_index = index_of(*p.spheres_, sphere);
-
-		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
-		if (cluster.empty())
-			return;
-		Vec3 c = (*p.spheres_position_)[sphere_index];
-		Spherical_Quadric q;
-		Line_Quadric lq;
-		for (PVertex v : cluster)
-		{
-			uint32 v_index = index_of(*data.mesh, v);
-			Scalar weight = value<Scalar>(*data.mesh, data.area, v);
-			if (weight <= Scalar(0))
-			{
-				log_verbose(p, "Warning: sample with zero volume weight in sphere ", sphere_index, '\n');
-				continue;
-			}
-			q += (*data.quadric)[v_index] * weight;
-			lq += (*data.line_quadric)[v_index] * weight;
-		}
-
-		Mat4 Ql = lq.get_quadric().matrix();
-		Mat3 Al = Ql.block<3, 3>(0, 0);
-		Vec3 bl = -Ql.block<3, 1>(0, 3);
-
-		Mat3 As = q._A.block<3, 3>(0, 0);
-		Vec3 bs = q._b.head<3>();
-		Vec3 Asr = q._A.block<3, 1>(0, 3);
-
-		const Scalar update_lambda = Scalar(p.sqem_update_lambda_line_plane_);
-		Mat3 A = As + update_lambda * Al;
-		Vec3 b = (bs + update_lambda * bl) - Asr * fixed_radius;
-
-		c = A.ldlt().solve(b);
-		if (!c.allFinite())
-			return;
-
-		(*p.spheres_position_)[sphere_index] = c;
-		(*p.spheres_radius_)[sphere_index] = fixed_radius;
-	}
-
-	void update_sphere_line_quadric_distance_free_radius(PointsParameters& p, PVertex sphere)
-	{
-		SphereFitData data;
-		if (!get_sphere_fit_data(p, data))
-			return;
-		uint32 sphere_index = index_of(*p.spheres_, sphere);
-
-		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[sphere_index];
-		const Scalar radius = (*p.spheres_radius_)[sphere_index];
-		if (cluster.empty())
-			return;
-		Spherical_Quadric q;
-		Line_Quadric lq;
-		Scalar weight_sum = Scalar(0);
-		for (PVertex v : cluster)
-		{
-			uint32 v_index = index_of(*data.mesh, v);
-			Scalar weight = value<Scalar>(*data.mesh, data.area, v);
-			if (weight <= 0.0)
-				continue;
-			q += (*data.quadric)[v_index] * weight;
-			lq += (*data.line_quadric)[v_index] * weight;
-			weight_sum += weight;
-		}
-		if (weight_sum <= Scalar(0))
-			return;
-
-		Mat4 Ql = lq.get_quadric().matrix();
-		Mat3 Al = Ql.block<3, 3>(0, 0);
-		Vec3 bl = -Ql.block<3, 1>(0, 3);
-
-		Mat4 Al_ext = Mat4::Zero();
-		Al_ext.block<3, 3>(0, 0) = Al;
-		Vec4 bl_ext = Vec4::Zero();
-		bl_ext.head<3>() = bl;
-
-		const Scalar update_lambda = Scalar(p.sqem_update_lambda_line_plane_);
-		Mat4 A = q._A + update_lambda * Al_ext;
-		Vec4 b = q._b + update_lambda * bl_ext;
-		Vec4 s = A.completeOrthogonalDecomposition().solve(b);
-		if (!s.allFinite())
-			return;
-		Scalar nearest_ma_radius = Scalar(0);
-		const bool radius_too_large =
-			try_get_nearest_sample_ma_radius(p, s.head<3>(), nearest_ma_radius) &&
-			(s[3] > nearest_ma_radius * Scalar(1.5));
-		const bool radius_non_positive = (s[3] <= Scalar(0));
-		if (radius_too_large || radius_non_positive)
-		{
-			update_sphere_line_quadric_distance_fix_current_radius(p, sphere, radius);
-			return;
-		}
-
-		(*p.spheres_position_)[sphere_index] = s.head<3>();
-		(*p.spheres_radius_)[sphere_index] = s[3];
-	}
-	bool should_refresh_local_connectivity(const PointsParameters& p)
-	{
-		return (p.iteration_count_ % 10) == 0;
-	}
-
-
-	void update_spheres(PointsParameters& p, HeadlessOptimizationStats* stats = nullptr)
-	{
-		auto cluster_start = std::chrono::high_resolution_clock::now();
-		if (should_refresh_local_connectivity(p))
-			compute_sphere_neighbors(p);
-		compute_clusters(p);
-		auto cluster_end = std::chrono::high_resolution_clock::now();
-		if (stats)
-			stats->cluster_total_ms_ +=
-				std::chrono::duration<float64, std::milli>(cluster_end - cluster_start).count();
-
-		auto update_start = std::chrono::high_resolution_clock::now();
-		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			update_sphere_line_quadric_distance_free_radius(p, v);
-			return true;
-		});
-		auto update_end = std::chrono::high_resolution_clock::now();
-		if (stats)
-			stats->sphere_update_total_ms_ +=
-				std::chrono::duration<float64, std::milli>(update_end - update_start).count();
-
-		auto error_start = std::chrono::high_resolution_clock::now();
-		compute_spheres_error(p);
-		auto error_end = std::chrono::high_resolution_clock::now();
-		if (stats)
-			stats->error_total_ms_ +=
-				std::chrono::duration<float64, std::milli>(error_end - error_start).count();
-	}
-
-	void remove_sphere(PointsParameters& p, PVertex v)
-	{
-		uint32 v_index = INVALID_INDEX;
-		if (!is_live_sphere_vertex(p, v, v_index))
-			return;
-		SphereFitData data;
-		if (!get_sphere_fit_data(p, data))
-			return;
-		const std::vector<PVertex> removed_cluster = (*p.spheres_cluster_)[v_index];
-		std::set<PVertex> removed_neighbors;
-		if (p.spheres_neighbor_clusters_)
-			removed_neighbors = (*p.spheres_neighbor_clusters_)[v_index];
-		for (PVertex s : removed_cluster)
-		{
-			uint32 s_idx = index_of(*data.mesh, s);
-			(*data.sphere)[s_idx] = PVertex();
-		}
-
-		// Keep neighbor lists consistent by removing the deleted sphere from adjacent sets.
-		if (p.spheres_neighbor_clusters_)
-		{
-			const std::set<PVertex>& neighbors = (*p.spheres_neighbor_clusters_)[v_index];
-			for (PVertex neighbor : neighbors)
-			{
-				if (!neighbor.is_valid())
-					continue;
-				const uint32 d_idx = neighbor.dart_.index_;
-				if (d_idx >= p.spheres_->darts_.maximum_index())
-					continue;
-				const uint32 n_index = index_of(*p.spheres_, neighbor);
-				if (n_index == INVALID_INDEX)
-					continue;
-				(*p.spheres_neighbor_clusters_)[n_index].erase(v);
-			}
-			(*p.spheres_neighbor_clusters_)[v_index].clear();
-		}
-
-		if (p.spheres_skeleton_vertex_)
-		{
-			const NMVertex linked_skeleton_vertex = (*p.spheres_skeleton_vertex_)[v_index];
-			if (linked_skeleton_vertex.is_valid() && p.skeleton_ && p.skeleton_source_sphere_)
-				value<PVertex>(*p.skeleton_, p.skeleton_source_sphere_, linked_skeleton_vertex) = PVertex();
-			(*p.spheres_skeleton_vertex_)[v_index] = NMVertex();
-		}
-
-		remove_vertex(*p.spheres_, v);
-		p.nb_spheres_--;
-		redistribute_removed_sphere_cluster(p, removed_cluster, removed_neighbors);
-	}
-
 	bool remove_skeleton_vertex_and_linked_sphere(PointsParameters& p, const NMVertex& v)
 	{
 		if (!p.skeleton_ || !v.is_valid())
@@ -3138,7 +2561,8 @@ private:
 			const uint32 sphere_index = index_of(*p.spheres_, linked_sphere);
 			if (sphere_index != INVALID_INDEX && p.spheres_skeleton_vertex_)
 				(*p.spheres_skeleton_vertex_)[sphere_index] = NMVertex();
-			remove_sphere(p, linked_sphere);
+			optimizer_for(p).remove_sphere(linked_sphere);
+			sync_optimizer_metrics(p);
 		}
 
 		if (p.skeleton_source_sphere_)
@@ -3164,51 +2588,13 @@ private:
 		}
 	};
 
-	void compute_sphere_neighbors(PointsParameters& p)
-	{
-		SphereFitData data;
-		if (!get_sphere_fit_data(p, data))
-			return;
-		auto knn_attr = data.knn;
-		if (!data.mesh || !data.sphere)
-			return;
-		if (!knn_attr)
-			return;
-		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*p.spheres_, v);
-			(*p.spheres_neighbor_clusters_)[v_index].clear();
-			return true;
-		});
-
-		foreach_cell(*data.mesh, [&](PVertex v) -> bool {
-			uint32 v_index = index_of(*data.mesh, v);
-			PVertex v_sphere = (*data.sphere)[v_index];
-			for (PVertex w : (*knn_attr)[v_index])
-			{
-				PVertex w_sphere = (*data.sphere)[index_of(*data.mesh, w)];
-				if (v_sphere.is_valid() && w_sphere.is_valid() && v_sphere != w_sphere)
-				{
-					uint32 v_index = index_of(*p.spheres_, v_sphere);
-					uint32 w_index = index_of(*p.spheres_, w_sphere);
-					(*p.spheres_neighbor_clusters_)[v_index].insert(w_sphere);
-					(*p.spheres_neighbor_clusters_)[w_index].insert(v_sphere);
-				}
-			}
-			return true;
-		});
-
-	}
-
 	void compute_skeleton(PointsParameters& p)
 	{
-		compute_sphere_neighbors(p);
-		SphereFitData data;
-		if (!get_sphere_fit_data(p, data))
-			return;
-		auto knn_attr = data.knn;
-		if (!data.mesh || !data.sphere || !knn_attr)
+		optimizer_for(p).compute_sphere_neighbors();
+		if (!p.samples_mesh_ || !p.samples_sphere_ || !p.samples_knn_)
 			return;
 		clear(*p.skeleton_);
+		p.skeleton_invalidated_ = false;
 		std::map<NMFaceKey, NMFace> skeleton_faces_map;
 		auto get_face_key = [](uint32 i1, uint32 i2, uint32 i3) -> NMFaceKey {
 			std::array<uint32, 3> key = {i1, i2, i3};
@@ -3354,279 +2740,6 @@ private:
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_non_manifold_color_.get());
 	}
 
-
-	void inherit_sphere_neighbors(PointsParameters& p, PVertex parent, PVertex child)
-	{
-		if (!parent.is_valid() || !child.is_valid())
-			return;
-		if (p.nb_spheres_ == 2)
-		{
-			uint32 parent_index = index_of(*p.spheres_, parent);
-			uint32 child_index = index_of(*p.spheres_, child);
-			(*p.spheres_neighbor_clusters_)[parent_index].clear();
-			(*p.spheres_neighbor_clusters_)[child_index].clear();
-			(*p.spheres_neighbor_clusters_)[parent_index].insert(child);
-			(*p.spheres_neighbor_clusters_)[child_index].insert(parent);
-			return;
-		}
-		uint32 parent_index = index_of(*p.spheres_, parent);
-		uint32 child_index = index_of(*p.spheres_, child);
-
-		(*p.spheres_neighbor_clusters_)[child_index].clear();
-		(*p.spheres_neighbor_clusters_)[child_index].insert(parent);
-		for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[parent_index])
-		{
-			if (!neighbor.is_valid() || neighbor == child)
-				continue;
-			(*p.spheres_neighbor_clusters_)[child_index].insert(neighbor);
-			uint32 n_index = index_of(*p.spheres_, neighbor);
-			(*p.spheres_neighbor_clusters_)[n_index].insert(child);
-		}
-		(*p.spheres_neighbor_clusters_)[parent_index].insert(child);
-	}
-
-	void recompute_clusters_local_neighborhood(PointsParameters& p, PVertex center_sphere)
-	{
-		if (!center_sphere.is_valid())
-			return;
-
-		std::vector<PVertex> center_spheres = {center_sphere};
-		recompute_clusters_local_neighborhoods(p, center_spheres);
-	}
-
-	void recompute_clusters_local_neighborhoods(PointsParameters& p, const std::vector<PVertex>& center_spheres)
-	{
-		if (center_spheres.empty() || p.nb_spheres_ == 0)
-			return;
-
-		SphereFitData data;
-		if (!get_sphere_fit_data(p, data))
-			return;
-		const uint32 nb_samples = nb_cells<PVertex>(*data.mesh);
-		if (nb_samples == 0)
-			return;
-
-		std::vector<PVertex> candidate_spheres;
-		std::unordered_set<uint32> candidate_indices;
-		candidate_spheres.reserve(center_spheres.size() * 8);
-
-		auto try_add_candidate = [&](PVertex sphere) {
-			if (!sphere.is_valid())
-				return;
-			const uint32 s_index = index_of(*p.spheres_, sphere);
-			if (s_index == INVALID_INDEX)
-				return;
-			if (candidate_indices.insert(s_index).second)
-				candidate_spheres.push_back(sphere);
-		};
-
-		for (PVertex center_sphere : center_spheres)
-		{
-			if (!center_sphere.is_valid())
-				continue;
-			const uint32 center_index = index_of(*p.spheres_, center_sphere);
-			if (center_index == INVALID_INDEX)
-				continue;
-
-			try_add_candidate(center_sphere);
-			for (PVertex neighbor : (*p.spheres_neighbor_clusters_)[center_index])
-				try_add_candidate(neighbor);
-		}
-		if (candidate_spheres.empty())
-			return;
-
-		std::vector<PVertex> samples;
-		samples.reserve(nb_samples);
-		std::vector<uint8_t> marked(nb_samples, 0);
-		for (PVertex sphere : candidate_spheres)
-		{
-			uint32 s_index = index_of(*p.spheres_, sphere);
-			for (PVertex v : (*p.spheres_cluster_)[s_index])
-			{
-				uint32 v_idx = index_of(*data.mesh, v);
-				if (v_idx >= nb_samples || marked[v_idx])
-					continue;
-				marked[v_idx] = 1;
-				samples.push_back(v);
-			}
-		}
-
-
-		for (PVertex sphere : candidate_spheres)
-		{
-			uint32 s_index = index_of(*p.spheres_, sphere);
-			(*p.spheres_cluster_)[s_index].clear();
-			(*p.spheres_cluster_area_)[s_index] = 0.0;
-		}
-
-		if (samples.empty())
-			return;
-
-		auto eval_distance = [&](uint32 v_index, uint32 sphere_index) -> Scalar {
-			const Vec3& center = (*p.spheres_position_)[sphere_index];
-			Scalar radius = (*p.spheres_radius_)[sphere_index];
-			Scalar dist_sqem = (*data.quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
-			Scalar dist_other = (*data.line_quadric)[v_index].eval(center);
-			Scalar dist = dist_sqem + Scalar(p.sqem_update_lambda_line_plane_) * dist_other;
-			return dist;
-		};
-
-		for (PVertex v : samples)
-		{
-			uint32 v_index = index_of(*data.mesh, v);
-			Scalar a = (*data.area)[v_index];
-			Scalar min_distance = std::numeric_limits<Scalar>::max();
-			PVertex closest_sphere;
-			uint32 closest_sphere_index = 0;
-
-			for (PVertex sphere : candidate_spheres)
-			{
-				uint32 s_index = index_of(*p.spheres_, sphere);
-				Scalar dist = eval_distance(v_index, s_index);
-				if (dist < min_distance)
-				{
-					min_distance = dist;
-					closest_sphere = sphere;
-					closest_sphere_index = s_index;
-				}
-			}
-
-			if (!closest_sphere.is_valid())
-				continue;
-			(*data.sphere)[v_index] = closest_sphere;
-			(*p.spheres_cluster_)[closest_sphere_index].push_back(v);
-			(*p.spheres_cluster_area_)[closest_sphere_index] += a;
-		}
-	}
-
-	void redistribute_removed_sphere_cluster(PointsParameters& p, const std::vector<PVertex>& removed_cluster,
-											 const std::set<PVertex>& removed_neighbors)
-	{
-		SphereFitData data;
-		if (!get_sphere_fit_data(p, data))
-			return;
-		if (removed_cluster.empty() || p.nb_spheres_ == 0)
-		{
-			return;
-		}
-
-		std::vector<PVertex> candidate_spheres;
-		candidate_spheres.reserve(removed_neighbors.size() + 4);
-		std::unordered_set<uint32> candidate_indices;
-		auto try_add_candidate = [&](PVertex sphere) {
-			if (!sphere.is_valid())
-				return;
-			const uint32 s_index = index_of(*p.spheres_, sphere);
-			if (s_index == INVALID_INDEX)
-				return;
-			if (candidate_indices.insert(s_index).second)
-				candidate_spheres.push_back(sphere);
-		};
-
-		for (PVertex neighbor : removed_neighbors)
-			try_add_candidate(neighbor);
-
-		if (candidate_spheres.empty())
-		{
-			foreach_cell(*p.spheres_, [&](PVertex sphere) -> bool {
-				try_add_candidate(sphere);
-				return true;
-			});
-		}
-
-		if (candidate_spheres.empty())
-		{
-			return;
-		}
-		auto eval_distance = [&](uint32 sample_index, uint32 sphere_index) -> Scalar {
-			const Vec3& center = (*p.spheres_position_)[sphere_index];
-			const Scalar radius = (*p.spheres_radius_)[sphere_index];
-			const Scalar dist_sqem =
-				(*data.quadric)[sample_index].eval(Vec4(center.x(), center.y(), center.z(), radius));
-			const Scalar dist_other = (*data.line_quadric)[sample_index].eval(center);
-			return dist_sqem + Scalar(p.sqem_update_lambda_line_plane_) * dist_other;
-		};
-
-		for (PVertex sample : removed_cluster)
-		{
-			const uint32 sample_index = index_of(*data.mesh, sample);
-			if (sample_index == INVALID_INDEX)
-				continue;
-
-			Scalar min_distance = std::numeric_limits<Scalar>::max();
-			PVertex closest_sphere;
-			uint32 closest_sphere_index = INVALID_INDEX;
-			for (PVertex sphere : candidate_spheres)
-			{
-				const uint32 sphere_index = index_of(*p.spheres_, sphere);
-				if (sphere_index == INVALID_INDEX)
-					continue;
-				const Scalar dist = eval_distance(sample_index, sphere_index);
-				if (dist < min_distance)
-				{
-					min_distance = dist;
-					closest_sphere = sphere;
-					closest_sphere_index = sphere_index;
-				}
-			}
-
-			if (!closest_sphere.is_valid() || closest_sphere_index == INVALID_INDEX)
-				continue;
-
-			(*data.sphere)[sample_index] = closest_sphere;
-			(*p.spheres_cluster_)[closest_sphere_index].push_back(sample);
-			(*p.spheres_cluster_area_)[closest_sphere_index] += (*data.area)[sample_index];
-		}
-	}
-
-protected:
-	PVertex split_sphere(PointsParameters& p, PVertex sphere)
-	{
-		if (!sphere.is_valid())
-			return PVertex();
-		SphereFitData data;
-		if (!get_sphere_fit_data(p, data))
-			return PVertex();
-		uint32 s_index = index_of(*p.spheres_, sphere);
-
-		// find the point in the cluster with the max error
-		const std::vector<PVertex>& cluster = (*p.spheres_cluster_)[s_index];
-		if (cluster.empty())
-			return PVertex();
-
-		Scalar max_err = -1.0;
-		PVertex max_err_v;
-		for (PVertex v : cluster)
-		{
-			uint32 v_idx = index_of(*data.mesh, v);
-			Scalar err = data.error ? (*data.error)[v_idx] : Scalar(0);
-			if (err > max_err)
-			{
-				max_err = err;
-				max_err_v = v;
-			}
-		}
-
-		if (!max_err_v.is_valid())
-			return PVertex();
-
-		uint32 max_err_v_idx = index_of(*data.mesh, max_err_v);
-
-		PVertex new_sphere = add_vertex(*p.spheres_);
-		uint32 new_s_index = index_of(*p.spheres_, new_sphere);
-
-		(*p.spheres_position_)[new_s_index] = (*p.samples_ma_position_)[max_err_v_idx];
-		(*p.spheres_radius_)[new_s_index] = (*p.samples_ma_radius_)[max_err_v_idx];
-		(*p.spheres_parent_)[new_s_index] = sphere;
-		(*p.spheres_cluster_color_)[new_s_index] =
-			Vec4(0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0,
-				 0.5 + 0.5 * (rand() % 256) / 256.0, 1.0);
-
-		p.nb_spheres_++;
-		inherit_sphere_neighbors(p, sphere, new_sphere);
-		recompute_clusters_local_neighborhood(p, new_sphere);
-		return new_sphere;
-	}
 
 	//------------------------------//
 	//-----Topology correction------//
@@ -4702,6 +3815,61 @@ protected:
 		}
 		cache.initialized = true;
 		return true;
+	}
+
+	SpheresOptimizerData make_spheres_optimizer_data(PointsParameters& p)
+	{
+		SpheresOptimizerData data;
+		data.samples_mesh = p.samples_mesh_;
+		data.spheres = p.spheres_;
+		data.sample_position = p.samples_position_;
+		data.sample_area = p.samples_area_;
+		data.sample_knn = p.samples_knn_;
+		data.sample_quadric = p.samples_quadric_;
+		data.sample_line_quadric = p.samples_line_quadric_;
+		data.sample_ma_position = p.samples_ma_position_;
+		data.sample_ma_radius = p.samples_ma_radius_;
+		data.sample_ma_secondary_vertex = p.samples_ma_secondary_vertex_;
+		data.sample_sphere = p.samples_sphere_;
+		data.sample_error = p.samples_error_;
+		data.sphere_position = p.spheres_position_;
+		data.sphere_radius = p.spheres_radius_;
+		data.sphere_cluster = p.spheres_cluster_;
+		data.sphere_cluster_area = p.spheres_cluster_area_;
+		data.sphere_cluster_color = p.spheres_cluster_color_;
+		data.sphere_neighbors = p.spheres_neighbor_clusters_;
+		data.sphere_error = p.spheres_error_;
+		data.sphere_error_not_normalized = p.spheres_error_not_normalized_;
+		data.sample_kdtree = p.samples_kdtree_;
+		data.sample_kdtree_vertices = &p.samples_kdtree_vertices_;
+		data.sqem_update_lambda_line_plane = Scalar(p.sqem_update_lambda_line_plane_);
+		data.sphere_count = &p.nb_spheres_;
+		return data;
+	}
+
+	SpheresOptimizerType& optimizer_for(PointsParameters& p)
+	{
+		SpheresOptimizerData data = make_spheres_optimizer_data(p);
+		if (!p.spheres_optimizer_)
+			p.spheres_optimizer_ = std::make_unique<SpheresOptimizerType>(std::move(data));
+		else
+			p.spheres_optimizer_->data() = std::move(data);
+		return *p.spheres_optimizer_;
+	}
+
+	void sync_optimizer_metrics(PointsParameters& p)
+	{
+		if (!p.spheres_optimizer_)
+			return;
+		const SpheresOptimizerMetrics& metrics = p.spheres_optimizer_->metrics();
+		p.nb_spheres_ = metrics.sphere_count;
+		p.iteration_count_ = metrics.iteration;
+		p.total_error_ = metrics.total_error;
+		p.total_error_not_normalized_ = metrics.total_error_not_normalized;
+		p.last_total_error_ = metrics.last_total_error;
+		p.total_error_diff_ = metrics.error_difference;
+		p.min_error_ = metrics.minimum_error;
+		p.max_error_ = metrics.maximum_error;
 	}
 
 	void erase_topology_fix_scores_for_removed_faces_and_orphan_edges(
@@ -6028,8 +5196,6 @@ protected:
 			(*p.spheres_cluster_area_)[center_sphere_id] = Scalar(0);
 		if (p.spheres_cluster_color_)
 			(*p.spheres_cluster_color_)[center_sphere_id] = Vec4(0.95, 0.25, 0.15, 1.0);
-		if (p.spheres_parent_)
-			(*p.spheres_parent_)[center_sphere_id] = PVertex();
 		if (p.spheres_error_)
 			(*p.spheres_error_)[center_sphere_id] = Scalar(0);
 		if (p.spheres_error_not_normalized_)
@@ -6154,6 +5320,11 @@ protected:
 
 	void run_topology_fix_pipeline(PointsParameters& p)
 	{
+		if (p.skeleton_invalidated_)
+		{
+			log_error(p, "Topology fix requires a skeleton built from the current sphere set.", '\n');
+			return;
+		}
 		if (!p.skeleton_ || !p.incident_tets_)
 		{
 			log_error(p, "[TopologyFull] requires a built skeleton.", '\n');
@@ -6300,27 +5471,25 @@ protected:
 	{
 		p.running_ = true;
 		p.stopping_ = false;
-		p.iteration_count_ = 0;
-		p.total_error_diff_ = 0.0;
-		p.last_total_error_ = std::numeric_limits<Scalar>::max();
+		SpheresOptimizerType& optimizer = optimizer_for(p);
+		optimizer.reset_optimization();
+		sync_optimizer_metrics(p);
 		p.pending_full_refresh_after_stop_ = false;
 
-		launch_thread([this, &p]() {
-			constexpr Scalar convergence_eps = Scalar(1e-10);
-			constexpr uint32 max_post_convergence_iterations = 10;
-			constexpr uint32 max_iterations = 150;
-			bool convergence_reached = false;
-			uint32 post_convergence_iterations = 0;
+		launch_thread([this, &p, &optimizer]() {
 			auto start = std::chrono::high_resolution_clock::now();
-			while (p.iteration_count_ < max_iterations)
+			SpheresOptimizerStatus status = SpheresOptimizerStatus::running;
+			while (status == SpheresOptimizerStatus::running)
 			{
 				{
 					std::lock_guard<std::mutex> lock(p.mutex_);
 					if (!p.stopping_)
 					{
 						log_basic(p, "Start Sphere update", '\n');
-						update_spheres(p);
-						++p.iteration_count_;
+						status = optimizer.update_once(Scalar(p.sqem_update_lambda_line_plane_));
+						sync_optimizer_metrics(p);
+						if (optimizer.metrics().sphere_topology_changed)
+							p.skeleton_invalidated_ = true;
 					}
 				}
 				if (p.stopping_)
@@ -6330,39 +5499,23 @@ protected:
 				else
 					std::this_thread::yield();
 
-				if (p.total_error_diff_ < convergence_eps)
-				{
-					if (!convergence_reached)
-					{
-						convergence_reached = true;
-						post_convergence_iterations = 0;
-						log_basic(p, "Auto stop: error converged (Diff < ", convergence_eps,
-								  "), start post-convergence countdown (", max_post_convergence_iterations, ").", '\n');
-					}
-					else
-					{
-						++post_convergence_iterations;
-					}
-					if (post_convergence_iterations >= max_post_convergence_iterations)
-					{
-						log_basic(p, "Auto stop: reached max post-convergence iterations (",
-								  max_post_convergence_iterations, ").", '\n');
-						p.stopping_ = true;
-					}
-				}
-				else if (convergence_reached)
-				{
-					convergence_reached = false;
-					post_convergence_iterations = 0;
-				}
-
-				if (p.iteration_count_ >= max_iterations)
-				{
-					log_basic(p, "Stop: reached max iterations (", max_iterations, ").", '\n');
-					p.stopping_ = true;
-				}
 				log_basic(p, "Iteration: ", p.iteration_count_, " | Spheres: ", p.nb_spheres_, " | Error: ",
 						  p.total_error_, " | Diff: ", p.total_error_diff_, '\n');
+				if (status == SpheresOptimizerStatus::converged)
+				{
+					log_basic(p, "Auto stop: error converged after post-convergence iterations.", '\n');
+					p.stopping_ = true;
+				}
+				else if (status == SpheresOptimizerStatus::max_iterations)
+				{
+					log_basic(p, "Stop: reached max iterations (150).", '\n');
+					p.stopping_ = true;
+				}
+				else if (status == SpheresOptimizerStatus::failed)
+				{
+					log_error(p, "Sphere optimizer is missing required data.", '\n');
+					p.stopping_ = true;
+				}
 				if (p.stopping_)
 					break;
 			}
@@ -6401,57 +5554,6 @@ protected:
 			{
 				std::lock_guard<std::mutex> lock(p.mutex_);
 				update_render_data(p);
-			}
-		}
-		else if (key_code == GLFW_KEY_I || key_code == GLFW_KEY_S || key_code == GLFW_KEY_D)
-		{
-			int32 x = view->mouse_x();
-			int32 y = view->mouse_y();
-
-			// minwindef.h (included by MSVC) defines near and far macros, which is why the underscore is needed
-			rendering::GLVec3d near_ = view->unproject(x, y, 0.0);
-			rendering::GLVec3d far_d = view->unproject(x, y, 1.0);
-			Vec3 A{near_.x(), near_.y(), near_.z()};
-			Vec3 B{far_d.x(), far_d.y(), far_d.z()};
-
-			picked_sphere_ = PVertex();
-			Vec3 picked_sphere_center = Vec3::Zero();
-			bool has_picked_sphere_center = false;
-			foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
-				if (!has_picked_sphere_center)
-				{
-					picked_sphere_ = v;
-					picked_sphere_center = (*p.spheres_position_)[index_of(*p.spheres_, picked_sphere_)];
-					has_picked_sphere_center = true;
-					return true;
-				}
-				const Vec3& sp = (*p.spheres_position_)[index_of(*p.spheres_, v)];
-				if (geometry::squared_distance_line_point(A, B, sp) <
-					geometry::squared_distance_line_point(A, B, picked_sphere_center))
-				{
-					picked_sphere_ = v;
-					picked_sphere_center = sp;
-				}
-				return true;
-			});
-
-			if (key_code == GLFW_KEY_S && picked_sphere_.is_valid())
-			{
-				std::lock_guard<std::mutex> lock(p.mutex_);
-				split_sphere(p, picked_sphere_);
-				compute_clusters(p);
-				compute_spheres_error(p);
-				if (!p.running_)
-					update_render_data(p, false, true, true);
-			}
-			else if (key_code == GLFW_KEY_D && picked_sphere_.is_valid())
-			{
-				std::lock_guard<std::mutex> lock(p.mutex_);
-				remove_sphere(p, picked_sphere_);
-				compute_spheres_error(p);
-				picked_sphere_ = PVertex();
-				if (!p.running_)
-					update_render_data(p, false, true, true);
 			}
 		}
 	}
@@ -6571,7 +5673,20 @@ protected:
 						if (!p.running_)
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
-							update_spheres(p);
+							SpheresOptimizerType& optimizer = optimizer_for(p);
+							optimizer.update_once(Scalar(p.sqem_update_lambda_line_plane_));
+							if (optimizer.metrics().sphere_topology_changed)
+							{
+								p.skeleton_invalidated_ = true;
+								if (p.skeleton_)
+								{
+									clear(*p.skeleton_);
+									p.skeleton_tets_.clear();
+									if (p.spheres_skeleton_vertex_)
+										p.spheres_skeleton_vertex_->fill(NMVertex());
+								}
+							}
+							sync_optimizer_metrics(p);
 							update_render_data(p, false, true, true);
 						}
 					}
@@ -6690,16 +5805,6 @@ protected:
 							update_render_data(p, false, true, false);
 					}
 
-					if (ImGui::Button("Split max error sphere"))
-					{
-						std::lock_guard<std::mutex> lock(p.mutex_);
-						split_sphere(p, p.max_error_sphere_);
-						compute_clusters(p);
-						compute_spheres_error(p);
-						if (!p.running_)
-							update_render_data(p, false, true, true);
-					}
-
 					ImGui::Separator();
 
 					ImGui::Text("Total error: %f", p.total_error_ / p.nb_spheres_);
@@ -6708,20 +5813,6 @@ protected:
 
 					ImGui::Separator();
 
-					ImGui::Text("Pick the sphere under the mouse with I, split it with S, delete it with D");
-					uint32 picked_index = INVALID_INDEX;
-					if (picked_sphere_.is_valid() && !is_live_sphere_vertex(p, picked_sphere_, picked_index))
-						picked_sphere_ = PVertex();
-					if (picked_sphere_.is_valid())
-					{
-						ImGui::Text("Picked sphere:");
-						const Vec3& sp = (*p.spheres_position_)[picked_index];
-						ImGui::Text("Index: %u", picked_index);
-						ImGui::Text("Center: (%f, %f, %f)", sp[0], sp[1], sp[2]);
-						ImGui::Text("Radius: %f", (*p.spheres_radius_)[picked_index]);
-						if (p.spheres_error_)
-							ImGui::Text("Error: %f", (*p.spheres_error_)[picked_index]);
-					}
 				}
 
 			}
@@ -6750,9 +5841,7 @@ private:
 
 	POINTS* selected_points_ = nullptr;
 	std::map<POINTS*, PointsParameters> points_parameters_;
-	PVertex picked_sphere_;
 	std::shared_ptr<boost::synapse::connection> timer_connection_;
-	std::array<std::mutex, 43> spheres_mutex_;
 
 	torch::Device device_ = torch::kCPU;
 };
