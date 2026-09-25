@@ -9313,9 +9313,6 @@ protected:
 
 	void start_spheres_update(PointsParameters& p)
 	{
-		constexpr Scalar convergence_eps = Scalar(1e-10);
-		constexpr uint32 max_post_convergence_iterations = 10;
-		constexpr uint32 max_iterations = 150;
 		p.running_ = true;
 		p.stopping_ = false;
 		p.iteration_count_ = 0;
@@ -9323,7 +9320,10 @@ protected:
 		p.last_total_error_ = std::numeric_limits<Scalar>::max();
 		p.pending_full_refresh_after_stop_ = false;
 
-		launch_thread([&]() {
+		launch_thread([this, &p]() {
+			constexpr Scalar convergence_eps = Scalar(1e-10);
+			constexpr uint32 max_post_convergence_iterations = 10;
+			constexpr uint32 max_iterations = 150;
 			bool convergence_reached = false;
 			uint32 post_convergence_iterations = 0;
 			auto start = std::chrono::high_resolution_clock::now();
