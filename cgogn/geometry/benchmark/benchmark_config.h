@@ -75,8 +75,6 @@ struct BenchmarkInitializationConfig
 
 struct BenchmarkPostprocessConfig
 {
-	bool topology_fix = false;
-	bool deg_face_deletion = false;
 	bool nm_two_layer_prune = false;
 	bool residual_prune = false;
 	bool face_post_processing = false;

@@ -78,8 +78,6 @@
     "init_dilation_constant": 0.001
   },
   "postprocess": {
-    "topology_fix": false,
-    "deg_face_deletion": false,
     "nm_two_layer_prune": false,
     "residual_prune": false,
     "face_post_processing": false

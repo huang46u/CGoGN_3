@@ -356,8 +356,11 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 
 	if (auto postprocess = root.get_child_optional("postprocess"))
 	{
-		config.postprocess.topology_fix = get_value<bool>(*postprocess, "topology_fix", false);
-		config.postprocess.deg_face_deletion = get_value<bool>(*postprocess, "deg_face_deletion", false);
+		if (auto topology_fix = postprocess->get_optional<bool>("topology_fix"); topology_fix && !*topology_fix)
+			fail_config("`postprocess.topology_fix` is fixed to true; migrate this legacy value.");
+		if (auto deg_face_deletion = postprocess->get_optional<bool>("deg_face_deletion");
+			deg_face_deletion && *deg_face_deletion)
+			fail_config("`postprocess.deg_face_deletion` was removed; migrate this legacy value.");
 		config.postprocess.nm_two_layer_prune = get_value<bool>(*postprocess, "nm_two_layer_prune", false);
 		config.postprocess.residual_prune = get_value<bool>(*postprocess, "residual_prune", false);
 		config.postprocess.face_post_processing = get_value<bool>(*postprocess, "face_post_processing", false);

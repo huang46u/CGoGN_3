@@ -188,14 +188,9 @@ public:
 		context_.udf_training.headless_build_skeleton_prepared(points);
 	}
 
-	void run_topology_fix_prepared(Points& points, bool run_deg_face_deletion)
+	void run_topology_fix_prepared(Points& points)
 	{
-		context_.udf_training.headless_run_topology_fix_prepared(points, run_deg_face_deletion);
-	}
-
-	void run_deg_face_deletion_prepared(Points& points)
-	{
-		context_.udf_training.headless_run_deg_face_deletion_prepared(points);
+		context_.udf_training.headless_run_topology_fix_prepared(points);
 	}
 
 	void run_face_post_processing_prepared(Points& points)
