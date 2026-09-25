@@ -205,13 +205,9 @@ private:
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_color_ = nullptr;
 		std::shared_ptr<NMAttribute<uint32>> skeleton_face_component_id_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_component_color_ = nullptr;
-		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_boundary_tet_color_ = nullptr;
-		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_k5_color_ = nullptr;
 		std::shared_ptr<NMAttribute<PVertex>> skeleton_source_sphere_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_vertex_completion_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_color_ = nullptr;
-		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_boundary_tet_color_ = nullptr;
-		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_k5_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_non_manifold_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_completion_path_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_completion_invalid_singular_color_ = nullptr;
@@ -1944,13 +1940,8 @@ private:
 		p.skeleton_face_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "color");
 		p.skeleton_face_component_id_ = get_or_add_attribute<uint32, NMFace>(*p.skeleton_, "face_component_id");
 		p.skeleton_face_component_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "face_component_color");
-		p.skeleton_face_boundary_tet_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "boundary_tet_color");
-		p.skeleton_face_k5_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "k5_color");
 		p.skeleton_vertex_completion_color_ = get_or_add_attribute<Vec3, NMVertex>(*p.skeleton_, "completion_vertex_color");
 		p.skeleton_edge_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "color");
-		p.skeleton_edge_boundary_tet_color_ =
-			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "boundary_tet_best_edge_color");
-		p.skeleton_edge_k5_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "k5_edge_color");
 		p.skeleton_edge_non_manifold_color_ =
 			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "non_manifold_edge_color");
 		p.skeleton_edge_completion_path_color_ =
@@ -5780,7 +5771,6 @@ protected:
 													 uf_options))
 			colorize_skeleton_face_components(p, "[FaceComponentsColor-ForPrune-Final]");
 		refresh_skeleton_topology_colors(p);
-		mark_boundary_tets_color(p);
 
 		if (collect_verbose_stats)
 		{
@@ -5967,7 +5957,6 @@ protected:
 		}
 
 		refresh_skeleton_topology_colors(p);
-		mark_boundary_tets_color(p);
 		compute_edge_degree(p);
 		if (compute_skeleton_face_components_union_find(p, "[FaceComponentsUF-CompletionResidual-Final]", nullptr,
 														uf_options))
@@ -7217,31 +7206,10 @@ protected:
 		return stats;
 	}
 
-	struct K5DetectionResult
-	{
-		std::vector<std::array<uint32, 5>> cliques;
-		std::unordered_set<uint32> face_ids;
-		std::unordered_set<uint32> edge_ids;
-	};
-
 	struct DenseFiveVertexDetectionResult
 	{
-		uint32 exact_k5_count = 0;
-		uint32 k5_minus_1_count = 0;
-		uint32 independent_exact_k5_count = 0;
-		uint32 independent_k5_minus_1_count = 0;
-		std::vector<std::array<uint32, 5>> exact_k5_regions;
-		std::vector<std::array<uint32, 5>> k5_minus_1_regions;
 		std::vector<std::array<uint32, 5>> independent_exact_k5_regions;
 		std::vector<std::array<uint32, 5>> independent_k5_minus_1_regions;
-		std::unordered_set<uint32> exact_k5_face_ids;
-		std::unordered_set<uint32> exact_k5_edge_ids;
-		std::unordered_set<uint32> k5_minus_1_face_ids;
-		std::unordered_set<uint32> k5_minus_1_edge_ids;
-		std::unordered_set<uint32> independent_exact_k5_face_ids;
-		std::unordered_set<uint32> independent_exact_k5_edge_ids;
-		std::unordered_set<uint32> independent_k5_minus_1_face_ids;
-		std::unordered_set<uint32> independent_k5_minus_1_edge_ids;
 	};
 
 	DenseFiveVertexDetectionResult detect_k5_and_k5_minus_1_cells(PointsParameters& p)
@@ -7255,17 +7223,13 @@ protected:
 				std::swap(a, b);
 			return (uint64(a) << 32) | uint64(b);
 		};
-		auto make_face_key = [](uint32 a, uint32 b, uint32 c) -> std::array<uint32, 3> {
-			std::array<uint32, 3> key = {a, b, c};
-			std::sort(key.begin(), key.end());
-			return key;
-		};
+		std::vector<std::array<uint32, 5>> exact_k5_regions;
+		std::vector<std::array<uint32, 5>> k5_minus_1_regions;
 
 		std::unordered_map<uint32, std::unordered_set<uint32>> adjacency;
 		adjacency.reserve(nb_cells<NMVertex>(*p.skeleton_));
 		std::unordered_map<uint64, uint32> edge_pair_to_id;
 		edge_pair_to_id.reserve(nb_cells<NMEdge>(*p.skeleton_) * 2 + 1);
-		std::map<std::array<uint32, 3>, uint32> face_key_to_id;
 
 		foreach_cell(*p.skeleton_, [&](NMEdge e) -> bool {
 			const uint32 ide = index_of(*p.skeleton_, e);
@@ -7281,22 +7245,6 @@ protected:
 			adjacency[a].insert(b);
 			adjacency[b].insert(a);
 			edge_pair_to_id[make_edge_key(a, b)] = ide;
-			return true;
-		});
-
-		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
-			const uint32 idf = index_of(*p.skeleton_, f);
-			if (idf == INVALID_INDEX)
-				return true;
-			const std::vector<NMVertex> fv = incident_vertices(*p.skeleton_, f);
-			if (fv.size() != 3)
-				return true;
-			const uint32 a = index_of(*p.skeleton_, fv[0]);
-			const uint32 b = index_of(*p.skeleton_, fv[1]);
-			const uint32 c = index_of(*p.skeleton_, fv[2]);
-			if (a == INVALID_INDEX || b == INVALID_INDEX || c == INVALID_INDEX)
-				return true;
-			face_key_to_id[make_face_key(a, b, c)] = idf;
 			return true;
 		});
 
@@ -7351,46 +7299,15 @@ protected:
 					continue;
 
 				const bool is_exact_k5 = candidate.second == 4;
-				auto& face_id_set = is_exact_k5 ? result.exact_k5_face_ids : result.k5_minus_1_face_ids;
-				auto& edge_id_set = is_exact_k5 ? result.exact_k5_edge_ids : result.k5_minus_1_edge_ids;
 				if (is_exact_k5)
-				{
-					++result.exact_k5_count;
-					result.exact_k5_regions.push_back(region);
-				}
+					exact_k5_regions.push_back(region);
 				else
-				{
-					++result.k5_minus_1_count;
-					result.k5_minus_1_regions.push_back(region);
-				}
-
-				for (uint32 i = 0; i < 5; ++i)
-				{
-					for (uint32 j = i + 1; j < 5; ++j)
-					{
-						const auto edge_it = edge_pair_to_id.find(make_edge_key(region[i], region[j]));
-						if (edge_it != edge_pair_to_id.end())
-							edge_id_set.insert(edge_it->second);
-					}
-				}
-
-				for (uint32 i = 0; i < 5; ++i)
-				{
-					for (uint32 j = i + 1; j < 5; ++j)
-					{
-						for (uint32 k = j + 1; k < 5; ++k)
-						{
-							const auto face_it = face_key_to_id.find(make_face_key(region[i], region[j], region[k]));
-							if (face_it != face_key_to_id.end())
-								face_id_set.insert(face_it->second);
-						}
-					}
-				}
+					k5_minus_1_regions.push_back(region);
 			}
 		}
 
 		std::unordered_map<uint64, uint32> edge_region_count;
-		edge_region_count.reserve((result.exact_k5_regions.size() + result.k5_minus_1_regions.size()) * 10);
+		edge_region_count.reserve((exact_k5_regions.size() + k5_minus_1_regions.size()) * 10);
 		auto count_region_edges = [&](const std::array<uint32, 5>& region) {
 			for (uint32 i = 0; i < 5; ++i)
 			{
@@ -7402,9 +7319,9 @@ protected:
 				}
 			}
 		};
-		for (const auto& region : result.exact_k5_regions)
+		for (const auto& region : exact_k5_regions)
 			count_region_edges(region);
-		for (const auto& region : result.k5_minus_1_regions)
+		for (const auto& region : k5_minus_1_regions)
 			count_region_edges(region);
 
 		auto append_independent_region = [&](const std::array<uint32, 5>& region, bool is_exact_k5) {
@@ -7419,564 +7336,17 @@ protected:
 				}
 			}
 
-			auto& face_ids = is_exact_k5 ? result.independent_exact_k5_face_ids
-									 : result.independent_k5_minus_1_face_ids;
-			auto& edge_ids = is_exact_k5 ? result.independent_exact_k5_edge_ids
-									 : result.independent_k5_minus_1_edge_ids;
 			if (is_exact_k5)
-			{
-				++result.independent_exact_k5_count;
 				result.independent_exact_k5_regions.push_back(region);
-			}
 			else
-			{
-				++result.independent_k5_minus_1_count;
 				result.independent_k5_minus_1_regions.push_back(region);
-			}
-
-			for (uint32 i = 0; i < 5; ++i)
-			{
-				for (uint32 j = i + 1; j < 5; ++j)
-				{
-					const auto edge_it = edge_pair_to_id.find(make_edge_key(region[i], region[j]));
-					if (edge_it != edge_pair_to_id.end())
-						edge_ids.insert(edge_it->second);
-				}
-			}
-			for (uint32 i = 0; i < 5; ++i)
-			{
-				for (uint32 j = i + 1; j < 5; ++j)
-				{
-					for (uint32 k = j + 1; k < 5; ++k)
-					{
-						const auto face_it = face_key_to_id.find(make_face_key(region[i], region[j], region[k]));
-						if (face_it != face_key_to_id.end())
-							face_ids.insert(face_it->second);
-					}
-				}
-			}
 		};
-		for (const auto& region : result.exact_k5_regions)
+		for (const auto& region : exact_k5_regions)
 			append_independent_region(region, true);
-		for (const auto& region : result.k5_minus_1_regions)
+		for (const auto& region : k5_minus_1_regions)
 			append_independent_region(region, false);
 
 		return result;
-	}
-
-	K5DetectionResult detect_k5_cells(PointsParameters& p)
-	{
-		const DenseFiveVertexDetectionResult dense_regions = detect_k5_and_k5_minus_1_cells(p);
-		K5DetectionResult result;
-		result.cliques = dense_regions.exact_k5_regions;
-		result.face_ids = dense_regions.exact_k5_face_ids;
-		result.edge_ids = dense_regions.exact_k5_edge_ids;
-		return result;
-	}
-
-	struct FaceEdgeDegreeStats
-	{
-		uint32 deg1_count = 0;
-		uint32 deg2_count = 0;
-		uint32 gt2_count = 0;
-	};
-
-	FaceEdgeDegreeStats compute_face_edge_degree_stats(PointsParameters& p, const NMFace& f)
-	{
-		FaceEdgeDegreeStats stats;
-		if (!p.skeleton_ || !f.is_valid())
-			return stats;
-		for (NMEdge e : incident_edges(*p.skeleton_, f))
-		{
-			if (!e.is_valid())
-				continue;
-			const size_t edge_degree = incident_faces(*p.skeleton_, e).size();
-			if (edge_degree == 1)
-				++stats.deg1_count;
-			else if (edge_degree == 2)
-				++stats.deg2_count;
-			else if (edge_degree > 2)
-				++stats.gt2_count;
-		}
-		return stats;
-	}
-
-	void mark_k5_color(PointsParameters& p, bool independent_only = true)
-	{
-		if (!p.skeleton_ || !p.skeleton_face_k5_color_ || !p.skeleton_edge_k5_color_)
-		{
-			log_error(p, "K5 coloring requires skeleton K5 color attributes.", '\n');
-			return;
-		}
-
-		const DenseFiveVertexDetectionResult k5_info = detect_k5_and_k5_minus_1_cells(p);
-		const auto& mask_exact_face_ids =
-			independent_only ? k5_info.independent_exact_k5_face_ids : k5_info.exact_k5_face_ids;
-		const auto& mask_exact_edge_ids =
-			independent_only ? k5_info.independent_exact_k5_edge_ids : k5_info.exact_k5_edge_ids;
-		const auto& mask_k5_minus_1_face_ids =
-			independent_only ? k5_info.independent_k5_minus_1_face_ids : k5_info.k5_minus_1_face_ids;
-		const auto& mask_k5_minus_1_edge_ids =
-			independent_only ? k5_info.independent_k5_minus_1_edge_ids : k5_info.k5_minus_1_edge_ids;
-		const Vec3 default_face_color(0.08, 0.08, 0.08);
-		const Vec3 exact_k5_face_color(0.05, 0.85, 0.95);
-		const Vec3 k5_minus_1_face_color(1.0, 0.55, 0.15);
-		const Vec3 overlap_face_color(0.95, 0.25, 0.85);
-		const Vec3 default_edge_color(0.08, 0.08, 0.08);
-		const Vec3 exact_k5_edge_color(0.0, 0.9, 0.75);
-		const Vec3 k5_minus_1_edge_color(1.0, 0.7, 0.2);
-		const Vec3 overlap_edge_color(0.95, 0.35, 0.9);
-		uint32 exact_face_count = 0;
-		uint32 k5_minus_1_face_count = 0;
-		uint32 overlap_face_count = 0;
-		uint32 exact_edge_count = 0;
-		uint32 k5_minus_1_edge_count = 0;
-		uint32 overlap_edge_count = 0;
-
-		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
-			Vec3 c = default_face_color;
-			const uint32 idf = index_of(*p.skeleton_, f);
-			if (idf != INVALID_INDEX)
-			{
-				const bool in_exact = mask_exact_face_ids.find(idf) != mask_exact_face_ids.end();
-				const bool in_k5_minus_1 = mask_k5_minus_1_face_ids.find(idf) != mask_k5_minus_1_face_ids.end();
-				if (in_exact && in_k5_minus_1)
-				{
-					c = overlap_face_color;
-					++overlap_face_count;
-				}
-				else if (in_exact)
-				{
-					c = exact_k5_face_color;
-					++exact_face_count;
-				}
-				else if (in_k5_minus_1)
-				{
-					c = k5_minus_1_face_color;
-					++k5_minus_1_face_count;
-				}
-			}
-			value<Vec3>(*p.skeleton_, p.skeleton_face_k5_color_, f) = c;
-			return true;
-		});
-		foreach_cell(*p.skeleton_, [&](NMEdge e) -> bool {
-			Vec3 c = default_edge_color;
-			const uint32 ide = index_of(*p.skeleton_, e);
-			if (ide != INVALID_INDEX)
-			{
-				const bool in_exact = mask_exact_edge_ids.find(ide) != mask_exact_edge_ids.end();
-				const bool in_k5_minus_1 = mask_k5_minus_1_edge_ids.find(ide) != mask_k5_minus_1_edge_ids.end();
-				if (in_exact && in_k5_minus_1)
-				{
-					c = overlap_edge_color;
-					++overlap_edge_count;
-				}
-				else if (in_exact)
-				{
-					c = exact_k5_edge_color;
-					++exact_edge_count;
-				}
-				else if (in_k5_minus_1)
-				{
-					c = k5_minus_1_edge_color;
-					++k5_minus_1_edge_count;
-				}
-			}
-			value<Vec3>(*p.skeleton_, p.skeleton_edge_k5_color_, e) = c;
-			return true;
-		});
-
-		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_k5_color_.get());
-		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_k5_color_.get());
-
-		log_basic(p, "[K5Mask] mode=", (independent_only ? "independent" : "all"), " exact_k5_regions=",
-				  k5_info.exact_k5_count, " k5_minus_1_regions=",
-				  k5_info.k5_minus_1_count, " independent_exact_k5_regions=",
-				  k5_info.independent_exact_k5_count, " independent_k5_minus_1_regions=",
-				  k5_info.independent_k5_minus_1_count, " exact_faces=", exact_face_count, " k5_minus_1_faces=",
-				  k5_minus_1_face_count, " overlap_faces=", overlap_face_count, " exact_edges=", exact_edge_count,
-				  " k5_minus_1_edges=", k5_minus_1_edge_count, " overlap_edges=", overlap_edge_count, '\n');
-	}
-
-	void mark_boundary_tets_color(PointsParameters& p)
-	{
-		if (!p.skeleton_ || !p.skeleton_face_boundary_tet_color_ || !p.skeleton_edge_boundary_tet_color_)
-		{
-			log_error(p, "Boundary tet coloring requires skeleton face/edge color attributes.", '\n');
-			return;
-		}
-
-		const Vec3 boundary_face_color(1.0, 0.85, 0.1);
-		const Vec3 k5_face_color(0.05, 0.9, 0.95);
-		const Vec3 non_boundary_face_color(0.12, 0.12, 0.12);
-		const Vec3 boundary_best_edge_color(1.0, 0.45, 0.05);
-		const Vec3 k5_edge_color(0.0, 0.85, 0.85);
-		const Vec3 overlap_edge_color(0.95, 0.95, 0.2);
-		const Vec3 non_boundary_best_edge_color(0.1, 0.1, 0.1);
-		std::unordered_set<uint32> boundary_face_ids;
-		boundary_face_ids.reserve(nb_cells<NMFace>(*p.skeleton_));
-		std::unordered_set<uint32> boundary_best_edge_ids;
-		boundary_best_edge_ids.reserve(nb_cells<NMEdge>(*p.skeleton_));
-
-		uint32 boundary_tet_count = 0;
-		for (const auto& kv : p.skeleton_tets_)
-		{
-			const Tet& tet = kv.second;
-			bool is_boundary_tet = false;
-			std::unordered_set<uint32> tet_face_ids;
-			tet_face_ids.reserve(4);
-			for (uint32 i = 0; i < 4; ++i)
-			{
-				const NMFace f = tet.faces[i];
-				const uint32 idf = index_of(*p.skeleton_, f);
-
-				tet_face_ids.insert(idf);
-
-				uint32 deg2_edge_count = 0;
-				for (NMEdge e : incident_edges(*p.skeleton_, f))
-				{
-					if (incident_faces(*p.skeleton_, e).size() == 2)
-						++deg2_edge_count;
-				}
-				if (deg2_edge_count >= 2)
-				{
-					is_boundary_tet = true;
-					break;
-				}
-			}
-			if (!is_boundary_tet)
-				continue;
-
-			struct BoundaryEdgeChoice
-			{
-				NMEdge edge;
-				Scalar length = Scalar(-1);
-			};
-			BoundaryEdgeChoice best_choice;
-			std::unordered_set<uint32> seen_edges;
-			seen_edges.reserve(8);
-			for (uint32 i = 0; i < 4; ++i)
-			{
-				const NMFace f = tet.faces[i];
-				for (NMEdge e : incident_edges(*p.skeleton_, f))
-				{
-					const uint32 ide = index_of(*p.skeleton_, e);
-					if (!seen_edges.insert(ide).second)
-						continue;
-					const auto in_faces = incident_faces(*p.skeleton_, e);
-					if (in_faces.size() != 2)
-						continue;
-					const NMFace f0 = in_faces[0];
-					const NMFace f1 = in_faces[1];
-					const uint32 idf0 = index_of(*p.skeleton_, f0);
-					const uint32 idf1 = index_of(*p.skeleton_, f1);
-					const std::vector<NMVertex> edge_vertices = incident_vertices(*p.skeleton_, e);
-					const Vec3 p0 = value<Vec3>(*p.skeleton_, p.skeleton_position_, edge_vertices[0]);
-					const Vec3 p1 = value<Vec3>(*p.skeleton_, p.skeleton_position_, edge_vertices[1]);
-					const Scalar edge_len = (p1 - p0).norm();
-					if (edge_len > best_choice.length)
-					{
-						best_choice.edge = e;
-						best_choice.length = edge_len;
-					}
-				}
-			}
-			if (best_choice.length >= Scalar(0))
-			{
-				const uint32 ide = index_of(*p.skeleton_, best_choice.edge);
-				boundary_best_edge_ids.insert(ide);
-			}
-
-			++boundary_tet_count;
-			for (uint32 i = 0; i < 4; ++i)
-			{
-				const NMFace f = tet.faces[i];
-
-				const uint32 idf = index_of(*p.skeleton_, f);
-				boundary_face_ids.insert(idf);
-			}
-		}
-
-		const K5DetectionResult k5_info = detect_k5_cells(p);
-
-		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
-			const uint32 idf = index_of(*p.skeleton_, f);
-			const bool is_boundary_face = boundary_face_ids.find(idf) != boundary_face_ids.end();
-			const bool is_k5_face = k5_info.face_ids.find(idf) != k5_info.face_ids.end();
-			Vec3 c = non_boundary_face_color;
-			if (is_k5_face)
-				c = k5_face_color;
-			else if (is_boundary_face)
-				c = boundary_face_color;
-			value<Vec3>(*p.skeleton_, p.skeleton_face_boundary_tet_color_, f) = c;
-			return true;
-		});
-		foreach_cell(*p.skeleton_, [&](NMEdge e) -> bool {
-			const uint32 ide = index_of(*p.skeleton_, e);
-			const bool is_best_edge = boundary_best_edge_ids.find(ide) != boundary_best_edge_ids.end();
-			const bool is_k5_edge = k5_info.edge_ids.find(ide) != k5_info.edge_ids.end();
-			Vec3 c = non_boundary_best_edge_color;
-			if (is_best_edge && is_k5_edge)
-				c = overlap_edge_color;
-			else if (is_best_edge)
-				c = boundary_best_edge_color;
-			else if (is_k5_edge)
-				c = k5_edge_color;
-			value<Vec3>(*p.skeleton_, p.skeleton_edge_boundary_tet_color_, e) = c;
-			return true;
-		});
-
-		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_boundary_tet_color_.get());
-		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_boundary_tet_color_.get());
-
-	}
-
-	void run_k5_face_deletion(PointsParameters& p)
-	{
-		if (!p.skeleton_ || !p.incident_tets_)
-		{
-			log_error(p, "[K5Delete] requires a built skeleton.", '\n');
-			return;
-		}
-		if (!ensure_topology_score_backend(p, "[K5Delete]"))
-		{
-			return;
-		}
-
-		const K5DetectionResult k5_info = detect_k5_cells(p);
-		if (k5_info.cliques.empty())
-		{
-			mark_k5_color(p);
-			log_basic(p, "[K5Delete] no K5 detected.", '\n');
-			return;
-		}
-
-		auto make_face_key = [](uint32 a, uint32 b, uint32 c) -> std::array<uint32, 3> {
-			std::array<uint32, 3> key = {a, b, c};
-			std::sort(key.begin(), key.end());
-			return key;
-		};
-
-		uint32 detected_k5 = static_cast<uint32>(k5_info.cliques.size());
-		uint32 processed_k5 = 0;
-		uint32 removed_faces = 0;
-		uint32 removed_edges = 0;
-		uint32 removed_vertices = 0;
-		uint32 removed_tets = 0;
-		uint32 skipped_no_deg2_pair = 0;
-		uint32 skipped_no_followup_pair = 0;
-
-		while (true)
-		{
-			const K5DetectionResult current_k5_info = detect_k5_cells(p);
-			if (current_k5_info.cliques.empty())
-				break;
-
-			const std::unordered_set<uint32> tet_face_ids = collect_current_tet_face_id_whitelist(p);
-			std::unordered_map<uint32, Scalar> face_score_cache;
-			if (!compute_skeleton_face_scores(p, tet_face_ids, face_score_cache, false, "[K5Delete]"))
-			{
-				log_error(p, "[K5Delete] failed to compute face scores.", '\n');
-				break;
-			}
-
-			std::map<std::array<uint32, 3>, NMFace> face_key_to_face;
-			foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
-				const std::vector<NMVertex> fv = incident_vertices(*p.skeleton_, f);
-				if (fv.size() != 3)
-					return true;
-				const uint32 a = index_of(*p.skeleton_, fv[0]);
-				const uint32 b = index_of(*p.skeleton_, fv[1]);
-				const uint32 c = index_of(*p.skeleton_, fv[2]);
-				if (a == INVALID_INDEX || b == INVALID_INDEX || c == INVALID_INDEX)
-					return true;
-				face_key_to_face[make_face_key(a, b, c)] = f;
-				return true;
-			});
-
-			struct FaceCand
-			{
-				NMFace f;
-				uint32 idf = INVALID_INDEX;
-				Scalar score = Scalar(0);
-				std::vector<NMEdge> deg2_edges;
-			};
-
-			bool processed_current_k5 = false;
-			for (const auto& clique : current_k5_info.cliques)
-			{
-				std::unordered_set<uint32> seen_face_ids;
-				seen_face_ids.reserve(16);
-				std::vector<FaceCand> deg2_face_candidates;
-				deg2_face_candidates.reserve(4);
-
-				for (uint32 i = 0; i < 5; ++i)
-				{
-					for (uint32 j = i + 1; j < 5; ++j)
-					{
-						for (uint32 k = j + 1; k < 5; ++k)
-						{
-							const auto it_f = face_key_to_face.find(make_face_key(clique[i], clique[j], clique[k]));
-							if (it_f == face_key_to_face.end())
-								continue;
-							const NMFace f = it_f->second;
-							const uint32 idf = index_of(*p.skeleton_, f);
-							if (idf == INVALID_INDEX || !seen_face_ids.insert(idf).second)
-								continue;
-
-							const FaceEdgeDegreeStats stats = compute_face_edge_degree_stats(p, f);
-							if (stats.deg2_count != 2)
-								continue;
-
-							std::vector<NMEdge> deg2_edges;
-							deg2_edges.reserve(2);
-							for (NMEdge e : incident_edges(*p.skeleton_, f))
-								if (e.is_valid() && incident_faces(*p.skeleton_, e).size() == 2)
-									deg2_edges.push_back(e);
-							if (deg2_edges.size() != 2)
-								continue;
-
-							const auto it_score = face_score_cache.find(idf);
-							const Scalar score = (it_score != face_score_cache.end()) ? it_score->second : Scalar(0);
-							deg2_face_candidates.push_back({f, idf, score, deg2_edges});
-						}
-					}
-				}
-
-				if (deg2_face_candidates.size() < 2)
-				{
-					++skipped_no_deg2_pair;
-					continue;
-				}
-
-				std::sort(deg2_face_candidates.begin(), deg2_face_candidates.end(),
-						  [](const FaceCand& a, const FaceCand& b) {
-							  if (a.score != b.score)
-								  return a.score > b.score;
-							  return a.idf < b.idf;
-						  });
-				const FaceCand& seed = deg2_face_candidates[0];
-
-				std::unordered_map<uint32, NMFace> followup_faces;
-				followup_faces.reserve(2);
-				for (NMEdge e : seed.deg2_edges)
-				{
-					if (!e.is_valid())
-						continue;
-					const auto in_faces = incident_faces(*p.skeleton_, e);
-					if (in_faces.size() != 2)
-						continue;
-					NMFace other = in_faces[0];
-					if (other == seed.f)
-						other = in_faces[1];
-					if (!other.is_valid() || other == seed.f)
-						continue;
-					const uint32 id_other = index_of(*p.skeleton_, other);
-					if (id_other == INVALID_INDEX)
-						continue;
-					followup_faces[id_other] = other;
-				}
-
-				if (followup_faces.size() != 2)
-				{
-					++skipped_no_followup_pair;
-					continue;
-				}
-
-				std::vector<NMFace> faces_to_remove;
-				faces_to_remove.reserve(3);
-				faces_to_remove.push_back(seed.f);
-				for (const auto& kv : followup_faces)
-					faces_to_remove.push_back(kv.second);
-
-				std::unordered_set<uint32> unique_face_ids;
-				unique_face_ids.reserve(4);
-				std::unordered_set<std::size_t> tets_to_erase;
-				std::vector<NMEdge> affected_edges;
-				affected_edges.reserve(9);
-				for (const NMFace& f : faces_to_remove)
-				{
-					if (!f.is_valid())
-						continue;
-					const uint32 idf = index_of(*p.skeleton_, f);
-					if (idf == INVALID_INDEX || !unique_face_ids.insert(idf).second)
-						continue;
-					for (std::size_t tet_id : (*p.incident_tets_)[idf])
-						if (p.skeleton_tets_.find(tet_id) != p.skeleton_tets_.end())
-							tets_to_erase.insert(tet_id);
-					for (NMEdge e : incident_edges(*p.skeleton_, f))
-						affected_edges.push_back(e);
-				}
-
-				if (unique_face_ids.size() != 3)
-				{
-					++skipped_no_followup_pair;
-					continue;
-				}
-
-				uint32 removed_faces_this_k5 = 0;
-				for (const NMFace& f : faces_to_remove)
-				{
-					if (!f.is_valid())
-						continue;
-					const uint32 idf = index_of(*p.skeleton_, f);
-					if (idf == INVALID_INDEX)
-						continue;
-					remove_face(*p.skeleton_, f);
-					++removed_faces_this_k5;
-				}
-				if (removed_faces_this_k5 != 3)
-				{
-					continue;
-				}
-
-				uint32 removed_vertices_this_k5 = 0;
-				const uint32 removed_edges_this_k5 =
-					remove_orphan_edges_from_removed_face_edges(p, affected_edges, &removed_vertices_this_k5);
-				uint32 removed_tets_this_k5 = 0;
-				for (std::size_t tet_id : tets_to_erase)
-				{
-					auto it_tet = p.skeleton_tets_.find(tet_id);
-					if (it_tet == p.skeleton_tets_.end())
-						continue;
-					const Tet old_tet = it_tet->second;
-					for (uint32 i = 0; i < 4; ++i)
-					{
-						const NMFace tf = old_tet.faces[i];
-						if (!tf.is_valid())
-							continue;
-						const uint32 idtf = index_of(*p.skeleton_, tf);
-						if (idtf == INVALID_INDEX)
-							continue;
-						(*p.incident_tets_)[idtf].erase(tet_id);
-					}
-					p.skeleton_tets_.erase(it_tet);
-					++removed_tets_this_k5;
-				}
-
-				++processed_k5;
-				removed_faces += removed_faces_this_k5;
-				removed_edges += removed_edges_this_k5;
-				removed_vertices += removed_vertices_this_k5;
-				removed_tets += removed_tets_this_k5;
-
-				processed_current_k5 = true;
-				break;
-			}
-
-			if (!processed_current_k5)
-				break;
-		}
-
-		mark_k5_color(p);
-		log_basic(p, "[K5Delete] done", " detected_k5=", detected_k5, " processed_k5=", processed_k5,
-				  " removed_faces=", removed_faces, " removed_edges=", removed_edges, " removed_vertices=",
-				  removed_vertices, " removed_tets=", removed_tets, " skipped_no_deg2_pair=",
-				  skipped_no_deg2_pair, " skipped_no_followup_pair=", skipped_no_followup_pair,
-				  " remaining_tets=", p.skeleton_tets_.size(), '\n');
-
-		refresh_skeleton_topology_colors(p);
-		mark_boundary_tets_color(p);
 	}
 
 	struct BoundaryTetPrepassStats
@@ -8179,13 +7549,8 @@ protected:
 		p.skeleton_face_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "color");
 		p.skeleton_face_component_id_ = get_or_add_attribute<uint32, NMFace>(*p.skeleton_, "face_component_id");
 		p.skeleton_face_component_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "face_component_color");
-		p.skeleton_face_boundary_tet_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "boundary_tet_color");
-		p.skeleton_face_k5_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "k5_color");
 		p.skeleton_vertex_completion_color_ = get_or_add_attribute<Vec3, NMVertex>(*p.skeleton_, "completion_vertex_color");
 		p.skeleton_edge_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "color");
-		p.skeleton_edge_boundary_tet_color_ =
-			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "boundary_tet_best_edge_color");
-		p.skeleton_edge_k5_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "k5_edge_color");
 		p.skeleton_edge_non_manifold_color_ =
 			get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "non_manifold_edge_color");
 		p.skeleton_edge_completion_path_color_ =
@@ -8536,7 +7901,6 @@ protected:
 		if (!refill_candidate_queue_from_global_neighborhood())
 		{
 			refresh_skeleton_topology_colors(p);
-			mark_boundary_tets_color(p);
 			return;
 		}
 
@@ -8702,13 +8066,11 @@ protected:
 					  " removed_global_orphan_vertices=", removed_global_orphan_vertices, '\n');
 		}
 		refresh_skeleton_topology_colors(p);
-		mark_boundary_tets_color(p);
 	}
 
 	struct IndependentDenseFiveVertexRepairSeed
 	{
 		std::array<PVertex, 5> spheres;
-		bool exact_k5 = false;
 	};
 
 	struct IndependentDenseFiveVertexRepairStats
@@ -8751,11 +8113,10 @@ protected:
 		if (!p.skeleton_ || !p.spheres_ || !p.skeleton_source_sphere_)
 			return seeds;
 
-		auto append_regions = [&](const std::vector<std::array<uint32, 5>>& regions, bool exact_k5) {
+		auto append_regions = [&](const std::vector<std::array<uint32, 5>>& regions) {
 			for (const auto& region : regions)
 			{
 				IndependentDenseFiveVertexRepairSeed seed;
-				seed.exact_k5 = exact_k5;
 				bool valid = true;
 				for (uint32 i = 0; i < 5; ++i)
 				{
@@ -8779,8 +8140,8 @@ protected:
 					seeds.push_back(seed);
 			}
 		};
-		append_regions(detection.independent_exact_k5_regions, true);
-		append_regions(detection.independent_k5_minus_1_regions, false);
+		append_regions(detection.independent_exact_k5_regions);
+		append_regions(detection.independent_k5_minus_1_regions);
 		return seeds;
 	}
 
@@ -9074,8 +8435,6 @@ protected:
 			value<std::set<std::size_t>>(*p.skeleton_, p.incident_tets_, new_face).clear();
 			if (p.skeleton_face_color_)
 				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, new_face) = Vec3(0.0, 0.0, 0.0);
-			if (p.skeleton_face_k5_color_)
-				value<Vec3>(*p.skeleton_, p.skeleton_face_k5_color_, new_face) = Vec3(0.08, 0.08, 0.08);
 			++out_added_faces;
 		}
 
@@ -9179,8 +8538,8 @@ protected:
 
 		log_basic(p, "[TopologyFull] start initial_tets=",
 				  p.skeleton_tets_.size(), " independent_k5=",
-				  dense_five_vertex_detection.independent_exact_k5_count, " independent_k5_minus_1=",
-				  dense_five_vertex_detection.independent_k5_minus_1_count, " repair_seeds=",
+				  dense_five_vertex_detection.independent_exact_k5_regions.size(), " independent_k5_minus_1=",
+				  dense_five_vertex_detection.independent_k5_minus_1_regions.size(), " repair_seeds=",
 				  independent_dense_repair_seeds.size(), '\n');
 		TopologyFixScoreCache score_cache;
 		if (!initialize_topology_fix_score_cache(p, score_cache, "[TopologyFull]"))
@@ -9193,7 +8552,6 @@ protected:
 			const uint32 round_start_tets = static_cast<uint32>(p.skeleton_tets_.size());
 			log_basic(p, "[TopologyFull] round=", round, " start_tets=", round_start_tets, '\n');
 
-			mark_boundary_tets_color(p);
 			const BoundaryTetPrepassStats boundary_stats =
 				run_boundary_tet_face_deletion(p, "[TopologyFull]", &score_cache);
 
@@ -9222,7 +8580,6 @@ protected:
 		const IndependentDenseFiveVertexRepairStats dense_repair_stats =
 			repair_isolated_independent_dense_five_vertex_regions(p, independent_dense_repair_seeds);
 		refresh_skeleton_topology_colors(p);
-		mark_boundary_tets_color(p);
 		log_basic(p, "[TopologyFull] done remaining_tets=", p.skeleton_tets_.size(), " repair_snapshots=",
 				  dense_repair_stats.snapshotted_regions, " isolated_nm_regions=",
 				  dense_repair_stats.regions_with_isolated_nm_edges, " repaired_regions=",
@@ -9657,15 +9014,6 @@ protected:
 						ImGui::EndDisabled();
 					ImGui::SameLine();
 					ImGui::TextDisabled("Select one or more ready targets.");
-					if (ImGui::Button("Boundary tet mask"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							mark_boundary_tets_color(p);
-						}
-					}
-					ImGui::SameLine();
 					if (ImGui::Button("Face components (UF)"))
 					{
 						if (!p.running_)
@@ -9675,30 +9023,6 @@ protected:
 						}
 					}
 					ImGui::SameLine();
-					if (ImGui::Button("Independent K5/K5-1 mask"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							mark_k5_color(p, true);
-						}
-					}
-					if (ImGui::Button("All K5/K5-1 mask"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							mark_k5_color(p, false);
-						}
-					}
-					if (ImGui::Button("K5 delete"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							run_k5_face_deletion(p);
-						}
-					}
 					if (ImGui::Button("Topology fix full pipeline"))
 					{
 						if (!p.running_)
