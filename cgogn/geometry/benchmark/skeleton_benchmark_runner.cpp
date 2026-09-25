@@ -250,7 +250,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 			ScopedBenchmarkTimer timer(result.timing.postprocess_ms);
 			core.run_topology_fix_prepared(*points);
 			if (config.postprocess.residual_prune)
-				core.run_residual_prune_prepared(*points);
+				core.run_completion_residual_prune_prepared(*points);
 			log_stage("postprocess_end");
 		}
 

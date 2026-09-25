@@ -646,14 +646,14 @@ public:
 	{
 		headless_run_topology_fix_prepared(points_parameters_[&points]);
 	}
-	void headless_run_residual_prune_prepared(PointsParameters& p)
+	void headless_run_completion_residual_prune_prepared(PointsParameters& p)
 	{
 		run_residual_sheet_prune(p, "[ResidualSheetPrune]");
 	}
 
-	void headless_run_residual_prune_prepared(POINTS& points)
+	void headless_run_completion_residual_prune_prepared(POINTS& points)
 	{
-		headless_run_residual_prune_prepared(points_parameters_[&points]);
+		headless_run_completion_residual_prune_prepared(points_parameters_[&points]);
 	}
 
 	HeadlessCounts headless_collect_counts(const POINTS& points) const
