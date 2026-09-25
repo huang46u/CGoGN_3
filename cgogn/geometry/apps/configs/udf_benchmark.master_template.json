@@ -44,7 +44,7 @@
       "All input modes use the 2d_plane Bridson sampler with fixed settings; sampling.bridson.sample_radius controls spacing.",
       "Bridson seed warmup uses two ray iterations, each using sampling.ray_sampler_batch_size rays.",
       "input.ma_flip_prune_alpha_factor scales the MF MAFlipPrune score threshold from alpha to alpha * factor while keeping the positive-SDF reject rule unchanged.",
-      "When postprocess.residual_prune is true, completion residual prune now deletes all sheets with face_count <= 2."
+      "When postprocess.residual_prune is true, residual sheet prune deletes all sheets with face_count <= 2 unless the isolated-edge guard keeps them."
     ]
   },
   "input": {
@@ -78,9 +78,7 @@
     "init_dilation_constant": 0.001
   },
   "postprocess": {
-    "nm_two_layer_prune": false,
-    "residual_prune": false,
-    "face_post_processing": false
+    "residual_prune": false
   },
   "benchmark": {
     "num_measure_runs": 1,

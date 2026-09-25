@@ -361,9 +361,12 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		if (auto deg_face_deletion = postprocess->get_optional<bool>("deg_face_deletion");
 			deg_face_deletion && *deg_face_deletion)
 			fail_config("`postprocess.deg_face_deletion` was removed; migrate this legacy value.");
-		config.postprocess.nm_two_layer_prune = get_value<bool>(*postprocess, "nm_two_layer_prune", false);
+		if (auto nm_two_layer = postprocess->get_optional<bool>("nm_two_layer_prune"); nm_two_layer && *nm_two_layer)
+			fail_config("`postprocess.nm_two_layer_prune` was removed; remove the field or set it to false.");
 		config.postprocess.residual_prune = get_value<bool>(*postprocess, "residual_prune", false);
-		config.postprocess.face_post_processing = get_value<bool>(*postprocess, "face_post_processing", false);
+		if (auto face_post_processing = postprocess->get_optional<bool>("face_post_processing");
+			face_post_processing && *face_post_processing)
+			fail_config("`postprocess.face_post_processing` was removed; remove the field or set it to false.");
 	}
 
 	const ptree& benchmark_tree = root.get_child("benchmark");

@@ -26,9 +26,7 @@
     "init_dilation_constant": 0.010
   },
   "postprocess": {
-    "nm_two_layer_prune": false,
-    "residual_prune": true,
-    "face_post_processing": false
+    "residual_prune": true
   },
   "benchmark": {
     "num_measure_runs": 1,

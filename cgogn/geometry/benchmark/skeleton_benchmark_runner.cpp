@@ -249,12 +249,8 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 			log_stage("postprocess_begin");
 			ScopedBenchmarkTimer timer(result.timing.postprocess_ms);
 			core.run_topology_fix_prepared(*points);
-			if (config.postprocess.nm_two_layer_prune)
-				core.run_nm_two_layer_prune_prepared(*points);
 			if (config.postprocess.residual_prune)
-				core.run_completion_residual_prune_prepared(*points);
-			if (config.postprocess.face_post_processing)
-				core.run_face_post_processing_prepared(*points);
+				core.run_residual_prune_prepared(*points);
 			log_stage("postprocess_end");
 		}
 
@@ -285,9 +281,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	std::cout << "Apply filtering: " << (config.sampling.apply_filtering ? "true" : "false") << std::endl;
 	std::cout << "Recompute normals after sampling: "
 			  << (config.sampling.recompute_normals_after_sampling ? "true" : "false") << std::endl;
-	std::cout << "NM two-layer prune: " << (config.postprocess.nm_two_layer_prune ? "true" : "false") << std::endl;
 	std::cout << "Residual prune: " << (config.postprocess.residual_prune ? "true" : "false") << std::endl;
-	std::cout << "Face post processing: " << (config.postprocess.face_post_processing ? "true" : "false") << std::endl;
 	std::cout << "Samples: " << result.counts.sample_points_before_filtering << " -> " << result.counts.sample_points
 			  << std::endl;
 	std::cout << "Final spheres: " << result.counts.final_spheres << std::endl;
@@ -318,9 +312,7 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	benchmark_config.put("input.ma_flip_prune", config.input.ma_flip_prune);
 	benchmark_config.put("input.ma_flip_prune_alpha_factor", config.input.ma_flip_prune_alpha_factor);
 	benchmark_config.put("output.save_face_components", config.output.save_face_components);
-	benchmark_config.put("postprocess.nm_two_layer_prune", config.postprocess.nm_two_layer_prune);
 	benchmark_config.put("postprocess.residual_prune", config.postprocess.residual_prune);
-	benchmark_config.put("postprocess.face_post_processing", config.postprocess.face_post_processing);
 	root.add_child("benchmark_config", benchmark_config);
 
 	boost::property_tree::ptree counts;
