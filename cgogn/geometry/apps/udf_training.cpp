@@ -34,8 +34,6 @@
 #include <cgogn/ui/view.h>
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
-#include <cgogn/geometry/ui_modules/alpha_samples_sphere_debugger.h>
-#include <cgogn/geometry/ui_modules/shrinking_ball_debugger.h>
 #include <cgogn/geometry/ui_modules/udf_training.h>
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
 #include <cgogn/rendering/ui_modules/surface_render.h>
@@ -74,13 +72,7 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 	cgogn::ui::SurfaceRender<Surface> sr(app);
 	cgogn::ui::PointCloudRender<Points> pcr(app);
 	cgogn::ui::SurfaceRender<NonManifold> srnm(app);
-	cgogn::ui::ShrinkingBallDebugger<Points> sbd(app);
-	cgogn::ui::AlphaSamplesSphereDebugger<Points> aisd(app);
-
 	cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag> udf(app);
-	sbd.set_center_udf_query([&udf](Points& points, const Vec3& query_point, cgogn::geometry::Scalar& out_value) {
-		return udf.try_eval_debug_udf_value(points, query_point, out_value);
-	});
 
 	app.init_modules();
 
@@ -91,8 +83,6 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 	v1->link_module(&pcr);
 	v1->link_module(&sr);
 	v1->link_module(&srnm);
-	v1->link_module(&sbd);
-	v1->link_module(&aisd);
 	v1->link_module(&udf);
 
 	Points* p = nullptr;

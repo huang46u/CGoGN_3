@@ -13,6 +13,7 @@
 #include <cgogn/geometry/algos/udf/alpha_sampling.h>
 #include <cgogn/geometry/algos/udf/neural_alpha_projection.h>
 #include <cgogn/geometry/algos/udf/neural_field_query.h>
+#include <cgogn/geometry/algos/udf/sample_processing.h>
 #include <cgogn/geometry/algos/udf/spatial_query.h>
 #include <cgogn/geometry/algos/normal.h>
 #include <cgogn/geometry/functions/angle.h>
@@ -53,7 +54,6 @@
 #include <mutex>
 #include <numeric>
 #include <queue>
-#include <random>
 #include <set>
 #include <string>
 #include <thread>
@@ -75,7 +75,6 @@ using geometry::Scalar;
 using geometry::Spherical_Quadric;
 using geometry::Quadric;
 using geometry::SpatialGrid;
-using geometry::BatchUDFResult;
 using geometry::NeuralFieldForward;
 using geometry::Vec3;
 using geometry::Vec4;
@@ -144,8 +143,6 @@ private:
 		torch::jit::Module neural_udf_model_;
 		std::string neural_udf_model_path_ = "";
 		NeuralModelType neural_model_type_ = NEURAL_MODEL_UDF;
-		bool udf_input_normalized_ = false;
-		const void* udf_normalized_source_ = nullptr;
 
 		// Ray Sampling
 		std::unique_ptr<RaySampler> ray_sampler_;
@@ -546,8 +543,13 @@ public:
 	void headless_compute_fitting_primitives_prepared(PointsParameters& p)
 	{
 		build_kdtree(p);
-		compute_samples_area(p);
-		compute_quadrics(p);
+		if (p.samples_mesh_ && p.samples_kdtree_)
+			geometry::compute_samples_area(
+				*p.samples_mesh_, *p.samples_position_, *p.samples_normal_, *p.samples_area_, *p.samples_knn_,
+				*p.samples_kdtree_, p.samples_kdtree_vertices_, p.knn_k_, Scalar(p.alpha_));
+		if (p.samples_mesh_)
+			geometry::compute_quadrics(*p.samples_mesh_, *p.samples_position_, *p.samples_normal_, *p.samples_area_,
+										*p.samples_knn_, *p.samples_quadric_, *p.samples_line_quadric_, p.knn_k_);
 	}
 
 	void headless_compute_fitting_primitives_prepared(POINTS& points)
@@ -931,8 +933,6 @@ public:
 			p.neural_udf_loaded_ = true;
 			p.neural_udf_model_path_ = model_path;
 			p.neural_model_type_ = model_type;
-			p.udf_input_normalized_ = false;
-			p.udf_normalized_source_ = nullptr;
 			p.input_mode_ = INPUT_NEURAL_UDF;
 			log_basic(p, "Loaded neural UDF model from: ", model_path, '\n');
 		}
@@ -941,38 +941,6 @@ public:
 			log_error(p, "Error loading Neural UDF model: ", e.what(), '\n');
 			p.neural_udf_loaded_ = false;
 		}
-	}
-
-	bool try_eval_debug_udf_value(POINTS& points, const Vec3& query_point, Scalar& out_value)
-	{
-		PointsParameters* params = nullptr;
-		auto it = points_parameters_.find(&points);
-		if (it != points_parameters_.end())
-		{
-			params = &it->second;
-		}
-		else
-		{
-			for (auto& [input_points, p] : points_parameters_)
-			{
-				(void)input_points;
-				if (p.points_ == &points || p.samples_mesh_ == &points || p.spheres_ == &points)
-				{
-					params = &p;
-					break;
-				}
-			}
-		}
-		if (!params)
-			return false;
-		PointsParameters& p = *params;
-		if (!p.neural_udf_loaded_)
-			return false;
-		std::vector<Scalar> values;
-		if (!eval_udf_values(p, std::vector<Vec3>{query_point}, values) || values.empty())
-			return false;
-		out_value = values[0];
-		return true;
 	}
 
 	NeuralFieldForward make_neural_field_forward(PointsParameters& p)
@@ -1071,45 +1039,6 @@ public:
 		bbox_min -= Vec3(expand, expand, expand);
 		bbox_max += Vec3(expand, expand, expand);
 		return {bbox_min, bbox_max};
-	}
-
-	void normalize_input_for_udf_model(PointsParameters& p)
-	{
-		const void* source = nullptr;
-		if (p.points_ && p.position_)
-			source = p.points_;
-		else if (selected_surface_)
-			source = selected_surface_;
-		else
-			return;
-
-		if (p.udf_input_normalized_ && p.udf_normalized_source_ == source)
-			return;
-
-		if (p.points_ && p.position_ && source == p.points_)
-		{
-			geometry::normalize_centered(*p.position_);
-			rebuild_input_kdtree(p);
-			compute_input_normals(p);
-			points_provider_->emit_attribute_changed(*p.points_, p.position_.get());
-			points_provider_->emit_attribute_changed(*p.points_, p.normal_.get());
-			points_provider_->set_mesh_bb_vertex_position(*p.points_, p.position_);
-			invalidate_samples_after_input_change(p);
-		}
-		else if (selected_surface_ && surface_provider_)
-		{
-			auto s_pos = get_attribute<Vec3, SVertex>(*selected_surface_, "position");
-			if (s_pos)
-			{
-				geometry::normalize_centered(*s_pos.get());
-				surface_bvh_dirty_ = true;
-				surface_provider_->set_mesh_bb_vertex_position(*selected_surface_, s_pos);
-				surface_provider_->emit_attribute_changed(*selected_surface_, s_pos.get());
-			}
-		}
-
-		p.udf_input_normalized_ = true;
-		p.udf_normalized_source_ = source;
 	}
 
 	bool compute_neural_gradients_gpu(PointsParameters& p, const std::vector<Vec3>& points, std::vector<Vec3>& normals)
@@ -1679,34 +1608,6 @@ public:
 		log_basic(p, "Sampling filtering applied: ", before, " -> ", after, " points.", '\n');
 	}
 
-	void test_batch_forward(PointsParameters& p)
-	{
-		// generate batch of random test points in [0,1]^3
-		const size_t N = 1000;
-		std::vector<Vec3> test_points(N);
-		std::mt19937 gen(42);
-		std::uniform_real_distribution<Scalar> dis(0.0, 1.0);
-		for (size_t i = 0; i < N; ++i)
-		{
-			test_points[i] = Vec3(dis(gen), dis(gen), dis(gen));
-		}
-		NeuralFieldForward udf = make_neural_field_forward(p);
-		BatchUDFResult result = udf.forward_batch_with_grad(test_points);
-		if (result.ok)
-		{
-			log_verbose(p, "Batch UDF evaluation successful. Sample results:", '\n');
-			for (size_t i = 0; i < 5; ++i)
-			{
-				log_verbose(p, "Point: ", test_points[i].transpose(), " UDF: ", result.values[i],
-						   " Grad: ", result.gradients[i].transpose(), '\n');
-			}
-		}
-		else
-		{
-			log_error(p, "Batch UDF evaluation failed.", '\n');
-		}
-	}
-
 public:
 
 protected:
@@ -1858,7 +1759,8 @@ private:
 				return true;
 			});
 			p.input_kdtree_ = new acc::KDTree<3, uint32>(points);
-			compute_input_normals(p);
+			geometry::compute_input_normals(*p.points_, *p.position_, *p.normal_, *p.knn_, *p.input_kdtree_,
+										p.input_kdtree_vertices_, p.knn_k_);
 		}
 
 		// Init Samples Mesh
@@ -1947,9 +1849,14 @@ private:
 		compute_initial_medial_axis(p);
 		build_kdtree(p);
 		log_basic(p, "Computing KNN and Area...", '\n');
-		compute_samples_area(p); // Compute KNN and Area for samples
+		if (p.samples_mesh_ && p.samples_kdtree_)
+			geometry::compute_samples_area(
+				*p.samples_mesh_, *p.samples_position_, *p.samples_normal_, *p.samples_area_, *p.samples_knn_,
+				*p.samples_kdtree_, p.samples_kdtree_vertices_, p.knn_k_, Scalar(p.alpha_));
 		log_basic(p, "Computing Quadrics...", '\n');
-		compute_quadrics(p);
+		if (p.samples_mesh_)
+			geometry::compute_quadrics(*p.samples_mesh_, *p.samples_position_, *p.samples_normal_, *p.samples_area_,
+										*p.samples_knn_, *p.samples_quadric_, *p.samples_line_quadric_, p.knn_k_);
 
 		log_basic(p, "Fitting Data Computed.", '\n');
 
@@ -1993,141 +1900,6 @@ private:
 
 		p.samples_kdtree_ = points.empty() ? nullptr : new acc::KDTree<3, uint32>(points);
 		p.samples_ma_kdtree_ = points_ma.empty() ? nullptr : new acc::KDTree<3, uint32>(points_ma);
-	}
-
-	// Generic PCA normal computation for any point cloud mesh
-	template <typename MESH, typename POS_ATTR>
-	Vec3 compute_pca_normal(const MESH& mesh, const POS_ATTR& position, const std::vector<uint32>& indices,
-							const std::vector<typename mesh_traits<MESH>::Vertex>& kdtree_vertices)
-	{
-		using Vertex = typename mesh_traits<MESH>::Vertex;
-		if (indices.size() < 3)
-			return Vec3(0, 0, 1);
-
-		Vec3 centroid(0, 0, 0);
-		for (uint32 idx : indices)
-			centroid += position[index_of(mesh, kdtree_vertices[idx])];
-		centroid /= Scalar(indices.size());
-
-		Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
-		for (uint32 idx : indices)
-		{
-			const Vertex v = kdtree_vertices[idx];
-			const Vec3 diff = position[index_of(mesh, v)] - centroid;
-			const Eigen::Vector3d point(diff[0], diff[1], diff[2]);
-			covariance += point * point.transpose();
-		}
-		covariance /= Scalar(indices.size());
-		const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
-		const Eigen::Vector3d normal = solver.eigenvectors().col(0);
-		return Vec3(normal[0], normal[1], normal[2]).normalized();
-	}
-
-	void compute_input_normals(PointsParameters& p)
-	{
-		if (!p.input_kdtree_ || !p.points_ || !p.position_ || !p.normal_ || !p.knn_)
-			return;
-		parallel_foreach_cell(*p.points_, [&](PVertex v) -> bool {
-			const uint32 v_idx = index_of(*p.points_, v);
-			const Vec3& pt = (*p.position_)[v_idx];
-			std::vector<std::pair<uint32, Scalar>> knn_res;
-			p.input_kdtree_->find_nns(pt, p.knn_k_ + 1, &knn_res);
-			std::vector<uint32> indices;
-			(*p.knn_)[v_idx].clear();
-			for (const auto& res : knn_res)
-			{
-				indices.push_back(res.first);
-				(*p.knn_)[v_idx].push_back(p.input_kdtree_vertices_[res.first]);
-			}
-			(*p.normal_)[v_idx] = compute_pca_normal(*p.points_, *p.position_, indices, p.input_kdtree_vertices_);
-			return true;
-		});
-	}
-
-	void compute_samples_area(PointsParameters& p)
-	{
-		// Compute KNN and Area on samples_mesh_
-		if (!p.samples_mesh_ || !p.samples_kdtree_)
-			return;
-
-		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			const Vec3& pt = (*p.samples_position_)[v_idx];
-			std::vector<std::pair<uint32, Scalar>> knn_res;
-			p.samples_kdtree_->find_nns(pt, p.knn_k_ + 10, &knn_res);
-
-			(*p.samples_knn_)[v_idx].clear();
-			Scalar sum_dist = 0.0;
-			const Scalar eps = Scalar(1e-12);
-			const Scalar band = p.alpha_;
-			Vec3 n = (*p.samples_normal_)[v_idx];
-			const Scalar n2 = n.squaredNorm();
-			if (n2 > eps)
-				n /= std::sqrt(n2);
-			else
-				n = Vec3(0, 0, 1);
-			int kept = 0;
-			for (auto& res : knn_res)
-			{
-				if (p.samples_kdtree_vertices_[res.first] != v)
-				{
-					PVertex nb = p.samples_kdtree_vertices_[res.first];
-					uint32 nb_idx = index_of(*p.samples_mesh_, nb);
-					const Vec3& q = (*p.samples_position_)[nb_idx];
-					const Scalar dn = (q - pt).dot(n);
-					if (std::abs(dn) > band)
-						continue;
-					(*p.samples_knn_)[v_idx].push_back(nb);
-					sum_dist += res.second;
-					++kept;
-					if (kept >= p.knn_k_ + 1)
-						break;
-				}
-			}
-			if (kept == 0) // fall back
-			{
-				for (auto& res : knn_res)
-				{
-					if (p.samples_kdtree_vertices_[res.first] != v)
-					{
-						PVertex nb = p.samples_kdtree_vertices_[res.first];
-						(*p.samples_knn_)[v_idx].push_back(nb);
-						sum_dist += res.second;
-					}
-				}
-			}
-			// Normals are already computed/oriented in sample_points
-			(*p.samples_area_)[v_idx] = (sum_dist * sum_dist) / (2.0 * p.knn_k_); // Rough area estimate
-			return true;
-		});
-	}
-
-	void compute_quadrics(PointsParameters& p)
-	{
-		if (!p.samples_mesh_)
-			return;
-		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) {
-			uint32 v_idx = index_of(*p.samples_mesh_, v);
-			Spherical_Quadric& q = (*p.samples_quadric_)[v_idx];
-			Line_Quadric& lq = (*p.samples_line_quadric_)[v_idx];
-			q.clear();
-			lq.clear();
-			const Vec3& pos = (*p.samples_position_)[v_idx];
-			const Vec3& n = (*p.samples_normal_)[v_idx];
-			Scalar a = (*p.samples_area_)[v_idx] / (p.knn_k_ + 1.0);
-			q += Spherical_Quadric(Vec4(pos.x(), pos.y(), pos.z(), 0), Vec4(n.x(), n.y(), n.z(), 1)) * a;
-			lq += Line_Quadric(pos, n) * a;
-			for (PVertex vn : (*p.samples_knn_)[v_idx])
-			{
-				uint32 vn_idx = index_of(*p.samples_mesh_, vn);
-				const Vec3& pn = (*p.samples_position_)[vn_idx];
-				const Vec3& nn = (*p.samples_normal_)[vn_idx];
-				Scalar an = (*p.samples_area_)[vn_idx] / (p.knn_k_ + 1.0);
-				q += Spherical_Quadric(Vec4(pn.x(), pn.y(), pn.z(), 0), Vec4(nn.x(), nn.y(), nn.z(), 1)) * an;
-				lq += Line_Quadric(pn, nn) * an;
-			}
-			return true;
-		});
 	}
 
 	bool recompute_sample_normal_pca_for_vertex(PointsParameters& p, PVertex v)
@@ -2239,19 +2011,6 @@ private:
 		}
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
-	}
-
-	Vec3 random_sample_in_sphere(const Vec3& p, const Scalar radius,
-							 std::uniform_real_distribution<Scalar>& uni, std::mt19937& rng)
-	{
-		const Scalar u = uni(rng);
-		const Scalar v = uni(rng);
-		const Scalar w = uni(rng);
-		const Scalar r = radius * std::cbrt(u);
-		const Scalar phi = v * 2.0 * M_PI;
-		const Scalar theta = std::acos(1.0 - 2.0 * w);
-		return p + Vec3(r * std::sin(theta) * std::cos(phi), r * std::sin(theta) * std::sin(phi),
-					r * std::cos(theta));
 	}
 
 	void refresh_sample_normals_color(PointsParameters& p)
@@ -6739,13 +6498,6 @@ protected:
 
 				ImGui::Separator();
 				ImGui::Text("Alpha Level Set Sampling Settings");
-
-				if (ImGui::Button("Test forward model"))
-				{
-					test_batch_forward(p);
-				}
-				ImGui::SameLine();
-				ImGui::TextColored(ImVec4(1, 1, 0, 1), "Test batch evaluation");
 			}
 		}
 		// Sampling
