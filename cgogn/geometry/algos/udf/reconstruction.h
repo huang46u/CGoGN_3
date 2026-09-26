@@ -115,10 +115,10 @@ public:
 		float ma_flip_prune_alpha_factor = 1.0f;
 		float alpha = 0.005f;
 		int knn_k = 10;
-		bool apply_filtering = false;
+		bool apply_filtering = true;
 		bool recompute_normals_after_sampling = false;
-		int ray_sampler_batch_size = 4096;
-		int batch_size = 1310640;
+		int ray_sampler_batch_size = 8192;
+		int batch_size = 1048576;
 		float tolerance = 1e-6f;
 		int udf_max_iterations = 3000;
 		float sample_radius = 0.0025f;
@@ -207,7 +207,6 @@ public:
 		topology_.reset();
 		neural_model_loaded_ = false;
 		fitting_data_computed_ = false;
-		face_components_prepared_ = false;
 		samples_before_filtering_ = 0;
 		initialized_ = false;
 	}
@@ -245,9 +244,7 @@ public:
 		skeleton_radius_ = get_or_add_attribute<Scalar, NMVertex>(*data_.skeleton, "radius");
 		skeleton_source_sphere_ = get_or_add_attribute<PVertex, NMVertex>(*data_.skeleton, "source_sphere");
 		skeleton_incident_tets_ = get_or_add_attribute<std::set<std::size_t>, NMFace>(*data_.skeleton, "incident_tets");
-		skeleton_component_id_ = get_or_add_attribute<uint32, NMFace>(*data_.skeleton, "face_component_id");
 		skeleton_edge_degree_ = get_or_add_attribute<uint32, NMEdge>(*data_.skeleton, "degree");
-		skeleton_face_component_color_ = get_or_add_attribute<Vec3, NMFace>(*data_.skeleton, "face_component_color");
 		initialized_ = input_position_ && sample_position_ && sample_normal_ && sphere_position_ && skeleton_position_;
 		return initialized_ ? Status::success : Status::invalid_data;
 	}
@@ -288,7 +285,6 @@ public:
 	Status build_skeleton();
 	Status fix_topology();
 	Status prune_residual_sheets();
-	Status prepare_face_components();
 	Result run(const IterationCallback& iteration_callback = {});
 
 	Counts counts() const
@@ -315,11 +311,9 @@ public:
 		return c;
 	}
 
-	bool export_skeleton_ply(const std::filesystem::path& path, bool include_face_components) const
+	bool export_skeleton_ply(const std::filesystem::path& path) const
 	{
 		if (!data_.skeleton || !skeleton_position_ || !skeleton_radius_)
-			return false;
-		if (include_face_components && !face_components_prepared_)
 			return false;
 		std::error_code error;
 		if (!path.parent_path().empty())
@@ -336,8 +330,6 @@ public:
 		}
 		io::SurfaceExportAttributeSelection<NONMANIFOLD> attributes;
 		attributes.vertex_attributes.push_back(skeleton_radius_);
-		if (include_face_components && skeleton_face_component_color_)
-			attributes.face_attributes.push_back(skeleton_face_component_color_);
 		io::export_PLY(*data_.skeleton, skeleton_position_.get(), path.string(), &attributes);
 		const bool exists = std::filesystem::exists(path, error);
 		if (error || !exists)
@@ -377,7 +369,6 @@ private:
 	std::unique_ptr<TopologyType> topology_;
 	bool fitting_data_computed_ = false;
 	bool initialized_ = false;
-	bool face_components_prepared_ = false;
 	uint32 sphere_count_ = 0;
 	uint32 samples_before_filtering_ = 0;
 
@@ -404,8 +395,7 @@ private:
 	std::shared_ptr<SkeletonAttribute<Scalar>> skeleton_radius_;
 	std::shared_ptr<SkeletonAttribute<PVertex>> skeleton_source_sphere_;
 	std::shared_ptr<SkeletonAttribute<std::set<std::size_t>>> skeleton_incident_tets_;
-	std::shared_ptr<SkeletonAttribute<uint32>> skeleton_component_id_, skeleton_edge_degree_;
-	std::shared_ptr<SkeletonAttribute<Vec3>> skeleton_face_component_color_;
+	std::shared_ptr<SkeletonAttribute<uint32>> skeleton_edge_degree_;
 	std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_normal_;
 
 	void build_surface_bvh();
@@ -422,8 +412,6 @@ private:
 	SpheresOptimizerType& optimizer_for();
 	TopologyType& topology_for();
 	bool evaluate_topology_scores(const std::vector<Vec3>& points, std::vector<Scalar>& values);
-	Vec3 hsv_to_rgb(Scalar h, Scalar s, Scalar v) const;
-	Vec3 component_palette_color(uint32 component_id) const;
 };
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
@@ -744,7 +732,6 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Topolog
 	d.skeleton_radius = skeleton_radius_;
 	d.skeleton_source_sphere = skeleton_source_sphere_;
 	d.face_incident_tets = skeleton_incident_tets_;
-	d.face_component_id = skeleton_component_id_;
 	d.edge_degree = skeleton_edge_degree_;
 	if (!topology_)
 		topology_ = std::make_unique<TopologyType>(std::move(d));
@@ -1224,46 +1211,6 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 }
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
-Vec3 UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::hsv_to_rgb(Scalar h, Scalar s, Scalar v) const
-{
-	const Scalar hh = h - std::floor(h);
-	if (!(s > Scalar(0)))
-		return Vec3(v, v, v);
-	const Scalar scaled = hh * Scalar(6);
-	const int sector = static_cast<int>(std::floor(scaled));
-	const Scalar f = scaled - Scalar(sector), p = v * (Scalar(1) - s), q = v * (Scalar(1) - s * f),
-				 t = v * (Scalar(1) - s * (Scalar(1) - f));
-	switch (sector % 6)
-	{
-	case 0:
-		return Vec3(v, t, p);
-	case 1:
-		return Vec3(q, v, p);
-	case 2:
-		return Vec3(p, v, t);
-	case 3:
-		return Vec3(p, q, v);
-	case 4:
-		return Vec3(t, p, v);
-	default:
-		return Vec3(v, p, q);
-	}
-}
-
-template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
-Vec3 UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::component_palette_color(uint32 id) const
-{
-	static constexpr double golden_ratio_conjugate = 0.6180339887498949;
-	const Scalar hue = Scalar(std::fmod(0.17 + golden_ratio_conjugate * static_cast<double>(id), 1.0));
-	const Scalar saturation = (id % 3 == 0) ? Scalar(0.82) : (id % 3 == 1) ? Scalar(0.72) : Scalar(0.90);
-	const Scalar value = (id % 4 == 0)	 ? Scalar(0.95)
-						 : (id % 4 == 1) ? Scalar(0.88)
-						 : (id % 4 == 2) ? Scalar(0.80)
-										 : Scalar(0.92);
-	return hsv_to_rgb(hue, saturation, value);
-}
-
-template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
 typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status UDFReconstruction<
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::initialize_spheres()
 {
@@ -1294,7 +1241,6 @@ template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RayS
 typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status UDFReconstruction<
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::build_skeleton()
 {
-	face_components_prepared_ = false;
 	return topology_for().build_from_spheres() == TopologyType::Status::success ? Status::success
 																				: Status::skeleton_build_failed;
 }
@@ -1303,7 +1249,6 @@ template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RayS
 typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status UDFReconstruction<
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::fix_topology()
 {
-	face_components_prepared_ = false;
 	return topology_for().fix_topology([this](const std::vector<Vec3>& p, std::vector<Scalar>& v) {
 		return evaluate_topology_scores(p, v);
 	}) == TopologyType::Status::success
@@ -1315,42 +1260,8 @@ template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RayS
 typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status UDFReconstruction<
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::prune_residual_sheets()
 {
-	face_components_prepared_ = false;
 	return topology_for().prune_residual_sheets() == TopologyType::Status::success ? Status::success
-																				   : Status::topology_fix_failed;
-}
-
-template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
-typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status UDFReconstruction<
-	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::prepare_face_components()
-{
-	face_components_prepared_ = false;
-	auto& topology = topology_for();
-	// Keep the legacy face-component export contract explicit: fully non-manifold
-	// triangles are removed before component ids and colors are computed.
-	if (topology.prune_fully_non_manifold_triangles() != TopologyType::Status::success ||
-		topology.compute_skeleton_face_components_union_find() != TopologyType::Status::success)
-		return Status::topology_fix_failed;
-	skeleton_face_component_color_ = get_or_add_attribute<Vec3, NMFace>(*data_.skeleton, "face_component_color");
-	const uint32 count = nb_cells<NMFace>(*data_.skeleton);
-	if (count == 0)
-	{
-		face_components_prepared_ = true;
-		return Status::success;
-	}
-	foreach_cell(*data_.skeleton, [&](NMFace f) {
-		const uint32 idx = index_of(*data_.skeleton, f);
-		const uint32 id = (*skeleton_component_id_)[idx];
-		if (id == INVALID_INDEX)
-		{
-			(*skeleton_face_component_color_)[idx] = Vec3(0, 0, 0);
-			return true;
-		}
-		(*skeleton_face_component_color_)[idx] = component_palette_color(id);
-		return true;
-	});
-	face_components_prepared_ = true;
-	return Status::success;
+																	   : Status::topology_fix_failed;
 }
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
@@ -1430,7 +1341,6 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Result 
 	optimizer_.reset();
 	topology_.reset();
 	fitting_data_computed_ = false;
-	face_components_prepared_ = false;
 	samples_before_filtering_ = 0;
 	sphere_count_ = 0;
 	auto run_stage = [](float64& time, auto&& stage) {

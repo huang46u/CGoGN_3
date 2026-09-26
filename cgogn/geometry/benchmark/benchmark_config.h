@@ -46,20 +46,9 @@ struct BenchmarkInputConfig
 
 struct BenchmarkSamplingConfig
 {
-	struct BridsonConfig
-	{
-		float sample_radius = 0.0025f;
-	};
-
 	float alpha = 0.005f;
 	int knn_k = 10;
-	bool apply_filtering = false;
-	bool recompute_normals_after_sampling = false;
-	int ray_sampler_batch_size = 4096;
-	int batch_size = 1310640;
-	float tol = 1e-5f;
-	int udf_max_iterations = 3000;
-	BridsonConfig bridson;
+	float sample_radius = 0.0025f;
 };
 
 struct BenchmarkOptimizationConfig
@@ -88,7 +77,6 @@ struct BenchmarkOutputConfig
 {
 	std::string skeleton_ply;
 	std::string timing_json;
-	bool save_face_components = false;
 };
 
 struct BenchmarkBatchConfig

@@ -6,12 +6,6 @@
   "sampling": {
     "alpha": 0.002,
     "knn_k": 10,
-    "apply_filtering": true,
-    "recompute_normals_after_sampling": false,
-    "ray_sampler_batch_size": 8192,
-    "batch_size": 1048576,
-    "tol": 1e-6,
-    "udf_max_iterations": 3000,
     "bridson": {
       "sample_radius": 0.002
     }

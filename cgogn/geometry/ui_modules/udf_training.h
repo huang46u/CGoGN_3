@@ -110,7 +110,6 @@ private:
 		std::shared_ptr<NMAttribute<std::set<std::size_t>>> incident_tets_ = nullptr;
 
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_color_ = nullptr;
-		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_component_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_color_ = nullptr;
 
 		bool error_as_spheres_color_ = false;
@@ -277,6 +276,11 @@ public:
 			log_error("Alpha level set sampling failed.", '\n');
 			return;
 		}
+		if (p.reconstruction_->apply_sampling_filtering() != ReconstructionStatus::success)
+		{
+			log_error("Sampling filtering failed.", '\n');
+			return;
+		}
 		if (p.samples_color_)
 			p.samples_color_->fill(Vec4(0.0, 0.0, 0.0, 1.0));
 		refresh_sample_normals_color(p);
@@ -287,31 +291,6 @@ public:
 			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
 		p.fitting_data_computed_ = false;
 		log_basic(p, "Alpha level set sampling complete. Ready for fitting.", '\n');
-	}
-
-	void apply_sampling_preprocess_filtering(PointsParameters& p)
-	{
-		if (!p.reconstruction_ || p.running_)
-			return;
-		const uint32 before = nb_cells<PVertex>(*p.samples_mesh_);
-		const ReconstructionStatus status = p.reconstruction_->apply_sampling_filtering();
-		if (status != ReconstructionStatus::success)
-		{
-			log_error("Sampling filtering failed.", '\n');
-			return;
-		}
-		const uint32 after = nb_cells<PVertex>(*p.samples_mesh_);
-		if (after == before)
-			return;
-		p.fitting_data_computed_ = false;
-		if (p.samples_color_)
-			p.samples_color_->fill(Vec4(0.0, 0.0, 0.0, 1.0));
-		points_provider_->emit_connectivity_changed(*p.samples_mesh_);
-		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_position_.get());
-		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_.get());
-		if (p.samples_color_)
-			points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
-		log_basic(p, "Sampling filtering applied: ", before, " -> ", after, " points.", '\n');
 	}
 
 protected:
@@ -383,13 +362,11 @@ private:
 		p.skeleton_radius_ = get_or_add_attribute<Scalar, NMVertex>(*p.skeleton_, "radius");
 		p.incident_tets_ = get_or_add_attribute<std::set<std::size_t>, NMFace>(*p.skeleton_, "incident_tets");
 		p.skeleton_face_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "color");
-		p.skeleton_face_component_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "face_component_color");
 		p.skeleton_edge_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "color");
 
 		typename ReconstructionType::Data data{selected_surface_, p.points_, p.samples_mesh_, p.spheres_, p.skeleton_};
 		p.reconstruction_ = std::make_unique<ReconstructionType>(data);
 		p.reconstruction_->options().ma_flip_prune = false;
-		p.reconstruction_->options().ray_sampler_batch_size = 8192;
 		p.sphere_update_lambda_.store(p.reconstruction_->options().sqem_update_lambda_line_plane);
 		const ReconstructionStatus status = p.reconstruction_->initialize_data();
 		p.initialized_ = status == ReconstructionStatus::success;
@@ -839,18 +816,7 @@ protected:
 			ImGui::BeginDisabled(p.running_.load());
 			ImGui::InputFloat("Alpha", &options.alpha, 0.001f, 0.1f, "%.4f");
 			ImGui::InputFloat("Sample Radius", &options.sample_radius, 0.001f, 0.01f, "%.4f");
-			ImGui::InputInt("Eval Batch Size", &options.batch_size, 256, 1024);
-			ImGui::InputInt("Ray Batch Size", &options.ray_sampler_batch_size, 256, 2048);
-			ImGui::InputInt("Max Iterations", &options.udf_max_iterations, 1000, 8000);
-			ImGui::InputFloat("Tolerance", &options.tolerance, 0.0f, 0.0f, "%.6f");
 			ImGui::InputInt("KNN K", &options.knn_k, 1, 5);
-			ImGui::Checkbox("Recompute Normals In Fitting Data", &options.recompute_normals_after_sampling);
-			if (ImGui::Button("Apply Sampling Filtering"))
-			{
-				std::lock_guard<std::mutex> lock(p.mutex_);
-				options.apply_filtering = true;
-				apply_sampling_preprocess_filtering(p);
-			}
 			if (ImGui::Button("Sample UDF"))
 			{
 				load_alpha_samples_to_mesh(p);
@@ -975,28 +941,13 @@ protected:
 						if (!filename.empty())
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
-							if (!p.reconstruction_->export_skeleton_ply(filename, false))
+							if (!p.reconstruction_->export_skeleton_ply(filename))
 								log_error("Failed to export skeleton PLY: ", filename, '\n');
 						}
 					}
 					if (!can_export_skeleton)
 						ImGui::EndDisabled();
 					ImGui::BeginDisabled(p.running_.load());
-					if (ImGui::Button("Face components (UF)"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							if (p.reconstruction_->prepare_face_components() == ReconstructionStatus::success &&
-								non_manifold_provider_ && p.skeleton_ &&
-								p.skeleton_face_component_color_)
-							{
-								non_manifold_provider_->emit_attribute_changed(*p.skeleton_,
-																p.skeleton_face_component_color_.get());
-							}
-						}
-					}
-					ImGui::SameLine();
 					if (ImGui::Button("Topology fix full pipeline"))
 					{
 						if (!p.running_)

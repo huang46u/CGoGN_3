@@ -12,12 +12,6 @@
   "sampling": {
     "alpha": 0.005,
     "knn_k": 10,
-    "apply_filtering": true,
-    "recompute_normals_after_sampling": false,
-    "ray_sampler_batch_size": 1048576,
-    "batch_size": 1048576,
-    "tol": 1e-5,
-    "udf_max_iterations": 3000,
     "bridson": {
       "sample_radius": 0.0018
     }
@@ -38,7 +32,6 @@
   },
   "output": {
     "skeleton_ply": "D:/Code/CGoGN_3/out/deepfashion/1-12.ply",
-    "timing_json": "D:/Code/CGoGN_3/out/deepfashion/1-12_timing.json",
-    "save_face_components": false
+    "timing_json": "D:/Code/CGoGN_3/out/deepfashion/1-12_timing.json"
   }
 }

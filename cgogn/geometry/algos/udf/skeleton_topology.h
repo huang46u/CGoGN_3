@@ -70,7 +70,6 @@ public:
 		std::shared_ptr<SkeletonAttribute<Scalar>> skeleton_radius;
 		std::shared_ptr<SkeletonAttribute<SphereVertex>> skeleton_source_sphere;
 		std::shared_ptr<SkeletonAttribute<std::set<std::size_t>>> face_incident_tets;
-		std::shared_ptr<SkeletonAttribute<uint32>> face_component_id;
 		std::shared_ptr<SkeletonAttribute<uint32>> edge_degree;
 	};
 
@@ -132,14 +131,6 @@ public:
 		return prune_fully_non_manifold_triangles(p) ? Status::success : Status::invalid_data;
 	}
 
-	Status compute_skeleton_face_components_union_find()
-	{
-		if (!valid_data())
-			return Status::invalid_data;
-		TopologyParameters p(data_, skeleton_tets_);
-		return compute_skeleton_face_components_union_find(p) ? Status::success : Status::invalid_data;
-	}
-
 	void compute_edge_degree()
 	{
 		if (!valid_data())
@@ -183,7 +174,6 @@ private:
 		std::shared_ptr<SkeletonAttribute<Vec3>>& skeleton_position_;
 		std::shared_ptr<SkeletonAttribute<Scalar>>& skeleton_radius_;
 		std::shared_ptr<SkeletonAttribute<std::set<std::size_t>>>& incident_tets_;
-		std::shared_ptr<SkeletonAttribute<uint32>>& skeleton_face_component_id_;
 		std::shared_ptr<SkeletonAttribute<SphereVertex>>& skeleton_source_sphere_;
 		std::shared_ptr<SkeletonAttribute<uint32>>& edge_degree_;
 		SpheresOptimizerType*& spheres_optimizer_;
@@ -201,14 +191,14 @@ private:
 			spheres_error_(d.spheres_optimizer->data().sphere_error),
 			spheres_skeleton_vertex_(d.sphere_skeleton_vertex), skeleton_position_(d.skeleton_position),
 			skeleton_radius_(d.skeleton_radius), incident_tets_(d.face_incident_tets),
-			skeleton_face_component_id_(d.face_component_id), skeleton_source_sphere_(d.skeleton_source_sphere),
+			skeleton_source_sphere_(d.skeleton_source_sphere),
 			edge_degree_(d.edge_degree), spheres_optimizer_(d.spheres_optimizer) {}
 	};
 
 	bool valid_data() const
 	{
 		return data_.skeleton && data_.spheres_optimizer && data_.skeleton_position && data_.skeleton_radius &&
-			data_.skeleton_source_sphere && data_.face_incident_tets && data_.face_component_id && data_.edge_degree &&
+			data_.skeleton_source_sphere && data_.face_incident_tets && data_.edge_degree &&
 			data_.sphere_skeleton_vertex;
 	}
 
@@ -441,56 +431,6 @@ private:
 		}
 	}
 
-	struct FaceComponentUnionFind
-	{
-		std::vector<uint32> parent_;
-		std::vector<uint32> rank_;
-
-		FaceComponentUnionFind() = default;
-
-		explicit FaceComponentUnionFind(size_t n)
-		{
-			reset(n);
-		}
-
-		void reset(size_t n)
-		{
-			parent_.resize(n);
-			rank_.assign(n, 0);
-			for (uint32 i = 0; i < static_cast<uint32>(n); ++i)
-				parent_[i] = i;
-		}
-
-		uint32 find(uint32 x)
-		{
-			uint32 root = x;
-			while (parent_[root] != root)
-				root = parent_[root];
-			while (parent_[x] != x)
-			{
-				const uint32 next = parent_[x];
-				parent_[x] = root;
-				x = next;
-			}
-			return root;
-		}
-
-		void unite(uint32 a, uint32 b)
-		{
-			uint32 ra = find(a);
-			uint32 rb = find(b);
-			if (ra == rb)
-				return;
-			if (rank_[ra] < rank_[rb])
-				std::swap(ra, rb);
-			parent_[rb] = ra;
-			if (rank_[ra] == rank_[rb])
-				++rank_[ra];
-		}
-	};
-
-
-
 	bool prune_fully_non_manifold_triangles(TopologyParameters& p)
 	{
 		if (!p.skeleton_)
@@ -564,88 +504,85 @@ private:
 		return true;
 	}
 
-	bool compute_skeleton_face_components_union_find(TopologyParameters& p)
+	void run_residual_sheet_prune(TopologyParameters& p)
 	{
-		if (!p.skeleton_ || !p.skeleton_face_component_id_)
-			return false;
+		if (!p.skeleton_ || !p.incident_tets_)
+			return;
+
+		compute_edge_degree(p);
+		prune_fully_non_manifold_triangles(p);
 
 		std::vector<SkeletonFace> faces;
 		faces.reserve(nb_cells<SkeletonFace>(*p.skeleton_));
-		std::unordered_map<uint32, uint32> face_id_to_uf_index;
-		face_id_to_uf_index.reserve(nb_cells<SkeletonFace>(*p.skeleton_));
+		std::unordered_map<uint32, uint32> face_id_to_index;
+		face_id_to_index.reserve(nb_cells<SkeletonFace>(*p.skeleton_));
 		foreach_cell(*p.skeleton_, [&](SkeletonFace f) -> bool {
 			if (!f.is_valid())
 				return true;
 			const uint32 face_id = index_of(*p.skeleton_, f);
 			if (face_id == INVALID_INDEX)
 				return true;
-			(*p.skeleton_face_component_id_)[face_id] = INVALID_INDEX;
-			face_id_to_uf_index.emplace(face_id, static_cast<uint32>(faces.size()));
+			face_id_to_index.emplace(face_id, static_cast<uint32>(faces.size()));
 			faces.push_back(f);
 			return true;
 		});
+		if (faces.empty())
+			return;
 
-		FaceComponentUnionFind uf(faces.size());
+		std::vector<uint32> parents(faces.size());
+		std::vector<uint32> ranks(faces.size(), 0);
+		for (uint32 i = 0; i < static_cast<uint32>(faces.size()); ++i)
+			parents[i] = i;
+		auto find_root = [&](uint32 index) {
+			uint32 root = index;
+			while (parents[root] != root)
+				root = parents[root];
+			while (parents[index] != index)
+			{
+				const uint32 next = parents[index];
+				parents[index] = root;
+				index = next;
+			}
+			return root;
+		};
+		auto unite = [&](uint32 first, uint32 second) {
+			uint32 first_root = find_root(first);
+			uint32 second_root = find_root(second);
+			if (first_root == second_root)
+				return;
+			if (ranks[first_root] < ranks[second_root])
+				std::swap(first_root, second_root);
+			parents[second_root] = first_root;
+			if (ranks[first_root] == ranks[second_root])
+				++ranks[first_root];
+		};
 		foreach_cell(*p.skeleton_, [&](SkeletonEdge e) -> bool {
 			if (!e.is_valid())
 				return true;
 			const auto incident = incident_faces(*p.skeleton_, e);
 			if (incident.size() != 2)
 				return true;
-			const uint32 f0 = index_of(*p.skeleton_, incident[0]);
-			const uint32 f1 = index_of(*p.skeleton_, incident[1]);
-			const auto i0 = face_id_to_uf_index.find(f0);
-			const auto i1 = face_id_to_uf_index.find(f1);
-			if (i0 != face_id_to_uf_index.end() && i1 != face_id_to_uf_index.end())
-				uf.unite(i0->second, i1->second);
+			const auto first = face_id_to_index.find(index_of(*p.skeleton_, incident[0]));
+			const auto second = face_id_to_index.find(index_of(*p.skeleton_, incident[1]));
+			if (first != face_id_to_index.end() && second != face_id_to_index.end())
+				unite(first->second, second->second);
 			return true;
 		});
 
-		std::unordered_map<uint32, uint32> root_to_component_id;
-		root_to_component_id.reserve(faces.size());
+		std::unordered_map<uint32, uint32> root_to_sheet_label;
+		root_to_sheet_label.reserve(faces.size());
+		std::unordered_map<uint32, std::vector<uint32>> label_to_faces;
+		label_to_faces.reserve(faces.size());
 		for (uint32 i = 0; i < static_cast<uint32>(faces.size()); ++i)
 		{
-			const uint32 root = uf.find(i);
+			const uint32 root = find_root(i);
 			const auto [it, inserted] =
-				root_to_component_id.emplace(root, static_cast<uint32>(root_to_component_id.size()));
+				root_to_sheet_label.emplace(root, static_cast<uint32>(root_to_sheet_label.size()));
 			(void)inserted;
 			const uint32 face_id = index_of(*p.skeleton_, faces[i]);
 			if (face_id != INVALID_INDEX)
-				(*p.skeleton_face_component_id_)[face_id] = it->second;
+				label_to_faces[it->second].push_back(face_id);
 		}
-		return true;
-	}
-
-
-	void run_residual_sheet_prune(TopologyParameters& p)
-	{
-		if (!p.skeleton_ || !p.skeleton_face_component_id_ || !p.incident_tets_)
-			return;
-
-		compute_edge_degree(p);
-		prune_fully_non_manifold_triangles(p);
-		if (!compute_skeleton_face_components_union_find(p))
-			return;
-
-		std::unordered_map<uint32, std::vector<uint32>> label_to_faces;
-		label_to_faces.reserve(nb_cells<SkeletonFace>(*p.skeleton_));
-		std::unordered_set<uint32> all_face_ids;
-		all_face_ids.reserve(nb_cells<SkeletonFace>(*p.skeleton_));
-		foreach_cell(*p.skeleton_, [&](SkeletonFace f) -> bool {
-			if (!f.is_valid())
-				return true;
-			const uint32 face_id = index_of(*p.skeleton_, f);
-			if (face_id == INVALID_INDEX)
-				return true;
-			const uint32 label = (*p.skeleton_face_component_id_)[face_id];
-			if (label == INVALID_INDEX)
-				return true;
-			label_to_faces[label].push_back(face_id);
-			all_face_ids.insert(face_id);
-			return true;
-		});
-		if (all_face_ids.empty())
-			return;
 
 		std::vector<uint32> sorted_sheet_labels;
 		sorted_sheet_labels.reserve(label_to_faces.size());
@@ -710,7 +647,6 @@ private:
 		{
 			compute_edge_degree(p);
 			prune_fully_non_manifold_triangles(p);
-			compute_skeleton_face_components_union_find(p);
 			return;
 		}
 
@@ -722,7 +658,6 @@ private:
 		metrics_.residual_removed_faces += deletion_stats.removed_faces;
 		compute_edge_degree(p);
 		prune_fully_non_manifold_triangles(p);
-		compute_skeleton_face_components_union_find(p);
 	}
 	uint32 remove_orphan_edges_from_removed_face_edges(TopologyParameters& p, const std::vector<SkeletonEdge>& face_edges)
 	{

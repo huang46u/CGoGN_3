@@ -136,13 +136,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	options.ma_flip_prune_alpha_factor = config.input.ma_flip_prune_alpha_factor;
 	options.alpha = config.sampling.alpha;
 	options.knn_k = config.sampling.knn_k;
-	options.apply_filtering = config.sampling.apply_filtering;
-	options.recompute_normals_after_sampling = config.sampling.recompute_normals_after_sampling;
-	options.ray_sampler_batch_size = config.sampling.ray_sampler_batch_size;
-	options.batch_size = config.sampling.batch_size;
-	options.tolerance = config.sampling.tol;
-	options.udf_max_iterations = config.sampling.udf_max_iterations;
-	options.sample_radius = config.sampling.bridson.sample_radius;
+	options.sample_radius = config.sampling.sample_radius;
 	options.sqem_update_lambda_line_plane = config.optimization.sqem_update_lambda_line_plane;
 	options.seed = config.initialization.seed;
 	options.init_dilation_constant = config.initialization.init_dilation_constant;
@@ -202,21 +196,8 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	result.timing.skeleton_construction_ms = reconstruction_result.timing.skeleton_construction_ms;
 	result.timing.postprocess_ms = reconstruction_result.timing.topology_processing_ms;
 
-	if (config.output.save_face_components)
-	{
-		const auto component_start = std::chrono::high_resolution_clock::now();
-		if (reconstruction.prepare_face_components() != Status::success)
-			throw std::runtime_error("Could not prepare skeleton face components.");
-		result.timing.postprocess_ms +=
-			std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - component_start)
-				.count();
-		const auto counts = reconstruction.counts();
-		result.counts.skeleton_vertices = counts.skeleton_vertices;
-		result.counts.skeleton_edges = counts.skeleton_edges;
-		result.counts.skeleton_faces = counts.skeleton_faces;
-	}
 	const auto export_start = std::chrono::high_resolution_clock::now();
-	if (!reconstruction.export_skeleton_ply(config.output.skeleton_ply, config.output.save_face_components))
+	if (!reconstruction.export_skeleton_ply(config.output.skeleton_ply))
 		throw std::runtime_error("Could not export skeleton: " + config.output.skeleton_ply);
 	const auto counts_after_export = reconstruction.counts();
 	if (counts_after_export.skeleton_vertices != result.counts.skeleton_vertices ||
@@ -238,13 +219,10 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	root.put("seed", result.seed);
 
 	boost::property_tree::ptree benchmark_config;
-	benchmark_config.put("sampling.apply_filtering", config.sampling.apply_filtering);
-	benchmark_config.put("sampling.recompute_normals_after_sampling", config.sampling.recompute_normals_after_sampling);
 	benchmark_config.put("initialization.init_dilation_constant", config.initialization.init_dilation_constant);
 	benchmark_config.put("input.geometry_type", to_string(config.input.geometry_type));
 	benchmark_config.put("input.ma_flip_prune", config.input.ma_flip_prune);
 	benchmark_config.put("input.ma_flip_prune_alpha_factor", config.input.ma_flip_prune_alpha_factor);
-	benchmark_config.put("output.save_face_components", config.output.save_face_components);
 	benchmark_config.put("postprocess.residual_prune", config.postprocess.residual_prune);
 	root.add_child("benchmark_config", benchmark_config);
 
