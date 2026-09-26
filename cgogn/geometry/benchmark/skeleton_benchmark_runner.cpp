@@ -1,26 +1,32 @@
-﻿#include <cgogn/geometry/benchmark/skeleton_benchmark_runner.h>
+#include <cgogn/geometry/benchmark/skeleton_benchmark_runner.h>
 
-#include <cgogn/geometry/algos/udf_pipeline_core.h>
+#include <cgogn/core/types/incidence_graph/incidence_graph.h>
+#include <cgogn/core/types/maps/cmap/cmap0.h>
+#include <cgogn/core/types/maps/cmap/cmap2.h>
+#include <cgogn/geometry/algos/udf/reconstruction.h>
 #include <cgogn/geometry/benchmark/benchmark_timer.h>
+#include <cgogn/geometry/functions/bounding_box.h>
+#include <cgogn/io/point/ply.h>
+#include <cgogn/io/surface/obj.h>
+#include <cgogn/io/surface/off.h>
+#include <cgogn/io/surface/ply.h>
+#include <cgogn/io/surface/stl.h>
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <exception>
 #include <filesystem>
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
-namespace cgogn
+namespace cgogn::geometry::benchmark
 {
-
-namespace geometry
-{
-
-namespace benchmark
-{
-
 namespace
 {
 
@@ -36,264 +42,191 @@ std::string geometry_input_path_for_run(const BenchmarkConfig& config)
 	return config.input.input_path;
 }
 
-constexpr const char* BENCHMARK_POINTS_MESH_NAME = "__benchmark_input_points";
-constexpr const char* BENCHMARK_SURFACE_MESH_NAME = "__benchmark_input_surface";
-
-template <typename Context>
-Context& shared_context()
+std::string lower_extension(const std::string& path)
 {
-	static Context context;
-	return context;
+	std::string extension = std::filesystem::path(path).extension().string();
+	if (!extension.empty() && extension.front() == '.')
+		extension.erase(extension.begin());
+	std::transform(extension.begin(), extension.end(), extension.begin(),
+				   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return extension;
 }
 
-class ScopedStreamSilencer
+bool import_points(CMap0& points, const std::string& filename)
 {
-public:
-	explicit ScopedStreamSilencer(bool enabled) : enabled_(enabled)
-	{
-		if (!enabled_)
-			return;
-		old_cout_ = std::cout.rdbuf(null_stream_.rdbuf());
-		old_cerr_ = std::cerr.rdbuf(null_stream_.rdbuf());
-	}
+	if (lower_extension(filename) == "ply")
+		return io::import_PLY(points, filename);
+	return false;
+}
 
-	~ScopedStreamSilencer()
-	{
-		if (!enabled_)
-			return;
-		std::cout.rdbuf(old_cout_);
-		std::cerr.rdbuf(old_cerr_);
-	}
-
-private:
-	bool enabled_ = false;
-	std::streambuf* old_cout_ = nullptr;
-	std::streambuf* old_cerr_ = nullptr;
-	std::ostringstream null_stream_;
-};
-
-template <typename Training>
-typename Training::HeadlessBenchmarkOptions make_training_options(const BenchmarkConfig& config)
+bool import_surface(CMap2& surface, const std::string& filename)
 {
-	typename Training::HeadlessBenchmarkOptions options;
-	options.verbose_ = config.benchmark.verbose;
-	options.ma_flip_prune_enabled_ = config.input.ma_flip_prune;
-	options.ma_flip_prune_alpha_factor_ = config.input.ma_flip_prune_alpha_factor;
-	options.sqem_update_lambda_line_plane_ = config.optimization.sqem_update_lambda_line_plane;
-	options.init_dilation_constant_ = config.initialization.init_dilation_constant;
-	options.alpha_ = config.sampling.alpha;
-	options.sample_radius_ = config.sampling.bridson.sample_radius;
-	options.knn_k_ = config.sampling.knn_k;
-	options.seed_ = config.initialization.seed;
-	options.batch_size_ = config.sampling.batch_size;
-	options.ray_sampler_batch_size_ = config.sampling.ray_sampler_batch_size;
-	options.tol_ = config.sampling.tol;
-	options.udf_max_iterations_ = config.sampling.udf_max_iterations;
-	options.recompute_sample_normals_after_sampling_ = config.sampling.recompute_normals_after_sampling;
-	return options;
+	const std::string extension = lower_extension(filename);
+	if (extension == "ply")
+		return io::import_PLY(surface, filename);
+	if (extension == "obj")
+		return io::import_OBJ(surface, filename);
+	if (extension == "off")
+		return io::import_OFF(surface, filename);
+	if (extension == "stl")
+		return io::import_STL(surface, filename);
+	return false;
 }
 
 template <typename RaySamplerTag>
 BenchmarkResult run_impl(const BenchmarkConfig& config)
 {
-	using Context = UDFPipelineContext<RaySamplerTag>;
-	using Core = UDFPipelineCore<RaySamplerTag>;
-	using Training = typename Context::Training;
-	using Points = typename Context::Points;
+	using Surface = CMap2;
+	using Points = CMap0;
+	using NonManifold = IncidenceGraph;
+	using Reconstruction = UDFReconstruction<Surface, Points, NonManifold, RaySamplerTag>;
+	using Status = typename Reconstruction::Status;
+
+	BenchmarkResult result;
+	result.input_mode = to_string(config.input.mode);
+	result.input_path = geometry_input_path_for_run(config);
+	result.seed = config.initialization.seed;
+	Surface surface;
+	Points input_points, samples, spheres;
+	NonManifold skeleton;
+	const bool neural = config.input.mode == InputMode::NeuralUDF;
+	const bool use_surface = config.input.mode == InputMode::SurfaceMesh ||
+							 (neural && config.input.geometry_type == InputGeometryType::Mesh);
+	const auto input_start = std::chrono::high_resolution_clock::now();
+	if (use_surface)
+	{
+		if (!import_surface(surface, result.input_path))
+			throw std::runtime_error("Could not import surface mesh: " + result.input_path);
+		auto position = get_attribute<Vec3, mesh_traits<Surface>::Vertex>(surface, "position");
+		if (!position)
+			throw std::runtime_error("Imported surface has no position attribute.");
+		geometry::rescale_centered(*position, 1);
+		if (neural && config.input.neural_model_type == NeuralModelType::UDF)
+		{
+			geometry::normalize_centered(*position);
+		}
+	}
+	else
+	{
+		if (!import_points(input_points, result.input_path))
+			throw std::runtime_error("Could not import point cloud (PLY required): " + result.input_path);
+		auto position = get_attribute<Vec3, mesh_traits<Points>::Vertex>(input_points, "position");
+		if (!position)
+			throw std::runtime_error("Imported point cloud has no position attribute.");
+		geometry::rescale_centered(*position, 1);
+		if (neural && config.input.neural_model_type == NeuralModelType::UDF)
+		{
+			geometry::normalize_centered(*position);
+		}
+	}
+	const auto input_end = std::chrono::high_resolution_clock::now();
+	result.timing.input_loading_ms = std::chrono::duration<double, std::milli>(input_end - input_start).count();
+
+	typename Reconstruction::Data data;
+	data.surface = use_surface ? &surface : nullptr;
+	data.input_points = &input_points;
+	data.samples = &samples;
+	data.spheres = &spheres;
+	data.skeleton = &skeleton;
+	typename Reconstruction::Options options;
+	options.neural_model_type = config.input.neural_model_type == NeuralModelType::MF
+									? Reconstruction::NeuralModelType::mf
+									: Reconstruction::NeuralModelType::udf;
+	options.ma_flip_prune = config.input.ma_flip_prune;
+	options.ma_flip_prune_alpha_factor = config.input.ma_flip_prune_alpha_factor;
+	options.alpha = config.sampling.alpha;
+	options.knn_k = config.sampling.knn_k;
+	options.apply_filtering = config.sampling.apply_filtering;
+	options.recompute_normals_after_sampling = config.sampling.recompute_normals_after_sampling;
+	options.ray_sampler_batch_size = config.sampling.ray_sampler_batch_size;
+	options.batch_size = config.sampling.batch_size;
+	options.tolerance = config.sampling.tol;
+	options.udf_max_iterations = config.sampling.udf_max_iterations;
+	options.sample_radius = config.sampling.bridson.sample_radius;
+	options.sqem_update_lambda_line_plane = config.optimization.sqem_update_lambda_line_plane;
+	options.seed = config.initialization.seed;
+	options.init_dilation_constant = config.initialization.init_dilation_constant;
+	options.residual_prune = config.postprocess.residual_prune;
+
+	Reconstruction reconstruction(data, options);
+	const auto preprocessing_start = std::chrono::high_resolution_clock::now();
+	if (neural)
+	{
+		const auto model_status =
+			reconstruction.load_neural_model(config.input.neural_udf_model_path, options.neural_model_type);
+		if (model_status != Status::success)
+			throw std::runtime_error("Could not load neural model: " + config.input.neural_udf_model_path);
+	}
+	const auto preprocessing_end = std::chrono::high_resolution_clock::now();
+	result.timing.preprocess_ms =
+		std::chrono::duration<double, std::milli>(preprocessing_end - preprocessing_start).count();
 
 	auto log_stage = [&](const char* stage) {
 		if (config.benchmark.verbose)
 			std::cerr << "[BenchmarkStage] " << stage << std::endl;
 	};
+	log_stage("reconstruction_begin");
+	const auto reconstruction_result = reconstruction.run([&](const auto& metrics) {
+		if (config.benchmark.verbose)
+			std::cout << "[Optimize] iteration=" << metrics.iteration << " spheres=" << metrics.sphere_count
+					  << " error=" << metrics.total_error << " diff=" << metrics.error_difference << std::endl;
+	});
+	if (reconstruction_result.status != Status::success)
+		throw std::runtime_error("UDF reconstruction failed with status " +
+								 std::to_string(static_cast<int>(reconstruction_result.status)));
+	result.timing.preprocess_ms += reconstruction_result.timing.preprocessing_ms;
 
-	log_stage("context_acquire_begin");
-	Context& context = shared_context<Context>();
-	log_stage("context_acquire_end");
-	Core core(context);
-	BenchmarkResult result;
-	result.input_mode = to_string(config.input.mode);
-	result.input_path = geometry_input_path_for_run(config);
-	result.seed = config.initialization.seed;
+	result.counts.input_vertices = reconstruction_result.counts.input_vertices;
+	result.counts.input_points = reconstruction_result.counts.input_points;
+	result.counts.sample_points_before_filtering = reconstruction_result.counts.samples_before_filtering;
+	result.counts.sample_points = reconstruction_result.counts.samples;
+	result.counts.final_spheres = reconstruction_result.counts.spheres;
+	result.counts.optimization_iterations = reconstruction_result.counts.optimization_iterations;
+	result.timing.average_iteration_ms =
+		reconstruction_result.counts.optimization_iterations > 0
+			? reconstruction_result.timing.optimization_ms / reconstruction_result.counts.optimization_iterations
+			: 0.0;
+	result.counts.skeleton_vertices = reconstruction_result.counts.skeleton_vertices;
+	result.counts.skeleton_edges = reconstruction_result.counts.skeleton_edges;
+	result.counts.skeleton_faces = reconstruction_result.counts.skeleton_faces;
+	result.timing.sampling_ms = reconstruction_result.timing.sampling_ms;
+	result.timing.sample_filtering_ms = reconstruction_result.timing.sample_filtering_ms;
+	result.timing.kdtree_bvh_ms = reconstruction_result.timing.kdtree_and_normals_ms;
+	result.timing.fitting_data_ms = reconstruction_result.timing.fitting_primitives_ms;
+	result.timing.initial_medial_axis_ms = reconstruction_result.timing.initial_medial_axis_ms;
+	result.timing.sphere_initialization_ms = reconstruction_result.timing.sphere_initialization_ms;
+	result.timing.optimization_total_ms = reconstruction_result.timing.optimization_ms;
+	result.timing.cluster_total_ms = reconstruction_result.timing.cluster_ms;
+	result.timing.sphere_update_total_ms = reconstruction_result.timing.sphere_update_ms;
+	result.timing.error_total_ms = reconstruction_result.timing.error_ms;
+	result.timing.skeleton_construction_ms = reconstruction_result.timing.skeleton_construction_ms;
+	result.timing.postprocess_ms = reconstruction_result.timing.topology_processing_ms;
 
-	Points* points = nullptr;
+	if (config.output.save_face_components)
 	{
-		ScopedStreamSilencer silence_internal_output(!config.benchmark.verbose);
-		core.reset_headless_state();
-
-		log_stage("input_loading_begin");
-		{
-			ScopedBenchmarkTimer timer(result.timing.input_loading_ms);
-			const bool normalize_for_udf =
-				(config.input.mode == InputMode::NeuralUDF && config.input.neural_model_type == NeuralModelType::UDF);
-			const std::string geometry_input_path = geometry_input_path_for_run(config);
-			switch (config.input.mode)
-			{
-			case InputMode::PointCloud:
-				points = &core.reload_point_cloud_input(BENCHMARK_POINTS_MESH_NAME, geometry_input_path, normalize_for_udf);
-				break;
-			case InputMode::SurfaceMesh:
-				core.reload_surface_input(BENCHMARK_SURFACE_MESH_NAME, geometry_input_path, normalize_for_udf);
-				points = &core.create_empty_points_input(BENCHMARK_POINTS_MESH_NAME);
-				break;
-			case InputMode::NeuralUDF:
-				if (config.input.geometry_type == InputGeometryType::Mesh)
-				{
-					core.reload_surface_input(BENCHMARK_SURFACE_MESH_NAME, geometry_input_path, normalize_for_udf);
-					points = &core.create_empty_points_input(BENCHMARK_POINTS_MESH_NAME);
-				}
-				else
-				{
-					points =
-						&core.reload_point_cloud_input(BENCHMARK_POINTS_MESH_NAME, geometry_input_path, normalize_for_udf);
-				}
-				break;
-			}
-		}
-		log_stage("input_loading_end");
-
-		if (!points)
-			throw std::runtime_error("Benchmark pipeline did not initialize a valid point container.");
-		core.prepare_points(*points);
-
-		const auto options = make_training_options<Training>(config);
-		log_stage("preprocess_begin");
-		{
-			ScopedBenchmarkTimer timer(result.timing.preprocess_ms);
-			core.apply_options_prepared(*points, options);
-			if (config.input.mode == InputMode::NeuralUDF)
-			{
-				const auto model_type = (config.input.neural_model_type == NeuralModelType::MF)
-											? Training::NEURAL_MODEL_MF
-											: Training::NEURAL_MODEL_UDF;
-				core.load_neural_model(*points, config.input.neural_udf_model_path, model_type);
-			}
-		}
-		log_stage("preprocess_end");
-
-		log_stage("sampling_begin");
-		{
-			ScopedBenchmarkTimer timer(result.timing.sampling_ms);
-			core.sample_alpha_level_set_prepared(*points, options);
-		}
-		log_stage("sampling_end");
-
-		{
-			const auto sampled_counts = core.collect_counts(*points);
-			result.counts.sample_points_before_filtering = sampled_counts.sample_points_;
-		}
-
-		if (config.sampling.apply_filtering)
-		{
-			log_stage("sample_filtering_begin");
-			ScopedBenchmarkTimer timer(result.timing.sample_filtering_ms);
-			core.apply_sampling_filtering_prepared(*points);
-			log_stage("sample_filtering_end");
-		}
-		else
-		{
-			result.timing.sample_filtering_ms = 0.0;
-		}
-
-		log_stage("kdtree_begin");
-		{
-			ScopedBenchmarkTimer timer(result.timing.kdtree_bvh_ms);
-			if (config.benchmark.verbose)
-			{
-				std::cout << "[BenchmarkKDTree] recompute_normals_after_sampling="
-						  << (config.sampling.recompute_normals_after_sampling ? "true" : "false") << std::endl;
-			}
-			core.build_kdtree_and_normals_prepared(*points);
-		}
-		log_stage("kdtree_end");
-
-		log_stage("fitting_begin");
-		{
-			ScopedBenchmarkTimer timer(result.timing.fitting_data_ms);
-			core.compute_fitting_primitives_prepared(*points);
-		}
-		log_stage("fitting_end");
-
-		log_stage("initial_ma_begin");
-		{
-			ScopedBenchmarkTimer timer(result.timing.initial_medial_axis_ms);
-			core.compute_initial_medial_axis_prepared(*points);
-		}
-		log_stage("initial_ma_end");
-
-		log_stage("sphere_init_begin");
-		{
-			ScopedBenchmarkTimer timer(result.timing.sphere_initialization_ms);
-			core.init_spheres_prepared(*points);
-		}
-		log_stage("sphere_init_end");
-
-		log_stage("optimization_begin");
-		{
-			const auto stats = core.optimize_prepared(*points, config.benchmark.verbose);
-			result.timing.optimization_total_ms = stats.optimization_total_ms_;
-			result.timing.cluster_total_ms = stats.cluster_total_ms_;
-			result.timing.sphere_update_total_ms = stats.sphere_update_total_ms_;
-			result.timing.error_total_ms = stats.error_total_ms_;
-			result.timing.average_iteration_ms = stats.average_iteration_ms_;
-		}
-		log_stage("optimization_end");
-
-		log_stage("skeleton_begin");
-		{
-			ScopedBenchmarkTimer timer(result.timing.skeleton_construction_ms);
-			core.build_skeleton_prepared(*points);
-		}
-		log_stage("skeleton_end");
-
-		{
-			log_stage("postprocess_begin");
-			ScopedBenchmarkTimer timer(result.timing.postprocess_ms);
-			core.run_topology_fix_prepared(*points);
-			if (config.postprocess.residual_prune)
-				core.run_completion_residual_prune_prepared(*points);
-			log_stage("postprocess_end");
-		}
-
-		log_stage("export_begin");
-		{
-			ScopedBenchmarkTimer timer(result.timing.export_ms);
-			core.export_skeleton_ply_prepared(*points, config.output.skeleton_ply, config.output.save_face_components);
-			if (!std::filesystem::exists(config.output.skeleton_ply))
-				throw std::runtime_error("Skeleton export did not create file: " + config.output.skeleton_ply);
-		}
-		log_stage("export_end");
-
-		const auto counts = core.collect_counts(*points);
-		result.counts.input_vertices = counts.input_vertices_;
-		result.counts.input_points = counts.input_points_;
-		result.counts.sample_points = counts.sample_points_;
-		if (result.counts.sample_points_before_filtering == 0)
-			result.counts.sample_points_before_filtering = counts.sample_points_;
-		result.counts.final_spheres = counts.final_spheres_;
-		result.counts.skeleton_vertices = counts.skeleton_vertices_;
-		result.counts.skeleton_edges = counts.skeleton_edges_;
-		result.counts.skeleton_faces = counts.skeleton_faces_;
-		result.counts.optimization_iterations = counts.optimization_iterations_;
+		const auto component_start = std::chrono::high_resolution_clock::now();
+		if (reconstruction.prepare_face_components() != Status::success)
+			throw std::runtime_error("Could not prepare skeleton face components.");
+		result.timing.postprocess_ms +=
+			std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - component_start)
+				.count();
+		const auto counts = reconstruction.counts();
+		result.counts.skeleton_vertices = counts.skeleton_vertices;
+		result.counts.skeleton_edges = counts.skeleton_edges;
+		result.counts.skeleton_faces = counts.skeleton_faces;
 	}
-
-	std::cout << "Input mode: " << result.input_mode << std::endl;
-	std::cout << "Input path: " << result.input_path << std::endl;
-	std::cout << "Apply filtering: " << (config.sampling.apply_filtering ? "true" : "false") << std::endl;
-	std::cout << "Recompute normals after sampling: "
-			  << (config.sampling.recompute_normals_after_sampling ? "true" : "false") << std::endl;
-	std::cout << "Residual prune: " << (config.postprocess.residual_prune ? "true" : "false") << std::endl;
-	std::cout << "Samples: " << result.counts.sample_points_before_filtering << " -> " << result.counts.sample_points
-			  << std::endl;
-	std::cout << "Final spheres: " << result.counts.final_spheres << std::endl;
-	const long long euler_characteristic = static_cast<long long>(result.counts.skeleton_vertices) -
-		static_cast<long long>(result.counts.skeleton_edges) +
-		static_cast<long long>(result.counts.skeleton_faces);
-	std::cout << "Skeleton V/E/F: " << result.counts.skeleton_vertices << "/" << result.counts.skeleton_edges << "/"
-			  << result.counts.skeleton_faces << "  Euler X=" << euler_characteristic << std::endl;
-	std::cout << "Optimization iterations: " << result.counts.optimization_iterations << std::endl;
+	const auto export_start = std::chrono::high_resolution_clock::now();
+	if (!reconstruction.export_skeleton_ply(config.output.skeleton_ply, config.output.save_face_components))
+		throw std::runtime_error("Could not export skeleton: " + config.output.skeleton_ply);
+	const auto counts_after_export = reconstruction.counts();
+	if (counts_after_export.skeleton_vertices != result.counts.skeleton_vertices ||
+		counts_after_export.skeleton_edges != result.counts.skeleton_edges ||
+		counts_after_export.skeleton_faces != result.counts.skeleton_faces)
+		throw std::runtime_error("Skeleton export changed the reconstructed topology.");
+	const auto export_end = std::chrono::high_resolution_clock::now();
+	result.timing.export_ms = std::chrono::duration<double, std::milli>(export_end - export_start).count();
 	return result;
 }
-
 void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult& result)
 {
 	if (config.output.timing_json.empty())
@@ -384,8 +317,4 @@ void write_benchmark_timing_json(const BenchmarkConfig& config, const BenchmarkR
 	write_timing_json_impl(config, result);
 }
 
-} // namespace benchmark
-
-} // namespace geometry
-
-} // namespace cgogn
+} // namespace cgogn::geometry::benchmark

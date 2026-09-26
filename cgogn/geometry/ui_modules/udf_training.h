@@ -219,10 +219,6 @@ private:
 		bool error_as_spheres_color_ = false;
 		float32 spheres_transparency_ = 0.5f;
 		float32 sqem_update_lambda_line_plane_ = 0.20f;
-		bool export_samples_mesh_selected_ = true;
-		bool export_samples_mesh_normal_color_selected_ = false;
-		bool export_samples_spheres_selected_ = true;
-		bool export_skeleton_selected_ = true;
 
 		// Filtering
 		float32 target_radius_ = 0.1f;
@@ -283,48 +279,6 @@ public:
 	~UDFTraining()
 	{
 	}
-
-	struct HeadlessBenchmarkOptions
-	{
-		bool verbose_ = true;
-		OutputVerbosity output_verbosity_ = OUTPUT_NORMAL;
-		bool ma_flip_prune_enabled_ = true;
-		float ma_flip_prune_alpha_factor_ = 1.0f;
-		float32 filter_radius_threshold_ = 0.0f;
-		float32 sqem_update_lambda_line_plane_ = 0.20f;
-		float32 init_dilation_constant_ = 0.001f;
-		float alpha_ = 0.005f;
-		float sample_radius_ = 0.0025f;
-		int knn_k_ = 10;
-		int seed_ = 42;
-		int batch_size_ = 1310640;
-		int ray_sampler_batch_size_ = 4096;
-		float tol_ = 1e-6f;
-		int udf_max_iterations_ = 3000;
-		bool recompute_sample_normals_after_sampling_ = false;
-	};
-
-	struct HeadlessOptimizationStats
-	{
-		float64 optimization_total_ms_ = 0.0;
-		float64 cluster_total_ms_ = 0.0;
-		float64 sphere_update_total_ms_ = 0.0;
-		float64 error_total_ms_ = 0.0;
-		float64 average_iteration_ms_ = 0.0;
-		uint32 optimization_iterations_ = 0;
-	};
-
-	struct HeadlessCounts
-	{
-		uint32 input_vertices_ = 0;
-		uint32 input_points_ = 0;
-		uint32 sample_points_ = 0;
-		uint32 final_spheres_ = 0;
-		uint32 skeleton_vertices_ = 0;
-		uint32 skeleton_edges_ = 0;
-		uint32 skeleton_faces_ = 0;
-		uint32 optimization_iterations_ = 0;
-	};
 
 	static int output_verbosity_index(OutputVerbosity value)
 	{
@@ -449,343 +403,23 @@ public:
 		manip(std::cerr);
 	}
 
-	void headless_prepare_points(POINTS& points)
+	bool prepare_face_components(PointsParameters& p)
 	{
-		init_points_data(points);
-	}
-
-	void apply_headless_benchmark_options_prepared(POINTS& points, const HeadlessBenchmarkOptions& options)
-	{
-		apply_headless_benchmark_options_prepared(points_parameters_[&points], options);
-	}
-
-	void apply_headless_benchmark_options_prepared(PointsParameters& p, const HeadlessBenchmarkOptions& options)
-	{
-		p.output_verbosity_ = options.output_verbosity_;
-		if (options.verbose_)
-			p.output_verbosity_ = OUTPUT_VERBOSE;
-		p.ma_flip_prune_enabled_ = options.ma_flip_prune_enabled_;
-		p.ma_flip_prune_alpha_factor_ = options.ma_flip_prune_alpha_factor_;
-		p.filter_radius_threshold_ = options.filter_radius_threshold_;
-		p.sqem_update_lambda_line_plane_ = options.sqem_update_lambda_line_plane_;
-		p.init_dilation_constant_ = options.init_dilation_constant_;
-		p.alpha_ = options.alpha_;
-		p.sample_radius_ = options.sample_radius_;
-		p.knn_k_ = options.knn_k_;
-		p.seed_ = options.seed_;
-		p.sample_grid_cell_size_ = std::max(p.sample_radius_ / std::sqrt(Scalar(3.0)), Scalar(1e-8));
-		p.batch_size_ = options.batch_size_;
-		p.ray_sampler_batch_size_ = options.ray_sampler_batch_size_;
-		p.tol_ = options.tol_;
-		p.udf_max_iterations_ = options.udf_max_iterations_;
-		p.recompute_sample_normals_after_sampling_ = options.recompute_sample_normals_after_sampling_;
-		if (p.sample_grid_cell_size_ > Scalar(0))
-			p.samples_spatial_grid_ = std::make_unique<SpatialGrid>(p.sample_grid_cell_size_);
-		else
-			p.samples_spatial_grid_.reset();
-	}
-
-	void headless_sample_alpha_level_set_prepared(PointsParameters& p, const HeadlessBenchmarkOptions& options)
-	{
-		(void)options;
-		load_alpha_samples_to_mesh(p);
-	}
-
-	void headless_sample_alpha_level_set_prepared(POINTS& points, const HeadlessBenchmarkOptions& options)
-	{
-		headless_sample_alpha_level_set_prepared(points_parameters_[&points], options);
-	}
-
-	void headless_apply_sampling_filtering_prepared(PointsParameters& p)
-	{
-		apply_sampling_preprocess_filtering(p);
-	}
-
-	void headless_apply_sampling_filtering_prepared(POINTS& points)
-	{
-		headless_apply_sampling_filtering_prepared(points_parameters_[&points]);
-	}
-
-	void headless_build_sample_kdtree_and_normals_prepared(PointsParameters& p)
-	{
-		log_basic(p, "Headless sample normal recompute after sampling: ",
-				  (p.recompute_sample_normals_after_sampling_ ? "true" : "false"), '\n');
-		build_kdtree(p);
-		if (p.recompute_sample_normals_after_sampling_)
-		{
-			log_basic(p, "Recomputing sampled normals with PCA after sampling...", '\n');
-			recompute_samples_normals_pca(p);
-		}
-		else
-		{
-			log_basic(p, "Keeping sampled normals from sampling output without PCA recompute.", '\n');
-		}
-	}
-
-	void headless_build_sample_kdtree_and_normals_prepared(POINTS& points)
-	{
-		headless_build_sample_kdtree_and_normals_prepared(points_parameters_[&points]);
-	}
-
-	void headless_compute_initial_medial_axis_prepared(PointsParameters& p)
-	{
-		compute_initial_medial_axis(p);
-		p.fitting_data_computed_ = true;
-	}
-
-	void headless_compute_initial_medial_axis_prepared(POINTS& points)
-	{
-		headless_compute_initial_medial_axis_prepared(points_parameters_[&points]);
-	}
-
-	void headless_compute_fitting_primitives_prepared(PointsParameters& p)
-	{
-		build_kdtree(p);
-		if (p.samples_mesh_ && p.samples_kdtree_)
-			geometry::compute_samples_area(
-				*p.samples_mesh_, *p.samples_position_, *p.samples_normal_, *p.samples_area_, *p.samples_knn_,
-				*p.samples_kdtree_, p.samples_kdtree_vertices_, p.knn_k_, Scalar(p.alpha_));
-		if (p.samples_mesh_)
-			geometry::compute_quadrics(*p.samples_mesh_, *p.samples_position_, *p.samples_normal_, *p.samples_area_,
-										*p.samples_knn_, *p.samples_quadric_, *p.samples_line_quadric_, p.knn_k_);
-	}
-
-	void headless_compute_fitting_primitives_prepared(POINTS& points)
-	{
-		headless_compute_fitting_primitives_prepared(points_parameters_[&points]);
-	}
-
-	void headless_init_spheres_prepared(POINTS& points)
-	{
-		auto& p = points_parameters_[&points];
-		if (optimizer_for(p).initialize_from_samples(Scalar(p.init_dilation_constant_)))
-		{
-			p.skeleton_invalidated_ = true;
-			if (p.skeleton_)
-			{
-				clear(*p.skeleton_);
-				p.skeleton_topology_.reset();
-				if (p.spheres_skeleton_vertex_)
-					p.spheres_skeleton_vertex_->fill(NMVertex());
-			}
-		}
-		sync_optimizer_metrics(p);
-	}
-
-	HeadlessOptimizationStats headless_optimize_spheres_prepared(PointsParameters& p, bool verbose = false)
-	{
-		const OutputVerbosity output_verbosity = verbose ? OUTPUT_VERBOSE : p.output_verbosity_;
-		HeadlessOptimizationStats stats;
-		p.running_ = true;
-		p.stopping_ = false;
-		auto& optimizer = optimizer_for(p);
-		optimizer.reset_optimization();
-		sync_optimizer_metrics(p);
-		p.pending_full_refresh_after_stop_ = false;
-		auto optimization_start = std::chrono::high_resolution_clock::now();
-		SpheresOptimizerStatus status = SpheresOptimizerStatus::running;
-		while (status == SpheresOptimizerStatus::running)
-		{
-			status = optimizer.update_once(Scalar(p.sqem_update_lambda_line_plane_));
-			sync_optimizer_metrics(p);
-			if (optimizer.metrics().sphere_topology_changed)
-				p.skeleton_invalidated_ = true;
-			log_basic(output_verbosity, "[HeadlessOptimize] iteration=", p.iteration_count_, " spheres=",
-					  p.nb_spheres_, " error=", p.total_error_, " diff=", p.total_error_diff_, '\n');
-		}
-
-		auto optimization_end = std::chrono::high_resolution_clock::now();
-		stats.optimization_total_ms_ =
-			std::chrono::duration<float64, std::milli>(optimization_end - optimization_start).count();
-		stats.cluster_total_ms_ = optimizer.metrics().cluster_total_ms;
-		stats.sphere_update_total_ms_ = optimizer.metrics().sphere_update_total_ms;
-		stats.error_total_ms_ = optimizer.metrics().error_total_ms;
-		stats.optimization_iterations_ = optimizer.metrics().iteration;
-		stats.average_iteration_ms_ = (p.iteration_count_ > 0)
-										 ? stats.optimization_total_ms_ / static_cast<float64>(p.iteration_count_)
-										 : 0.0;
-		p.running_ = false;
-		p.stopping_ = false;
-		p.pending_full_refresh_after_stop_ = false;
-		return stats;
-	}
-
-	HeadlessOptimizationStats headless_optimize_spheres_prepared(POINTS& points, bool verbose = false)
-	{
-		return headless_optimize_spheres_prepared(points_parameters_[&points], verbose);
-	}
-	void headless_build_skeleton_prepared(PointsParameters& p)
-	{
-		const SkeletonTopologyStatus status = skeleton_topology_for(p).build_from_spheres();
-		if (status == SkeletonTopologyStatus::success)
-		{
-			p.skeleton_invalidated_ = false;
-			log_basic(p, "[SkeletonBuild] tets=", skeleton_topology_for(p).metrics().tet_count, '\n');
-			refresh_skeleton_topology_colors(p);
-		}
-	}
-
-	void headless_build_skeleton_prepared(POINTS& points)
-	{
-		headless_build_skeleton_prepared(points_parameters_[&points]);
-	}
-
-	void headless_run_topology_fix_prepared(PointsParameters& p)
-	{
-		if (p.skeleton_invalidated_)
-		{
-			log_error(p, "Topology fix requires a skeleton built from the current sphere set.", '\n');
-			return;
-		}
-		auto evaluator = [this, &p](const std::vector<Vec3>& points, std::vector<Scalar>& values) {
-			return eval_topology_score_values(p, points, values);
-		};
 		auto& topology = skeleton_topology_for(p);
-		const SkeletonTopologyStatus status = topology.fix_topology(evaluator);
-		if (status == SkeletonTopologyStatus::success)
-		{
-			log_skeleton_topology_summary(p, "[TopologyFull]");
-			apply_skeleton_topology_results(p);
-		}
-		else
-			log_error(p, "[TopologyFull] score evaluation failed or topology data is invalid.", '\n');
-	}
-
-	void headless_run_topology_fix_prepared(POINTS& points)
-	{
-		headless_run_topology_fix_prepared(points_parameters_[&points]);
-	}
-	void headless_run_completion_residual_prune_prepared(PointsParameters& p)
-	{
-		if (skeleton_topology_for(p).prune_residual_sheets() == SkeletonTopologyStatus::success)
-		{
-			log_skeleton_topology_summary(p, "[ResidualSheetPrune]");
-			apply_skeleton_topology_results(p);
-			if (colorize_skeleton_face_components(p, "[FaceComponentsColor-Residual-Final]") &&
-				non_manifold_provider_ && p.skeleton_ && p.skeleton_face_component_color_)
-				non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_component_color_.get());
-		}
-	}
-
-	void headless_run_completion_residual_prune_prepared(POINTS& points)
-	{
-		headless_run_completion_residual_prune_prepared(points_parameters_[&points]);
-	}
-
-	HeadlessCounts headless_collect_counts(const POINTS& points) const
-	{
-		HeadlessCounts counts;
-		auto it = points_parameters_.find(const_cast<POINTS*>(&points));
-		if (it == points_parameters_.end())
-			return counts;
-		const PointsParameters& p = it->second;
-		counts.input_points_ = p.points_ ? nb_cells<PVertex>(*p.points_) : 0;
-		counts.input_vertices_ = (selected_surface_ ? nb_cells<SVertex>(*selected_surface_) : counts.input_points_);
-		counts.sample_points_ = p.samples_mesh_ ? nb_cells<PVertex>(*p.samples_mesh_) : 0;
-		counts.final_spheres_ = p.spheres_ ? nb_cells<PVertex>(*p.spheres_) : 0;
-		counts.skeleton_vertices_ = p.skeleton_ && !p.skeleton_invalidated_ ? nb_cells<NMVertex>(*p.skeleton_) : 0;
-		counts.skeleton_edges_ = p.skeleton_ && !p.skeleton_invalidated_ ? nb_cells<NMEdge>(*p.skeleton_) : 0;
-		counts.skeleton_faces_ = p.skeleton_ && !p.skeleton_invalidated_ ? nb_cells<NMFace>(*p.skeleton_) : 0;
-		counts.optimization_iterations_ = p.iteration_count_;
-		return counts;
-	}
-
-	std::filesystem::path default_training_export_directory(const PointsParameters& p) const
-	{
-		if (points_provider_ && p.points_)
-		{
-			const std::string source_filename = points_provider_->mesh_filename(*p.points_);
-			if (!source_filename.empty())
-			{
-				const std::filesystem::path parent = std::filesystem::path(source_filename).parent_path();
-				if (!parent.empty())
-					return parent;
-			}
-		}
-		return std::filesystem::current_path();
-	}
-
-	std::string training_export_basename(const PointsParameters& p) const
-	{
-		if (points_provider_ && p.points_)
-		{
-			const std::string mesh_name = points_provider_->mesh_name(*p.points_);
-			if (!mesh_name.empty())
-				return std::filesystem::path(mesh_name).stem().string();
-		}
-		return "udf_training";
-	}
-
-	bool export_samples_mesh_cluster_ply(PointsParameters& p, const std::string& filename)
-	{
-		if (!points_provider_ || !p.samples_mesh_ || !p.samples_position_ || !p.samples_sphere_ || !p.spheres_ ||
-			!p.spheres_cluster_color_)
+		if (topology.prune_fully_non_manifold_triangles() != SkeletonTopologyStatus::success)
 			return false;
-
-		auto export_cluster_color = get_attribute<Vec4, PVertex>(*p.samples_mesh_, "cluster_color");
-		const bool created_export_cluster_color = !export_cluster_color;
-		if (!export_cluster_color)
-			export_cluster_color = add_attribute<Vec4, PVertex>(*p.samples_mesh_, "cluster_color");
-		if (!export_cluster_color)
+		if (topology.compute_skeleton_face_components_union_find() != SkeletonTopologyStatus::success)
 			return false;
-		foreach_cell(*p.samples_mesh_, [&](PVertex sample) -> bool {
-			const uint32 sample_index = index_of(*p.samples_mesh_, sample);
-			Vec4 color(0.0, 0.0, 0.0, 1.0);
-			if (sample_index != INVALID_INDEX)
-			{
-				const PVertex sphere = (*p.samples_sphere_)[sample_index];
-				if (sphere.is_valid())
-					color = value<Vec4>(*p.spheres_, p.spheres_cluster_color_, sphere);
-				(*export_cluster_color)[sample_index] = color;
-			}
-			return true;
-		});
-
-		io::PointExportAttributeSelection<POINTS> export_attributes;
-		export_attributes.vertex_color_attribute = export_cluster_color;
-		points_provider_->save_points_ply_to_file(*p.samples_mesh_, p.samples_position_.get(), filename, export_attributes);
-		if (created_export_cluster_color)
-			remove_attribute<PVertex>(*p.samples_mesh_, export_cluster_color);
-		return true;
+		return colorize_skeleton_face_components(p, "[FaceComponents]");
 	}
 
-	bool export_samples_spheres_ply(const PointsParameters& p, const std::string& filename) const
+	bool export_skeleton_mesh_ply(const PointsParameters& p, const std::string& filename) const
 	{
-		if (!points_provider_ || !p.spheres_ || !p.spheres_position_ || !p.spheres_radius_ || !p.spheres_cluster_color_)
-			return false;
-
-		io::PointExportAttributeSelection<POINTS> export_attributes;
-		export_attributes.vertex_attributes.push_back(p.spheres_radius_);
-		export_attributes.vertex_color_attribute = p.spheres_cluster_color_;
-		points_provider_->save_points_ply_to_file(*p.spheres_, p.spheres_position_.get(), filename, export_attributes);
-		return true;
-	}
-
-	bool export_samples_mesh_normal_color_ply(const PointsParameters& p, const std::string& filename) const
-	{
-		if (!points_provider_ || !p.samples_mesh_ || !p.samples_position_ || !p.samples_normal_color_)
-			return false;
-
-		io::PointExportAttributeSelection<POINTS> export_attributes;
-		export_attributes.vertex_color_attribute = p.samples_normal_color_;
-		points_provider_->save_points_ply_to_file(*p.samples_mesh_, p.samples_position_.get(), filename, export_attributes);
-		return true;
-	}
-
-	bool export_skeleton_mesh_ply(PointsParameters& p, const std::string& filename)
-	{
-		if (!p.skeleton_ || !p.skeleton_position_ || !p.skeleton_radius_ || !p.spheres_ || !p.spheres_radius_)
+		if (p.skeleton_invalidated_ || !p.skeleton_ || !p.skeleton_position_ || !p.skeleton_radius_)
 			return false;
 
 		if (!std::filesystem::path(filename).parent_path().empty())
 			std::filesystem::create_directories(std::filesystem::path(filename).parent_path());
-
-		foreach_cell(*p.skeleton_, [&](NMVertex v) -> bool {
-			const uint32 v_index = index_of(*p.skeleton_, v);
-			if (v_index < nb_cells<PVertex>(*p.spheres_))
-				(*p.skeleton_radius_)[v_index] = (*p.spheres_radius_)[v_index];
-			return true;
-		});
 
 		io::SurfaceExportAttributeSelection<NONMANIFOLD> export_attributes;
 		export_attributes.vertex_attributes.push_back(p.skeleton_radius_);
@@ -797,112 +431,6 @@ public:
 		else
 			io::export_PLY(*p.skeleton_, p.skeleton_position_.get(), filename, &export_attributes);
 		return true;
-	}
-
-	bool export_training_ply_bundle(PointsParameters& p, const std::filesystem::path& output_directory)
-	{
-		const std::string basename = training_export_basename(p);
-		const std::filesystem::path samples_mesh_path = output_directory / (basename + "_samples_mesh.ply");
-		const std::filesystem::path samples_mesh_normal_color_path =
-			output_directory / (basename + "_samples_mesh_normal_color.ply");
-		const std::filesystem::path samples_spheres_path = output_directory / (basename + "_samples_spheres.ply");
-		const std::filesystem::path skeleton_path = output_directory / (basename + "_skeleton.ply");
-
-		const bool any_selected =
-			p.export_samples_mesh_selected_ || p.export_samples_mesh_normal_color_selected_ ||
-			p.export_samples_spheres_selected_ || p.export_skeleton_selected_;
-		const bool samples_ok =
-			!p.export_samples_mesh_selected_ || export_samples_mesh_cluster_ply(p, samples_mesh_path.string());
-		const bool samples_normal_color_ok =
-			!p.export_samples_mesh_normal_color_selected_ ||
-			export_samples_mesh_normal_color_ply(p, samples_mesh_normal_color_path.string());
-		const bool spheres_ok =
-			!p.export_samples_spheres_selected_ || export_samples_spheres_ply(p, samples_spheres_path.string());
-		const bool skeleton_ok = !p.export_skeleton_selected_ || export_skeleton_mesh_ply(p, skeleton_path.string());
-		const std::string samples_status =
-			p.export_samples_mesh_selected_ ? (samples_ok ? samples_mesh_path.string() : "FAILED") : "SKIPPED";
-		const std::string samples_normal_color_status = p.export_samples_mesh_normal_color_selected_
-														 ? (samples_normal_color_ok ? samples_mesh_normal_color_path.string()
-																					: "FAILED")
-														 : "SKIPPED";
-		const std::string spheres_status =
-			p.export_samples_spheres_selected_ ? (spheres_ok ? samples_spheres_path.string() : "FAILED") : "SKIPPED";
-		const std::string skeleton_status =
-			p.export_skeleton_selected_ ? (skeleton_ok ? skeleton_path.string() : "FAILED") : "SKIPPED";
-
-		std::cout << "[UDFExport] samples_mesh=" << samples_status
-				  << " samples_mesh_normal_color=" << samples_normal_color_status
-				  << " samples_spheres=" << spheres_status << " skeleton=" << skeleton_status << std::endl;
-		return any_selected && samples_ok && samples_normal_color_ok && spheres_ok && skeleton_ok;
-	}
-
-	void headless_export_skeleton_ply_prepared(PointsParameters& p, const std::string& filename,
-											   bool save_face_components = false)
-	{
-		if (p.skeleton_invalidated_ || !p.skeleton_ || !p.skeleton_position_ || !p.skeleton_radius_ || !p.spheres_ || !p.spheres_radius_)
-			return;
-
-		if (!std::filesystem::path(filename).parent_path().empty())
-			std::filesystem::create_directories(std::filesystem::path(filename).parent_path());
-
-		foreach_cell(*p.skeleton_, [&](NMVertex v) -> bool {
-			const uint32 v_index = index_of(*p.skeleton_, v);
-			if (v_index < nb_cells<PVertex>(*p.spheres_))
-				(*p.skeleton_radius_)[v_index] = (*p.spheres_radius_)[v_index];
-			return true;
-		});
-
-		io::SurfaceExportAttributeSelection<NONMANIFOLD> export_attributes;
-		export_attributes.vertex_attributes.push_back(p.skeleton_radius_);
-		if (save_face_components)
-		{
-			skeleton_topology_for(p).prune_fully_non_manifold_triangles();
-			if (skeleton_topology_for(p).compute_skeleton_face_components_union_find() == SkeletonTopologyStatus::success)
-				colorize_skeleton_face_components(p, "[FaceComponentsExport]");
-			if (p.skeleton_face_component_color_)
-				export_attributes.face_attributes.push_back(p.skeleton_face_component_color_);
-		}
-		io::export_PLY(*p.skeleton_, p.skeleton_position_.get(), filename, &export_attributes);
-	}
-
-	void headless_export_skeleton_ply_prepared(POINTS& points, const std::string& filename,
-											   bool save_face_components = false)
-	{
-		headless_export_skeleton_ply_prepared(points_parameters_[&points], filename, save_face_components);
-	}
-
-	void reset_headless_state()
-	{
-		if (surface_provider_ && selected_surface_)
-			surface_provider_->clear_mesh(*selected_surface_);
-
-		for (auto& [points, p] : points_parameters_)
-		{
-			(void)points;
-			if (points_provider_)
-			{
-				if (p.points_)
-					points_provider_->clear_mesh(*p.points_);
-				if (p.samples_mesh_ && p.samples_mesh_ != p.points_)
-					points_provider_->clear_mesh(*p.samples_mesh_);
-				if (p.spheres_ && p.spheres_ != p.points_ && p.spheres_ != p.samples_mesh_)
-					points_provider_->clear_mesh(*p.spheres_);
-			}
-			if (non_manifold_provider_ && p.skeleton_)
-				non_manifold_provider_->clear_mesh(*p.skeleton_);
-		}
-
-		points_parameters_.clear();
-		selected_surface_ = nullptr;
-		surface_bvh_.reset();
-		surface_bvh_faces_.clear();
-		surface_bvh_vertices_.clear();
-		surface_bvh_vertex_positions_.clear();
-		surface_vertex_normal_ = nullptr;
-		surface_bvh_dirty_ = false;
-
-		selected_points_ = nullptr;
-		timer_connection_.reset();
 	}
 
 	void set_selected_surface(SURFACE& s)
@@ -3116,63 +2644,30 @@ protected:
 							update_render_data(p, false, true, false);
 						}
 					}
-					const bool samples_mesh_export_available =
-						p.samples_mesh_ && p.samples_position_ && nb_cells<PVertex>(*p.samples_mesh_) > 0;
-					const bool samples_mesh_normal_color_export_available =
-						p.samples_mesh_ && p.samples_position_ && p.samples_normal_color_ &&
-						nb_cells<PVertex>(*p.samples_mesh_) > 0;
-					const bool samples_spheres_export_available =
-						p.spheres_ && p.spheres_position_ && p.spheres_radius_ && p.spheres_cluster_color_ &&
-						nb_cells<PVertex>(*p.spheres_) > 0;
 					const bool skeleton_export_available =
-						p.skeleton_ && p.skeleton_position_ && nb_cells<NMVertex>(*p.skeleton_) > 0;
-					const bool all_selected_exports_available =
-						(!p.export_samples_mesh_selected_ || samples_mesh_export_available) &&
-						(!p.export_samples_mesh_normal_color_selected_ || samples_mesh_normal_color_export_available) &&
-						(!p.export_samples_spheres_selected_ || samples_spheres_export_available) &&
-						(!p.export_skeleton_selected_ || skeleton_export_available);
-					const bool any_export_selected =
-						p.export_samples_mesh_selected_ || p.export_samples_mesh_normal_color_selected_ ||
-						p.export_samples_spheres_selected_ || p.export_skeleton_selected_;
-					const bool can_export_training_bundle =
-						!p.running_ && any_export_selected && all_selected_exports_available;
-					ImGui::Checkbox("Save samples_mesh", &p.export_samples_mesh_selected_);
-					ImGui::SameLine();
-					ImGui::TextDisabled(samples_mesh_export_available ? "ready" : "missing");
-					ImGui::Checkbox("Save sample mesh + normal color", &p.export_samples_mesh_normal_color_selected_);
-					ImGui::SameLine();
-					ImGui::TextDisabled(samples_mesh_normal_color_export_available ? "ready" : "missing");
-					ImGui::Checkbox("Save samples_spheres", &p.export_samples_spheres_selected_);
-					ImGui::SameLine();
-					ImGui::TextDisabled(samples_spheres_export_available ? "ready" : "missing");
-					ImGui::Checkbox("Save skeleton", &p.export_skeleton_selected_);
-					ImGui::SameLine();
+						!p.skeleton_invalidated_ && p.skeleton_ && p.skeleton_position_ && p.skeleton_radius_ &&
+						nb_cells<NMVertex>(*p.skeleton_) > 0;
+					const bool can_export_skeleton = !p.running_ && skeleton_export_available;
 					ImGui::TextDisabled(skeleton_export_available ? "ready" : "missing");
-					if (!can_export_training_bundle)
+					if (!can_export_skeleton)
 						ImGui::BeginDisabled();
-					if (ImGui::Button("Export selected PLY"))
+					if (ImGui::Button("Export skeleton PLY"))
 					{
-						const std::string export_directory =
-							pfd::select_folder("Select export folder", default_training_export_directory(p).string())
-								.result();
-						if (!export_directory.empty())
+						const std::string filename = pfd::save_file("Export skeleton PLY", "skeleton.ply", {"PLY", "*.ply"}).result();
+						if (!filename.empty())
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
-							export_training_ply_bundle(p, std::filesystem::path(export_directory));
+							export_skeleton_mesh_ply(p, filename);
 						}
 					}
-					if (!can_export_training_bundle)
+					if (!can_export_skeleton)
 						ImGui::EndDisabled();
-					ImGui::SameLine();
-					ImGui::TextDisabled("Select one or more ready targets.");
 					if (ImGui::Button("Face components (UF)"))
 					{
 						if (!p.running_)
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
-							skeleton_topology_for(p).prune_fully_non_manifold_triangles();
-							if (skeleton_topology_for(p).compute_skeleton_face_components_union_find() == SkeletonTopologyStatus::success &&
-								colorize_skeleton_face_components(p) && non_manifold_provider_ && p.skeleton_ &&
+							if (prepare_face_components(p) && non_manifold_provider_ && p.skeleton_ &&
 								p.skeleton_face_component_color_)
 							{
 								non_manifold_provider_->emit_attribute_changed(*p.skeleton_,

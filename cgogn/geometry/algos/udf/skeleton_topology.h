@@ -25,6 +25,7 @@
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
+#include <cgogn/core/functions/traversals/edge.h>
 #include <cgogn/geometry/algos/area.h>
 #include <cgogn/geometry/algos/udf/spheres_optimizer.h>
 #include <Eigen/Dense>
@@ -304,7 +305,9 @@ private:
 		foreach_cell(*p.spheres_, [&](SphereVertex pv) -> bool {
 			uint32 pv_index = index_of(*p.spheres_, pv);
 			SkeletonVertex nmv = add_vertex(*p.skeleton_);
-			(*p.skeleton_position_)[index_of(*p.skeleton_, nmv)] = (*p.spheres_position_)[pv_index];
+			const uint32 skeleton_index = index_of(*p.skeleton_, nmv);
+			(*p.skeleton_position_)[skeleton_index] = (*p.spheres_position_)[pv_index];
+			(*p.skeleton_radius_)[skeleton_index] = (*p.spheres_radius_)[pv_index];
 			if (p.spheres_skeleton_vertex_)
 				(*p.spheres_skeleton_vertex_)[pv_index] = nmv;
 			if (p.skeleton_source_sphere_)
