@@ -417,6 +417,8 @@ private:
 		p.skeleton_invalidated_ = true;
 		if (p.skeleton_)
 			clear(*p.skeleton_);
+		if (!p.running_)
+			set_post_init_sphere_render_state(p);
 	}
 
 	void refresh_sample_normals_color(PointsParameters& p)
@@ -813,7 +815,7 @@ protected:
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
 						init_spheres(p);
-							update_render_data(p, false, true, true);
+						update_render_data(p, false, true, true);
 					}
 					ImGui::SliderFloat("Update lambda", &options.sqem_update_lambda_line_plane, 0.0f, 4.0f, "%.6f");
 					if (ImGui::Button("Update spheres"))
