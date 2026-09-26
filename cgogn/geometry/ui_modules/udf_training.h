@@ -457,8 +457,6 @@ private:
 		return Vec4(1.0, 0.0, 0.0, transparency);
 	}
 
-	SpheresOptimizerType& optimizer_for(PointsParameters& p) { return p.reconstruction_->spheres_optimizer(); }
-	SkeletonTopologyType& skeleton_topology_for(PointsParameters& p) { return p.reconstruction_->skeleton_topology(); }
 	void log_skeleton_topology_summary(const PointsParameters& p, const char* prefix) const
 	{
 		if (!p.reconstruction_) return;
@@ -490,6 +488,8 @@ private:
 			non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
 			if (p.skeleton_position_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
 			if (p.skeleton_radius_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_radius_.get());
+			if (p.skeleton_edge_color_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
+			if (p.skeleton_face_color_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
 		}
 		if (points_provider_ && p.spheres_)
 		{
@@ -502,7 +502,7 @@ private:
 	}
 	void refresh_skeleton_topology_colors(PointsParameters& p)
 	{
-		skeleton_topology_for(p).compute_edge_degree();
+		p.reconstruction_->skeleton_topology().compute_edge_degree();
 		foreach_cell(*p.skeleton_, [&](NMEdge e) {
 			auto in_face = incident_faces(*p.skeleton_, e);
 			if (in_face.size() == 1)
@@ -519,28 +519,20 @@ private:
 				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.0, 0.0, 0.0);
 			return true;
 		});
-		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
-		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
-		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
 	}
-
 protected:
-	void update_render_data(PointsParameters& p, bool non_blocking_running_lock = false, bool full_refresh = true,
-						bool rebuild_skeleton = false)
+	enum class RenderUpdateMode : uint8
+	{
+		spheres_only,
+		all_current_data,
+		rebuild_skeleton_and_update_all
+	};
+
+	void update_render_data(PointsParameters& p, RenderUpdateMode mode)
 	{
 		std::unique_lock<std::mutex> lock(p.mutex_, std::defer_lock);
 		if (p.running_)
-		{
-			if (non_blocking_running_lock)
-			{
-				if (!lock.try_lock())
-					return;
-			}
-			else
-			{
-				lock.lock();
-			}
-		}
+			lock.lock();
 
 		points_provider_->emit_connectivity_changed(*p.spheres_);
 		points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_position_.get());
@@ -549,7 +541,7 @@ protected:
 		update_spheres_color(p);
 		points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_color_.get());
 
-		if (!full_refresh)
+		if (mode == RenderUpdateMode::spheres_only)
 			return;
 
 		parallel_foreach_cell(*p.samples_mesh_, [&](PVertex v) -> bool {
@@ -566,21 +558,21 @@ protected:
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_color_.get());
 		points_provider_->emit_attribute_changed(*p.samples_mesh_, p.samples_normal_color_.get());
 
-		if (rebuild_skeleton)
+		if (mode == RenderUpdateMode::rebuild_skeleton_and_update_all)
 		{
 			const ReconstructionStatus status = p.reconstruction_->build_skeleton();
 			p.skeleton_invalidated_ = status != ReconstructionStatus::success;
 			if (status == ReconstructionStatus::success)
 				refresh_skeleton_topology_colors(p);
 		}
-		non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
-		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
-	}
-
-	void request_linked_views_update()
-	{
-		for (View* v : linked_views_)
-			v->request_update();
+		if (non_manifold_provider_ && p.skeleton_)
+		{
+			non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
+			if (p.skeleton_position_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
+			if (p.skeleton_radius_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_radius_.get());
+			if (p.skeleton_edge_color_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
+			if (p.skeleton_face_color_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
+		}
 	}
 
 	void set_post_init_sphere_render_state(PointsParameters& p)
@@ -616,8 +608,8 @@ protected:
 		p.render_refresh_requested_.store(false);
 		{
 			std::lock_guard<std::mutex> lock(p.mutex_);
-			optimizer_for(p).reset_optimization();
-			p.metrics_snapshot_ = optimizer_for(p).metrics();
+			p.reconstruction_->spheres_optimizer().reset_optimization();
+			p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
 			p.sphere_update_lambda_.store(p.reconstruction_->options().sqem_update_lambda_line_plane);
 		}
 		p.running_.store(true);
@@ -626,7 +618,7 @@ protected:
 			cgogn::thread_start(cgogn::max_nb_threads() - 1);
 			auto start = std::chrono::high_resolution_clock::now();
 			auto last_preview_refresh = start;
-			SpheresOptimizerType& optimizer = optimizer_for(*active);
+			SpheresOptimizerType& optimizer = active->reconstruction_->spheres_optimizer();
 			SpheresOptimizerStatus status = SpheresOptimizerStatus::running;
 			SpheresOptimizerMetrics final_metrics;
 			try
@@ -734,14 +726,15 @@ protected:
 			spheres_update_thread_.join();
 
 		if (running)
-			update_render_data(*active, false, true, true);
+			update_render_data(*active, RenderUpdateMode::rebuild_skeleton_and_update_all);
 		else
 		{
 			if (active->skeleton_invalidated_ && active->skeleton_)
 				clear(*active->skeleton_);
-			update_render_data(*active, false, true, true);
+			update_render_data(*active, RenderUpdateMode::rebuild_skeleton_and_update_all);
 		}
-		request_linked_views_update();
+		for (View* v : linked_views_)
+			v->request_update();
 		if (!running)
 			active_spheres_update_ = nullptr;
 	}
@@ -784,7 +777,7 @@ protected:
 			if (!p.running_)
 			{
 				std::lock_guard<std::mutex> lock(p.mutex_);
-				update_render_data(p);
+				update_render_data(p, RenderUpdateMode::all_current_data);
 			}
 		}
 	}
@@ -892,7 +885,7 @@ protected:
 			{
 				p.fitting_data_computed_ = false;
 				compute_fitting_data(p);
-				update_render_data(p);
+				update_render_data(p, RenderUpdateMode::all_current_data);
 			}
 			ImGui::EndDisabled();
 			const bool sphere_fit_ready = p.fitting_data_computed_;
@@ -907,8 +900,8 @@ protected:
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
 						init_spheres(p);
-						p.metrics_snapshot_ = optimizer_for(p).metrics();
-						update_render_data(p, false, true, true);
+						p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
+						update_render_data(p, RenderUpdateMode::rebuild_skeleton_and_update_all);
 					}
 					ImGui::EndDisabled();
 					float update_lambda = p.sphere_update_lambda_.load();
@@ -923,7 +916,7 @@ protected:
 						if (!p.running_)
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
-							SpheresOptimizerType& optimizer = optimizer_for(p);
+							SpheresOptimizerType& optimizer = p.reconstruction_->spheres_optimizer();
 							optimizer.update_once(Scalar(options.sqem_update_lambda_line_plane));
 							p.metrics_snapshot_ = optimizer.metrics();
 							if (optimizer.metrics().sphere_topology_changed)
@@ -934,7 +927,7 @@ protected:
 									clear(*p.skeleton_);
 								}
 							}
-							update_render_data(p, false, true, true);
+							update_render_data(p, RenderUpdateMode::rebuild_skeleton_and_update_all);
 						}
 					}
 					ImGui::EndDisabled();
@@ -950,10 +943,10 @@ protected:
 							p.skeleton_invalidated_ = status != ReconstructionStatus::success;
 							if (status == ReconstructionStatus::success)
 							{
-								log_basic(p, "[SkeletonBuild] tets=", skeleton_topology_for(p).metrics().tet_count, '\n');
+								log_basic(p, "[SkeletonBuild] tets=", p.reconstruction_->skeleton_topology().metrics().tet_count, '\n');
 								refresh_skeleton_topology_colors(p);
 							}
-							update_render_data(p, false, true, false);
+							update_render_data(p, RenderUpdateMode::all_current_data);
 						}
 					}
 					ImGui::EndDisabled();
@@ -1006,7 +999,7 @@ protected:
 							const ReconstructionStatus status = p.reconstruction_->fix_topology();
 							if (status == ReconstructionStatus::success)
 							{
-								p.metrics_snapshot_ = optimizer_for(p).metrics();
+								p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
 								log_skeleton_topology_summary(p, "[TopologyFull]");
 								apply_skeleton_topology_results(p);
 							}
@@ -1043,15 +1036,19 @@ protected:
 
 					if (ImGui::Checkbox("Error as color", &p.error_as_spheres_color_))
 					{
-						std::lock_guard<std::mutex> lock(p.mutex_);
 						if (!p.running_)
-							update_render_data(p, false, false);
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							update_render_data(p, RenderUpdateMode::spheres_only);
+						}
 					}
 					if (ImGui::SliderFloat("Transparency", &p.spheres_transparency_, 0.0f, 1.0f))
 					{
-						std::lock_guard<std::mutex> lock(p.mutex_);
 						if (!p.running_)
-							update_render_data(p, false, true, false);
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							update_render_data(p, RenderUpdateMode::all_current_data);
+						}
 					}
 
 					ImGui::Separator();
