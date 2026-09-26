@@ -27,7 +27,6 @@
 
 #include <cgogn/core/functions/attributes.h>
 
-#include <cgogn/geometry/functions/bounding_box.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <cgogn/ui/app.h>
@@ -138,20 +137,17 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 
 	if (use_neural_udf)
 	{
-		std::cout << "=== Neural UDF Mode ===" << std::endl;
 		auto p_vertex_position = cgogn::get_or_add_attribute<Vec3, PVertex>(*p, "position");
 
-		udf.set_selected_points(*p);
-		udf.load_neural_udf_model(
+		const auto model_status = udf.load_neural_udf_model(
 			*p, model_path,
 			neural_is_mf ? cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag>::NEURAL_MODEL_MF
-						 : cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag>::NEURAL_MODEL_UDF);
+							 : cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag>::NEURAL_MODEL_UDF);
+		if (model_status !=
+			cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag>::ReconstructionStatus::success)
+			return 1;
 		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
 		pcr.set_vertex_position(*v1, *p, p_vertex_position);
-		auto [bb_min, bb_max] = mpp.meshes_bb();
-		std::cout << "Loaded point cloud bounding box: min(" << bb_min.transpose() << "), max(" << bb_max.transpose()
-				  << ")" << std::endl;
-		std::cout << "Neural UDF model loaded. Use UI to sample alpha-level set." << std::endl;
 	}
 
 	v1->update_scene_bb();
@@ -244,7 +240,6 @@ int main(int argc, char** argv)
 				{
 					model_path = arg;
 					use_neural_udf = true;
-					std::cout << "Neural UDF mode: will load model from " << model_path << std::endl;
 				}
 				continue;
 			}
