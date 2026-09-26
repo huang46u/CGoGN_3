@@ -466,6 +466,34 @@ public:
 		sync_sphere_count();
 	}
 
+	Vertex add_sphere(const Vec3& position, Scalar radius)
+	{
+		if (!data_.spheres || !data_.sphere_position || !data_.sphere_radius)
+			return Vertex();
+
+		const Vertex sphere = add_vertex(*data_.spheres);
+		const uint32 sphere_id = index_of(*data_.spheres, sphere);
+		if (sphere_id == INVALID_INDEX)
+			return Vertex();
+
+		(*data_.sphere_position)[sphere_id] = position;
+		(*data_.sphere_radius)[sphere_id] = radius;
+		if (data_.sphere_cluster)
+			(*data_.sphere_cluster)[sphere_id].clear();
+		if (data_.sphere_cluster_area)
+			(*data_.sphere_cluster_area)[sphere_id] = Scalar(0);
+		if (data_.sphere_neighbors)
+			(*data_.sphere_neighbors)[sphere_id].clear();
+		if (data_.sphere_error)
+			(*data_.sphere_error)[sphere_id] = Scalar(0);
+		if (data_.sphere_error_not_normalized)
+			(*data_.sphere_error_not_normalized)[sphere_id] = Scalar(0);
+
+		metrics_.sphere_topology_changed = true;
+		sync_sphere_count();
+		return sphere;
+	}
+
 private:
 	bool is_valid_sphere_for_clustering(uint32 sphere_index) const
 	{
