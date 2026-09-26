@@ -161,38 +161,24 @@ public:
 
 private:
 	using SpheresOptimizerType = SpheresOptimizer<POINTS>;
-	using SpheresOptimizerData = typename SpheresOptimizerType::Data;
 	using FaceKey = std::array<uint32, 3>;
 
 	struct Tet { SkeletonFace faces[4]; };
 	using TetMap = std::unordered_map<std::size_t, Tet>;
 	struct TopologyParameters
 	{
-		Data& data;
-		SpheresOptimizerData& optimizer_data;
 		TetMap& skeleton_tets_;
 		NONMANIFOLD*& skeleton_;
 		POINTS*& samples_mesh_;
-		std::shared_ptr<SphereAttribute<Vec3>>& samples_position_;
-		std::shared_ptr<SphereAttribute<Scalar>>& samples_area_;
 		std::shared_ptr<SphereAttribute<std::vector<SphereVertex>>>& samples_knn_;
-		std::shared_ptr<SphereAttribute<Spherical_Quadric>>& samples_quadric_;
-		std::shared_ptr<SphereAttribute<Line_Quadric>>& samples_line_quadric_;
-		std::shared_ptr<SphereAttribute<Vec3>>& samples_ma_position_;
-		std::shared_ptr<SphereAttribute<Scalar>>& samples_ma_radius_;
-		std::shared_ptr<SphereAttribute<SphereVertex>>& samples_ma_secondary_vertex_;
 		std::shared_ptr<SphereAttribute<SphereVertex>>& samples_sphere_;
-		std::shared_ptr<SphereAttribute<Scalar>>& samples_error_;
 		const acc::KDTree<3, uint32>*& samples_kdtree_;
-		const std::vector<SphereVertex>*& samples_kdtree_vertices_;
 		POINTS*& spheres_;
 		std::shared_ptr<SphereAttribute<Vec3>>& spheres_position_;
 		std::shared_ptr<SphereAttribute<Scalar>>& spheres_radius_;
 		std::shared_ptr<SphereAttribute<std::vector<SphereVertex>>>& spheres_cluster_;
-		std::shared_ptr<SphereAttribute<Scalar>>& spheres_cluster_area_;
 		std::shared_ptr<SphereAttribute<std::set<SphereVertex>>>& spheres_neighbor_clusters_;
 		std::shared_ptr<SphereAttribute<Scalar>>& spheres_error_;
-		std::shared_ptr<SphereAttribute<Scalar>>& spheres_error_not_normalized_;
 		std::shared_ptr<SphereAttribute<SkeletonVertex>>& spheres_skeleton_vertex_;
 		std::shared_ptr<SkeletonAttribute<Vec3>>& skeleton_position_;
 		std::shared_ptr<SkeletonAttribute<Scalar>>& skeleton_radius_;
@@ -201,20 +187,18 @@ private:
 		std::shared_ptr<SkeletonAttribute<SphereVertex>>& skeleton_source_sphere_;
 		std::shared_ptr<SkeletonAttribute<uint32>>& edge_degree_;
 		SpheresOptimizerType*& spheres_optimizer_;
-		Scalar sqem_update_lambda_line_plane_ = Scalar(0.20);
 
-		TopologyParameters(Data& d, TetMap& t) : data(d), optimizer_data(d.spheres_optimizer->data()), skeleton_tets_(t),
-			skeleton_(d.skeleton), samples_mesh_(optimizer_data.samples_mesh), samples_position_(optimizer_data.sample_position),
-			samples_area_(optimizer_data.sample_area), samples_knn_(optimizer_data.sample_knn),
-			samples_quadric_(optimizer_data.sample_quadric), samples_line_quadric_(optimizer_data.sample_line_quadric),
-			samples_ma_position_(optimizer_data.sample_ma_position), samples_ma_radius_(optimizer_data.sample_ma_radius),
-			samples_ma_secondary_vertex_(optimizer_data.sample_ma_secondary_vertex), samples_sphere_(optimizer_data.sample_sphere),
-			samples_error_(optimizer_data.sample_error), samples_kdtree_(optimizer_data.sample_kdtree),
-			samples_kdtree_vertices_(optimizer_data.sample_kdtree_vertices),
-			spheres_(optimizer_data.spheres), spheres_position_(optimizer_data.sphere_position), spheres_radius_(optimizer_data.sphere_radius),
-			spheres_cluster_(optimizer_data.sphere_cluster), spheres_cluster_area_(optimizer_data.sphere_cluster_area),
-			spheres_neighbor_clusters_(optimizer_data.sphere_neighbors),
-			spheres_error_(optimizer_data.sphere_error), spheres_error_not_normalized_(optimizer_data.sphere_error_not_normalized),
+		TopologyParameters(Data& d, TetMap& t) : skeleton_tets_(t), skeleton_(d.skeleton),
+			samples_mesh_(d.spheres_optimizer->data().samples_mesh),
+			samples_knn_(d.spheres_optimizer->data().sample_knn),
+			samples_sphere_(d.spheres_optimizer->data().sample_sphere),
+			samples_kdtree_(d.spheres_optimizer->data().sample_kdtree),
+			spheres_(d.spheres_optimizer->data().spheres),
+			spheres_position_(d.spheres_optimizer->data().sphere_position),
+			spheres_radius_(d.spheres_optimizer->data().sphere_radius),
+			spheres_cluster_(d.spheres_optimizer->data().sphere_cluster),
+			spheres_neighbor_clusters_(d.spheres_optimizer->data().sphere_neighbors),
+			spheres_error_(d.spheres_optimizer->data().sphere_error),
 			spheres_skeleton_vertex_(d.sphere_skeleton_vertex), skeleton_position_(d.skeleton_position),
 			skeleton_radius_(d.skeleton_radius), incident_tets_(d.face_incident_tets),
 			skeleton_face_component_id_(d.face_component_id), skeleton_source_sphere_(d.skeleton_source_sphere),
@@ -740,8 +724,7 @@ private:
 		prune_fully_non_manifold_triangles(p);
 		compute_skeleton_face_components_union_find(p);
 	}
-	uint32 remove_orphan_edges_from_removed_face_edges(TopologyParameters& p, const std::vector<SkeletonEdge>& face_edges,
-													   uint32* out_removed_vertices = nullptr)
+	uint32 remove_orphan_edges_from_removed_face_edges(TopologyParameters& p, const std::vector<SkeletonEdge>& face_edges)
 	{
 		uint32 removed_edges = 0;
 		std::vector<SkeletonVertex> candidate_vertices;
@@ -759,7 +742,6 @@ private:
 				++removed_edges;
 			}
 		}
-		uint32 removed_vertices = 0;
 		for (const SkeletonVertex& v : candidate_vertices)
 		{
 			if (!v.is_valid())
@@ -769,11 +751,8 @@ private:
 				continue;
 			if (!incident_edges(*p.skeleton_, v).empty())
 				continue;
-			if (remove_skeleton_vertex_and_linked_sphere(p, v))
-				++removed_vertices;
+			remove_skeleton_vertex_and_linked_sphere(p, v);
 		}
-		if (out_removed_vertices)
-			*out_removed_vertices = removed_vertices;
 		return removed_edges;
 	}
 
@@ -797,17 +776,13 @@ private:
 	}
 
 	void remove_global_orphan_skeleton_elements(TopologyParameters& p, uint32* out_removed_edges = nullptr,
-												uint32* out_removed_vertices = nullptr,
 												const std::unordered_set<uint32>* preserved_orphan_edge_ids = nullptr)
 	{
 		uint32 removed_edges = 0;
-		uint32 removed_vertices = 0;
 		if (!p.skeleton_)
 		{
 			if (out_removed_edges)
 				*out_removed_edges = 0;
-			if (out_removed_vertices)
-				*out_removed_vertices = 0;
 			return;
 		}
 
@@ -860,21 +835,17 @@ private:
 				continue;
 			if (!incident_edges(*p.skeleton_, v).empty())
 				continue;
-			if (remove_skeleton_vertex_and_linked_sphere(p, v))
-				++removed_vertices;
+			remove_skeleton_vertex_and_linked_sphere(p, v);
 		}
 
 		if (out_removed_edges)
 			*out_removed_edges = removed_edges;
-		if (out_removed_vertices)
-			*out_removed_vertices = removed_vertices;
 	}
 
 	struct SkeletonFaceDeletionStats
 	{
 		uint32 removed_faces = 0;
 		uint32 removed_edges = 0;
-		uint32 removed_vertices = 0;
 		uint32 removed_tets = 0;
 	};
 
@@ -928,12 +899,7 @@ private:
 			++out_stats.removed_faces;
 
 			if (options.remove_incident_orphan_edges_immediately)
-			{
-				uint32 removed_vertices_this_face = 0;
-				out_stats.removed_edges +=
-					remove_orphan_edges_from_removed_face_edges(p, affected_edges, &removed_vertices_this_face);
-				out_stats.removed_vertices += removed_vertices_this_face;
-			}
+				out_stats.removed_edges += remove_orphan_edges_from_removed_face_edges(p, affected_edges);
 
 			for (std::size_t tet_id : in_tets)
 			{
@@ -961,11 +927,8 @@ private:
 		if (options.remove_global_orphan_elements_after_batch)
 		{
 			uint32 global_orphan_edges = 0;
-			uint32 global_orphan_vertices = 0;
-			remove_global_orphan_skeleton_elements(
-				p, &global_orphan_edges, &global_orphan_vertices, &preexisting_orphan_edge_ids);
+			remove_global_orphan_skeleton_elements(p, &global_orphan_edges, &preexisting_orphan_edge_ids);
 			out_stats.removed_edges += global_orphan_edges;
-			out_stats.removed_vertices += global_orphan_vertices;
 		}
 		return true;
 	}
@@ -1632,7 +1595,6 @@ private:
 		struct FaceChoice
 		{
 			SkeletonFace face;
-			uint32 face_id = INVALID_INDEX;
 			Scalar score = Scalar(0);
 		};
 		struct TetCandidateQueueEntry
@@ -1832,7 +1794,7 @@ private:
 						continue;
 					if (face_has_edge_with_tet_face_count_gt2(f, &step_tets_to_erase))
 						continue;
-					created_deg1_faces.push_back({f, idf, get_face_score(idf)});
+					created_deg1_faces.push_back({f, get_face_score(idf)});
 				}
 			}
 			std::sort(created_deg1_faces.begin(), created_deg1_faces.end(),
@@ -2063,14 +2025,9 @@ private:
 			const Tet tet = it_tet->second;
 
 			bool is_boundary_tet = false;
-			std::unordered_set<uint32> tet_face_ids;
-			tet_face_ids.reserve(4);
 			for (uint32 i = 0; i < 4; ++i)
 			{
 				const SkeletonFace f = tet.faces[i];
-				const uint32 idf = index_of(*p.skeleton_, f);
-				tet_face_ids.insert(idf);
-
 				uint32 deg2_edge_count = 0;
 				for (SkeletonEdge e : incident_edges(*p.skeleton_, f))
 				{
@@ -2083,7 +2040,7 @@ private:
 					break;
 				}
 			}
-			if (!is_boundary_tet || tet_face_ids.empty())
+			if (!is_boundary_tet)
 				continue;
 
 			struct BoundaryEdgeChoice
