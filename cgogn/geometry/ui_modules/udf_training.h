@@ -5,6 +5,7 @@
 #include <cgogn/ui/module.h>
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
+#include <cgogn/core/utils/thread.h>
 #include <cgogn/geometry/algos/udf/reconstruction.h>
 #include <cgogn/geometry/types/vector_traits.h>
 #include <cgogn/ui/portable-file-dialogs.h>
@@ -14,6 +15,7 @@
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -118,16 +120,18 @@ private:
 		float32 spheres_transparency_ = 0.5f;
 
 		// UI state
-		OutputVerbosity output_verbosity_ = OUTPUT_NORMAL;
+		std::atomic<OutputVerbosity> output_verbosity_{OUTPUT_NORMAL};
 
 		// Threading
 		std::mutex mutex_;
-		bool running_ = false;
-		bool stopping_ = false;
-		bool preview_render_during_sphere_update_ = true;
-		bool pending_full_refresh_after_stop_ = false;
-		bool slow_down_ = true;
-		uint32 update_rate_ = 20;
+		std::atomic<bool> running_{false};
+		std::atomic<bool> stop_requested_{false};
+		std::atomic<bool> render_refresh_requested_{false};
+		std::atomic<bool> preview_render_during_sphere_update_{true};
+		std::atomic<bool> slow_down_{true};
+		std::atomic<uint32> update_rate_{20};
+		std::atomic<float32> sphere_update_lambda_{0.2f};
+		SpheresOptimizerMetrics metrics_snapshot_{};
 
 	};
 
@@ -136,8 +140,9 @@ public:
 	{
 	}
 
-	~UDFTraining()
+	~UDFTraining() override
 	{
+		stop_and_join_spheres_update();
 	}
 
 	static int output_verbosity_index(OutputVerbosity value)
@@ -166,7 +171,7 @@ public:
 
 	bool is_basic_logging_enabled(const PointsParameters& p) const
 	{
-		return p.output_verbosity_ != OUTPUT_MUTE;
+		return p.output_verbosity_.load() != OUTPUT_MUTE;
 	}
 
 	bool is_basic_logging_enabled(OutputVerbosity output_verbosity) const
@@ -312,28 +317,11 @@ protected:
 			app_.module("SurfaceRender (" + std::string{mesh_traits<NONMANIFOLD>::name} + ")"));
 
 		timer_connection_ = boost::synapse::connect<App::timer_tick>(&app_, [this]() {
-			if (selected_points_)
-			{
-				PointsParameters& p = points_parameters_[selected_points_];
-				if (p.running_ && p.preview_render_during_sphere_update_)
-				{
-					update_render_data(p, false, true, true);
-					request_linked_views_update();
-				}
-				else if (p.pending_full_refresh_after_stop_)
-				{
-					if (p.skeleton_invalidated_ && p.skeleton_)
-					{
-						clear(*p.skeleton_);
-					}
-					update_render_data(p, false, true, true);
-					request_linked_views_update();
-					p.pending_full_refresh_after_stop_ = false;
-				}
-			}
+			handle_spheres_update_tick();
 		});
-		const OutputVerbosity startup_output_verbosity =
-			selected_points_ ? points_parameters_[selected_points_].output_verbosity_ : OUTPUT_NORMAL;
+		const OutputVerbosity startup_output_verbosity = selected_points_
+			? points_parameters_[selected_points_].output_verbosity_.load()
+			: OUTPUT_NORMAL;
 		if (torch::cuda::is_available())
 		{
 			log_basic(startup_output_verbosity, "CUDA is available! Using GPU device 0.", '\n');
@@ -387,6 +375,7 @@ private:
 		p.reconstruction_ = std::make_unique<ReconstructionType>(data);
 		p.reconstruction_->options().ma_flip_prune = false;
 		p.reconstruction_->options().ray_sampler_batch_size = 8192;
+		p.sphere_update_lambda_.store(p.reconstruction_->options().sqem_update_lambda_line_plane);
 		const ReconstructionStatus status = p.reconstruction_->initialize_data();
 		p.initialized_ = status == ReconstructionStatus::success;
 	}
@@ -439,8 +428,8 @@ private:
 			uint32 v_index = index_of(*p.spheres_, v);
 			if (p.error_as_spheres_color_)
 				(*p.spheres_color_)[v_index] =
-					color_map((*p.spheres_error_)[v_index], p.reconstruction_->spheres_optimizer().metrics().minimum_error,
-											  p.reconstruction_->spheres_optimizer().metrics().maximum_error, p.spheres_transparency_);
+					color_map((*p.spheres_error_)[v_index], p.metrics_snapshot_.minimum_error,
+											  p.metrics_snapshot_.maximum_error, p.spheres_transparency_);
 			else
 			{
 				const Vec4& c = (*p.spheres_cluster_color_)[v_index];
@@ -619,68 +608,162 @@ protected:
 
 	void start_spheres_update(PointsParameters& p)
 	{
-		p.running_ = true;
-		p.stopping_ = false;
-		SpheresOptimizerType& optimizer = optimizer_for(p);
-		optimizer.reset_optimization();
-		p.pending_full_refresh_after_stop_ = false;
+		if (spheres_update_thread_.joinable())
+			spheres_update_thread_.join();
 
-		launch_thread([this, &p, &optimizer]() {
+		active_spheres_update_ = &p;
+		p.stop_requested_.store(false);
+		p.render_refresh_requested_.store(false);
+		{
+			std::lock_guard<std::mutex> lock(p.mutex_);
+			optimizer_for(p).reset_optimization();
+			p.metrics_snapshot_ = optimizer_for(p).metrics();
+			p.sphere_update_lambda_.store(p.reconstruction_->options().sqem_update_lambda_line_plane);
+		}
+		p.running_.store(true);
+
+		spheres_update_thread_ = std::thread([this, active = &p]() {
+			cgogn::thread_start(cgogn::max_nb_threads() - 1);
 			auto start = std::chrono::high_resolution_clock::now();
+			auto last_preview_refresh = start;
+			SpheresOptimizerType& optimizer = optimizer_for(*active);
 			SpheresOptimizerStatus status = SpheresOptimizerStatus::running;
-			while (status == SpheresOptimizerStatus::running)
+			SpheresOptimizerMetrics final_metrics;
+			try
 			{
+				while (status == SpheresOptimizerStatus::running && !active->stop_requested_.load())
 				{
-					std::lock_guard<std::mutex> lock(p.mutex_);
-					if (!p.stopping_)
+					SpheresOptimizerMetrics metrics;
+					bool emit_preview_refresh = false;
 					{
-						log_basic(p, "Start Sphere update", '\n');
-						status = optimizer.update_once(Scalar(p.reconstruction_->options().sqem_update_lambda_line_plane));
-						if (optimizer.metrics().sphere_topology_changed)
-							p.skeleton_invalidated_ = true;
+						std::lock_guard<std::mutex> lock(active->mutex_);
+						if (active->stop_requested_.load())
+							break;
+						const Scalar lambda = Scalar(active->sphere_update_lambda_.load());
+						status = optimizer.update_once(lambda);
+						metrics = optimizer.metrics();
+						if (metrics.sphere_topology_changed)
+							active->skeleton_invalidated_ = true;
+						const auto now = std::chrono::high_resolution_clock::now();
+						if (active->preview_render_during_sphere_update_.load() &&
+							std::chrono::duration_cast<std::chrono::milliseconds>(now - last_preview_refresh).count() >=
+								100)
+						{
+							emit_preview_refresh = !active->render_refresh_requested_.exchange(true);
+							if (emit_preview_refresh)
+								last_preview_refresh = now;
+						}
 					}
-				}
-				if (p.stopping_)
-					break;
-				if (p.slow_down_)
-					std::this_thread::sleep_for(std::chrono::microseconds(1000000 / p.update_rate_));
-				else
-					std::this_thread::yield();
 
-				log_basic(p, "Iteration: ", optimizer.metrics().iteration, " | Spheres: ", optimizer.metrics().sphere_count,
-						  " | Error: ", optimizer.metrics().total_error, " | Diff: ", optimizer.metrics().error_difference, '\n');
-				if (status == SpheresOptimizerStatus::converged)
-				{
-					log_basic(p, "Auto stop: error converged after post-convergence iterations.", '\n');
-					p.stopping_ = true;
+					log_basic(*active, "Iteration: ", metrics.iteration, " | Spheres: ", metrics.sphere_count,
+							  " | Error: ", metrics.total_error, " | Diff: ", metrics.error_difference, '\n');
+					if (emit_preview_refresh)
+						boost::synapse::emit<App::timer_tick>(&app_);
+
+					if (status == SpheresOptimizerStatus::converged)
+						log_basic(*active, "Auto stop: error converged after post-convergence iterations.", '\n');
+					else if (status == SpheresOptimizerStatus::max_iterations)
+						log_basic(*active, "Stop: reached max iterations (150).", '\n');
+					else if (status == SpheresOptimizerStatus::failed)
+						log_error(*active, "Sphere optimizer is missing required data.", '\n');
+
+					if (status != SpheresOptimizerStatus::running)
+						break;
+					if (active->stop_requested_.load())
+						break;
+					if (active->slow_down_.load())
+						std::this_thread::sleep_for(
+							std::chrono::microseconds(1000000 / std::max<uint32>(1, active->update_rate_.load())));
+					else
+						std::this_thread::yield();
 				}
-				else if (status == SpheresOptimizerStatus::max_iterations)
-				{
-					log_basic(p, "Stop: reached max iterations (150).", '\n');
-					p.stopping_ = true;
-				}
-				else if (status == SpheresOptimizerStatus::failed)
-				{
-					log_error(p, "Sphere optimizer is missing required data.", '\n');
-					p.stopping_ = true;
-				}
-				if (p.stopping_)
-					break;
 			}
-			p.stopping_ = false;
-			p.running_ = false;
-			p.pending_full_refresh_after_stop_ = true;
-			auto end = std::chrono::high_resolution_clock::now();
-			log_basic(p, "Sphere optimizations time: ", std::chrono::duration<Scalar>(end - start).count(), "s", '\n');
-			log_basic(p, "Nb iterations: ", optimizer.metrics().iteration, '\n');
-		});
+			catch (const std::exception& e)
+			{
+				log_error(*active, "Sphere update failed: ", e.what(), '\n');
+			}
+			catch (...)
+			{
+				log_error(*active, "Sphere update failed with an unknown exception.", '\n');
+			}
 
-		app_.start_timer(100, [&]() -> bool { return !p.running_ && !p.pending_full_refresh_after_stop_; });
+			{
+				std::lock_guard<std::mutex> lock(active->mutex_);
+				final_metrics = optimizer.metrics();
+				active->render_refresh_requested_.store(true);
+				active->stop_requested_.store(false);
+				active->running_.store(false);
+			}
+			const auto end = std::chrono::high_resolution_clock::now();
+			log_basic(*active, "Sphere optimizations time: ",
+					  std::chrono::duration<Scalar>(end - start).count(), "s", '\n');
+			log_basic(*active, "Nb iterations: ", final_metrics.iteration, '\n');
+			cgogn::thread_stop();
+			boost::synapse::emit<App::timer_tick>(&app_);
+		});
 	}
 
 	void stop_spheres_update(PointsParameters& p)
 	{
-		p.stopping_ = true;
+		p.stop_requested_.store(true);
+	}
+
+	void handle_spheres_update_tick()
+	{
+		PointsParameters* active = active_spheres_update_;
+		if (!active)
+			return;
+
+		if (!active->render_refresh_requested_.load())
+			return;
+
+		bool running;
+		bool should_render;
+		{
+			std::lock_guard<std::mutex> lock(active->mutex_);
+			running = active->running_.load();
+			should_render = (running && active->preview_render_during_sphere_update_.load()) ||
+						(!running && active->render_refresh_requested_.load());
+			active->metrics_snapshot_ = active->reconstruction_->spheres_optimizer().metrics();
+			active->render_refresh_requested_.store(false);
+		}
+		if (!should_render)
+			return;
+
+		if (!running && spheres_update_thread_.joinable())
+			spheres_update_thread_.join();
+
+		if (running)
+			update_render_data(*active, false, true, true);
+		else
+		{
+			if (active->skeleton_invalidated_ && active->skeleton_)
+				clear(*active->skeleton_);
+			update_render_data(*active, false, true, true);
+		}
+		request_linked_views_update();
+		if (!running)
+			active_spheres_update_ = nullptr;
+	}
+
+	void stop_and_join_spheres_update()
+	{
+		PointsParameters* active = active_spheres_update_;
+		if (active)
+			active->stop_requested_.store(true);
+		if (spheres_update_thread_.joinable())
+			spheres_update_thread_.join();
+		if (active)
+		{
+			active->running_.store(false);
+			active->render_refresh_requested_.store(false);
+			active_spheres_update_ = nullptr;
+		}
+	}
+
+	void close_event() override
+	{
+		stop_and_join_spheres_update();
 	}
 
 	void key_press_event(View* view, int32 key_code) override
@@ -716,6 +799,9 @@ protected:
 		}
 
 		// Input Point Cloud Selection
+		PointsParameters* active_update = active_spheres_update_;
+		const bool update_running = active_update && active_update->running_.load();
+		ImGui::BeginDisabled(update_running);
 		if (ImGui::BeginCombo("Input Point Cloud",
 							  selected_points_ ? points_provider_->mesh_name(*selected_points_).c_str() : "None"))
 		{
@@ -731,14 +817,15 @@ protected:
 			});
 			ImGui::EndCombo();
 		}
+		ImGui::EndDisabled();
 
 		if (!selected_points_)
 			return;
 		PointsParameters& p = points_parameters_[selected_points_];
 		auto& options = p.reconstruction_->options();
-		int output_verbosity = output_verbosity_index(p.output_verbosity_);
+		int output_verbosity = output_verbosity_index(p.output_verbosity_.load());
 		if (ImGui::Combo("Output", &output_verbosity, "Mute\0Normal\0"))
-			p.output_verbosity_ = output_verbosity_from_index(output_verbosity);
+			p.output_verbosity_.store(output_verbosity_from_index(output_verbosity));
 
 		ImGui::Separator();
 		if (ImGui::CollapsingHeader("Neural UDF", ImGuiTreeNodeFlags_DefaultOpen))
@@ -754,6 +841,7 @@ protected:
 		// Sampling
 		if (ImGui::CollapsingHeader("Sampling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
+			ImGui::BeginDisabled(p.running_.load());
 			ImGui::InputFloat("Alpha", &options.alpha, 0.001f, 0.1f, "%.4f");
 			ImGui::InputFloat("Sample Radius", &options.sample_radius, 0.001f, 0.01f, "%.4f");
 			ImGui::InputInt("Eval Batch Size", &options.batch_size, 256, 1024);
@@ -779,7 +867,8 @@ protected:
 				if (p.samples_mesh_)
 					points_provider_->clear_mesh(*p.samples_mesh_);
 				p.fitting_data_computed_ = false;
-					}
+			}
+			ImGui::EndDisabled();
 
 			if (p.samples_mesh_)
 				ImGui::Text("Number of samples: %zu", nb_cells<PVertex>(*p.samples_mesh_));
@@ -794,6 +883,7 @@ protected:
 		else
 		{
 			ImGui::Separator();
+			ImGui::BeginDisabled(p.running_.load());
 			ImGui::Checkbox("Enable MAFlipPrune", &options.ma_flip_prune);
 			float ma_flip_prune_alpha_factor = static_cast<float>(options.ma_flip_prune_alpha_factor);
 			if (ImGui::SliderFloat("MAFlipPrune MF Alpha Factor", &ma_flip_prune_alpha_factor, 1.0f, 5.0f, "%.2f"))
@@ -804,20 +894,30 @@ protected:
 				compute_fitting_data(p);
 				update_render_data(p);
 			}
+			ImGui::EndDisabled();
 			const bool sphere_fit_ready = p.fitting_data_computed_;
 			if (sphere_fit_ready)
 			{
 				// Sphere Fitting
 				if (ImGui::CollapsingHeader("Sphere Fitting", ImGuiTreeNodeFlags_DefaultOpen))
 				{
+					ImGui::BeginDisabled(p.running_.load());
 					ImGui::SliderFloat("Init dilation constant", &options.init_dilation_constant, 0.001f, 0.01f, "%.4f");
 					if (ImGui::Button("Init spheres"))
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
 						init_spheres(p);
+						p.metrics_snapshot_ = optimizer_for(p).metrics();
 						update_render_data(p, false, true, true);
 					}
-					ImGui::SliderFloat("Update lambda", &options.sqem_update_lambda_line_plane, 0.0f, 4.0f, "%.6f");
+					ImGui::EndDisabled();
+					float update_lambda = p.sphere_update_lambda_.load();
+					if (ImGui::SliderFloat("Update lambda", &update_lambda, 0.0f, 4.0f, "%.6f"))
+					{
+						p.sphere_update_lambda_.store(update_lambda);
+						options.sqem_update_lambda_line_plane = update_lambda;
+					}
+					ImGui::BeginDisabled(p.running_.load());
 					if (ImGui::Button("Update spheres"))
 					{
 						if (!p.running_)
@@ -825,6 +925,7 @@ protected:
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							SpheresOptimizerType& optimizer = optimizer_for(p);
 							optimizer.update_once(Scalar(options.sqem_update_lambda_line_plane));
+							p.metrics_snapshot_ = optimizer.metrics();
 							if (optimizer.metrics().sphere_topology_changed)
 							{
 								p.skeleton_invalidated_ = true;
@@ -833,11 +934,13 @@ protected:
 									clear(*p.skeleton_);
 								}
 							}
-												update_render_data(p, false, true, true);
+							update_render_data(p, false, true, true);
 						}
 					}
+					ImGui::EndDisabled();
 
 
+					ImGui::BeginDisabled(p.running_.load());
 					if (ImGui::Button("Build Skeleton"))
 					{
 						if (!p.running_)
@@ -853,10 +956,12 @@ protected:
 							update_render_data(p, false, true, false);
 						}
 					}
+					ImGui::EndDisabled();
+					const bool running = p.running_.load();
 					const bool skeleton_export_available =
-						!p.skeleton_invalidated_ && p.skeleton_ && p.skeleton_position_ && p.skeleton_radius_ &&
+						!running && !p.skeleton_invalidated_ && p.skeleton_ && p.skeleton_position_ && p.skeleton_radius_ &&
 						nb_cells<NMVertex>(*p.skeleton_) > 0;
-					const bool can_export_skeleton = !p.running_ && skeleton_export_available;
+					const bool can_export_skeleton = skeleton_export_available;
 					ImGui::TextDisabled(skeleton_export_available ? "ready" : "missing");
 					if (!can_export_skeleton)
 						ImGui::BeginDisabled();
@@ -872,6 +977,7 @@ protected:
 					}
 					if (!can_export_skeleton)
 						ImGui::EndDisabled();
+					ImGui::BeginDisabled(p.running_.load());
 					if (ImGui::Button("Face components (UF)"))
 					{
 						if (!p.running_)
@@ -900,6 +1006,7 @@ protected:
 							const ReconstructionStatus status = p.reconstruction_->fix_topology();
 							if (status == ReconstructionStatus::success)
 							{
+								p.metrics_snapshot_ = optimizer_for(p).metrics();
 								log_skeleton_topology_summary(p, "[TopologyFull]");
 								apply_skeleton_topology_results(p);
 							}
@@ -907,12 +1014,21 @@ protected:
 								log_error(p, "[TopologyFull] score evaluation failed or topology data is invalid.", '\n');
 						}
 					}
+					ImGui::EndDisabled();
 					ImGui::SameLine();
 
-					ImGui::Checkbox("Slow down", &p.slow_down_);
-					if (p.slow_down_)
-						ImGui::SliderInt("Update rate", (int*)&p.update_rate_, 1, 100);
-					ImGui::Checkbox("Preview during update", &p.preview_render_during_sphere_update_);
+					bool slow_down = p.slow_down_.load();
+					if (ImGui::Checkbox("Slow down", &slow_down))
+						p.slow_down_.store(slow_down);
+					if (slow_down)
+					{
+						int update_rate = static_cast<int>(p.update_rate_.load());
+						if (ImGui::SliderInt("Update rate", &update_rate, 1, 100))
+							p.update_rate_.store(static_cast<uint32>(update_rate));
+					}
+					bool preview = p.preview_render_during_sphere_update_.load();
+					if (ImGui::Checkbox("Preview during update", &preview))
+						p.preview_render_during_sphere_update_.store(preview);
 					if (!p.running_)
 					{
 						if (ImGui::Button("Start spheres update"))
@@ -940,7 +1056,7 @@ protected:
 
 					ImGui::Separator();
 
-					const SpheresOptimizerMetrics& metrics = optimizer_for(p).metrics();
+					const SpheresOptimizerMetrics& metrics = p.metrics_snapshot_;
 					ImGui::Text("Total error: %f", metrics.total_error / std::max<uint32>(1, metrics.sphere_count));
 					ImGui::Text("Min error: %f", metrics.minimum_error);
 					ImGui::Text("Max error: %f", metrics.maximum_error);
@@ -970,6 +1086,8 @@ private:
 	POINTS* selected_points_ = nullptr;
 	std::map<POINTS*, PointsParameters> points_parameters_;
 	std::shared_ptr<boost::synapse::connection> timer_connection_;
+	std::thread spheres_update_thread_;
+	PointsParameters* active_spheres_update_ = nullptr;
 
 };
 
