@@ -47,7 +47,6 @@ public:
 			return torch::Tensor();
 		try
 		{
-			ModuleDeviceScope module_scope(module_, device_, device_);
 			torch::NoGradGuard no_grad;
 			torch::Tensor x = points_gpu;
 			if (x.device() != device_)
@@ -76,7 +75,6 @@ public:
 			return {torch::Tensor(), torch::Tensor()};
 		try
 		{
-			ModuleDeviceScope module_scope(module_, device_, device_);
 			torch::NoGradGuard no_grad;
 			torch::Tensor x = points_gpu;
 			if (x.device() != device_)
@@ -112,7 +110,6 @@ public:
 			return {torch::Tensor(), torch::Tensor()};
 		try
 		{
-			ModuleDeviceScope module_scope(module_, device_, device_);
 			torch::Tensor x = points_gpu;
 			if (x.device() != device_)
 				x = x.to(device_);
@@ -144,32 +141,6 @@ private:
 		bool has_pred_grad = false;
 		torch::Tensor sdf;
 		bool has_sdf = false;
-	};
-
-	class ModuleDeviceScope
-	{
-	public:
-		ModuleDeviceScope(torch::jit::Module* module, const torch::Device& current_device,
-						  const torch::Device& target_device)
-			: module_(module), current_device_(current_device), moved_(false)
-		{
-			if (module_ && current_device_ != target_device)
-			{
-				module_->to(target_device);
-				moved_ = true;
-			}
-		}
-
-		~ModuleDeviceScope()
-		{
-			if (module_ && moved_)
-				module_->to(current_device_);
-		}
-
-	private:
-		torch::jit::Module* module_;
-		torch::Device current_device_;
-		bool moved_;
 	};
 
 	std::pair<torch::Tensor, torch::Tensor> forward_values_grad_gpu_predicted(const torch::Tensor& points,
@@ -276,6 +247,7 @@ private:
 		return false;
 	}
 
+	// (n, 1) -> (n): every value / sdf tensor returned by this class is 1-D
 	bool normalize_scalar_tensor(torch::Tensor& values) const
 	{
 		if (values.dim() == 2 && values.size(1) == 1)

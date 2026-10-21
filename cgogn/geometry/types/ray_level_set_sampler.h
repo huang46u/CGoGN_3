@@ -694,10 +694,6 @@ private:
 			if (!f.defined())
 				break;
 
-			if (f.dim() == 2 && f.size(1) == 1)
-				f = f.squeeze(1);
-			if (has_sdf && sdf.dim() == 2 && sdf.size(1) == 1)
-				sdf = sdf.squeeze(1);
 
 			torch::Tensor d = f - params_.alpha;
 			torch::Tensor delta = torch::abs(d);
@@ -786,10 +782,6 @@ private:
 					if (!f_near.defined() || (has_sdf && !sdf_near.defined()))
 						break;
 
-					if (f_near.dim() == 2 && f_near.size(1) == 1)
-						f_near = f_near.squeeze(1);
-					if (has_sdf && sdf_near.dim() == 2 && sdf_near.size(1) == 1)
-						sdf_near = sdf_near.squeeze(1);
 					torch::Tensor d_near = f_near - params_.alpha;
 					delta_near = torch::abs(d_near);
 
@@ -835,10 +827,6 @@ private:
 					if (!f_far.defined() || (has_sdf && !sdf_far.defined()))
 						break;
 
-					if (f_far.dim() == 2 && f_far.size(1) == 1)
-						f_far = f_far.squeeze(1);
-					if (has_sdf && sdf_far.dim() == 2 && sdf_far.size(1) == 1)
-						sdf_far = sdf_far.squeeze(1);
 					torch::Tensor d_far = f_far - params_.alpha;
 					torch::Tensor delta_far_new = torch::abs(d_far);
 
@@ -1226,6 +1214,10 @@ private:
 	{
 		const int R = static_cast<int>(rays.size());
 		init_ray_buffers(R);
+		// the page-locked buffers below are uploaded with non_blocking copies and reused by every batch: wait until
+		// the previous batch's copies are done before overwriting them
+		if (device_.is_cuda())
+			torch::cuda::synchronize();
 
 		auto O_cpu = ray_origins_cpu_.narrow(0, 0, R);
 		auto D_cpu = ray_directions_cpu_.narrow(0, 0, R);

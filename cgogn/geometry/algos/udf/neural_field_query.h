@@ -30,26 +30,10 @@ inline bool evaluate_udf_values(const NeuralFieldForward& field, const std::vect
 	for (size_t offset = 0; offset < points.size(); offset += batch)
 	{
 		const size_t count = std::min(batch, points.size() - offset);
-		auto cpu_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-		if (field.device().is_cuda())
-			cpu_opts = cpu_opts.pinned_memory(true);
-
-		torch::Tensor points_cpu = torch::empty({static_cast<int64_t>(count), 3}, cpu_opts);
-		auto points_acc = points_cpu.accessor<float, 2>();
-		for (size_t i = 0; i < count; ++i)
-		{
-			const Vec3& point = points[offset + i];
-			points_acc[static_cast<long>(i)][0] = static_cast<float>(point.x());
-			points_acc[static_cast<long>(i)][1] = static_cast<float>(point.y());
-			points_acc[static_cast<long>(i)][2] = static_cast<float>(point.z());
-		}
-
-		torch::Tensor points_gpu = points_cpu.to(field.device());
+		torch::Tensor points_gpu = detail::make_points_tensor(points, offset, count, field.device()).to(field.device());
 		torch::Tensor values = field.forward_values_gpu(points_gpu);
 		if (!values.defined())
 			return false;
-		if (values.dim() == 2 && values.size(1) == 1)
-			values = values.squeeze(1);
 		torch::Tensor values_cpu = values.to(torch::kCPU).contiguous();
 		auto values_acc = values_cpu.accessor<float, 1>();
 		for (size_t i = 0; i < count; ++i)
@@ -75,14 +59,7 @@ inline bool evaluate_udf_normals(const NeuralFieldForward& field, const std::vec
 		const size_t count = std::min(batch, points.size() - offset);
 		const int64_t tensor_count = static_cast<int64_t>(count);
 		torch::Tensor points_cpu = workspace.points_cpu_.narrow(0, 0, tensor_count);
-		auto points_acc = points_cpu.accessor<float, 2>();
-		for (size_t i = 0; i < count; ++i)
-		{
-			const Vec3& point = points[offset + i];
-			points_acc[static_cast<long>(i)][0] = static_cast<float>(point.x());
-			points_acc[static_cast<long>(i)][1] = static_cast<float>(point.y());
-			points_acc[static_cast<long>(i)][2] = static_cast<float>(point.z());
-		}
+		detail::fill_points_tensor(points, offset, count, points_cpu);
 
 		torch::Tensor points_gpu = workspace.points_gpu_.narrow(0, 0, tensor_count);
 		points_gpu.copy_(points_cpu);
@@ -101,6 +78,36 @@ inline bool evaluate_udf_normals(const NeuralFieldForward& field, const std::vec
 						static_cast<Scalar>(gradients_acc[static_cast<long>(i)][1]),
 						static_cast<Scalar>(gradients_acc[static_cast<long>(i)][2]));
 			normals[offset + i] = unit_normal_or_z(normal);
+		}
+	}
+	return true;
+}
+
+// udf value (mf - |sdf| for MF models) and sdf of every point; false if the model has no sdf output
+inline bool evaluate_udf_values_sdf(const NeuralFieldForward& field, const std::vector<Vec3>& points,
+									size_t batch_size, std::vector<Scalar>& out_values, std::vector<Scalar>& out_sdf)
+{
+	out_values.assign(points.size(), Scalar(0));
+	out_sdf.assign(points.size(), Scalar(0));
+	if (points.empty())
+		return true;
+	if (!field.is_loaded())
+		return false;
+
+	const size_t batch = std::max<size_t>(1, batch_size);
+	for (size_t offset = 0; offset < points.size(); offset += batch)
+	{
+		const size_t count = std::min(batch, points.size() - offset);
+		auto [values, sdf] = field.forward_values_sdf_gpu(detail::make_points_tensor(points, offset, count, field.device()));
+		if (!values.defined() || !sdf.defined() || values.numel() != static_cast<int64_t>(count) ||
+			sdf.numel() != static_cast<int64_t>(count))
+			return false;
+		torch::Tensor both = torch::stack({values.to(torch::kFloat32), sdf.to(torch::kFloat32)}, 1).to(torch::kCPU);
+		auto acc = both.accessor<float, 2>();
+		for (size_t i = 0; i < count; ++i)
+		{
+			out_values[offset + i] = static_cast<Scalar>(acc[static_cast<long>(i)][0]);
+			out_sdf[offset + i] = static_cast<Scalar>(acc[static_cast<long>(i)][1]);
 		}
 	}
 	return true;

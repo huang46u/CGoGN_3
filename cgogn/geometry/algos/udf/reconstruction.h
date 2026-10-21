@@ -185,6 +185,7 @@ public:
 		optimizer_.reset();
 		topology_.reset();
 		neural_model_loaded_ = false;
+		neural_field_ = NeuralFieldForward(&neural_model_, false, device_);
 		fitting_data_computed_ = false;
 		samples_before_filtering_ = 0;
 		initialized_ = false;
@@ -243,12 +244,14 @@ public:
 				neural_model_ = torch::jit::load(path.string(), device_);
 				neural_model_.eval();
 				neural_model_loaded_ = true;
+				neural_field_ = NeuralFieldForward(&neural_model_, true, device_);
 				options_.neural_model_type = type;
 				return Status::success;
 			}
 			catch (const c10::Error&)
 			{
 				neural_model_loaded_ = false;
+				neural_field_ = NeuralFieldForward(&neural_model_, false, device_);
 				return Status::model_load_failed;
 			}
 		}
@@ -333,6 +336,9 @@ private:
 	torch::Device device_ = torch::cuda::is_available() ? torch::Device(torch::kCUDA, 0) : torch::Device(torch::kCPU);
 	torch::jit::Module neural_model_;
 	bool neural_model_loaded_ = false;
+	// one wrapper for the loaded model: it remembers the output layout found by its first forward, so MF models
+	// do not go through autograd again on every call
+	NeuralFieldForward neural_field_{&neural_model_, false, device_};
 	NeuralProjectionWorkspace projection_workspace_;
 	std::unique_ptr<RaySampler> ray_sampler_;
 	std::unique_ptr<acc::KDTree<3, uint32>> input_kdtree_;
@@ -385,9 +391,9 @@ private:
 	bool query_point_cloud_projection_info(const Vec3& query, AlphaProjectionInfo& info);
 	void recompute_samples_normals_from_input();
 	bool recompute_sample_normal_pca(PVertex vertex);
-	NeuralFieldForward neural_field()
+	NeuralFieldForward& neural_field()
 	{
-		return NeuralFieldForward(&neural_model_, neural_model_loaded_, device_);
+		return neural_field_;
 	}
 	SpheresOptimizerType& optimizer_for();
 	TopologyType& topology_for();
@@ -539,26 +545,6 @@ bool UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::query_point
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
 void UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::recompute_samples_normals_from_input()
 {
-	if constexpr (std::is_same_v<RaySamplerTag, RaySamplerNeural>)
-	{
-		std::vector<Vec3> positions, normals;
-		positions.reserve(nb_cells<PVertex>(*data_.samples));
-		foreach_cell(*data_.samples, [&](PVertex v) {
-			positions.push_back((*sample_position_)[index_of(*data_.samples, v)]);
-			return true;
-		});
-		if (evaluate_udf_normals(neural_field(), positions, static_cast<size_t>(std::max(1, options_.batch_size)),
-								 projection_workspace_, normals) &&
-			normals.size() == positions.size())
-		{
-			uint32 i = 0;
-			foreach_cell(*data_.samples, [&](PVertex v) {
-				(*sample_normal_)[index_of(*data_.samples, v)] = normals[i++];
-				return true;
-			});
-			return;
-		}
-	}
 	if (!input_kdtree_ && data_.surface)
 	{
 		build_surface_bvh();
@@ -892,7 +878,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	build_input_kdtree();
 	if (!input_kdtree_)
 		build_surface_bvh();
-	std::vector<Vec3> kept;
+	std::vector<Vec3> kept, kept_normals;
 	kept.reserve(nb_cells<PVertex>(*data_.samples));
 	foreach_cell(*data_.samples, [&](PVertex v) {
 		const Vec3 p = (*sample_position_)[index_of(*data_.samples, v)];
@@ -909,17 +895,21 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 			within_distance = surface_bvh_->closest_point(p, &closest, max_distance);
 		}
 		if (within_distance)
+		{
 			kept.push_back(p);
+			kept_normals.push_back((*sample_normal_)[index_of(*data_.samples, v)]);
+		}
 		return true;
 	});
 	const size_t before = nb_cells<PVertex>(*data_.samples);
 	if (kept.size() == before)
 		return Status::success;
 	clear(*data_.samples);
-	for (const Vec3& p : kept)
+	for (size_t i = 0; i < kept.size(); ++i)
 	{
 		PVertex v = add_vertex(*data_.samples);
-		(*sample_position_)[index_of(*data_.samples, v)] = p;
+		(*sample_position_)[index_of(*data_.samples, v)] = kept[i];
+		(*sample_normal_)[index_of(*data_.samples, v)] = kept_normals[i];
 	}
 	fitting_data_computed_ = false;
 	if (kept.empty())
@@ -928,7 +918,10 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 		sample_vertices_.clear();
 		return Status::success;
 	}
-	recompute_samples_normals_from_input();
+	// neural samples keep their projection normals (the same network gradient a recompute would give); for point
+	// cloud / surface input the normal is recomputed at the projected position from the input
+	if constexpr (!std::is_same_v<RaySamplerTag, RaySamplerNeural>)
+		recompute_samples_normals_from_input();
 	build_sample_kdtree();
 	return Status::success;
 }
@@ -1055,42 +1048,8 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 			sdf.clear();
 			if (!mf_model)
 				return evaluate_topology_scores(points, values);
-			NeuralFieldForward field = neural_field();
-			if (!field.is_loaded())
-				return false;
-			values.assign(points.size(), Scalar(0));
-			sdf.assign(points.size(), Scalar(0));
-			const size_t batch = std::max<size_t>(1, static_cast<size_t>(options_.batch_size));
-			for (size_t offset = 0; offset < points.size(); offset += batch)
-			{
-				const size_t count = std::min(batch, points.size() - offset);
-				auto cpu = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-				if (device_.is_cuda())
-					cpu = cpu.pinned_memory(true);
-				torch::Tensor input = torch::empty({static_cast<long>(count), 3}, cpu);
-				auto acc = input.accessor<float, 2>();
-				for (size_t i = 0; i < count; ++i)
-					for (int j = 0; j < 3; ++j)
-						acc[static_cast<long>(i)][j] = static_cast<float>(points[offset + i][j]);
-				auto [v, s] = field.forward_values_sdf_gpu(input);
-				if (!v.defined() || !s.defined() || v.numel() != static_cast<long>(count) ||
-					s.numel() != static_cast<long>(count))
-					return false;
-				if (v.dim() == 2 && v.size(1) == 1)
-					v = v.squeeze(1);
-				if (s.dim() == 2 && s.size(1) == 1)
-					s = s.squeeze(1);
-				v = v.to(torch::kCPU).contiguous();
-				s = s.to(torch::kCPU).contiguous();
-				auto va = v.accessor<float, 1>();
-				auto sa = s.accessor<float, 1>();
-				for (size_t i = 0; i < count; ++i)
-				{
-					values[offset + i] = Scalar(va[static_cast<long>(i)]);
-					sdf[offset + i] = Scalar(sa[static_cast<long>(i)]);
-				}
-			}
-			return true;
+			return evaluate_udf_values_sdf(neural_field(), points, static_cast<size_t>(options_.batch_size), values,
+										   sdf);
 		};
 		if (supported)
 		{
@@ -1240,6 +1199,8 @@ bool UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::evaluate_to
 	{
 		if (options_.neural_model_type == NeuralModelType::mf)
 		{
+			// MF: mf - |sdf| is not a stable medial axis (its minimum is above zero and varies a lot over a shape),
+			// so the score is the distance to the medial point of the nearest sample instead of the network value
 			if (!sample_ma_kdtree_)
 				return false;
 			values.resize(points.size(), Scalar(0));

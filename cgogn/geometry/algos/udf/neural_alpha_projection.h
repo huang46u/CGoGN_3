@@ -101,6 +101,31 @@ inline void ensure_neural_projection_clamp_tensors(NeuralProjectionWorkspace& wo
 	workspace.clamp_bounds_valid_ = true;
 }
 
+// writes points[begin, begin + count) as float xyz rows into dst (a CPU tensor with at least count rows)
+inline void fill_points_tensor(const std::vector<Vec3>& points, size_t begin, size_t count, torch::Tensor& dst)
+{
+	auto acc = dst.accessor<float, 2>();
+	for (size_t i = 0; i < count; ++i)
+	{
+		const Vec3& p = points[begin + i];
+		acc[static_cast<long>(i)][0] = static_cast<float>(p.x());
+		acc[static_cast<long>(i)][1] = static_cast<float>(p.y());
+		acc[static_cast<long>(i)][2] = static_cast<float>(p.z());
+	}
+}
+
+// points[begin, begin + count) in a new CPU tensor, page-locked when the field runs on CUDA (faster upload)
+inline torch::Tensor make_points_tensor(const std::vector<Vec3>& points, size_t begin, size_t count,
+										const torch::Device& device)
+{
+	auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+	if (device.is_cuda())
+		opts = opts.pinned_memory(true);
+	torch::Tensor t = torch::empty({static_cast<int64_t>(count), 3}, opts);
+	fill_points_tensor(points, begin, count, t);
+	return t;
+}
+
 } // namespace detail
 
 inline bool project_points_to_alpha(const NeuralFieldForward& udf, const std::vector<Vec3>& points,
@@ -120,13 +145,7 @@ inline bool project_points_to_alpha(const NeuralFieldForward& udf, const std::ve
 	{
 		const int64_t count = static_cast<int64_t>(nb_points);
 		torch::Tensor cpu_points = workspace.points_cpu_.narrow(0, 0, count);
-		auto x_acc = cpu_points.accessor<float, 2>();
-		for (size_t i = 0; i < nb_points; ++i)
-		{
-			x_acc[static_cast<long>(i)][0] = static_cast<float>(points[i].x());
-			x_acc[static_cast<long>(i)][1] = static_cast<float>(points[i].y());
-			x_acc[static_cast<long>(i)][2] = static_cast<float>(points[i].z());
-		}
+		detail::fill_points_tensor(points, 0, nb_points, cpu_points);
 
 		torch::Tensor X = workspace.points_gpu_.narrow(0, 0, count);
 		X.copy_(cpu_points);
@@ -140,10 +159,7 @@ inline bool project_points_to_alpha(const NeuralFieldForward& udf, const std::ve
 			auto [values, grad] = udf.forward_values_grad_gpu(X);
 			if (!values.defined() || !grad.defined())
 				return false;
-			torch::Tensor f = values;
-			if (f.dim() == 2 && f.size(1) == 1)
-				f = f.squeeze(1);
-			torch::Tensor residual = f - parameters.alpha;
+			torch::Tensor residual = values - parameters.alpha;
 			torch::Tensor next_active = active & (torch::abs(residual) > parameters.tolerance);
 			active.copy_(next_active);
 			// the early exit costs a host sync; on the last iteration the same skip is done on the device below
