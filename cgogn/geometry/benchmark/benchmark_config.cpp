@@ -270,6 +270,10 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	const ptree& sampling = root.get_child("sampling");
 	config.sampling.alpha = require_value<float>(sampling, "alpha");
 	config.sampling.knn_k = require_value<int>(sampling, "knn_k");
+	if (auto apply_filtering = sampling.get_optional<bool>("apply_filtering"))
+		config.sampling.apply_filtering = *apply_filtering;
+	if (auto recompute_normals = sampling.get_optional<bool>("recompute_normals_after_sampling"))
+		config.sampling.recompute_normals_after_sampling = *recompute_normals;
 	const ptree& bridson = sampling.get_child("bridson");
 	config.sampling.sample_radius = require_value<float>(bridson, "sample_radius");
 

@@ -8,6 +8,8 @@
   "sampling": {
     "alpha": 0.0050,
     "knn_k": 10,
+    "apply_filtering": false,
+    "recompute_normals_after_sampling": true,
     "bridson": {
       "sample_radius": 0.0020
     }

@@ -41,6 +41,7 @@
       "When input.geometry_type = mesh, benchmark loading uses the surface loader and accepts .obj, .ply, .off, .stl.",
       "Set batch.resume_from_existing = true to skip cases whose skeleton output already exists; if timing_directory is set, the timing json must also exist for the case to be treated as completed.",
       "All input modes use the 2d_plane Bridson sampler with fixed settings; sampling.bridson.sample_radius controls spacing.",
+      "sampling.apply_filtering (drop samples farther than alpha + 0.01 from the input) and sampling.recompute_normals_after_sampling are optional; when omitted they follow input.neural_model_type: mf -> no filtering, recompute normals (mf - |sdf| vanishes on the medial axis, not on the surface); otherwise filtering, keep normals.",
       "input.ma_flip_prune_alpha_factor scales the MF MAFlipPrune score threshold from alpha to alpha * factor while keeping the positive-SDF reject rule unchanged.",
       "When postprocess.residual_prune is true, residual sheet prune deletes all sheets with face_count <= 2 unless the isolated-edge guard keeps them."
     ]
@@ -58,6 +59,8 @@
   "sampling": {
     "alpha": 0.005,
     "knn_k": 10,
+    "apply_filtering": false,
+    "recompute_normals_after_sampling": false,
     "bridson": {
       "sample_radius": 0.0025
     }

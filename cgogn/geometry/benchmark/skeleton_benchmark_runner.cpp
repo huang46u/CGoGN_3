@@ -133,6 +133,10 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	options.ma_flip_prune_alpha_factor = config.input.ma_flip_prune_alpha_factor;
 	options.alpha = config.sampling.alpha;
 	options.knn_k = config.sampling.knn_k;
+	options.apply_filtering =
+		config.sampling.apply_filtering.value_or(default_apply_filtering(config.input.neural_model_type));
+	options.recompute_normals_after_sampling = config.sampling.recompute_normals_after_sampling.value_or(
+		default_recompute_normals_after_sampling(config.input.neural_model_type));
 	options.sample_radius = config.sampling.sample_radius;
 	options.sqem_update_lambda_line_plane = config.optimization.sqem_update_lambda_line_plane;
 	options.seed = config.initialization.seed;
@@ -202,6 +206,11 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	benchmark_config.put("input.ma_flip_prune", config.input.ma_flip_prune);
 	benchmark_config.put("input.ma_flip_prune_alpha_factor", config.input.ma_flip_prune_alpha_factor);
 	benchmark_config.put("postprocess.residual_prune", config.postprocess.residual_prune);
+	benchmark_config.put("sampling.apply_filtering",
+						 config.sampling.apply_filtering.value_or(default_apply_filtering(config.input.neural_model_type)));
+	benchmark_config.put("sampling.recompute_normals_after_sampling",
+						 config.sampling.recompute_normals_after_sampling.value_or(
+							 default_recompute_normals_after_sampling(config.input.neural_model_type)));
 	root.add_child("benchmark_config", benchmark_config);
 
 	boost::property_tree::ptree counts;

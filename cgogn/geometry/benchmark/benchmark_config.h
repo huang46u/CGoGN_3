@@ -3,6 +3,7 @@
 
 #include <cgogn/geometry/algos/udf/neural_model_type.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,9 @@ struct BenchmarkSamplingConfig
 	float alpha = 0.005f;
 	int knn_k = 10;
 	float sample_radius = 0.0025f;
+	// unset: default of the neural model type (default_apply_filtering / default_recompute_normals_after_sampling)
+	std::optional<bool> apply_filtering;
+	std::optional<bool> recompute_normals_after_sampling;
 };
 
 struct BenchmarkOptimizationConfig

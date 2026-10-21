@@ -243,6 +243,11 @@ public:
 				return ReconstructionStatus::model_load_failed;
 			}
 			p.neural_udf_model_path_ = model_path;
+			// sampling defaults of the model type, the Sampling panel can still change them
+			auto& options = p.reconstruction_->options();
+			options.apply_filtering = cgogn::geometry::default_apply_filtering(model_type);
+			options.recompute_normals_after_sampling =
+				cgogn::geometry::default_recompute_normals_after_sampling(model_type);
 			log_basic(p, "Loaded neural UDF model from: ", model_path, '\n');
 			return ReconstructionStatus::success;
 		}
@@ -812,6 +817,8 @@ protected:
 			ImGui::InputFloat("Alpha", &options.alpha, 0.001f, 0.1f, "%.4f");
 			ImGui::InputFloat("Sample Radius", &options.sample_radius, 0.001f, 0.01f, "%.4f");
 			ImGui::InputInt("KNN K", &options.knn_k, 1, 5);
+			ImGui::Checkbox("Filter samples by distance to input", &options.apply_filtering);
+			ImGui::Checkbox("Recompute normals after sampling", &options.recompute_normals_after_sampling);
 			if (ImGui::Button("Sample UDF"))
 			{
 				load_alpha_samples_to_mesh(p);
