@@ -124,6 +124,8 @@ public:
 		int batch_size = 1048576;
 		float tolerance = 1e-6f;
 		int udf_max_iterations = 3000;
+		// neural seed rays: end a ray batch once fewer than this many rays are still marching (0 = off)
+		int udf_min_active_rays = 100;
 		float sample_radius = 0.0025f;
 		float sqem_update_lambda_line_plane = 0.2f;
 		int seed = 42;
@@ -793,6 +795,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	ray_params.step_bound = Scalar(2.0);
 	ray_params.batch_size = std::max(1, options_.ray_sampler_batch_size);
 	ray_params.max_iterations = options_.udf_max_iterations;
+	ray_params.min_active_rays = options_.udf_min_active_rays;
 	ray_params.max_outer_iterations = 10;
 	ray_params.seed = options_.seed;
 	torch::Device sampling_device = torch::kCPU;

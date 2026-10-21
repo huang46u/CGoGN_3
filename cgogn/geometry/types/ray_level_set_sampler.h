@@ -42,6 +42,8 @@ public:
 		Scalar step_bound = Scalar(2.0);
 		int batch_size = 0;
 		int max_iterations = 0;
+		// GPU marching: end a batch once fewer rays than this are still marching (0 = march until max_iterations)
+		int min_active_rays = 0;
 		int max_outer_iterations = 500;
 		int seed = 42;
 	};
@@ -377,6 +379,10 @@ private:
 						break;
 					std::cout << "    Step " << step << ": " << active_count << " active\r" << std::flush;
 				}
+				// the last rays run nearly tangent to the level set and creep forward by tiny steps: they take most
+				// of the marching time but find few seeds, which the Poisson expansion reaches anyway
+				if (params_.min_active_rays > 0 && torch::sum(not_converged).item<int>() < params_.min_active_rays)
+					break;
 
 				torch::Tensor inside_mask;
 				if (has_sdf)
