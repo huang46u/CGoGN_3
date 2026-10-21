@@ -918,8 +918,8 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 		sample_vertices_.clear();
 		return Status::success;
 	}
-	// neural samples keep their projection normals (the same network gradient a recompute would give); for point
-	// cloud / surface input the normal is recomputed at the projected position from the input
+	// neural samples keep their projection normals (the network gradient); for point cloud / surface input the
+	// normal is recomputed at the projected position from the input
 	if constexpr (!std::is_same_v<RaySamplerTag, RaySamplerNeural>)
 		recompute_samples_normals_from_input();
 	build_sample_kdtree();
@@ -934,27 +934,13 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 		return Status::invalid_data;
 	if (!sample_kdtree_)
 		return Status::invalid_data;
+	// PCA for every input: neural samples already carry the network gradient, and for MF models that gradient
+	// is not orthogonal to the medial axis.
 	if (options_.recompute_normals_after_sampling)
-	{
-		if constexpr (std::is_same_v<RaySamplerTag, RaySamplerNeural>)
-		{
-			std::vector<Vec3> positions, normals;
-			foreach_cell(*data_.samples, [&](PVertex v) {
-				positions.push_back((*sample_position_)[index_of(*data_.samples, v)]);
-				return true;
-			});
-			if (!evaluate_udf_normals(neural_field(), positions, static_cast<size_t>(options_.batch_size),
-									  projection_workspace_, normals))
-				return Status::fitting_failed;
-			for (uint32 i = 0; i < normals.size(); ++i)
-				(*sample_normal_)[i] = normals[i];
-		}
-		else
-			parallel_foreach_cell(*data_.samples, [&](PVertex v) {
-				recompute_sample_normal_pca(v);
-				return true;
-			});
-	}
+		parallel_foreach_cell(*data_.samples, [&](PVertex v) {
+			recompute_sample_normal_pca(v);
+			return true;
+		});
 	return Status::success;
 }
 
