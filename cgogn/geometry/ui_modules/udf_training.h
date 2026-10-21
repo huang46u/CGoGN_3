@@ -6,6 +6,7 @@
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/core/utils/thread.h>
+#include <cgogn/geometry/algos/udf/neural_model_type.h>
 #include <cgogn/geometry/algos/udf/reconstruction.h>
 #include <cgogn/geometry/types/vector_traits.h>
 #include <cgogn/ui/portable-file-dialogs.h>
@@ -57,11 +58,6 @@ public:
 	using ReconstructionType = geometry::UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>;
 	using ReconstructionStatus = typename ReconstructionType::Status;
 
-	enum NeuralModelType : uint32
-	{
-		NEURAL_MODEL_UDF,
-		NEURAL_MODEL_MF
-	};
 	enum OutputVerbosity : uint32
 	{
 		OUTPUT_MUTE,
@@ -219,7 +215,8 @@ public:
 			params.reconstruction_->data().surface = selected_surface_;
 	}
 
-	ReconstructionStatus load_neural_udf_model(POINTS& points, const std::string& model_path, NeuralModelType model_type)
+	ReconstructionStatus load_neural_udf_model(POINTS& points, const std::string& model_path,
+											   cgogn::geometry::NeuralModelType model_type)
 	{
 		PointsParameters& p = points_parameters_[&points];
 		init_points_data(points);
@@ -238,9 +235,7 @@ public:
 				return ReconstructionStatus::model_load_failed;
 			}
 			log_basic(p, "Loading Neural UDF model from: ", model_path, '\n');
-			const auto type = model_type == NEURAL_MODEL_MF ? ReconstructionType::NeuralModelType::mf
-													: ReconstructionType::NeuralModelType::udf;
-			const ReconstructionStatus status = p.reconstruction_->load_neural_model(model_path, type);
+			const ReconstructionStatus status = p.reconstruction_->load_neural_model(model_path, model_type);
 			p.neural_udf_loaded_ = status == ReconstructionStatus::success;
 			if (!p.neural_udf_loaded_)
 			{
@@ -705,7 +700,7 @@ protected:
 			spheres_update_thread_.join();
 
 		if (running)
-			update_render_data(*active, RenderUpdateMode::rebuild_skeleton_and_update_all);
+			update_render_data(*active, RenderUpdateMode::all_current_data);
 		else
 		{
 			if (active->skeleton_invalidated_ && active->skeleton_)

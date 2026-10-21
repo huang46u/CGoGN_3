@@ -141,8 +141,7 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 
 		const auto model_status = udf.load_neural_udf_model(
 			*p, model_path,
-			neural_is_mf ? cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag>::NEURAL_MODEL_MF
-							 : cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag>::NEURAL_MODEL_UDF);
+			neural_is_mf ? cgogn::geometry::NeuralModelType::mf : cgogn::geometry::NeuralModelType::udf);
 		if (model_status !=
 			cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag>::ReconstructionStatus::success)
 			return 1;

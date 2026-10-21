@@ -23,6 +23,8 @@
 #ifndef CGOGN_GEOMETRY_ALGOS_UDF_ALPHA_SAMPLING_H_
 #define CGOGN_GEOMETRY_ALGOS_UDF_ALPHA_SAMPLING_H_
 
+#include <cgogn/geometry/algos/udf/alpha_projection.h>
+#include <cgogn/geometry/algos/udf/normal_utils.h>
 #include <cgogn/geometry/types/spatial_grid.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
@@ -30,6 +32,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <random>
@@ -49,6 +52,9 @@ struct AlphaSamplingParameters
 	size_t ray_sampler_batch_size = 1;
 	Vec3 bbox_min = Vec3(0, 0, 0);
 	Vec3 bbox_max = Vec3(1, 1, 1);
+	// used only for the residual diagnostic printed at the end of sample_alpha_level_set
+	Scalar alpha = Scalar(0);
+	Scalar tolerance = Scalar(0);
 };
 
 struct AlphaSamplingResult
@@ -70,11 +76,7 @@ inline constexpr size_t alpha_sampling_max_samples = 10000000;
 
 inline void build_stable_tangent_basis(const Vec3& normal_in, Vec3& tangent_u, Vec3& tangent_v)
 {
-	Vec3 n = normal_in;
-	if (n.squaredNorm() < Scalar(1e-12))
-		n = Vec3(0, 0, 1);
-	else
-		n.normalize();
+	Vec3 n = unit_normal_or_z(normal_in);
 	Vec3 ref = (std::abs(n.z()) < Scalar(0.9)) ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
 	tangent_u = n.cross(ref);
 	if (tangent_u.squaredNorm() < Scalar(1e-12))
@@ -150,26 +152,19 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 	std::vector<uint32> active_slot_of_sample;
 	std::vector<uint32> selected_parents;
 	std::vector<Vec3> raw_candidates;
-	std::vector<Vec3> projected_candidates;
-	std::vector<Vec3> projected_normals;
-	std::vector<uint8_t> projected_keep_mask;
+	AlphaProjectionResult projection;
+	std::vector<Scalar> residual_samples;
+	std::vector<Scalar> accepted_residuals;
 	result.positions.reserve(initial_reserve);
 	result.normals.reserve(initial_reserve);
 	active_indices.reserve(initial_reserve);
 	active_slot_of_sample.reserve(initial_reserve);
 	raw_candidates.reserve(parent_batch_size * detail::alpha_sampling_candidates_per_parent);
-	projected_candidates.reserve(parent_batch_size * detail::alpha_sampling_candidates_per_parent);
-	projected_normals.reserve(parent_batch_size * detail::alpha_sampling_candidates_per_parent);
 
 	auto add_sample = [&](const Vec3& position, const Vec3& normal) {
 		const uint32 sample_index = static_cast<uint32>(result.positions.size());
-		Vec3 normalized_normal = normal;
-		if (normalized_normal.squaredNorm() < Scalar(1e-12))
-			normalized_normal = Vec3(0, 0, 1);
-		else
-			normalized_normal.normalize();
 		result.positions.push_back(position);
-		result.normals.push_back(normalized_normal);
+		result.normals.push_back(unit_normal_or_z(normal));
 		active_slot_of_sample.push_back(static_cast<uint32>(active_indices.size()));
 		active_indices.push_back(sample_index);
 		result.spatial_grid->insert(position, sample_index);
@@ -190,9 +185,8 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 
 	if (result.positions.size() < max_samples)
 	{
+		// empty grid: no samples exist yet at this point, so nothing is inserted
 		SpatialGrid working_grid(grid_cell_size);
-		for (uint32 sample_index = 0; sample_index < result.positions.size(); ++sample_index)
-			working_grid.insert(result.positions[sample_index], sample_index);
 
 		bool used_sdf_filter = false;
 		std::vector<Vec3> seed_points = ray_sampler.sample_alpha_level_set_rays_fixed_iterations(
@@ -245,17 +239,20 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 				raw_candidates.push_back(detail::sample_tangent_annulus_candidate(
 					result.positions[parent_index], result.normals[parent_index], parameters.sample_radius, uniform, generator));
 
-		if (!project_points(raw_candidates, projected_candidates, projected_normals, projected_keep_mask))
+		if (!project_points(raw_candidates, projection))
 		{
 			result.success = false;
 			break;
 		}
-		if (projected_candidates.size() != raw_candidates.size() || projected_normals.size() != raw_candidates.size() ||
-			projected_keep_mask.size() != raw_candidates.size())
+		if (projection.projected_points.size() != raw_candidates.size() ||
+			projection.normals.size() != raw_candidates.size() || projection.keep_mask.size() != raw_candidates.size())
 		{
 			result.success = false;
 			break;
 		}
+		for (Scalar residual : projection.residuals)
+			if (std::isfinite(residual))
+				residual_samples.push_back(residual);
 
 		for (size_t parent_batch_index = 0; parent_batch_index < selected_parents.size(); ++parent_batch_index)
 		{
@@ -270,10 +267,10 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 				if (result.positions.size() >= max_samples)
 					break;
 				const size_t candidate_index = candidate_begin + candidate_offset;
-				const Vec3& child_position = projected_candidates[candidate_index];
-				const Vec3& child_normal = projected_normals[candidate_index];
+				const Vec3& child_position = projection.projected_points[candidate_index];
+				const Vec3& child_normal = projection.normals[candidate_index];
 				const Vec3& raw_candidate = raw_candidates[candidate_index];
-				bool accept = projected_keep_mask[candidate_index] != 0;
+				bool accept = projection.keep_mask[candidate_index] != 0;
 				if (accept && (child_position - raw_candidate).norm() > parameters.sample_radius)
 					accept = false;
 				if (accept && !result.spatial_grid->is_valid_sample(child_position, parameters.sample_radius,
@@ -281,6 +278,8 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 					accept = false;
 				if (!accept)
 					continue;
+				if (candidate_index < projection.residuals.size() && std::isfinite(projection.residuals[candidate_index]))
+					accepted_residuals.push_back(projection.residuals[candidate_index]);
 				add_sample(child_position, child_normal);
 				parent_found_new_sample = true;
 				break;
@@ -289,6 +288,51 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 				remove_active_sample(parent_index);
 		}
 	}
+
+	// residual diagnostics, normalized by alpha; the tolerance is the CPU projection's acceptance threshold on
+	// |udf - alpha|. "candidates" covers every projected point, "accepted" only those that became samples.
+	auto print_residual_stats = [&](const char* label, std::vector<Scalar>& residuals) {
+		if (residuals.empty())
+			return;
+		const Scalar scale = parameters.alpha > Scalar(0) ? parameters.alpha : Scalar(1);
+		const size_t n = residuals.size();
+		size_t above_tol_count = 0;
+		size_t above_alpha_count = 0;
+		double sum = 0.0;
+		for (Scalar& r : residuals)
+		{
+			r /= scale;
+			sum += static_cast<double>(r);
+			if (r > parameters.tolerance / scale)
+				++above_tol_count;
+			if (r > Scalar(1))
+				++above_alpha_count;
+		}
+		// nth_element with ascending ranks: each call only reorders the suffix left by the previous rank
+		auto rank_value = [&](size_t lo, size_t k) {
+			std::nth_element(residuals.begin() + static_cast<std::ptrdiff_t>(lo),
+							 residuals.begin() + static_cast<std::ptrdiff_t>(k), residuals.end());
+			return residuals[k];
+		};
+		const size_t k50 = static_cast<size_t>(0.50 * static_cast<double>(n - 1));
+		const size_t k90 = static_cast<size_t>(0.90 * static_cast<double>(n - 1));
+		const size_t k99 = static_cast<size_t>(0.99 * static_cast<double>(n - 1));
+		const Scalar p50 = rank_value(0, k50);
+		const Scalar p90 = rank_value(k50, k90);
+		const Scalar p99 = rank_value(k90, k99);
+		const Scalar max_value = *std::max_element(residuals.begin(), residuals.end());
+		const std::streamsize old_precision = std::cout.precision(6);
+		std::cout << "[alpha projection] " << label << " residual |udf-alpha|/alpha: n=" << n
+				  << " mean=" << sum / static_cast<double>(n) << " p50=" << p50 << " p90=" << p90 << " p99=" << p99
+				  << " max=" << max_value
+				  << " above_tol=" << 100.0 * static_cast<double>(above_tol_count) / static_cast<double>(n)
+				  << "% (tol=" << parameters.tolerance / scale << ")"
+				  << " above_alpha=" << 100.0 * static_cast<double>(above_alpha_count) / static_cast<double>(n) << "%"
+				  << std::endl;
+		std::cout.precision(old_precision);
+	};
+	print_residual_stats("candidates", residual_samples);
+	print_residual_stats("accepted", accepted_residuals);
 
 	return result;
 }

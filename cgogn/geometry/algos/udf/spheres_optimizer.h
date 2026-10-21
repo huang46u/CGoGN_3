@@ -32,11 +32,9 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -49,6 +47,23 @@ namespace cgogn
 {
 namespace geometry
 {
+
+// sorted, duplicate-free vector used as a set: same element order and membership as std::set
+template <typename T>
+void sorted_vector_insert(std::vector<T>& v, const T& item)
+{
+	auto it = std::lower_bound(v.begin(), v.end(), item);
+	if (it == v.end() || item < *it)
+		v.insert(it, item);
+}
+
+template <typename T>
+void sorted_vector_erase(std::vector<T>& v, const T& item)
+{
+	auto it = std::lower_bound(v.begin(), v.end(), item);
+	if (it != v.end() && !(item < *it))
+		v.erase(it);
+}
 
 template <typename POINTS>
 class SpheresOptimizer
@@ -77,13 +92,12 @@ public:
 		std::shared_ptr<Attribute<std::vector<Vertex>>> sphere_cluster;
 		std::shared_ptr<Attribute<Scalar>> sphere_cluster_area;
 		std::shared_ptr<Attribute<Vec4>> sphere_cluster_color;
-		std::shared_ptr<Attribute<std::set<Vertex>>> sphere_neighbors;
+		std::shared_ptr<Attribute<std::vector<Vertex>>> sphere_neighbors;
 		std::shared_ptr<Attribute<Scalar>> sphere_error;
 		std::shared_ptr<Attribute<Scalar>> sphere_error_not_normalized;
 		const acc::KDTree<3, uint32>* sample_kdtree = nullptr;
 		const std::vector<Vertex>* sample_kdtree_vertices = nullptr;
 		Scalar sqem_update_lambda_line_plane = Scalar(0.20);
-		uint32* sphere_count = nullptr;
 	};
 
 	struct Metrics
@@ -235,8 +249,6 @@ public:
 			data_.sample_sphere->fill(Vertex());
 		metrics_ = Metrics{};
 		metrics_.sphere_count = sphere_count;
-		if (data_.sphere_count)
-			*data_.sphere_count = sphere_count;
 		compute_clusters_local();
 		return true;
 	}
@@ -297,10 +309,16 @@ public:
 				const Vertex w_sphere = (*data_.sample_sphere)[index_of(*data_.samples_mesh, w)];
 				if (v_sphere.is_valid() && w_sphere.is_valid() && v_sphere != w_sphere)
 				{
-					(*data_.sphere_neighbors)[index_of(*data_.spheres, v_sphere)].insert(w_sphere);
-					(*data_.sphere_neighbors)[index_of(*data_.spheres, w_sphere)].insert(v_sphere);
+					(*data_.sphere_neighbors)[index_of(*data_.spheres, v_sphere)].push_back(w_sphere);
+					(*data_.sphere_neighbors)[index_of(*data_.spheres, w_sphere)].push_back(v_sphere);
 				}
 			}
+			return true;
+		});
+		parallel_foreach_cell(*data_.spheres, [&](Vertex v) {
+			std::vector<Vertex>& neighbors = (*data_.sphere_neighbors)[index_of(*data_.spheres, v)];
+			std::sort(neighbors.begin(), neighbors.end());
+			neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
 			return true;
 		});
 	}
@@ -314,7 +332,6 @@ public:
 			data_.sample_sphere->fill(Vertex());
 			return;
 		}
-		std::atomic<uint64> invalid_sphere_candidates(0), nonfinite_distance_candidates(0), unassigned_samples(0);
 		parallel_foreach_cell(*data_.spheres, [&](Vertex v) {
 			const uint32 idx = index_of(*data_.spheres, v);
 			(*data_.sphere_cluster)[idx].clear();
@@ -333,7 +350,6 @@ public:
 				const uint32 idx = index_of(*data_.spheres, candidate);
 				if (!is_valid_sphere_for_clustering(idx))
 				{
-					++invalid_sphere_candidates;
 					return;
 				}
 				const Vec3& center = (*data_.sphere_position)[idx];
@@ -342,7 +358,6 @@ public:
 					data_.sqem_update_lambda_line_plane * (*data_.sample_line_quadric)[v_index].eval(center);
 				if (!std::isfinite(static_cast<double>(distance)))
 				{
-					++nonfinite_distance_candidates;
 					return;
 				}
 				if (distance < min_distance)
@@ -354,7 +369,7 @@ public:
 			};
 			if (is_valid_sphere_for_clustering(owner_index))
 			{
-				const std::set<Vertex>& neighbors = (*data_.sphere_neighbors)[owner_index];
+				const std::vector<Vertex>& neighbors = (*data_.sphere_neighbors)[owner_index];
 				bool owner_evaluated = false;
 				for (Vertex candidate : neighbors)
 				{
@@ -375,7 +390,6 @@ public:
 			(*data_.sample_sphere)[v_index] = closest_sphere;
 			if (!closest_sphere.is_valid() || closest_index == INVALID_INDEX)
 			{
-				++unassigned_samples;
 				return true;
 			}
 			std::lock_guard<std::mutex> lock(cluster_mutexes_[closest_index % cluster_mutexes_.size()]);
@@ -383,9 +397,6 @@ public:
 			(*data_.sphere_cluster_area)[closest_index] += area;
 			return true;
 		});
-		(void)invalid_sphere_candidates;
-		(void)nonfinite_distance_candidates;
-		(void)unassigned_samples;
 	}
 
 	void compute_spheres_error()
@@ -413,7 +424,7 @@ public:
 			return true;
 		});
 		metrics_.minimum_error = std::numeric_limits<Scalar>::max();
-		metrics_.maximum_error = std::numeric_limits<Scalar>::min();
+		metrics_.maximum_error = Scalar(0);
 		metrics_.total_error = Scalar(0);
 		metrics_.total_error_not_normalized = Scalar(0);
 		foreach_cell(*data_.spheres, [&](Vertex v) {
@@ -442,8 +453,8 @@ public:
 		if (sphere_index == INVALID_INDEX)
 			return;
 		const std::vector<Vertex> removed_cluster = (*data_.sphere_cluster)[sphere_index];
-		const std::set<Vertex> removed_neighbors =
-			data_.sphere_neighbors ? (*data_.sphere_neighbors)[sphere_index] : std::set<Vertex>();
+		const std::vector<Vertex> removed_neighbors =
+			data_.sphere_neighbors ? (*data_.sphere_neighbors)[sphere_index] : std::vector<Vertex>();
 		for (Vertex sample : removed_cluster)
 		{
 			const uint32 idx = index_of(*data_.samples_mesh, sample);
@@ -456,7 +467,7 @@ public:
 			{
 				const uint32 idx = neighbor.is_valid() ? index_of(*data_.spheres, neighbor) : INVALID_INDEX;
 				if (idx != INVALID_INDEX)
-					(*data_.sphere_neighbors)[idx].erase(sphere);
+					sorted_vector_erase((*data_.sphere_neighbors)[idx], sphere);
 			}
 			(*data_.sphere_neighbors)[sphere_index].clear();
 		}
@@ -515,8 +526,6 @@ private:
 	void sync_sphere_count()
 	{
 		metrics_.sphere_count = data_.spheres ? nb_cells<Vertex>(*data_.spheres) : 0;
-		if (data_.sphere_count)
-			*data_.sphere_count = metrics_.sphere_count;
 	}
 
 	void prune_empty_clusters()
@@ -630,7 +639,7 @@ private:
 	}
 
 	void redistribute_removed_sphere_cluster(const std::vector<Vertex>& removed_cluster,
-										 const std::set<Vertex>& removed_neighbors)
+										 const std::vector<Vertex>& removed_neighbors)
 	{
 		if (removed_cluster.empty() || metrics_.sphere_count == 0)
 			return;

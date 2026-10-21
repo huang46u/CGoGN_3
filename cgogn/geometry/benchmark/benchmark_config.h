@@ -1,6 +1,8 @@
 ﻿#ifndef CGOGN_GEOMETRY_BENCHMARK_CONFIG_H_
 #define CGOGN_GEOMETRY_BENCHMARK_CONFIG_H_
 
+#include <cgogn/geometry/algos/udf/neural_model_type.h>
+
 #include <string>
 #include <vector>
 
@@ -12,6 +14,8 @@ namespace geometry
 
 namespace benchmark
 {
+
+using cgogn::geometry::NeuralModelType;
 
 enum class InputMode
 {
@@ -26,12 +30,6 @@ enum class InputGeometryType
 	Mesh
 };
 
-enum class NeuralModelType
-{
-	UDF,
-	MF
-};
-
 struct BenchmarkInputConfig
 {
 	InputMode mode = InputMode::PointCloud;
@@ -39,7 +37,7 @@ struct BenchmarkInputConfig
 	std::string input_path;
 	std::string surface_path;
 	std::string neural_udf_model_path;
-	NeuralModelType neural_model_type = NeuralModelType::UDF;
+	NeuralModelType neural_model_type = NeuralModelType::udf;
 	bool ma_flip_prune = true;
 	float ma_flip_prune_alpha_factor = 1.0f;
 };

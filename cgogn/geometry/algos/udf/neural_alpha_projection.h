@@ -24,12 +24,14 @@
 #define CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_ALPHA_PROJECTION_H_
 
 #include <cgogn/geometry/algos/udf/alpha_projection.h>
+#include <cgogn/geometry/algos/udf/normal_utils.h>
 #include <cgogn/geometry/types/neural_field_forward.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iostream>
 #include <vector>
 
 namespace cgogn
@@ -162,8 +164,9 @@ inline bool project_points_to_alpha(const NeuralFieldForward& udf, const std::ve
 		torch::Tensor grad_cpu = workspace.grad_cpu_.narrow(0, 0, count);
 		projected_cpu.copy_(X);
 		grad_cpu.copy_(grad);
-		auto [values_sdf, sdf] = udf.forward_values_sdf_gpu(X);
-		(void)values_sdf;
+		torch::Tensor sdf;
+		if (udf.is_mf_model()) // UDF models have no sdf output; skip the extra forward
+			sdf = udf.forward_values_sdf_gpu(X).second;
 		torch::Tensor sdf_cpu;
 		if (sdf.defined())
 		{
@@ -175,6 +178,12 @@ inline bool project_points_to_alpha(const NeuralFieldForward& udf, const std::ve
 
 		auto projected_acc = projected_cpu.accessor<float, 2>();
 		auto grad_acc = grad_cpu.accessor<float, 2>();
+		// |udf(x) - alpha| at the projected positions, same order as projected_points
+		result.residuals.resize(nb_points);
+		torch::Tensor values_cpu = values.detach().to(torch::kCPU, torch::kFloat32).contiguous();
+		if (values_cpu.dim() != 1 || values_cpu.size(0) != count)
+			return false;
+		auto values_acc = values_cpu.accessor<float, 1>();
 		if (sdf_cpu.defined() && sdf_cpu.dim() == 1 && sdf_cpu.size(0) == count)
 		{
 			auto sdf_acc = sdf_cpu.accessor<float, 1>();
@@ -185,14 +194,11 @@ inline bool project_points_to_alpha(const NeuralFieldForward& udf, const std::ve
 				result.projected_points[i] =
 					Vec3(projected_acc[static_cast<long>(i)][0], projected_acc[static_cast<long>(i)][1],
 						 static_cast<Scalar>(projected_acc[static_cast<long>(i)][2]));
+				result.residuals[i] = std::abs(static_cast<Scalar>(values_acc[static_cast<long>(i)]) - parameters.alpha);
 				Vec3 normal(static_cast<Scalar>(grad_acc[static_cast<long>(i)][0]),
 						 static_cast<Scalar>(grad_acc[static_cast<long>(i)][1]),
 						 static_cast<Scalar>(grad_acc[static_cast<long>(i)][2]));
-				if (normal.squaredNorm() < Scalar(1e-12))
-					normal = Vec3(0, 0, 1);
-				else
-					normal.normalize();
-				result.normals[i] = normal;
+				result.normals[i] = unit_normal_or_z(normal);
 			}
 		}
 		else
@@ -202,20 +208,18 @@ inline bool project_points_to_alpha(const NeuralFieldForward& udf, const std::ve
 				result.projected_points[i] =
 					Vec3(projected_acc[static_cast<long>(i)][0], projected_acc[static_cast<long>(i)][1],
 						 static_cast<Scalar>(projected_acc[static_cast<long>(i)][2]));
+				result.residuals[i] = std::abs(static_cast<Scalar>(values_acc[static_cast<long>(i)]) - parameters.alpha);
 				Vec3 normal(static_cast<Scalar>(grad_acc[static_cast<long>(i)][0]),
 						 static_cast<Scalar>(grad_acc[static_cast<long>(i)][1]),
 						 static_cast<Scalar>(grad_acc[static_cast<long>(i)][2]));
-				if (normal.squaredNorm() < Scalar(1e-12))
-					normal = Vec3(0, 0, 1);
-				else
-					normal.normalize();
-				result.normals[i] = normal;
+				result.normals[i] = unit_normal_or_z(normal);
 			}
 		}
 		return true;
 	}
-	catch (const c10::Error&)
+	catch (const c10::Error& e)
 	{
+		std::cerr << "Neural alpha projection failed: " << e.what() << std::endl;
 		return false;
 	}
 }

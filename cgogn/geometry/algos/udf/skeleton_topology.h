@@ -168,7 +168,7 @@ private:
 		std::shared_ptr<SphereAttribute<Vec3>>& spheres_position_;
 		std::shared_ptr<SphereAttribute<Scalar>>& spheres_radius_;
 		std::shared_ptr<SphereAttribute<std::vector<SphereVertex>>>& spheres_cluster_;
-		std::shared_ptr<SphereAttribute<std::set<SphereVertex>>>& spheres_neighbor_clusters_;
+		std::shared_ptr<SphereAttribute<std::vector<SphereVertex>>>& spheres_neighbor_clusters_;
 		std::shared_ptr<SphereAttribute<Scalar>>& spheres_error_;
 		std::shared_ptr<SphereAttribute<SkeletonVertex>>& spheres_skeleton_vertex_;
 		std::shared_ptr<SkeletonAttribute<Vec3>>& skeleton_position_;
@@ -294,7 +294,7 @@ private:
 		foreach_cell(*p.spheres_, [&](SphereVertex pv) -> bool {
 			uint32 pv_index = index_of(*p.spheres_, pv);
 			SkeletonVertex nmv1 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[pv_index] : SkeletonVertex();
-			const std::set<SphereVertex>& neighbors = (*p.spheres_neighbor_clusters_)[pv_index];
+			const std::vector<SphereVertex>& neighbors = (*p.spheres_neighbor_clusters_)[pv_index];
 			for (SphereVertex neighbor : neighbors)
 			{
 				uint32 n_index = index_of(*p.spheres_, neighbor);
@@ -312,17 +312,17 @@ private:
 		foreach_cell(*p.spheres_, [&](SphereVertex pv) -> bool {
 			uint32 idx1 = index_of(*p.spheres_, pv);
 			SkeletonVertex nmv1 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[idx1] : SkeletonVertex();
-			const std::set<SphereVertex>& n_pv = (*p.spheres_neighbor_clusters_)[idx1];
+			const std::vector<SphereVertex>& n_pv = (*p.spheres_neighbor_clusters_)[idx1];
 			for (const SphereVertex& ne1 : n_pv)
 			{
 				uint32 idx2 = index_of(*p.spheres_, ne1);
 				if (idx1 >= idx2)
 					continue;
 				SkeletonVertex nmv2 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[idx2] : SkeletonVertex();
-				const std::set<SphereVertex>& ne_ne1 = (*p.spheres_neighbor_clusters_)[idx2];
+				const std::vector<SphereVertex>& ne_ne1 = (*p.spheres_neighbor_clusters_)[idx2];
 				for (const SphereVertex& ne2 : ne_ne1)
 				{
-					if (n_pv.find(ne2) == n_pv.end())
+					if (!std::binary_search(n_pv.begin(), n_pv.end(), ne2))
 						continue;
 					uint32 idx3 = index_of(*p.spheres_, ne2);
 					if (idx2 >= idx3)
@@ -330,24 +330,29 @@ private:
 
 					SkeletonVertex nmv3 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[idx3] : SkeletonVertex();
 
+					const auto e12 = edge_indices.find({index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv2)});
+					const auto e23 = edge_indices.find({index_of(*p.skeleton_, nmv2), index_of(*p.skeleton_, nmv3)});
+					const auto e13 = edge_indices.find({index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv3)});
+					if (e12 == edge_indices.end() || e23 == edge_indices.end() || e13 == edge_indices.end())
+						continue;
 					std::vector<SkeletonEdge> edges;
 					edges.reserve(3);
-					edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv2)}]);
-					edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv2), index_of(*p.skeleton_, nmv3)}]);
-					edges.push_back(edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv3)}]);
+					edges.push_back(e12->second);
+					edges.push_back(e23->second);
+					edges.push_back(e13->second);
 					SkeletonFace new_face = add_face(*p.skeleton_, edges);
 
 					skeleton_faces_map[get_face_key(idx1, idx2, idx3)] = new_face;
 
-					const std::set<SphereVertex>& ne_ne2 = (*p.spheres_neighbor_clusters_)[idx3];
+					const std::vector<SphereVertex>& ne_ne2 = (*p.spheres_neighbor_clusters_)[idx3];
 
 					for (const SphereVertex& ne3 : ne_ne2)
 					{
 						uint32 idx4 = index_of(*p.spheres_, ne3);
 						if (idx3 >= idx4)
 							continue;
-						bool connected_v1 = (n_pv.find(ne3) != n_pv.end());
-						bool connected_v2 = (ne_ne1.find(ne3) != ne_ne1.end());
+						bool connected_v1 = std::binary_search(n_pv.begin(), n_pv.end(), ne3);
+						bool connected_v2 = std::binary_search(ne_ne1.begin(), ne_ne1.end(), ne3);
 						if (connected_v1 && connected_v2)
 						{
 							raw_tets.push_back({idx1, idx2, idx3, idx4});
@@ -650,7 +655,7 @@ private:
 			return;
 		}
 
-		SkeletonFaceDeletionStats deletion_stats;
+		RemovalStats deletion_stats;
 		if (!delete_skeleton_face_id_set(p, face_ids_to_delete, deletion_stats))
 			return;
 
@@ -777,11 +782,19 @@ private:
 			*out_removed_edges = removed_edges;
 	}
 
-	struct SkeletonFaceDeletionStats
+	struct RemovalStats
 	{
 		uint32 removed_faces = 0;
 		uint32 removed_edges = 0;
 		uint32 removed_tets = 0;
+
+		RemovalStats& operator+=(const RemovalStats& o)
+		{
+			removed_faces += o.removed_faces;
+			removed_edges += o.removed_edges;
+			removed_tets += o.removed_tets;
+			return *this;
+		}
 	};
 
 	struct SkeletonFaceDeletionOptions
@@ -791,10 +804,10 @@ private:
 	};
 
 	bool delete_skeleton_face_id_set(TopologyParameters& p, const std::unordered_set<uint32>& face_ids_to_delete,
-									 SkeletonFaceDeletionStats& out_stats,
+									 RemovalStats& out_stats,
 									 const SkeletonFaceDeletionOptions& options = {})
 	{
-		out_stats = SkeletonFaceDeletionStats{};
+		out_stats = RemovalStats{};
 		if (!p.skeleton_ || !p.incident_tets_ || face_ids_to_delete.empty())
 			return false;
 		const std::unordered_set<uint32> preexisting_orphan_edge_ids =
@@ -1205,18 +1218,11 @@ private:
 		NonSimpleTet
 	};
 
-	struct EdgeTetModeRunStats
-	{
-		uint32 removed_faces = 0;
-		uint32 removed_edges = 0;
-		uint32 removed_tets = 0;
-	};
-
 	template <typename ScoreEvaluator>
-	EdgeTetModeRunStats run_edge_score_tet_mode_topology_fix(
+	RemovalStats run_edge_score_tet_mode_topology_fix(
 		TopologyParameters& p, EdgeTetDeleteMode mode, TopologyFixScoreCache& score_cache, ScoreEvaluator& evaluator)
 	{
-		EdgeTetModeRunStats stats;
+		RemovalStats stats;
 		if (!p.skeleton_ || !p.incident_tets_)
 			return stats;
 
@@ -1520,7 +1526,6 @@ private:
 		struct StepCandidate
 		{
 			std::size_t tet_id = 0;
-			SkeletonEdge edge;
 			uint32 edge_id = INVALID_INDEX;
 			Scalar edge_score = Scalar(0);
 			SkeletonFace first_face;
@@ -1581,7 +1586,6 @@ private:
 				return false;
 
 			out_candidate.tet_id = tet_id;
-			out_candidate.edge = best_edge_local;
 			out_candidate.edge_id = best_edge_local_id;
 			out_candidate.edge_score = best_edge_local_score;
 			out_candidate.first_face = first_face_local;
@@ -1802,7 +1806,7 @@ private:
 
 		std::unordered_map<uint32, std::unordered_set<uint32>> adjacency;
 		adjacency.reserve(nb_cells<SkeletonVertex>(*p.skeleton_));
-		std::unordered_map<uint64, uint32> edge_pair_to_id;
+		std::unordered_set<uint64> edge_pair_to_id;
 		edge_pair_to_id.reserve(nb_cells<SkeletonEdge>(*p.skeleton_) * 2 + 1);
 
 		foreach_cell(*p.skeleton_, [&](SkeletonEdge e) -> bool {
@@ -1818,7 +1822,7 @@ private:
 				return true;
 			adjacency[a].insert(b);
 			adjacency[b].insert(a);
-			edge_pair_to_id[make_edge_key(a, b)] = ide;
+			edge_pair_to_id.insert(make_edge_key(a, b));
 			return true;
 		});
 
@@ -1923,17 +1927,10 @@ private:
 		return result;
 	}
 
-	struct BoundaryTetPrepassStats
-	{
-		uint32 removed_faces = 0;
-		uint32 removed_tets = 0;
-		uint32 removed_edges = 0;
-	};
-
-	BoundaryTetPrepassStats run_boundary_tet_face_deletion(
+	RemovalStats run_boundary_tet_face_deletion(
 		TopologyParameters& p, TopologyFixScoreCache* score_cache = nullptr)
 	{
-		BoundaryTetPrepassStats stats;
+		RemovalStats stats;
 
 		struct BoundaryTetCandidate
 		{
@@ -2376,7 +2373,7 @@ private:
 			}
 		}
 
-		SkeletonFaceDeletionStats deletion_stats;
+		RemovalStats deletion_stats;
 		SkeletonFaceDeletionOptions deletion_options;
 		deletion_options.remove_incident_orphan_edges_immediately = false;
 		deletion_options.remove_global_orphan_elements_after_batch = false;
@@ -2399,13 +2396,13 @@ private:
 				const bool is_cycle_edge = cycle_edge_keys.find(edge_key) != cycle_edge_keys.end();
 				if (is_cycle_edge)
 				{
-					(*p.spheres_neighbor_clusters_)[sphere_ids[i]].insert(seed.spheres[j]);
-					(*p.spheres_neighbor_clusters_)[sphere_ids[j]].insert(seed.spheres[i]);
+					sorted_vector_insert((*p.spheres_neighbor_clusters_)[sphere_ids[i]], seed.spheres[j]);
+					sorted_vector_insert((*p.spheres_neighbor_clusters_)[sphere_ids[j]], seed.spheres[i]);
 				}
 				else
 				{
-					(*p.spheres_neighbor_clusters_)[sphere_ids[i]].erase(seed.spheres[j]);
-					(*p.spheres_neighbor_clusters_)[sphere_ids[j]].erase(seed.spheres[i]);
+					sorted_vector_erase((*p.spheres_neighbor_clusters_)[sphere_ids[i]], seed.spheres[j]);
+					sorted_vector_erase((*p.spheres_neighbor_clusters_)[sphere_ids[j]], seed.spheres[i]);
 				}
 			}
 		}
@@ -2431,8 +2428,8 @@ private:
 			if (!find_skeleton_edge_between(p, vertices[a], vertices[b], cycle_edges[i]))
 				cycle_edges[i] = add_edge(*p.skeleton_, vertices[a], vertices[b]);
 			spoke_edges[i] = add_edge(*p.skeleton_, center_vertex, vertices[a]);
-			(*p.spheres_neighbor_clusters_)[center_sphere_id].insert(seed.spheres[a]);
-			(*p.spheres_neighbor_clusters_)[sphere_ids[a]].insert(center_sphere);
+			sorted_vector_insert((*p.spheres_neighbor_clusters_)[center_sphere_id], seed.spheres[a]);
+			sorted_vector_insert((*p.spheres_neighbor_clusters_)[sphere_ids[a]], center_sphere);
 		}
 
 		for (uint32 i = 0; i < 5; ++i)
@@ -2517,12 +2514,12 @@ private:
 		while (!p.skeleton_tets_.empty())
 		{
 			const uint32 round_start_tets = static_cast<uint32>(p.skeleton_tets_.size());
-			const BoundaryTetPrepassStats boundary_stats = run_boundary_tet_face_deletion(p, &score_cache);
-			EdgeTetModeRunStats simple_stats;
+			const RemovalStats boundary_stats = run_boundary_tet_face_deletion(p, &score_cache);
+			RemovalStats simple_stats;
 			if (!p.skeleton_tets_.empty())
 				simple_stats = run_edge_score_tet_mode_topology_fix(
 					p, EdgeTetDeleteMode::SimpleTet, score_cache, evaluator);
-			EdgeTetModeRunStats nonsimple_stats;
+			RemovalStats nonsimple_stats;
 			if (!p.skeleton_tets_.empty())
 				nonsimple_stats = run_edge_score_tet_mode_topology_fix(
 					p, EdgeTetDeleteMode::NonSimpleTet, score_cache, evaluator);
@@ -2532,8 +2529,11 @@ private:
 			metrics_.boundary_removed_tets += boundary_stats.removed_tets;
 			metrics_.simple_removed_tets += simple_stats.removed_tets;
 			metrics_.nonsimple_removed_tets += nonsimple_stats.removed_tets;
-			metrics_.removed_faces += boundary_stats.removed_faces + simple_stats.removed_faces + nonsimple_stats.removed_faces;
-			metrics_.removed_edges += boundary_stats.removed_edges + simple_stats.removed_edges + nonsimple_stats.removed_edges;
+			RemovalStats round_stats = boundary_stats;
+			round_stats += simple_stats;
+			round_stats += nonsimple_stats;
+			metrics_.removed_faces += round_stats.removed_faces;
+			metrics_.removed_edges += round_stats.removed_edges;
 			metrics_.removed_tets += round_removed_tets;
 			if (round_removed_tets == 0)
 				break;

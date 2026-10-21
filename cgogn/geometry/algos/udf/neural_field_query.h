@@ -3,9 +3,9 @@
 
 #include <cgogn/geometry/types/neural_field_forward.h>
 #include <cgogn/geometry/algos/udf/neural_alpha_projection.h>
+#include <cgogn/geometry/algos/udf/normal_utils.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -58,17 +58,6 @@ inline bool evaluate_udf_values(const NeuralFieldForward& field, const std::vect
 	return true;
 }
 
-inline bool evaluate_udf_value_and_gradient(const NeuralFieldForward& field, const Vec3& query_point, Scalar& value,
-												Vec3& gradient)
-{
-	if (!field.is_loaded())
-		return false;
-	const auto result = field.forward_point_with_grad(query_point);
-	value = result.first;
-	gradient = result.second;
-	return std::isfinite(value) && gradient.allFinite();
-}
-
 inline bool evaluate_udf_normals(const NeuralFieldForward& field, const std::vector<Vec3>& points, size_t batch_size,
 								NeuralProjectionWorkspace& workspace, std::vector<Vec3>& normals)
 {
@@ -111,11 +100,7 @@ inline bool evaluate_udf_normals(const NeuralFieldForward& field, const std::vec
 			Vec3 normal(static_cast<Scalar>(gradients_acc[static_cast<long>(i)][0]),
 						static_cast<Scalar>(gradients_acc[static_cast<long>(i)][1]),
 						static_cast<Scalar>(gradients_acc[static_cast<long>(i)][2]));
-			if (normal.squaredNorm() < Scalar(1e-12))
-				normal = Vec3(0, 0, 1);
-			else
-				normal.normalize();
-			normals[offset + i] = normal;
+			normals[offset + i] = unit_normal_or_z(normal);
 		}
 	}
 	return true;

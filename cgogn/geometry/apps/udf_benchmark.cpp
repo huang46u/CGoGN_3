@@ -44,17 +44,14 @@ int main(int argc, char** argv)
 	};
 
 	auto print_result = [&](const BenchmarkConfig& config, const BenchmarkResult& result, bool include_config_loading) {
-		if (include_config_loading)
-			std::cout << "Config loading (s): " << seconds_from_milliseconds(result.timing.config_loading_ms) << std::endl;
-		std::cout << "Input loading (s): " << seconds_from_milliseconds(result.timing.input_loading_ms) << std::endl;
-		std::cout << "Preprocess (s): " << seconds_from_milliseconds(result.timing.preprocess_ms) << std::endl;
-		std::cout << "Sampling (s): " << seconds_from_milliseconds(result.timing.sampling_ms) << std::endl;
-		std::cout << "Optimization total (s): " << seconds_from_milliseconds(result.timing.optimization_total_ms) << std::endl;
-		std::cout << "Skeleton construction (s): "
-				  << seconds_from_milliseconds(result.timing.skeleton_construction_ms) << std::endl;
-		std::cout << "Postprocess (s): " << seconds_from_milliseconds(result.timing.postprocess_ms) << std::endl;
-		std::cout << "Export (s): " << seconds_from_milliseconds(result.timing.export_ms) << std::endl;
-		std::cout << "Total (s): " << seconds_from_milliseconds(result.timing.total_ms) << std::endl;
+		for (const auto& field : cgogn::geometry::benchmark::kBenchmarkTimingFields)
+		{
+			if (field.print_label == nullptr)
+				continue;
+			if (field.config_loading_only && !include_config_loading)
+				continue;
+			std::cout << field.print_label << " (s): " << seconds_from_milliseconds(field.value_ms(result)) << std::endl;
+		}
 		std::cout << "Skeleton saved to: " << config.output.skeleton_ply << std::endl;
 		if (!config.output.timing_json.empty())
 			std::cout << "Timing saved to: " << config.output.timing_json << std::endl;
@@ -91,8 +88,8 @@ int main(int argc, char** argv)
 				ensure_output_directory(config.output.skeleton_ply);
 				ensure_output_directory(config.output.timing_json);
 				BenchmarkResult result = runner.run(config);
-				result.timing.config_loading_ms = config_loading_ms;
-				result.timing.total_ms += result.timing.config_loading_ms;
+				result.extra_timing.config_loading_ms = config_loading_ms;
+				result.extra_timing.total_ms += result.extra_timing.config_loading_ms;
 				write_benchmark_timing_json(config, result);
 				print_result(config, result, true);
 			}

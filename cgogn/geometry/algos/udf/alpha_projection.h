@@ -51,6 +51,8 @@ struct AlphaProjectionResult
 	std::vector<Vec3> projected_points;
 	std::vector<Vec3> normals;
 	std::vector<uint8_t> keep_mask;
+	// |udf(x) - alpha| of the final query per point (NaN when the query failed); diagnostics only
+	std::vector<Scalar> residuals;
 };
 
 struct AlphaProjectionInfo
@@ -69,6 +71,7 @@ bool project_points_to_alpha(const std::vector<Vec3>& points, const AlphaProject
 	result.projected_points.assign(nb_points, Vec3(0, 0, 0));
 	result.normals.assign(nb_points, Vec3(0, 0, 1));
 	result.keep_mask.assign(nb_points, uint8_t(0));
+	result.residuals.assign(nb_points, std::numeric_limits<Scalar>::quiet_NaN());
 	if (nb_points == 0)
 		return true;
 
@@ -101,6 +104,7 @@ bool project_points_to_alpha(const std::vector<Vec3>& points, const AlphaProject
 			continue;
 
 		const Scalar residual = std::abs(info.distance - parameters.alpha);
+		result.residuals[i] = residual;
 		if (residual > parameters.tolerance)
 			continue;
 

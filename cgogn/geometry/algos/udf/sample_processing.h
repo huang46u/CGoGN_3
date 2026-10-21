@@ -157,6 +157,7 @@ void compute_samples_area(
 		}
 		if (kept == 0)
 		{
+			int fallback_count = 0;
 			for (auto& res : knn_res)
 			{
 				if (kdtree_vertices[res.first] != v)
@@ -164,6 +165,9 @@ void compute_samples_area(
 					const Vertex nb = kdtree_vertices[res.first];
 					knn[v_idx].push_back(nb);
 					sum_dist += res.second;
+					++fallback_count;
+					if (fallback_count >= knn_k + 1)
+						break;
 				}
 			}
 		}

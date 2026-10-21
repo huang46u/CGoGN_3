@@ -57,11 +57,21 @@ std::string resolve_config_relative_path(const std::filesystem::path& config_dir
 	return std::filesystem::absolute(config_directory / path).lexically_normal().string();
 }
 
+std::string normalize_extension(std::string ext)
+{
+	std::transform(ext.begin(), ext.end(), ext.begin(),
+				   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	if (!ext.empty() && ext.front() != '.')
+		ext.insert(ext.begin(), '.');
+	return ext;
+}
+
 bool has_matching_extension(const fs::path& path, const std::string& extension)
 {
-	if (extension.empty())
+	const std::string expected = normalize_extension(extension);
+	if (expected.empty())
 		return true;
-	return path.extension().string() == extension;
+	return normalize_extension(path.extension().string()) == expected;
 }
 
 std::vector<fs::path> collect_input_files(const fs::path& directory, const std::string& extension, bool recursive)
@@ -146,19 +156,10 @@ InputGeometryType parse_input_geometry_type(const std::string& value)
 NeuralModelType parse_neural_model_type(const std::string& value)
 {
 	if (value == "udf")
-		return NeuralModelType::UDF;
+		return NeuralModelType::udf;
 	if (value == "mf")
-		return NeuralModelType::MF;
+		return NeuralModelType::mf;
 	fail_config("unsupported `input.neural_model_type`: " + value);
-}
-
-std::string normalize_extension(std::string ext)
-{
-	std::transform(ext.begin(), ext.end(), ext.begin(),
-				   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-	if (!ext.empty() && ext.front() != '.')
-		ext.insert(ext.begin(), '.');
-	return ext;
 }
 
 bool is_supported_point_cloud_extension(const std::string& ext)
@@ -234,7 +235,7 @@ std::string to_string(InputGeometryType value)
 
 std::string to_string(NeuralModelType value)
 {
-	return value == NeuralModelType::MF ? "mf" : "udf";
+	return value == NeuralModelType::mf ? "mf" : "udf";
 }
 
 BenchmarkConfig load_benchmark_config(const std::string& path)
