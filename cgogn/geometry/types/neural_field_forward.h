@@ -263,6 +263,9 @@ private:
 
 			parsed.sdf = sdf;
 			parsed.has_sdf = true;
+			// medial field (Deep Medial Field / QMDF): mf - |sdf| vanishes on the medial axis, not on the surface, so its
+			// alpha level set is a thin layer around the medial axis and its minimum is not zero; filtering MF samples by
+			// their distance to the input surface would remove most of them
 			parsed.values = mf - torch::abs(sdf);
 			parsed.pred_grad = pgrad;
 			parsed.has_pred_grad = true;
