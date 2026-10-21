@@ -24,6 +24,7 @@
 #include <cgogn/geometry/algos/udf/spatial_query.h>
 #include <cgogn/geometry/algos/udf/neural_model_type.h>
 #include <cgogn/geometry/algos/udf/normal_utils.h>
+#include <cgogn/geometry/algos/udf/parallel_for.h>
 #include <cgogn/geometry/algos/udf/spheres_optimizer.h>
 #include <cgogn/geometry/functions/bounding_box.h>
 #include <cgogn/geometry/functions/normal.h>
@@ -60,41 +61,6 @@
 
 namespace cgogn::geometry
 {
-
-namespace detail
-{
-
-// runs f(i) for i in [0, n), in chunks on the thread pool; must not be called from a pool worker (nested wait)
-template <typename FUNC>
-void parallel_for_index(std::size_t n, const FUNC& f)
-{
-	constexpr std::size_t min_parallel_size = 1024;
-	ThreadPool* pool = thread_pool();
-	const std::size_t nb_workers = pool->nb_workers();
-	if (n < min_parallel_size || nb_workers == 0)
-	{
-		for (std::size_t i = 0; i < n; ++i)
-			f(i);
-		return;
-	}
-
-	const std::size_t nb_chunks = nb_workers * 4;
-	const std::size_t chunk_size = (n + nb_chunks - 1) / nb_chunks;
-	std::vector<std::future<void>> futures;
-	futures.reserve(nb_chunks);
-	for (std::size_t begin = 0; begin < n; begin += chunk_size)
-	{
-		const std::size_t end = std::min(n, begin + chunk_size);
-		futures.push_back(pool->enqueue([&f, begin, end]() {
-			for (std::size_t i = begin; i < end; ++i)
-				f(i);
-		}));
-	}
-	for (auto& future : futures)
-		future.wait();
-}
-
-} // namespace detail
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
 class UDFReconstruction

@@ -2,11 +2,13 @@
 #define CGOGN_GEOMETRY_TYPES_RAY_LEVEL_SET_SAMPLER_H_
 
 #include <cgogn/core/utils/numerics.h>
+#include <cgogn/core/utils/thread_pool.h>
 #include <cgogn/geometry/types/spatial_grid.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <algorithm>
 #include <cmath>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <random>
@@ -152,6 +154,36 @@ private:
 	Scalar convergence_tolerance() const
 	{
 		return std::max(Scalar(0), params_.tol);
+	}
+
+	// runs f(i) for i in [0, n), in chunks on the thread pool; must not be called from a pool worker (nested wait)
+	template <typename FUNC>
+	static void parallel_for_rays(std::size_t n, const FUNC& f)
+	{
+		constexpr std::size_t min_parallel_size = 1024;
+		ThreadPool* pool = thread_pool();
+		const std::size_t nb_workers = pool->nb_workers();
+		if (n < min_parallel_size || nb_workers == 0)
+		{
+			for (std::size_t i = 0; i < n; ++i)
+				f(i);
+			return;
+		}
+
+		const std::size_t nb_chunks = nb_workers * 4;
+		const std::size_t chunk_size = (n + nb_chunks - 1) / nb_chunks;
+		std::vector<std::future<void>> futures;
+		futures.reserve(nb_chunks);
+		for (std::size_t begin = 0; begin < n; begin += chunk_size)
+		{
+			const std::size_t end = std::min(n, begin + chunk_size);
+			futures.push_back(pool->enqueue([&f, begin, end]() {
+				for (std::size_t i = begin; i < end; ++i)
+					f(i);
+			}));
+		}
+		for (auto& future : futures)
+			future.wait();
 	}
 
 	struct InsideSegment
@@ -513,6 +545,7 @@ private:
 
 			std::vector<Scalar> t(static_cast<size_t>(R));
 			std::vector<Scalar> t_max(static_cast<size_t>(R));
+			std::vector<Scalar> step_udf(static_cast<size_t>(R));
 			for (int i = 0; i < R; ++i)
 			{
 				t[i] = rays[i].t_min;
@@ -529,6 +562,22 @@ private:
 					std::cout << "    Step " << step << ": " << active_count << " active\r" << std::flush;
 				}
 
+				// stage 1 (parallel): udf of all active rays; reads t/rays only, writes only step_udf[i]
+				// (serial once few rays are left, the long tail would otherwise pay a pool dispatch per step)
+				auto eval_ray = [&](std::size_t i) {
+					if (t[i] < t_max[i])
+					{
+						const Ray& ray = rays[i];
+						step_udf[i] = traits.eval_distance(ray.origin + t[i] * ray.direction);
+					}
+				};
+				if (active_count >= 1024)
+					parallel_for_rays(static_cast<std::size_t>(R), eval_ray);
+				else
+					for (std::size_t i = 0; i < static_cast<std::size_t>(R); ++i)
+						eval_ray(i);
+
+				// stage 2 (serial): same ordered logic as before, using the precomputed udf
 				for (int i = 0; i < R; ++i)
 				{
 					if (t[i] >= t_max[i])
@@ -536,7 +585,7 @@ private:
 
 					const Ray& ray = rays[i];
 					const Vec3 X = ray.origin + t[i] * ray.direction;
-					const Scalar udf = traits.eval_distance(X);
+					const Scalar udf = step_udf[i];
 					if (!std::isfinite(static_cast<double>(udf)))
 					{
 						t[i] = t_max[i];

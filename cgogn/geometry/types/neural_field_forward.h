@@ -101,9 +101,13 @@ public:
 		}
 	}
 
-	// Forward points in GPU tensor with gradient
-	std::pair<torch::Tensor, torch::Tensor> forward_values_grad_gpu(const torch::Tensor& points_gpu) const
+	// Forward points in GPU tensor with gradient; sdf_out (optional) receives the sdf output of MF models
+	// from the same forward, and stays undefined for models without one
+	std::pair<torch::Tensor, torch::Tensor> forward_values_grad_gpu(const torch::Tensor& points_gpu,
+																	torch::Tensor* sdf_out = nullptr) const
 	{
+		if (sdf_out)
+			*sdf_out = torch::Tensor();
 		if (!is_loaded())
 			return {torch::Tensor(), torch::Tensor()};
 		try
@@ -114,9 +118,9 @@ public:
 				x = x.to(device_);
 
 			if (output_kind_ == OutputKind::MFTuple)
-				return forward_values_grad_gpu_predicted(x);
+				return forward_values_grad_gpu_predicted(x, sdf_out);
 
-			return forward_values_grad_gpu_autograd(x);
+			return forward_values_grad_gpu_autograd(x, sdf_out);
 		}
 		catch (const c10::Error& e)
 		{
@@ -168,7 +172,8 @@ private:
 		bool moved_;
 	};
 
-	std::pair<torch::Tensor, torch::Tensor> forward_values_grad_gpu_predicted(const torch::Tensor& points) const
+	std::pair<torch::Tensor, torch::Tensor> forward_values_grad_gpu_predicted(const torch::Tensor& points,
+																			  torch::Tensor* sdf_out) const
 	{
 		torch::NoGradGuard no_grad;
 		torch::IValue output = module_->forward({points});
@@ -181,11 +186,14 @@ private:
 			output_kind_ = kind;
 		if (!parsed.has_pred_grad)
 			return {torch::Tensor(), torch::Tensor()};
+		if (sdf_out && parsed.has_sdf)
+			*sdf_out = parsed.sdf.detach();
 
 		return {parsed.values.detach(), parsed.pred_grad.detach()};
 	}
 
-	std::pair<torch::Tensor, torch::Tensor> forward_values_grad_gpu_autograd(const torch::Tensor& points) const
+	std::pair<torch::Tensor, torch::Tensor> forward_values_grad_gpu_autograd(const torch::Tensor& points,
+																			 torch::Tensor* sdf_out) const
 	{
 		torch::Tensor x = points.detach().requires_grad_(true);
 		torch::IValue output = module_->forward({x});
@@ -195,6 +203,8 @@ private:
 		if (!parse_output(output, parsed, kind))
 			return {torch::Tensor(), torch::Tensor()};
 		output_kind_ = kind;
+		if (sdf_out && parsed.has_sdf)
+			*sdf_out = parsed.sdf.detach();
 
 		if (parsed.has_pred_grad)
 			return {parsed.values.detach(), parsed.pred_grad.detach()};

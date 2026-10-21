@@ -29,7 +29,7 @@ struct SpatialGrid
 	{
 		std::size_t operator()(const GridKey& k) const
 		{
-			return std::hash<int>()(k.x) ^ (std::hash<int>()(k.y) << 1) ^ (std::hash<int>()(k.z) << 2);
+			return (std::size_t(k.x) * 73856093u) ^ (std::size_t(k.y) * 19349663u) ^ (std::size_t(k.z) * 83492791u);
 		}
 	};
 
@@ -58,6 +58,21 @@ struct SpatialGrid
 			return true;
 		GridKey k = get_key(pos);
 		Scalar r2 = radius * radius;
+		// returns true if a stored point in cell 'key' is closer than radius
+		auto cell_conflicts = [&](const GridKey& key) {
+			auto it = grid_.find(key);
+			if (it == grid_.end())
+				return false;
+			for (uint32 idx : it->second)
+			{
+				if ((positions[idx] - pos).squaredNorm() < r2)
+					return true;
+			}
+			return false;
+		};
+		// the center cell is the most likely to hold a conflicting point, check it first
+		if (cell_conflicts(k))
+			return false;
 		const int range = std::max(1, static_cast<int>(std::ceil(radius / cell_size_)));
 		for (int dx = -range; dx <= range; ++dx)
 		{
@@ -65,16 +80,10 @@ struct SpatialGrid
 			{
 				for (int dz = -range; dz <= range; ++dz)
 				{
-					GridKey neighbor_key = {k.x + dx, k.y + dy, k.z + dz};
-					auto it = grid_.find(neighbor_key);
-					if (it != grid_.end())
-					{
-						for (uint32 idx : it->second)
-						{
-							if ((positions[idx] - pos).squaredNorm() < r2)
-								return false;
-						}
-					}
+					if (dx == 0 && dy == 0 && dz == 0)
+						continue;
+					if (cell_conflicts({k.x + dx, k.y + dy, k.z + dz}))
+						return false;
 				}
 			}
 		}

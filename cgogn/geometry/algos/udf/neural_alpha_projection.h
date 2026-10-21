@@ -46,9 +46,9 @@ struct NeuralProjectionWorkspace
 	torch::Tensor points_cpu_;
 	torch::Tensor points_gpu_;
 	torch::Tensor active_gpu_;
-	torch::Tensor projected_cpu_;
 	torch::Tensor grad_cpu_;
-	torch::Tensor sdf_cpu_;
+	// projected xyz, gradient, value and (MF only) sdf per point, so a projection needs one device-to-host copy
+	torch::Tensor packed_cpu_;
 	torch::Tensor clamp_min_gpu_;
 	torch::Tensor clamp_max_gpu_;
 	Vec3 clamp_min_cache_ = Vec3(0, 0, 0);
@@ -78,9 +78,8 @@ inline void ensure_neural_projection_workspace(NeuralProjectionWorkspace& worksp
 	workspace.points_cpu_ = torch::empty({static_cast<int64_t>(new_capacity), 3}, cpu_opts);
 	workspace.points_gpu_ = torch::empty({static_cast<int64_t>(new_capacity), 3}, gpu_float_opts);
 	workspace.active_gpu_ = torch::empty({static_cast<int64_t>(new_capacity)}, gpu_bool_opts);
-	workspace.projected_cpu_ = torch::empty({static_cast<int64_t>(new_capacity), 3}, cpu_opts);
 	workspace.grad_cpu_ = torch::empty({static_cast<int64_t>(new_capacity), 3}, cpu_opts);
-	workspace.sdf_cpu_ = torch::empty({static_cast<int64_t>(new_capacity)}, cpu_opts);
+	workspace.packed_cpu_ = torch::empty({static_cast<int64_t>(new_capacity) * 8}, cpu_opts);
 	workspace.clamp_bounds_valid_ = false;
 	workspace.capacity_ = new_capacity;
 }
@@ -147,73 +146,44 @@ inline bool project_points_to_alpha(const NeuralFieldForward& udf, const std::ve
 			torch::Tensor residual = f - parameters.alpha;
 			torch::Tensor next_active = active & (torch::abs(residual) > parameters.tolerance);
 			active.copy_(next_active);
-			if (torch::sum(active).item<int64_t>() == 0)
+			// the early exit costs a host sync; on the last iteration the same skip is done on the device below
+			const bool last_iteration = iter + 1 == parameters.max_iterations;
+			if (!last_iteration && torch::sum(active).item<int64_t>() == 0)
 				break;
 
 			torch::Tensor grad_norm2 = (grad * grad).sum(1, true);
 			torch::Tensor step = residual.unsqueeze(1) / (grad_norm2 + 1e-12f);
 			step = torch::where(active.unsqueeze(1), step, torch::zeros_like(step));
-			X.sub_(step * grad);
-			X.copy_(torch::maximum(torch::minimum(X, bbox_max), bbox_min));
+			torch::Tensor moved = torch::maximum(torch::minimum(X - step * grad, bbox_max), bbox_min);
+			X.copy_(last_iteration ? torch::where(active.any(), moved, X) : moved);
 		}
 
-		auto [values, grad] = udf.forward_values_grad_gpu(X);
-		if (!values.defined() || !grad.defined())
-			return false;
-		torch::Tensor projected_cpu = workspace.projected_cpu_.narrow(0, 0, count);
-		torch::Tensor grad_cpu = workspace.grad_cpu_.narrow(0, 0, count);
-		projected_cpu.copy_(X);
-		grad_cpu.copy_(grad);
 		torch::Tensor sdf;
-		if (udf.is_mf_model()) // UDF models have no sdf output; skip the extra forward
-			sdf = udf.forward_values_sdf_gpu(X).second;
-		torch::Tensor sdf_cpu;
-		if (sdf.defined())
-		{
-			if (sdf.dim() == 2 && sdf.size(1) == 1)
-				sdf = sdf.squeeze(1);
-			sdf_cpu = workspace.sdf_cpu_.narrow(0, 0, count);
-			sdf_cpu.copy_(sdf);
-		}
-
-		auto projected_acc = projected_cpu.accessor<float, 2>();
-		auto grad_acc = grad_cpu.accessor<float, 2>();
-		// |udf(x) - alpha| at the projected positions, same order as projected_points
-		result.residuals.resize(nb_points);
-		torch::Tensor values_cpu = values.detach().to(torch::kCPU, torch::kFloat32).contiguous();
-		if (values_cpu.dim() != 1 || values_cpu.size(0) != count)
+		auto [values, grad] = udf.forward_values_grad_gpu(X, &sdf);
+		if (!values.defined() || !grad.defined() || values.numel() != count)
 			return false;
-		auto values_acc = values_cpu.accessor<float, 1>();
-		if (sdf_cpu.defined() && sdf_cpu.dim() == 1 && sdf_cpu.size(0) == count)
+		const bool has_sdf = sdf.defined() && sdf.numel() == count;
+		std::vector<torch::Tensor> columns = {X, grad.to(torch::kFloat32), values.to(torch::kFloat32).reshape({count, 1})};
+		if (has_sdf)
+			columns.push_back(sdf.to(torch::kFloat32).reshape({count, 1}));
+		torch::Tensor packed_gpu = torch::cat(columns, 1);
+		torch::Tensor packed_cpu =
+			workspace.packed_cpu_.narrow(0, 0, count * packed_gpu.size(1)).view({count, packed_gpu.size(1)});
+		packed_cpu.copy_(packed_gpu);
+
+		// columns: projected xyz, gradient xyz, value, sdf; residual = |udf(x) - alpha| at the projected position
+		auto packed_acc = packed_cpu.accessor<float, 2>();
+		result.residuals.resize(nb_points);
+		for (size_t i = 0; i < nb_points; ++i)
 		{
-			auto sdf_acc = sdf_cpu.accessor<float, 1>();
-			for (size_t i = 0; i < nb_points; ++i)
-			{
-				result.keep_mask[i] = ((sdf_acc[static_cast<long>(i)] <= 0.0f) || !filter_positive) ? uint8_t(1)
-																 : uint8_t(0);
-				result.projected_points[i] =
-					Vec3(projected_acc[static_cast<long>(i)][0], projected_acc[static_cast<long>(i)][1],
-						 static_cast<Scalar>(projected_acc[static_cast<long>(i)][2]));
-				result.residuals[i] = std::abs(static_cast<Scalar>(values_acc[static_cast<long>(i)]) - parameters.alpha);
-				Vec3 normal(static_cast<Scalar>(grad_acc[static_cast<long>(i)][0]),
-						 static_cast<Scalar>(grad_acc[static_cast<long>(i)][1]),
-						 static_cast<Scalar>(grad_acc[static_cast<long>(i)][2]));
-				result.normals[i] = unit_normal_or_z(normal);
-			}
-		}
-		else
-		{
-			for (size_t i = 0; i < nb_points; ++i)
-			{
-				result.projected_points[i] =
-					Vec3(projected_acc[static_cast<long>(i)][0], projected_acc[static_cast<long>(i)][1],
-						 static_cast<Scalar>(projected_acc[static_cast<long>(i)][2]));
-				result.residuals[i] = std::abs(static_cast<Scalar>(values_acc[static_cast<long>(i)]) - parameters.alpha);
-				Vec3 normal(static_cast<Scalar>(grad_acc[static_cast<long>(i)][0]),
-						 static_cast<Scalar>(grad_acc[static_cast<long>(i)][1]),
-						 static_cast<Scalar>(grad_acc[static_cast<long>(i)][2]));
-				result.normals[i] = unit_normal_or_z(normal);
-			}
+			const long k = static_cast<long>(i);
+			if (has_sdf)
+				result.keep_mask[i] = ((packed_acc[k][7] <= 0.0f) || !filter_positive) ? uint8_t(1) : uint8_t(0);
+			result.projected_points[i] = Vec3(packed_acc[k][0], packed_acc[k][1], static_cast<Scalar>(packed_acc[k][2]));
+			result.residuals[i] = std::abs(static_cast<Scalar>(packed_acc[k][6]) - parameters.alpha);
+			Vec3 normal(static_cast<Scalar>(packed_acc[k][3]), static_cast<Scalar>(packed_acc[k][4]),
+						static_cast<Scalar>(packed_acc[k][5]));
+			result.normals[i] = unit_normal_or_z(normal);
 		}
 		return true;
 	}

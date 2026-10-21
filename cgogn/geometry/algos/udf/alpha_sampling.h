@@ -34,7 +34,6 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
-#include <memory>
 #include <random>
 #include <unordered_map>
 #include <vector>
@@ -61,7 +60,6 @@ struct AlphaSamplingResult
 {
 	std::vector<Vec3> positions;
 	std::vector<Vec3> normals;
-	std::unique_ptr<SpatialGrid> spatial_grid;
 	bool success = true;
 };
 
@@ -139,7 +137,8 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 		return result;
 	}
 
-	const Scalar grid_cell_size = std::max(parameters.sample_radius / std::sqrt(Scalar(3.0)), Scalar(1e-8));
+	// cell = radius, so every neighbor closer than radius lies in the 27 surrounding cells
+	const Scalar grid_cell_size = std::max(parameters.sample_radius, Scalar(1e-8));
 	const size_t parent_batch_size = detail::alpha_sampling_parent_batch_size;
 	const size_t max_samples = detail::alpha_sampling_max_samples;
 	const size_t seed_rays_per_round =
@@ -147,7 +146,7 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 	const size_t initial_reserve = std::max(seed_rays_per_round, parent_batch_size) * size_t(4);
 
 	std::mt19937 generator(parameters.seed);
-	result.spatial_grid = std::make_unique<SpatialGrid>(grid_cell_size);
+	SpatialGrid spatial_grid(grid_cell_size);
 	std::vector<uint32> active_indices;
 	std::vector<uint32> active_slot_of_sample;
 	std::vector<uint32> selected_parents;
@@ -167,7 +166,7 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 		result.normals.push_back(unit_normal_or_z(normal));
 		active_slot_of_sample.push_back(static_cast<uint32>(active_indices.size()));
 		active_indices.push_back(sample_index);
-		result.spatial_grid->insert(position, sample_index);
+		spatial_grid.insert(position, sample_index);
 	};
 
 	auto remove_active_sample = [&](uint32 sample_index) {
@@ -273,8 +272,8 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 				bool accept = projection.keep_mask[candidate_index] != 0;
 				if (accept && (child_position - raw_candidate).norm() > parameters.sample_radius)
 					accept = false;
-				if (accept && !result.spatial_grid->is_valid_sample(child_position, parameters.sample_radius,
-															 result.positions))
+				if (accept && !spatial_grid.is_valid_sample(child_position, parameters.sample_radius,
+															result.positions))
 					accept = false;
 				if (!accept)
 					continue;

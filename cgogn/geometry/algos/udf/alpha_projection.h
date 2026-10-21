@@ -23,6 +23,7 @@
 #ifndef CGOGN_GEOMETRY_ALGOS_UDF_ALPHA_PROJECTION_H_
 #define CGOGN_GEOMETRY_ALGOS_UDF_ALPHA_PROJECTION_H_
 
+#include <cgogn/geometry/algos/udf/parallel_for.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <cmath>
@@ -75,8 +76,7 @@ bool project_points_to_alpha(const std::vector<Vec3>& points, const AlphaProject
 	if (nb_points == 0)
 		return true;
 
-	for (size_t i = 0; i < nb_points; ++i)
-	{
+	detail::parallel_for_index(nb_points, [&](std::size_t i) {
 		Vec3 x = points[i].cwiseMax(parameters.bbox_min).cwiseMin(parameters.bbox_max);
 		AlphaProjectionInfo info;
 		bool valid = false;
@@ -101,17 +101,17 @@ bool project_points_to_alpha(const std::vector<Vec3>& points, const AlphaProject
 		}
 
 		if (!valid || !query(x, info) || !info.valid)
-			continue;
+			return;
 
 		const Scalar residual = std::abs(info.distance - parameters.alpha);
 		result.residuals[i] = residual;
 		if (residual > parameters.tolerance)
-			continue;
+			return;
 
 		result.projected_points[i] = info.closest_point + info.normal * parameters.alpha;
 		result.normals[i] = info.normal;
 		result.keep_mask[i] = uint8_t(1);
-	}
+	});
 	return true;
 }
 
