@@ -141,8 +141,9 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 					  << " error=" << metrics.total_error << " diff=" << metrics.error_difference << std::endl;
 	});
 	if (reconstruction_result.status != Status::success)
-		throw std::runtime_error("UDF reconstruction failed with status " +
-								 std::to_string(static_cast<int>(reconstruction_result.status)));
+		throw std::runtime_error(
+			"UDF reconstruction failed with status " + std::to_string(static_cast<int>(reconstruction_result.status)) +
+			(reconstruction_result.message.empty() ? std::string() : ": " + reconstruction_result.message));
 	result.extra_timing.preprocess_ms += reconstruction_result.timing.preprocessing_ms;
 
 	result.counts = reconstruction_result.counts;

@@ -94,6 +94,7 @@ public:
 
 	using NeuralModelType = typename State::NeuralModelType;
 	using Status = typename State::Status;
+	using StatusInfo = typename State::StatusInfo;
 	using Data = typename State::Data;
 	using Options = typename State::Options;
 	using Timing = typename State::Timing;
@@ -140,59 +141,59 @@ public:
 	{
 		udf_stages::reset(s_);
 	}
-	Status initialize_data()
+	StatusInfo initialize_data()
 	{
 		return udf_stages::initialize_data(s_);
 	}
-	Status load_neural_model(const std::filesystem::path& path, NeuralModelType type)
+	StatusInfo load_neural_model(const std::filesystem::path& path, NeuralModelType type)
 	{
 		return udf_stages::load_neural_model(s_, path, type);
 	}
-	Status sample_alpha_level_set()
+	StatusInfo sample_alpha_level_set()
 	{
 		return udf_stages::sample_alpha_level_set(s_);
 	}
-	Status apply_sampling_filtering()
+	StatusInfo apply_sampling_filtering()
 	{
 		return udf_stages::apply_sampling_filtering(s_);
 	}
-	Status build_kdtree_and_normals()
+	StatusInfo build_kdtree_and_normals()
 	{
 		return udf_stages::build_kdtree_and_normals(s_);
 	}
-	Status compute_fitting_primitives()
+	StatusInfo compute_fitting_primitives()
 	{
 		return udf_stages::compute_fitting_primitives(s_);
 	}
-	Status compute_initial_medial_axis()
+	StatusInfo compute_initial_medial_axis()
 	{
 		return udf_stages::compute_initial_medial_axis(s_);
 	}
-	Status initialize_spheres()
+	StatusInfo initialize_spheres()
 	{
 		return udf_stages::initialize_spheres(s_);
 	}
-	Status optimize_spheres(const IterationCallback& iteration_callback = {})
+	StatusInfo optimize_spheres(const IterationCallback& iteration_callback = {})
 	{
 		return udf_stages::optimize_spheres(s_, iteration_callback);
 	}
-	Status build_skeleton()
+	StatusInfo build_skeleton()
 	{
 		return udf_stages::build_skeleton(s_);
 	}
-	Status fix_topology()
+	StatusInfo fix_topology()
 	{
 		return udf_stages::fix_topology(s_);
 	}
-	Status prune_residual_sheets()
+	StatusInfo prune_residual_sheets()
 	{
 		return udf_stages::prune_residual_sheets(s_);
 	}
-	Status sample()
+	StatusInfo sample()
 	{
 		return udf_stages::sample(s_);
 	}
-	Status compute_fitting_data()
+	StatusInfo compute_fitting_data()
 	{
 		return udf_stages::compute_fitting_data(s_);
 	}
@@ -200,7 +201,7 @@ public:
 	{
 		return udf_stages::update_spheres_once(s_, sqem_update_lambda_line_plane);
 	}
-	Status fix_topology_and_prune()
+	StatusInfo fix_topology_and_prune()
 	{
 		return udf_stages::fix_topology_and_prune(s_);
 	}

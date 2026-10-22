@@ -127,6 +127,22 @@ struct ReconstructionState
 		topology_fix_failed
 	};
 
+	// Status code with the reason of a failure. It converts to and from Status, so callers that compare a stage
+	// result with a Status value keep working.
+	struct StatusInfo
+	{
+		Status code = Status::success;
+		std::string message;
+
+		StatusInfo(Status c = Status::success, std::string m = {}) : code(c), message(std::move(m))
+		{
+		}
+		operator Status() const
+		{
+			return code;
+		}
+	};
+
 	struct Data
 	{
 		SURFACE* surface = nullptr;
@@ -148,6 +164,8 @@ struct ReconstructionState
 		Timing timing;
 		Counts counts;
 		Repairs repairs;
+		// reason of the failure when status is not success (may be empty)
+		std::string message;
 	};
 
 	using IterationCallback = std::function<void(const SpheresOptimizerMetrics&)>;

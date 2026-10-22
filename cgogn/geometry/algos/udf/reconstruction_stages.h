@@ -102,6 +102,15 @@ inline constexpr Scalar mf_flip_alpha_factor_max = Scalar(5);
 
 } // namespace cgogn::geometry
 
+// Stage precondition: when cond does not hold, the enclosing stage function (template parameter State) returns code
+// with a message naming the stage and the condition.
+#define UDF_PRECONDITION(cond, code)                                                                                   \
+	do                                                                                                                 \
+	{                                                                                                                  \
+		if (!(cond))                                                                                                   \
+			return typename State::StatusInfo{(code), std::string(__func__) + ": precondition failed: " #cond};        \
+	} while (false)
+
 namespace cgogn::geometry::udf_stages
 {
 
@@ -112,11 +121,11 @@ template <typename State>
 void reset(State& s);
 
 template <typename State>
-typename State::Status initialize_data(State& s);
+typename State::StatusInfo initialize_data(State& s);
 
 template <typename State>
-typename State::Status load_neural_model(State& s, const std::filesystem::path& path,
-										 typename State::NeuralModelType type);
+typename State::StatusInfo load_neural_model(State& s, const std::filesystem::path& path,
+											 typename State::NeuralModelType type);
 
 template <typename State>
 typename State::Counts counts(State& s);
@@ -146,47 +155,47 @@ template <typename State>
 typename State::Status status_of(State&, FieldPrepareResult result);
 
 template <typename State>
-typename State::Status sample_alpha_level_set(State& s);
+typename State::StatusInfo sample_alpha_level_set(State& s);
 
 template <typename State>
-typename State::Status apply_sampling_filtering(State& s);
+typename State::StatusInfo apply_sampling_filtering(State& s);
 
 template <typename State>
-typename State::Status build_kdtree_and_normals(State& s);
+typename State::StatusInfo build_kdtree_and_normals(State& s);
 
 template <typename State>
-typename State::Status compute_fitting_primitives(State& s);
+typename State::StatusInfo compute_fitting_primitives(State& s);
 
 template <typename State>
-typename State::Status compute_initial_medial_axis(State& s);
+typename State::StatusInfo compute_initial_medial_axis(State& s);
 
 template <typename State>
-typename State::Status initialize_spheres(State& s);
+typename State::StatusInfo initialize_spheres(State& s);
 
 template <typename State>
-typename State::Status optimize_spheres(State& s, const typename State::IterationCallback& callback = {});
+typename State::StatusInfo optimize_spheres(State& s, const typename State::IterationCallback& callback = {});
 
 template <typename State>
-typename State::Status build_skeleton(State& s);
+typename State::StatusInfo build_skeleton(State& s);
 
 template <typename State>
-typename State::Status fix_topology(State& s);
+typename State::StatusInfo fix_topology(State& s);
 
 template <typename State>
-typename State::Status prune_residual_sheets(State& s);
+typename State::StatusInfo prune_residual_sheets(State& s);
 
 // Composite stages shared by the UI buttons and the stage sequence test.
 template <typename State>
-typename State::Status sample(State& s);
+typename State::StatusInfo sample(State& s);
 
 template <typename State>
-typename State::Status compute_fitting_data(State& s);
+typename State::StatusInfo compute_fitting_data(State& s);
 
 template <typename State>
 typename State::SpheresOptimizerType::Status update_spheres_once(State& s, Scalar sqem_update_lambda_line_plane);
 
 template <typename State>
-typename State::Status fix_topology_and_prune(State& s);
+typename State::StatusInfo fix_topology_and_prune(State& s);
 
 template <typename State>
 typename State::Result reconstruct(State& s, const typename State::IterationCallback& callback = {});
@@ -210,7 +219,7 @@ void reset(State& s)
 }
 
 template <typename State>
-typename State::Status initialize_data(State& s)
+typename State::StatusInfo initialize_data(State& s)
 {
 	using PVertex = typename State::PVertex;
 	using NMVertex = typename State::NMVertex;
@@ -220,8 +229,7 @@ typename State::Status initialize_data(State& s)
 
 	if (s.initialized)
 		return Status::success;
-	if (!s.data.input_points || !s.data.samples || !s.data.spheres || !s.data.skeleton)
-		return Status::invalid_data;
+	UDF_PRECONDITION(s.data.input_points && s.data.samples && s.data.spheres && s.data.skeleton, Status::invalid_data);
 	s.input_position = get_or_add_attribute<Vec3, PVertex>(*s.data.input_points, "position");
 	s.input_normal = get_or_add_attribute<Vec3, PVertex>(*s.data.input_points, "normal");
 	s.input_knn = get_or_add_attribute<std::vector<PVertex>, PVertex>(*s.data.input_points, "knn");
@@ -257,8 +265,8 @@ typename State::Status initialize_data(State& s)
 }
 
 template <typename State>
-typename State::Status load_neural_model(State& s, const std::filesystem::path& path,
-										 typename State::NeuralModelType type)
+typename State::StatusInfo load_neural_model(State& s, const std::filesystem::path& path,
+											 typename State::NeuralModelType type)
 {
 	using Status = typename State::Status;
 
@@ -559,15 +567,15 @@ typename State::Status status_of(State&, FieldPrepareResult result)
 }
 
 template <typename State>
-typename State::Status sample_alpha_level_set(State& s)
+typename State::StatusInfo sample_alpha_level_set(State& s)
 {
 	using PVertex = typename State::PVertex;
 	using RayTraits = typename State::RayTraits;
 	using RayParams = typename State::RayParams;
 	using Status = typename State::Status;
 
-	if (initialize_data(s) != Status::success)
-		return Status::invalid_data;
+	if (const typename State::StatusInfo initialized = initialize_data(s); initialized != Status::success)
+		return initialized;
 	s.input.bind(s.data.surface, s.data.input_points, s.input_position, s.input_normal);
 	s.input.invalidate();
 	s.input.build_input_kdtree();
@@ -585,8 +593,7 @@ typename State::Status sample_alpha_level_set(State& s)
 	bbox_max += Vec3(padding, padding, padding);
 
 	RayTraits traits = s.field.ray_traits(inputs);
-	if (!traits.is_ready())
-		return Status::invalid_data;
+	UDF_PRECONDITION(traits.is_ready(), Status::invalid_data);
 	RayParams ray_params;
 	ray_params.bbox_expand = udf_constants::ray_box_relative_expand;
 	ray_params.alpha = Scalar(s.options.alpha);
@@ -637,15 +644,14 @@ typename State::Status sample_alpha_level_set(State& s)
 }
 
 template <typename State>
-typename State::Status apply_sampling_filtering(State& s)
+typename State::StatusInfo apply_sampling_filtering(State& s)
 {
 	using PVertex = typename State::PVertex;
 	using Field = typename State::Field;
 	using Status = typename State::Status;
 
 	// attributes come from initialize_data
-	if (!s.initialized)
-		return Status::invalid_data;
+	UDF_PRECONDITION(s.initialized, Status::invalid_data);
 	if (!s.options.apply_filtering || !s.data.samples || nb_cells<PVertex>(*s.data.samples) == 0)
 		return Status::success;
 	s.input.bind(s.data.surface, s.data.input_points, s.input_position, s.input_normal);
@@ -701,16 +707,14 @@ typename State::Status apply_sampling_filtering(State& s)
 }
 
 template <typename State>
-typename State::Status build_kdtree_and_normals(State& s)
+typename State::StatusInfo build_kdtree_and_normals(State& s)
 {
 	using PVertex = typename State::PVertex;
 	using Status = typename State::Status;
 
 	// samples and their kd-tree come from sample_alpha_level_set / apply_sampling_filtering
-	if (!s.data.samples || nb_cells<PVertex>(*s.data.samples) == 0)
-		return Status::invalid_data;
-	if (!s.sample_kdtree)
-		return Status::invalid_data;
+	UDF_PRECONDITION(s.data.samples && nb_cells<PVertex>(*s.data.samples) > 0, Status::invalid_data);
+	UDF_PRECONDITION(s.sample_kdtree, Status::invalid_data);
 	// PCA for every input: neural samples already carry the network gradient, and for MF models that gradient
 	// is not orthogonal to the medial axis.
 	if (s.options.recompute_normals_after_sampling)
@@ -722,14 +726,13 @@ typename State::Status build_kdtree_and_normals(State& s)
 }
 
 template <typename State>
-typename State::Status compute_fitting_primitives(State& s)
+typename State::StatusInfo compute_fitting_primitives(State& s)
 {
 	using PVertex = typename State::PVertex;
 	using Status = typename State::Status;
 
 	// samples and their kd-tree come from sample_alpha_level_set / apply_sampling_filtering
-	if (!s.data.samples || nb_cells<PVertex>(*s.data.samples) == 0 || !s.sample_kdtree)
-		return Status::invalid_data;
+	UDF_PRECONDITION(s.data.samples && nb_cells<PVertex>(*s.data.samples) > 0 && s.sample_kdtree, Status::invalid_data);
 	compute_samples_area(*s.data.samples, *s.sample_position, *s.sample_normal, *s.sample_area, *s.sample_knn,
 						 *s.sample_kdtree, s.sample_vertices, s.options.knn_k, Scalar(s.options.alpha));
 	compute_quadrics(*s.data.samples, *s.sample_position, *s.sample_normal, *s.sample_area, *s.sample_knn,
@@ -739,7 +742,7 @@ typename State::Status compute_fitting_primitives(State& s)
 }
 
 template <typename State>
-typename State::Status compute_initial_medial_axis(State& s)
+typename State::StatusInfo compute_initial_medial_axis(State& s)
 {
 	using PVertex = typename State::PVertex;
 	using Field = typename State::Field;
@@ -747,8 +750,7 @@ typename State::Status compute_initial_medial_axis(State& s)
 	using Status = typename State::Status;
 
 	// samples and their kd-tree come from sample_alpha_level_set / apply_sampling_filtering
-	if (!s.data.samples || nb_cells<PVertex>(*s.data.samples) == 0 || !s.sample_kdtree)
-		return Status::invalid_data;
+	UDF_PRECONDITION(s.data.samples && nb_cells<PVertex>(*s.data.samples) > 0 && s.sample_kdtree, Status::invalid_data);
 	const Scalar fallback_radius = Scalar(s.options.alpha);
 	const Scalar min_norm = Scalar(1e-12);
 	const bool neural_input = Field::is_neural_type && s.field.loaded();
@@ -925,27 +927,25 @@ typename State::Status compute_initial_medial_axis(State& s)
 }
 
 template <typename State>
-typename State::Status initialize_spheres(State& s)
+typename State::StatusInfo initialize_spheres(State& s)
 {
 	using Status = typename State::Status;
 
-	if (!s.fitting_data_computed || !s.data.samples || !s.data.spheres)
-		return Status::invalid_data;
+	UDF_PRECONDITION(s.fitting_data_computed && s.data.samples && s.data.spheres, Status::invalid_data);
 	if (!optimizer_for(s).initialize_from_samples(Scalar(s.options.init_dilation_constant)))
 		return Status::sphere_initialization_failed;
 	return Status::success;
 }
 
 template <typename State>
-typename State::Status optimize_spheres(State& s, const typename State::IterationCallback& callback)
+typename State::StatusInfo optimize_spheres(State& s, const typename State::IterationCallback& callback)
 {
 	using PVertex = typename State::PVertex;
 	using SpheresOptimizerType = typename State::SpheresOptimizerType;
 	using Status = typename State::Status;
 
 	// spheres come from initialize_spheres
-	if (!s.data.spheres || nb_cells<PVertex>(*s.data.spheres) == 0)
-		return Status::invalid_data;
+	UDF_PRECONDITION(s.data.spheres && nb_cells<PVertex>(*s.data.spheres) > 0, Status::invalid_data);
 	auto& optimizer = optimizer_for(s);
 	optimizer.reset_optimization();
 	typename SpheresOptimizerType::Status status = SpheresOptimizerType::Status::running;
@@ -959,29 +959,27 @@ typename State::Status optimize_spheres(State& s, const typename State::Iteratio
 }
 
 template <typename State>
-typename State::Status build_skeleton(State& s)
+typename State::StatusInfo build_skeleton(State& s)
 {
 	using PVertex = typename State::PVertex;
 	using TopologyType = typename State::TopologyType;
 	using Status = typename State::Status;
 
 	// spheres come from initialize_spheres / optimize_spheres
-	if (!s.data.spheres || nb_cells<PVertex>(*s.data.spheres) == 0)
-		return Status::invalid_data;
+	UDF_PRECONDITION(s.data.spheres && nb_cells<PVertex>(*s.data.spheres) > 0, Status::invalid_data);
 	return topology_for(s).build_from_spheres() == TopologyType::Status::success ? Status::success
 																				 : Status::skeleton_build_failed;
 }
 
 template <typename State>
-typename State::Status fix_topology(State& s)
+typename State::StatusInfo fix_topology(State& s)
 {
 	using NMVertex = typename State::NMVertex;
 	using TopologyType = typename State::TopologyType;
 	using Status = typename State::Status;
 
 	// skeleton comes from build_skeleton
-	if (!s.data.skeleton || nb_cells<NMVertex>(*s.data.skeleton) == 0)
-		return Status::invalid_data;
+	UDF_PRECONDITION(s.data.skeleton && nb_cells<NMVertex>(*s.data.skeleton) > 0, Status::invalid_data);
 	return topology_for(s).fix_topology([&](const std::vector<Vec3>& p, std::vector<Scalar>& v) {
 		return evaluate_topology_scores(s, p, v);
 	}) == TopologyType::Status::success
@@ -990,15 +988,14 @@ typename State::Status fix_topology(State& s)
 }
 
 template <typename State>
-typename State::Status prune_residual_sheets(State& s)
+typename State::StatusInfo prune_residual_sheets(State& s)
 {
 	using NMVertex = typename State::NMVertex;
 	using TopologyType = typename State::TopologyType;
 	using Status = typename State::Status;
 
 	// skeleton comes from build_skeleton
-	if (!s.data.skeleton || nb_cells<NMVertex>(*s.data.skeleton) == 0)
-		return Status::invalid_data;
+	UDF_PRECONDITION(s.data.skeleton && nb_cells<NMVertex>(*s.data.skeleton) > 0, Status::invalid_data);
 	topology_for(s).set_residual_prune_mode(
 		static_cast<typename TopologyType::ResidualPruneMode>(static_cast<int>(s.options.residual_prune_mode)));
 	return topology_for(s).prune_residual_sheets() == TopologyType::Status::success ? Status::success
@@ -1006,22 +1003,22 @@ typename State::Status prune_residual_sheets(State& s)
 }
 
 template <typename State>
-typename State::Status sample(State& s)
+typename State::StatusInfo sample(State& s)
 {
 	using Status = typename State::Status;
 
-	const Status status = sample_alpha_level_set(s);
+	const typename State::StatusInfo status = sample_alpha_level_set(s);
 	if (status != Status::success)
 		return status;
 	return apply_sampling_filtering(s);
 }
 
 template <typename State>
-typename State::Status compute_fitting_data(State& s)
+typename State::StatusInfo compute_fitting_data(State& s)
 {
 	using Status = typename State::Status;
 
-	Status status = build_kdtree_and_normals(s);
+	typename State::StatusInfo status = build_kdtree_and_normals(s);
 	if (status != Status::success)
 		return status;
 	status = compute_fitting_primitives(s);
@@ -1044,11 +1041,11 @@ typename State::SpheresOptimizerType::Status update_spheres_once(State& s, Scala
 }
 
 template <typename State>
-typename State::Status fix_topology_and_prune(State& s)
+typename State::StatusInfo fix_topology_and_prune(State& s)
 {
 	using Status = typename State::Status;
 
-	const Status status = fix_topology(s);
+	const typename State::StatusInfo status = fix_topology(s);
 	if (status != Status::success || !s.options.residual_prune)
 		return status;
 	return prune_residual_sheets(s);
@@ -1077,11 +1074,13 @@ typename State::Result reconstruct(State& s, const typename State::IterationCall
 	s.fitting_data_computed = false;
 	s.samples_before_filtering = 0;
 	s.ma_repairs = {};
-	auto run_stage = [](float64& time, auto&& stage) {
+	auto run_stage = [&r](float64& time, auto&& stage) -> Status {
 		const auto start = std::chrono::high_resolution_clock::now();
-		const Status status = stage();
+		const typename State::StatusInfo status = stage();
 		time = std::chrono::duration<float64, std::milli>(std::chrono::high_resolution_clock::now() - start).count();
-		return status;
+		if (status.code != Status::success)
+			r.message = status.message;
+		return status.code;
 	};
 	if ((r.status = run_stage(r.timing.preprocessing_ms, [&] { return initialize_data(s); })) != Status::success)
 		return r;
@@ -1130,5 +1129,7 @@ typename State::Result reconstruct(State& s, const typename State::IterationCall
 }
 
 } // namespace cgogn::geometry::udf_stages
+
+#undef UDF_PRECONDITION
 
 #endif // CGOGN_GEOMETRY_ALGOS_UDF_RECONSTRUCTION_STAGES_H_

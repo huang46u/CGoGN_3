@@ -179,7 +179,29 @@ bool run_test(const BenchmarkConfig& config)
 	if (!bytes_same)
 		std::cout << "PLY bytes differ" << std::endl;
 
-	const bool pass = counts_same && bytes_same;
+	// a stage called before the stage producing its input reports invalid_data with the failed precondition
+	bool precondition_ok = false;
+	{
+		Surface surface;
+		Points input_points, samples, spheres;
+		NonManifold skeleton;
+		const bool use_surface = benchmark::load_benchmark_input(config, surface, input_points);
+		typename Reconstruction::Data data;
+		data.surface = use_surface ? &surface : nullptr;
+		data.input_points = &input_points;
+		data.samples = &samples;
+		data.spheres = &spheres;
+		data.skeleton = &skeleton;
+		Reconstruction reconstruction(data, config.reconstruction);
+		reconstruction.initialize_data();
+		const auto status = reconstruction.compute_fitting_data();
+		precondition_ok =
+			status.code == Status::invalid_data && status.message.find("precondition failed") != std::string::npos;
+		std::cout << "precondition check: " << (precondition_ok ? "ok" : "unexpected") << " (" << status.message << ")"
+				  << std::endl;
+	}
+
+	const bool pass = counts_same && bytes_same && precondition_ok;
 	std::cout << (pass ? "PASS" : "FAIL") << std::endl;
 	return pass;
 }
