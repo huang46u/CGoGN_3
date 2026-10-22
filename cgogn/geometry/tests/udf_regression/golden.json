@@ -9,6 +9,16 @@
     },
     "sha256": "f228a7dbb6acf293d3f506ee9c56425481d0349014c28e7d1d527a0dd637b264"
   },
+  "mf_abc_066_profile": {
+    "counts": {
+      "final_spheres": 1669,
+      "sample_points": 157657,
+      "skeleton_edges": 4868,
+      "skeleton_faces": 3200,
+      "skeleton_vertices": 1669
+    },
+    "sha256": "f228a7dbb6acf293d3f506ee9c56425481d0349014c28e7d1d527a0dd637b264"
+  },
   "mf_organic_bug": {
     "counts": {
       "final_spheres": 608,

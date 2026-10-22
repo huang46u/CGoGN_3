@@ -1,4 +1,5 @@
 ﻿#include <cgogn/geometry/benchmark/benchmark_config.h>
+#include <cgogn/geometry/algos/udf/reconstruction_profiles.h>
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -279,7 +280,6 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	BenchmarkConfig config;
 	config.config_path = config_path.string();
 
-	// 1. table defaults, 2. neural model type, 3. model-type defaults, 4. profile (later step), 5. table overrides
 	config.reconstruction = ReconstructionOptions{};
 	if (auto neural_type = root.get_optional<std::string>("input.neural_model_type"))
 	{
@@ -289,7 +289,13 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	config.reconstruction.apply_filtering = default_apply_filtering(config.reconstruction.neural_model_type);
 	config.reconstruction.recompute_normals_after_sampling =
 		default_recompute_normals_after_sampling(config.reconstruction.neural_model_type);
-	// profile (sampling defaults of a dataset) is applied here in a later step
+	// Order: table defaults -> model-type defaults -> profile -> explicit JSON keys (applied by for_each_option below).
+	if (auto profile = root.get_optional<std::string>("profile"))
+	{
+		config.profile = *profile;
+		if (!apply_reconstruction_profile(config.profile, config.reconstruction))
+			fail_config("unknown `profile`: " + config.profile + " (expected default, mf_organic, mf_abc or df)");
+	}
 	for_each_option(config.reconstruction, [&](const OptionInfo& info, auto& value) {
 		if (std::string_view(info.json_key) == "input.neural_model_type")
 			return; // already parsed above
