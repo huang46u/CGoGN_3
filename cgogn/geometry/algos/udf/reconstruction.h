@@ -16,6 +16,7 @@
 #include <cgogn/geometry/algos/normal.h>
 #include <cgogn/geometry/algos/udf/alpha_projection.h>
 #include <cgogn/geometry/algos/udf/alpha_sampling.h>
+#include <cgogn/geometry/algos/udf/input_geometry.h>
 #include <cgogn/geometry/algos/udf/neural_alpha_projection.h>
 #include <cgogn/geometry/algos/udf/neural_field_query.h>
 #include <cgogn/geometry/algos/udf/reconstruction_options.h>
@@ -153,7 +154,7 @@ public:
 
 	Data& data()
 	{
-		invalidate_input_caches();
+		input_.invalidate();
 		return data_;
 	}
 	const Data& data() const
@@ -171,16 +172,11 @@ public:
 
 	void reset()
 	{
-		input_kdtree_.reset();
+		input_.invalidate();
 		sample_kdtree_.reset();
 		sample_ma_kdtree_.reset();
 		sample_vertices_.clear();
 		sample_ma_vertices_.clear();
-		input_vertices_.clear();
-		surface_bvh_.reset();
-		surface_faces_.clear();
-		surface_vertices_.clear();
-		surface_positions_.clear();
 		ray_sampler_.reset();
 		optimizer_.reset();
 		topology_.reset();
@@ -226,6 +222,7 @@ public:
 		skeleton_incident_tets_ = get_or_add_attribute<std::set<std::size_t>, NMFace>(*data_.skeleton, "incident_tets");
 		skeleton_edge_degree_ = get_or_add_attribute<uint32, NMEdge>(*data_.skeleton, "degree");
 		initialized_ = input_position_ && sample_position_ && sample_normal_ && sphere_position_ && skeleton_position_;
+		input_.bind(data_.surface, data_.input_points, input_position_, input_normal_);
 		return initialized_ ? Status::success : Status::invalid_data;
 	}
 
@@ -341,16 +338,11 @@ private:
 	NeuralFieldForward neural_field_{&neural_model_, false, device_};
 	NeuralProjectionWorkspace projection_workspace_;
 	std::unique_ptr<RaySampler> ray_sampler_;
-	std::unique_ptr<acc::KDTree<3, uint32>> input_kdtree_;
+	InputGeometry<SURFACE, POINTS> input_;
 	std::unique_ptr<acc::KDTree<3, uint32>> sample_kdtree_;
 	std::unique_ptr<acc::KDTree<3, uint32>> sample_ma_kdtree_;
-	std::vector<PVertex> input_vertices_;
 	std::vector<PVertex> sample_vertices_;
 	std::vector<PVertex> sample_ma_vertices_;
-	std::unique_ptr<acc::BVHTree<uint32, Vec3>> surface_bvh_;
-	std::vector<SFace> surface_faces_;
-	std::vector<SVertex> surface_vertices_;
-	std::vector<Vec3> surface_positions_;
 	std::unique_ptr<SpheresOptimizerType> optimizer_;
 	std::unique_ptr<TopologyType> topology_;
 	bool fitting_data_computed_ = false;
@@ -381,14 +373,8 @@ private:
 	std::shared_ptr<SkeletonAttribute<PVertex>> skeleton_source_sphere_;
 	std::shared_ptr<SkeletonAttribute<std::set<std::size_t>>> skeleton_incident_tets_;
 	std::shared_ptr<SkeletonAttribute<uint32>> skeleton_edge_degree_;
-	std::shared_ptr<SurfaceAttribute<Vec3>> surface_vertex_normal_;
 
-	void invalidate_input_caches();
-	void build_surface_bvh();
-	void build_input_kdtree();
 	void build_sample_kdtree();
-	bool query_surface_projection_info(const Vec3& query, AlphaProjectionInfo& info);
-	bool query_point_cloud_projection_info(const Vec3& query, AlphaProjectionInfo& info);
 	void recompute_samples_normals_from_input();
 	bool recompute_sample_normal_pca(PVertex vertex);
 	NeuralFieldForward& neural_field()
@@ -399,38 +385,6 @@ private:
 	TopologyType& topology_for();
 	bool evaluate_topology_scores(const std::vector<Vec3>& points, std::vector<Scalar>& values);
 };
-
-template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
-void UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::invalidate_input_caches()
-{
-	input_kdtree_.reset();
-	input_vertices_.clear();
-	surface_bvh_.reset();
-	surface_faces_.clear();
-	surface_vertices_.clear();
-	surface_positions_.clear();
-	surface_vertex_normal_.reset();
-}
-
-template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
-void UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::build_input_kdtree()
-{
-	if (input_kdtree_)
-		return;
-	input_kdtree_.reset();
-	input_vertices_.clear();
-	if (!data_.input_points || !input_position_)
-		return;
-	std::vector<Vec3> positions;
-	foreach_cell(*data_.input_points, [&](PVertex v) {
-		const uint32 idx = index_of(*data_.input_points, v);
-		positions.push_back((*input_position_)[idx]);
-		input_vertices_.push_back(v);
-		return true;
-	});
-	if (!positions.empty())
-		input_kdtree_ = std::make_unique<acc::KDTree<3, uint32>>(positions);
-}
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
 void UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::build_sample_kdtree()
@@ -462,100 +416,20 @@ void UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::build_sampl
 }
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
-void UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::build_surface_bvh()
-{
-	if (surface_bvh_)
-		return;
-	surface_bvh_.reset();
-	surface_faces_.clear();
-	surface_vertices_.clear();
-	surface_positions_.clear();
-	if (!data_.surface)
-		return;
-	auto position = get_attribute<Vec3, SVertex>(*data_.surface, "position");
-	if (!position)
-		return;
-	surface_vertex_normal_ = get_or_add_attribute<Vec3, SVertex>(*data_.surface, "normal");
-	geometry::compute_normal<SVertex>(*data_.surface, position.get(), surface_vertex_normal_.get());
-	auto vertex_index = get_or_add_attribute<uint32, SVertex>(*data_.surface, "__udf_bvh_vertex_index");
-	uint32 next = 0;
-	foreach_cell(*data_.surface, [&](SVertex v) {
-		surface_vertices_.push_back(v);
-		surface_positions_.push_back((*position)[index_of(*data_.surface, v)]);
-		value<uint32>(*data_.surface, vertex_index, v) = next++;
-		return true;
-	});
-	std::vector<uint32> face_indices;
-	foreach_cell(*data_.surface, [&](typename mesh_traits<SURFACE>::Face f) {
-		surface_faces_.push_back(f);
-		foreach_incident_vertex(*data_.surface, f, [&](SVertex v) {
-			face_indices.push_back(value<uint32>(*data_.surface, vertex_index, v));
-			return true;
-		});
-		return true;
-	});
-	remove_attribute<SVertex>(*data_.surface, vertex_index);
-	if (!face_indices.empty() && !surface_positions_.empty())
-		surface_bvh_ = std::make_unique<acc::BVHTree<uint32, Vec3>>(face_indices, surface_positions_);
-}
-
-template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
-bool UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::query_surface_projection_info(
-	const Vec3& query, AlphaProjectionInfo& info)
-{
-	info = AlphaProjectionInfo{};
-	if (!data_.surface || !surface_bvh_ || !surface_vertex_normal_)
-		return false;
-	uint32 primitive;
-	if (!query_surface_closest_point(*surface_bvh_, query, primitive, info.closest_point, info.distance))
-		return false;
-	info.normal = query - info.closest_point;
-	if (info.normal.squaredNorm() < Scalar(1e-12) && primitive < surface_faces_.size())
-		info.normal = geometry::normal(*data_.surface, surface_faces_[primitive], surface_vertex_normal_.get());
-	info.normal = unit_normal_or_z(info.normal);
-	info.valid =
-		info.closest_point.allFinite() && info.normal.allFinite() && std::isfinite(static_cast<double>(info.distance));
-	return info.valid;
-}
-
-template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
-bool UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::query_point_cloud_projection_info(
-	const Vec3& query, AlphaProjectionInfo& info)
-{
-	info = AlphaProjectionInfo{};
-	if (!input_kdtree_ || !data_.input_points || input_vertices_.empty())
-		return false;
-	uint32 point_index;
-	if (!query_point_cloud_nearest_point(*input_kdtree_, query, point_index, info.distance) ||
-		point_index >= input_vertices_.size())
-		return false;
-	const uint32 vertex_index = index_of(*data_.input_points, input_vertices_[point_index]);
-	if (vertex_index == INVALID_INDEX)
-		return false;
-	info.closest_point = (*input_position_)[vertex_index];
-	info.normal = query - info.closest_point;
-	if (info.normal.squaredNorm() < Scalar(1e-12))
-		info.normal = (*input_normal_)[vertex_index];
-	info.normal = unit_normal_or_z(info.normal);
-	info.valid =
-		info.closest_point.allFinite() && info.normal.allFinite() && std::isfinite(static_cast<double>(info.distance));
-	return info.valid;
-}
-
-template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
 void UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::recompute_samples_normals_from_input()
 {
-	if (!input_kdtree_ && data_.surface)
+	input_.bind(data_.surface, data_.input_points, input_position_, input_normal_);
+	if (!input_.input_kdtree() && data_.surface)
 	{
-		build_surface_bvh();
-		if (surface_bvh_)
+		input_.build_surface_bvh();
+		if (input_.surface_bvh())
 		{
 			foreach_cell(*data_.samples, [&](PVertex v) {
 				const uint32 idx = index_of(*data_.samples, v);
 				const Vec3& position = (*sample_position_)[idx];
 				std::pair<uint32, Vec3> closest;
 				Vec3 normal(0, 0, 1);
-				if (surface_bvh_->closest_point(position, &closest))
+				if (input_.surface_bvh()->closest_point(position, &closest))
 				{
 					normal = unit_normal_or_z(position - closest.second);
 				}
@@ -565,16 +439,16 @@ void UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::recompute_s
 			return;
 		}
 	}
-	if (input_kdtree_ && data_.input_points)
+	if (input_.input_kdtree() && data_.input_points)
 	{
 		foreach_cell(*data_.samples, [&](PVertex v) {
 			const uint32 idx = index_of(*data_.samples, v);
 			const Vec3& position = (*sample_position_)[idx];
 			std::pair<uint32, Scalar> nearest;
 			Vec3 normal(0, 0, 1);
-			if (input_kdtree_->find_nn(position, &nearest) && nearest.first < input_vertices_.size())
+			if (input_.input_kdtree()->find_nn(position, &nearest) && nearest.first < input_.input_vertices().size())
 			{
-				const uint32 input_idx = index_of(*data_.input_points, input_vertices_[nearest.first]);
+				const uint32 input_idx = index_of(*data_.input_points, input_.input_vertices()[nearest.first]);
 				if (input_idx != INVALID_INDEX)
 				{
 					normal = position - (*input_position_)[input_idx];
@@ -714,17 +588,18 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 {
 	if (initialize_data() != Status::success)
 		return Status::invalid_data;
-	invalidate_input_caches();
-	build_input_kdtree();
+	input_.bind(data_.surface, data_.input_points, input_position_, input_normal_);
+	input_.invalidate();
+	input_.build_input_kdtree();
 	if constexpr (std::is_same_v<RaySamplerTag, RaySamplerPointCloud>)
 	{
-		if (!input_kdtree_ || !input_normal_ || !input_knn_)
+		if (!input_.input_kdtree() || !input_normal_ || !input_knn_)
 			return Status::invalid_data;
-		compute_input_normals(*data_.input_points, *input_position_, *input_normal_, *input_knn_, *input_kdtree_,
-							  input_vertices_, options_.knn_k);
+		compute_input_normals(*data_.input_points, *input_position_, *input_normal_, *input_knn_, *input_.input_kdtree(),
+							  input_.input_vertices(), options_.knn_k);
 	}
 	else if constexpr (std::is_same_v<RaySamplerTag, RaySamplerSurface>)
-		build_surface_bvh();
+		input_.build_surface_bvh();
 
 	Vec3 bbox_min(0, 0, 0), bbox_max(1, 1, 1);
 	if constexpr (std::is_same_v<RaySamplerTag, RaySamplerNeural>)
@@ -747,7 +622,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	}
 	else if constexpr (std::is_same_v<RaySamplerTag, RaySamplerSurface>)
 	{
-		if (!data_.surface || !surface_bvh_)
+		if (!data_.surface || !input_.surface_bvh())
 			return Status::invalid_data;
 		auto s_pos = get_attribute<Vec3, SVertex>(*data_.surface, "position");
 		std::tie(bbox_min, bbox_max) = geometry::bounding_box(*s_pos);
@@ -767,11 +642,11 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	else if constexpr (std::is_same_v<RaySamplerTag, RaySamplerSurface>)
 	{
 		auto s_pos = get_attribute<Vec3, SVertex>(*data_.surface, "position");
-		traits = RayConfig::make(*data_.surface, s_pos.get(), surface_bvh_.get(), &surface_faces_);
+		traits = RayConfig::make(*data_.surface, s_pos.get(), input_.surface_bvh().get(), &input_.surface_faces());
 	}
 	else
 		traits = RayConfig::make(*data_.input_points, input_position_.get(), input_normal_.get(), input_knn_.get(),
-								 input_kdtree_.get(), &input_vertices_);
+								 input_.input_kdtree().get(), &input_.input_vertices());
 	if (!traits.is_ready())
 		return Status::invalid_data;
 	RayParams ray_params;
@@ -819,9 +694,9 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 				AlphaProjectionInfo info;
 				const bool query_ok = [&]() {
 					if constexpr (std::is_same_v<RaySamplerTag, RaySamplerSurface>)
-						return query_surface_projection_info(points[i], info);
+						return input_.query_surface_projection_info(points[i], info);
 					else
-						return query_point_cloud_projection_info(points[i], info);
+						return input_.query_point_cloud_projection_info(points[i], info);
 				}();
 				if (!query_ok || !info.valid || !points[i].allFinite() || !info.normal.allFinite())
 					return;
@@ -846,9 +721,9 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 			points, pp,
 			[&](const Vec3& p, AlphaProjectionInfo& info) {
 				if constexpr (std::is_same_v<RaySamplerTag, RaySamplerSurface>)
-					return query_surface_projection_info(p, info);
+					return input_.query_surface_projection_info(p, info);
 				else
-					return query_point_cloud_projection_info(p, info);
+					return input_.query_point_cloud_projection_info(p, info);
 			},
 			projection);
 	};
@@ -875,24 +750,25 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 {
 	if (!options_.apply_filtering || !data_.samples || nb_cells<PVertex>(*data_.samples) == 0)
 		return Status::success;
-	build_input_kdtree();
-	if (!input_kdtree_)
-		build_surface_bvh();
+	input_.bind(data_.surface, data_.input_points, input_position_, input_normal_);
+	input_.build_input_kdtree();
+	if (!input_.input_kdtree())
+		input_.build_surface_bvh();
 	std::vector<Vec3> kept, kept_normals;
 	kept.reserve(nb_cells<PVertex>(*data_.samples));
 	foreach_cell(*data_.samples, [&](PVertex v) {
 		const Vec3 p = (*sample_position_)[index_of(*data_.samples, v)];
 		bool within_distance = false;
 		const Scalar max_distance = Scalar(options_.alpha) + udf_constants::filter_margin;
-		if (input_kdtree_)
+		if (input_.input_kdtree())
 		{
 			std::pair<uint32, Scalar> nearest;
-			within_distance = input_kdtree_->find_nn(p, &nearest, max_distance);
+			within_distance = input_.input_kdtree()->find_nn(p, &nearest, max_distance);
 		}
-		else if (surface_bvh_)
+		else if (input_.surface_bvh())
 		{
 			std::pair<uint32, Vec3> closest;
-			within_distance = surface_bvh_->closest_point(p, &closest, max_distance);
+			within_distance = input_.surface_bvh()->closest_point(p, &closest, max_distance);
 		}
 		if (within_distance)
 		{
@@ -1186,6 +1062,7 @@ template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RayS
 bool UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::evaluate_topology_scores(
 	const std::vector<Vec3>& points, std::vector<Scalar>& values)
 {
+	input_.bind(data_.surface, data_.input_points, input_position_, input_normal_);
 	if constexpr (std::is_same_v<RaySamplerTag, RaySamplerNeural>)
 	{
 		if (options_.neural_model_type == NeuralModelType::mf)
@@ -1209,8 +1086,8 @@ bool UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::evaluate_to
 	}
 	else if constexpr (std::is_same_v<RaySamplerTag, RaySamplerSurface>)
 	{
-		build_surface_bvh();
-		if (!surface_bvh_)
+		input_.build_surface_bvh();
+		if (!input_.surface_bvh())
 			return false;
 		values.resize(points.size());
 		std::atomic<bool> all_found{true};
@@ -1218,7 +1095,7 @@ bool UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::evaluate_to
 			uint32 primitive;
 			Vec3 closest;
 			Scalar distance;
-			if (!query_surface_closest_point(*surface_bvh_, points[i], primitive, closest, distance))
+			if (!query_surface_closest_point(*input_.surface_bvh(), points[i], primitive, closest, distance))
 			{
 				all_found = false;
 				return;
@@ -1231,15 +1108,15 @@ bool UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::evaluate_to
 	}
 	else
 	{
-		build_input_kdtree();
-		if (!input_kdtree_)
+		input_.build_input_kdtree();
+		if (!input_.input_kdtree())
 			return false;
 		values.resize(points.size());
 		std::atomic<bool> all_found{true};
 		detail::parallel_for_index(points.size(), [&](std::size_t i) {
 			uint32 point;
 			Scalar distance;
-			if (!query_point_cloud_nearest_point(*input_kdtree_, points[i], point, distance))
+			if (!query_point_cloud_nearest_point(*input_.input_kdtree(), points[i], point, distance))
 			{
 				all_found = false;
 				return;
@@ -1257,7 +1134,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Result 
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::run(const IterationCallback& callback)
 {
 	Result r;
-	invalidate_input_caches();
+	input_.invalidate();
 	if (data_.samples)
 		clear(*data_.samples);
 	if (data_.spheres)
