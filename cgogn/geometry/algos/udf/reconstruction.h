@@ -16,17 +16,21 @@
 #include <cgogn/geometry/algos/normal.h>
 #include <cgogn/geometry/algos/udf/alpha_projection.h>
 #include <cgogn/geometry/algos/udf/alpha_sampling.h>
+#include <cgogn/geometry/algos/udf/distance_field.h>
 #include <cgogn/geometry/algos/udf/input_geometry.h>
 #include <cgogn/geometry/algos/udf/neural_alpha_projection.h>
+#include <cgogn/geometry/algos/udf/neural_distance_field.h>
 #include <cgogn/geometry/algos/udf/neural_field_query.h>
 #include <cgogn/geometry/algos/udf/reconstruction_options.h>
 #include <cgogn/geometry/algos/udf/reconstruction_stats.h>
 #include <cgogn/geometry/algos/udf/sample_processing.h>
 #include <cgogn/geometry/algos/udf/skeleton_topology.h>
 #include <cgogn/geometry/algos/udf/spatial_query.h>
+#include <cgogn/geometry/algos/udf/surface_distance_field.h>
 #include <cgogn/geometry/algos/udf/neural_model_type.h>
 #include <cgogn/geometry/algos/udf/normal_utils.h>
 #include <cgogn/geometry/algos/udf/parallel_for.h>
+#include <cgogn/geometry/algos/udf/point_cloud_distance_field.h>
 #include <cgogn/geometry/algos/udf/spheres_optimizer.h>
 #include <cgogn/geometry/functions/bounding_box.h>
 #include <cgogn/geometry/functions/normal.h>
@@ -96,7 +100,8 @@ public:
 	using SpheresOptimizerType = SpheresOptimizer<POINTS>;
 	using SpheresOptimizerMetrics = typename SpheresOptimizerType::Metrics;
 	using TopologyType = SkeletonTopology<POINTS, NONMANIFOLD>;
-	using RayConfig = RaySamplerTraits<RaySamplerTag, SURFACE, POINTS>;
+	using Field = typename DistanceFieldFor<RaySamplerTag, SURFACE, POINTS>::type;
+	using RayConfig = typename Field::RayConfig;
 	using RayTraits = typename RayConfig::SamplerTraits;
 	using RaySampler = RayLevelSetSampler<RayTraits>;
 	using RayParams = typename RaySampler::Params;
@@ -180,8 +185,7 @@ public:
 		ray_sampler_.reset();
 		optimizer_.reset();
 		topology_.reset();
-		neural_model_loaded_ = false;
-		neural_field_ = NeuralFieldForward(&neural_model_, false, device_);
+		field_.reset();
 		fitting_data_computed_ = false;
 		samples_before_filtering_ = 0;
 		initialized_ = false;
@@ -228,30 +232,10 @@ public:
 
 	Status load_neural_model(const std::filesystem::path& path, NeuralModelType type)
 	{
-		if constexpr (!std::is_same_v<RaySamplerTag, RaySamplerNeural>)
-		{
-			(void)path;
-			(void)type;
+		if (!field_.load_model(path, type))
 			return Status::model_load_failed;
-		}
-		else
-		{
-			try
-			{
-				neural_model_ = torch::jit::load(path.string(), device_);
-				neural_model_.eval();
-				neural_model_loaded_ = true;
-				neural_field_ = NeuralFieldForward(&neural_model_, true, device_);
-				options_.neural_model_type = type;
-				return Status::success;
-			}
-			catch (const c10::Error&)
-			{
-				neural_model_loaded_ = false;
-				neural_field_ = NeuralFieldForward(&neural_model_, false, device_);
-				return Status::model_load_failed;
-			}
-		}
+		options_.neural_model_type = type;
+		return Status::success;
 	}
 
 	Status sample_alpha_level_set();
@@ -330,15 +314,11 @@ public:
 private:
 	Data data_;
 	Options options_;
-	torch::Device device_ = torch::cuda::is_available() ? torch::Device(torch::kCUDA, 0) : torch::Device(torch::kCPU);
-	torch::jit::Module neural_model_;
-	bool neural_model_loaded_ = false;
-	// one wrapper for the loaded model: it remembers the output layout found by its first forward, so MF models
-	// do not go through autograd again on every call
-	NeuralFieldForward neural_field_{&neural_model_, false, device_};
-	NeuralProjectionWorkspace projection_workspace_;
 	std::unique_ptr<RaySampler> ray_sampler_;
 	InputGeometry<SURFACE, POINTS> input_;
+	// distance field of the input kind (CPU fields or the neural model); it refers to input_ and options_, so it is
+	// declared after them
+	Field field_{input_, options_};
 	std::unique_ptr<acc::KDTree<3, uint32>> sample_kdtree_;
 	std::unique_ptr<acc::KDTree<3, uint32>> sample_ma_kdtree_;
 	std::vector<PVertex> sample_vertices_;
@@ -377,13 +357,22 @@ private:
 	void build_sample_kdtree();
 	void recompute_samples_normals_from_input();
 	bool recompute_sample_normal_pca(PVertex vertex);
-	NeuralFieldForward& neural_field()
-	{
-		return neural_field_;
-	}
 	SpheresOptimizerType& optimizer_for();
 	TopologyType& topology_for();
 	bool evaluate_topology_scores(const std::vector<Vec3>& points, std::vector<Scalar>& values);
+	static Status status_of(FieldPrepareResult result)
+	{
+		switch (result)
+		{
+		case FieldPrepareResult::ok:
+			return Status::success;
+		case FieldPrepareResult::invalid_data:
+			return Status::invalid_data;
+		case FieldPrepareResult::model_not_loaded:
+			return Status::model_load_failed;
+		}
+		return Status::invalid_data;
+	}
 };
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
@@ -591,62 +580,20 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	input_.bind(data_.surface, data_.input_points, input_position_, input_normal_);
 	input_.invalidate();
 	input_.build_input_kdtree();
-	if constexpr (std::is_same_v<RaySamplerTag, RaySamplerPointCloud>)
-	{
-		if (!input_.input_kdtree() || !input_normal_ || !input_knn_)
-			return Status::invalid_data;
-		compute_input_normals(*data_.input_points, *input_position_, *input_normal_, *input_knn_, *input_.input_kdtree(),
-							  input_.input_vertices(), options_.knn_k);
-	}
-	else if constexpr (std::is_same_v<RaySamplerTag, RaySamplerSurface>)
-		input_.build_surface_bvh();
+	const PrepareInputs<SURFACE, POINTS> inputs{data_.surface, data_.input_points, input_position_, input_normal_,
+												input_knn_};
+	if (const FieldPrepareResult prepared = field_.prepare(inputs); prepared != FieldPrepareResult::ok)
+		return status_of(prepared);
 
 	Vec3 bbox_min(0, 0, 0), bbox_max(1, 1, 1);
-	if constexpr (std::is_same_v<RaySamplerTag, RaySamplerNeural>)
-	{
-		if (!neural_model_loaded_)
-			return Status::model_load_failed;
-		if (options_.neural_model_type == NeuralModelType::udf)
-		{
-			bbox_min = Vec3(-0.5, -0.5, -0.5);
-			bbox_max = Vec3(0.5, 0.5, 0.5);
-		}
-		if (data_.surface && nb_cells<SVertex>(*data_.surface) > 0)
-		{
-			auto position = get_attribute<Vec3, SVertex>(*data_.surface, "position");
-			if (position)
-				std::tie(bbox_min, bbox_max) = geometry::bounding_box(*position);
-		}
-		else if (data_.input_points && nb_cells<PVertex>(*data_.input_points) > 0)
-			std::tie(bbox_min, bbox_max) = geometry::bounding_box(*input_position_);
-	}
-	else if constexpr (std::is_same_v<RaySamplerTag, RaySamplerSurface>)
-	{
-		if (!data_.surface || !input_.surface_bvh())
-			return Status::invalid_data;
-		auto s_pos = get_attribute<Vec3, SVertex>(*data_.surface, "position");
-		std::tie(bbox_min, bbox_max) = geometry::bounding_box(*s_pos);
-	}
-	else if (data_.input_points && nb_cells<PVertex>(*data_.input_points) > 0)
-		std::tie(bbox_min, bbox_max) = geometry::bounding_box(*input_position_);
+	if (const FieldPrepareResult boxed = field_.sampling_box(inputs, bbox_min, bbox_max);
+		boxed != FieldPrepareResult::ok)
+		return status_of(boxed);
 	const Scalar padding = udf_constants::sampling_padding;
 	bbox_min -= Vec3(padding, padding, padding);
 	bbox_max += Vec3(padding, padding, padding);
 
-	RayTraits traits;
-	// NeuralFieldRayTraits stores a pointer, so keep this object alive through
-	// the complete sample_alpha_level_set call below.
-	NeuralFieldForward sampling_field = neural_field();
-	if constexpr (std::is_same_v<RaySamplerTag, RaySamplerNeural>)
-		traits = RayConfig::make(sampling_field);
-	else if constexpr (std::is_same_v<RaySamplerTag, RaySamplerSurface>)
-	{
-		auto s_pos = get_attribute<Vec3, SVertex>(*data_.surface, "position");
-		traits = RayConfig::make(*data_.surface, s_pos.get(), input_.surface_bvh().get(), &input_.surface_faces());
-	}
-	else
-		traits = RayConfig::make(*data_.input_points, input_position_.get(), input_normal_.get(), input_knn_.get(),
-								 input_.input_kdtree().get(), &input_.input_vertices());
+	RayTraits traits = field_.ray_traits(inputs);
 	if (!traits.is_ready())
 		return Status::invalid_data;
 	RayParams ray_params;
@@ -659,9 +606,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	ray_params.min_active_rays = options_.udf_min_active_rays;
 	ray_params.max_outer_iterations = 10;
 	ray_params.seed = options_.seed;
-	torch::Device sampling_device = torch::kCPU;
-	if constexpr (std::is_same_v<RaySamplerTag, RaySamplerNeural>)
-		sampling_device = device_;
+	torch::Device sampling_device = field_.sampling_device();
 	if (!ray_sampler_)
 		ray_sampler_ = std::make_unique<RaySampler>(ray_params, sampling_device);
 	else
@@ -681,51 +626,11 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 							   std::vector<uint8_t>& keep) {
 		keep.assign(points.size(), uint8_t(0));
 		normals.assign(points.size(), Vec3(0, 0, 1));
-		if constexpr (std::is_same_v<RaySamplerTag, RaySamplerNeural>)
-		{
-			if (!evaluate_udf_normals(neural_field(), points, static_cast<size_t>(options_.batch_size),
-									  projection_workspace_, normals))
-				return false;
-			std::fill(keep.begin(), keep.end(), uint8_t(1));
-		}
-		else
-		{
-			detail::parallel_for_index(points.size(), [&](std::size_t i) {
-				AlphaProjectionInfo info;
-				const bool query_ok = [&]() {
-					if constexpr (std::is_same_v<RaySamplerTag, RaySamplerSurface>)
-						return input_.query_surface_projection_info(points[i], info);
-					else
-						return input_.query_point_cloud_projection_info(points[i], info);
-				}();
-				if (!query_ok || !info.valid || !points[i].allFinite() || !info.normal.allFinite())
-					return;
-				normals[i] = unit_normal_or_z(info.normal);
-				keep[i] = uint8_t(1);
-			});
-		}
-		return true;
+		return field_.normals(points, normals, keep);
 	};
+	const AlphaProjectionParameters pp{Scalar(options_.alpha), Scalar(options_.tolerance), bbox_min, bbox_max, 1};
 	auto project_points = [&](const std::vector<Vec3>& points, AlphaProjectionResult& projection) {
-		if constexpr (std::is_same_v<RaySamplerTag, RaySamplerNeural>)
-		{
-			const AlphaProjectionParameters pp{Scalar(options_.alpha), Scalar(options_.tolerance), bbox_min, bbox_max, 1};
-			const bool filter_positive = options_.neural_model_type == NeuralModelType::mf;
-			if (!geometry::project_points_to_alpha(neural_field(), points, pp, filter_positive,
-												  projection_workspace_, projection))
-				return false;
-			return true;
-		}
-		const AlphaProjectionParameters pp{Scalar(options_.alpha), Scalar(options_.tolerance), bbox_min, bbox_max, 1};
-		return geometry::project_points_to_alpha(
-			points, pp,
-			[&](const Vec3& p, AlphaProjectionInfo& info) {
-				if constexpr (std::is_same_v<RaySamplerTag, RaySamplerSurface>)
-					return input_.query_surface_projection_info(p, info);
-				else
-					return input_.query_point_cloud_projection_info(p, info);
-			},
-			projection);
+		return field_.project(points, pp, projection);
 	};
 	AlphaSamplingResult result =
 		geometry::sample_alpha_level_set(traits, *ray_sampler_, params, compute_normals, project_points);
@@ -842,7 +747,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 		return Status::invalid_data;
 	const Scalar fallback_radius = Scalar(options_.alpha);
 	const Scalar min_norm = Scalar(1e-12);
-	const bool neural_input = std::is_same_v<RaySamplerTag, RaySamplerNeural> && neural_model_loaded_;
+	const bool neural_input = std::is_same_v<RaySamplerTag, RaySamplerNeural> && field_.loaded();
 	const bool mf_model = neural_input && options_.neural_model_type == NeuralModelType::mf;
 	const bool udf_model = neural_input && options_.neural_model_type == NeuralModelType::udf;
 	const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(10), Scalar(0));
@@ -911,10 +816,13 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 		auto scores = [&](const std::vector<Vec3>& points, std::vector<Scalar>& values,
 						  std::vector<Scalar>& sdf) -> bool {
 			sdf.clear();
-			if (!mf_model)
-				return evaluate_topology_scores(points, values);
-			return evaluate_udf_values_sdf(neural_field(), points, static_cast<size_t>(options_.batch_size), values,
-										   sdf);
+			if constexpr (Field::is_neural_type)
+			{
+				if (mf_model)
+					return evaluate_udf_values_sdf(field_.forward(), points, static_cast<size_t>(options_.batch_size),
+												   values, sdf);
+			}
+			return evaluate_topology_scores(points, values);
 		};
 		if (supported)
 		{
@@ -1082,7 +990,7 @@ bool UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::evaluate_to
 			});
 			return true;
 		}
-		return evaluate_udf_values(neural_field(), points, static_cast<size_t>(options_.batch_size), values);
+		return evaluate_udf_values(field_.forward(), points, static_cast<size_t>(options_.batch_size), values);
 	}
 	else if constexpr (std::is_same_v<RaySamplerTag, RaySamplerSurface>)
 	{
