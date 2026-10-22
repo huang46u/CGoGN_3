@@ -62,6 +62,25 @@
 namespace cgogn::geometry
 {
 
+// Fixed constants of the reconstruction (not user options). Lengths are absolute, in model units (the inputs are
+// rescaled to [0,1] before the reconstruction).
+namespace udf_constants
+{
+// Padding added on each side of the input bounding box. The padded box is the sampling domain and the box the
+// projected points are clamped to.
+inline constexpr Scalar sampling_padding = Scalar(0.1);
+// Relative enlargement of the padded sampling box from which the seed rays are cast (its half size is multiplied by
+// 1 + ray_box_relative_expand). Overrides the ray sampler default (0.1).
+inline constexpr Scalar ray_box_relative_expand = Scalar(0.05);
+// Samples farther than alpha + filter_margin from the input are removed by the sampling filter.
+inline constexpr Scalar filter_margin = Scalar(1e-2);
+// MAFlipPrune, neural UDF: a medial centre is retried when its UDF value exceeds this factor times alpha.
+inline constexpr Scalar udf_flip_threshold_factor = Scalar(1.2);
+// MAFlipPrune, MF: range the ma_flip_prune_alpha_factor option is clamped to.
+inline constexpr Scalar mf_flip_alpha_factor_min = Scalar(1);
+inline constexpr Scalar mf_flip_alpha_factor_max = Scalar(5);
+} // namespace udf_constants
+
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
 class UDFReconstruction
 {
@@ -757,9 +776,9 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	}
 	else if (data_.input_points && nb_cells<PVertex>(*data_.input_points) > 0)
 		std::tie(bbox_min, bbox_max) = geometry::bounding_box(*input_position_);
-	const Scalar bbox_expand = Scalar(0.1);
-	bbox_min -= Vec3(bbox_expand, bbox_expand, bbox_expand);
-	bbox_max += Vec3(bbox_expand, bbox_expand, bbox_expand);
+	const Scalar padding = udf_constants::sampling_padding;
+	bbox_min -= Vec3(padding, padding, padding);
+	bbox_max += Vec3(padding, padding, padding);
 
 	RayTraits traits;
 	// NeuralFieldRayTraits stores a pointer, so keep this object alive through
@@ -778,7 +797,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	if (!traits.is_ready())
 		return Status::invalid_data;
 	RayParams ray_params;
-	ray_params.bbox_expand = Scalar(0.05);
+	ray_params.bbox_expand = udf_constants::ray_box_relative_expand;
 	ray_params.alpha = Scalar(options_.alpha);
 	ray_params.tol = Scalar(options_.tolerance);
 	ray_params.step_bound = Scalar(2.0);
@@ -886,7 +905,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	foreach_cell(*data_.samples, [&](PVertex v) {
 		const Vec3 p = (*sample_position_)[index_of(*data_.samples, v)];
 		bool within_distance = false;
-		const Scalar max_distance = Scalar(options_.alpha) + Scalar(1e-2);
+		const Scalar max_distance = Scalar(options_.alpha) + udf_constants::filter_margin;
 		if (input_kdtree_)
 		{
 			std::pair<uint32, Scalar> nearest;
@@ -1027,9 +1046,12 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	{
 		uint32 flipped = 0, deleted = 0;
 		std::vector<uint32> flipped_indices;
-		const Scalar udf_threshold = udf_model ? Scalar(1.2) * fallback_radius : fallback_radius;
+		const Scalar udf_threshold =
+			udf_model ? udf_constants::udf_flip_threshold_factor * fallback_radius : fallback_radius;
 		const Scalar mf_threshold =
-			fallback_radius * std::max(Scalar(1), std::min(Scalar(5), Scalar(options_.ma_flip_prune_alpha_factor)));
+			fallback_radius * std::max(udf_constants::mf_flip_alpha_factor_min,
+									   std::min(udf_constants::mf_flip_alpha_factor_max,
+												Scalar(options_.ma_flip_prune_alpha_factor)));
 		const bool supported = mf_model || std::is_same_v<RaySamplerTag, RaySamplerSurface> ||
 							   std::is_same_v<RaySamplerTag, RaySamplerPointCloud> || neural_input;
 		auto scores = [&](const std::vector<Vec3>& points, std::vector<Scalar>& values,
