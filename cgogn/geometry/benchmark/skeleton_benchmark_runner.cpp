@@ -22,6 +22,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace cgogn::geometry::benchmark
@@ -72,13 +73,13 @@ bool import_surface(CMap2& surface, const std::string& filename)
 	return false;
 }
 
-int residual_prune_mode_index(const std::string& mode)
+template <typename T>
+void put_option_value(boost::property_tree::ptree& tree, const char* key, const T& value)
 {
-	if (mode == "keep_fully_non_manifold")
-		return 1;
-	if (mode == "collapsible_only")
-		return 2;
-	return 0;
+	if constexpr (std::is_enum_v<T>)
+		tree.put(key, to_string(value));
+	else
+		tree.put(key, value);
 }
 
 template <typename RaySamplerTag>
@@ -93,7 +94,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	BenchmarkResult result;
 	result.input_mode = to_string(config.input.mode);
 	result.input_path = geometry_input_path_for_run(config);
-	result.seed = config.initialization.seed;
+	result.seed = config.reconstruction.seed;
 	Surface surface;
 	Points input_points, samples, spheres;
 	NonManifold skeleton;
@@ -109,7 +110,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 		if (!position)
 			throw std::runtime_error("Imported surface has no position attribute.");
 		geometry::rescale_centered(*position, 1);
-		if (neural && config.input.neural_model_type == NeuralModelType::udf)
+		if (neural && config.reconstruction.neural_model_type == NeuralModelType::udf)
 		{
 			geometry::normalize_centered(*position);
 		}
@@ -122,7 +123,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 		if (!position)
 			throw std::runtime_error("Imported point cloud has no position attribute.");
 		geometry::rescale_centered(*position, 1);
-		if (neural && config.input.neural_model_type == NeuralModelType::udf)
+		if (neural && config.reconstruction.neural_model_type == NeuralModelType::udf)
 		{
 			geometry::normalize_centered(*position);
 		}
@@ -136,25 +137,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	data.samples = &samples;
 	data.spheres = &spheres;
 	data.skeleton = &skeleton;
-	typename Reconstruction::Options options;
-	options.neural_model_type = config.input.neural_model_type;
-	options.ma_flip_prune = config.input.ma_flip_prune;
-	options.ma_flip_prune_alpha_factor = config.input.ma_flip_prune_alpha_factor;
-	options.alpha = config.sampling.alpha;
-	options.knn_k = config.sampling.knn_k;
-	options.apply_filtering =
-		config.sampling.apply_filtering.value_or(default_apply_filtering(config.input.neural_model_type));
-	options.recompute_normals_after_sampling = config.sampling.recompute_normals_after_sampling.value_or(
-		default_recompute_normals_after_sampling(config.input.neural_model_type));
-	options.sample_radius = config.sampling.sample_radius;
-	options.sqem_update_lambda_line_plane = config.optimization.sqem_update_lambda_line_plane;
-	options.seed = config.initialization.seed;
-	options.init_dilation_constant = config.initialization.init_dilation_constant;
-	options.residual_prune = config.postprocess.residual_prune;
-	options.residual_prune_mode =
-		static_cast<ResidualPruneOption>(residual_prune_mode_index(config.postprocess.residual_prune_mode));
-	options.alpha_sampling_candidates_per_parent = config.sampling.candidates_per_parent;
-	options.alpha_sampling_parent_batch_size = config.sampling.parent_batch_size;
+	typename Reconstruction::Options options = config.reconstruction;
 
 	Reconstruction reconstruction(data, options);
 	const auto preprocessing_start = std::chrono::high_resolution_clock::now();
@@ -226,19 +209,11 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	root.put("seed", result.seed);
 
 	boost::property_tree::ptree benchmark_config;
-	benchmark_config.put("initialization.init_dilation_constant", config.initialization.init_dilation_constant);
 	benchmark_config.put("input.geometry_type", to_string(config.input.geometry_type));
-	benchmark_config.put("input.ma_flip_prune", config.input.ma_flip_prune);
-	benchmark_config.put("input.ma_flip_prune_alpha_factor", config.input.ma_flip_prune_alpha_factor);
-	benchmark_config.put("postprocess.residual_prune", config.postprocess.residual_prune);
-	benchmark_config.put("postprocess.residual_prune_mode", config.postprocess.residual_prune_mode);
-	benchmark_config.put("sampling.bridson.candidates_per_parent", config.sampling.candidates_per_parent);
-	benchmark_config.put("sampling.bridson.parent_batch_size", config.sampling.parent_batch_size);
-	benchmark_config.put("sampling.apply_filtering",
-						 config.sampling.apply_filtering.value_or(default_apply_filtering(config.input.neural_model_type)));
-	benchmark_config.put("sampling.recompute_normals_after_sampling",
-						 config.sampling.recompute_normals_after_sampling.value_or(
-							 default_recompute_normals_after_sampling(config.input.neural_model_type)));
+	for_each_option(config.reconstruction, [&](const OptionInfo& info, const auto& value) {
+		put_option_value(benchmark_config, info.json_key, value);
+	});
+	benchmark_config.put("profile", config.profile.empty() ? std::string("none") : config.profile);
 	root.add_child("benchmark_config", benchmark_config);
 
 	boost::property_tree::ptree counts;
@@ -254,7 +229,7 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	root.add_child("counts", counts);
 
 	boost::property_tree::ptree residual_prune;
-	residual_prune.put("mode", config.postprocess.residual_prune_mode);
+	residual_prune.put("mode", to_string(config.reconstruction.residual_prune_mode));
 	residual_prune.put("residual_removed_sheets", result.residual_prune.residual_removed_sheets);
 	residual_prune.put("residual_removed_faces", result.residual_prune.residual_removed_faces);
 	residual_prune.put("residual_chi_before", result.residual_prune.residual_chi_before);

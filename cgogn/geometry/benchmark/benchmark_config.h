@@ -2,8 +2,8 @@
 #define CGOGN_GEOMETRY_BENCHMARK_CONFIG_H_
 
 #include <cgogn/geometry/algos/udf/neural_model_type.h>
+#include <cgogn/geometry/algos/udf/reconstruction_options.h>
 
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -38,38 +38,6 @@ struct BenchmarkInputConfig
 	std::string input_path;
 	std::string surface_path;
 	std::string neural_udf_model_path;
-	NeuralModelType neural_model_type = NeuralModelType::udf;
-	bool ma_flip_prune = true;
-	float ma_flip_prune_alpha_factor = 1.0f;
-};
-
-struct BenchmarkSamplingConfig
-{
-	float alpha = 0.005f;
-	int knn_k = 10;
-	float sample_radius = 0.0025f;
-	int candidates_per_parent = 12;
-	int parent_batch_size = 1024;
-	// unset: default of the neural model type (default_apply_filtering / default_recompute_normals_after_sampling)
-	std::optional<bool> apply_filtering;
-	std::optional<bool> recompute_normals_after_sampling;
-};
-
-struct BenchmarkOptimizationConfig
-{
-	float sqem_update_lambda_line_plane = 0.20f;
-};
-
-struct BenchmarkInitializationConfig
-{
-	int seed = 42;
-	float init_dilation_constant = 0.001f;
-};
-
-struct BenchmarkPostprocessConfig
-{
-	bool residual_prune = false;
-	std::string residual_prune_mode = "collapsible_only";
 };
 
 struct BenchmarkRuntimeConfig
@@ -103,10 +71,8 @@ struct BenchmarkConfig
 {
 	std::string config_path;
 	BenchmarkInputConfig input;
-	BenchmarkSamplingConfig sampling;
-	BenchmarkOptimizationConfig optimization;
-	BenchmarkInitializationConfig initialization;
-	BenchmarkPostprocessConfig postprocess;
+	cgogn::geometry::ReconstructionOptions reconstruction;
+	std::string profile;
 	BenchmarkRuntimeConfig benchmark;
 	BenchmarkOutputConfig output;
 	BenchmarkBatchConfig batch;

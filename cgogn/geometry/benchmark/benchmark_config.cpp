@@ -7,7 +7,11 @@
 #include <cctype>
 #include <cmath>
 #include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
+#include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace cgogn
@@ -153,13 +157,42 @@ InputGeometryType parse_input_geometry_type(const std::string& value)
 	fail_config("unsupported `input.geometry_type`: " + value);
 }
 
-NeuralModelType parse_neural_model_type(const std::string& value)
+std::string format_number(double value)
 {
-	if (value == "udf")
-		return NeuralModelType::udf;
-	if (value == "mf")
-		return NeuralModelType::mf;
-	fail_config("unsupported `input.neural_model_type`: " + value);
+	std::ostringstream stream;
+	stream << std::setprecision(15) << value;
+	return stream.str();
+}
+
+// Reads one table option from its dotted json key; absent keys keep the current value.
+template <typename T>
+void read_option(const ptree& root, const OptionInfo& info, T& value)
+{
+	if constexpr (std::is_same_v<T, NeuralModelType> || std::is_same_v<T, ResidualPruneOption>)
+	{
+		if (auto raw = root.get_optional<std::string>(info.json_key))
+		{
+			if (!cgogn::geometry::parse(*raw, value))
+				fail_config(std::string("unsupported `") + info.json_key + "`: " + *raw);
+		}
+	}
+	else if (auto parsed = root.get_optional<T>(info.json_key))
+	{
+		value = *parsed;
+	}
+}
+
+// Range check for int/float options only; bool and enum entries carry no range.
+template <typename T>
+void validate_option_range(const OptionInfo& info, const T& value)
+{
+	if constexpr (std::is_arithmetic_v<T> && !std::is_same_v<T, bool>)
+	{
+		const double number = static_cast<double>(value);
+		if (number < info.min || number > info.max)
+			fail_config(std::string("`") + info.json_key + "` must be in [" + format_number(info.min) + ", " +
+						format_number(info.max) + "]");
+	}
 }
 
 bool is_supported_point_cloud_extension(const std::string& ext)
@@ -246,6 +279,24 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	BenchmarkConfig config;
 	config.config_path = config_path.string();
 
+	// 1. table defaults, 2. neural model type, 3. model-type defaults, 4. profile (later step), 5. table overrides
+	config.reconstruction = ReconstructionOptions{};
+	if (auto neural_type = root.get_optional<std::string>("input.neural_model_type"))
+	{
+		if (!cgogn::geometry::parse(*neural_type, config.reconstruction.neural_model_type))
+			fail_config("unsupported `input.neural_model_type`: " + *neural_type);
+	}
+	config.reconstruction.apply_filtering = default_apply_filtering(config.reconstruction.neural_model_type);
+	config.reconstruction.recompute_normals_after_sampling =
+		default_recompute_normals_after_sampling(config.reconstruction.neural_model_type);
+	// profile (sampling defaults of a dataset) is applied here in a later step
+	for_each_option(config.reconstruction, [&](const OptionInfo& info, auto& value) {
+		if (std::string_view(info.json_key) == "input.neural_model_type")
+			return; // already parsed above
+		read_option(root, info, value);
+		validate_option_range(info, value);
+	});
+
 	const ptree& input = root.get_child("input");
 	const auto geometry_type_raw = input.get_optional<std::string>("geometry_type");
 	config.input.mode = parse_input_mode(require_value<std::string>(input, "mode"));
@@ -256,44 +307,22 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	if (const auto initial_ma_mode = input.get_optional<std::string>("initial_ma_mode_override");
 		initial_ma_mode && *initial_ma_mode != "shrinking_ball")
 		fail_config("`input.initial_ma_mode_override` is fixed to `shrinking_ball`; remove the key or update its value");
-	config.input.ma_flip_prune = get_value<bool>(input, "ma_flip_prune", true);
-	config.input.ma_flip_prune_alpha_factor =
-		get_value<float>(input, "ma_flip_prune_alpha_factor", config.input.ma_flip_prune_alpha_factor);
-	if (auto neural_type = input.get_optional<std::string>("neural_model_type"))
-		config.input.neural_model_type = parse_neural_model_type(*neural_type);
-
-	const ptree& sampling = root.get_child("sampling");
-	config.sampling.alpha = require_value<float>(sampling, "alpha");
-	config.sampling.knn_k = require_value<int>(sampling, "knn_k");
-	if (auto apply_filtering = sampling.get_optional<bool>("apply_filtering"))
-		config.sampling.apply_filtering = *apply_filtering;
-	if (auto recompute_normals = sampling.get_optional<bool>("recompute_normals_after_sampling"))
-		config.sampling.recompute_normals_after_sampling = *recompute_normals;
-	const ptree& bridson = sampling.get_child("bridson");
-	config.sampling.sample_radius = require_value<float>(bridson, "sample_radius");
-	config.sampling.candidates_per_parent = get_value<int>(bridson, "candidates_per_parent", 12);
-	config.sampling.parent_batch_size = get_value<int>(bridson, "parent_batch_size", 1024);
-
-	const ptree& optimization = root.get_child("optimization");
-	if (auto distance_mode = optimization.get_optional<std::string>("distance_mode");
-		distance_mode && *distance_mode != "line_quadric_distance_free_r" &&
-		*distance_mode != "line_quadric_distance_free_radius")
-		fail_config("`optimization.distance_mode` is fixed to free radius; migrate this legacy value.");
-	if (auto use_local_clusters = optimization.get_optional<bool>("use_local_clusters");
-		use_local_clusters && !*use_local_clusters)
-		fail_config("`optimization.use_local_clusters` is fixed to true; remove the legacy field or set it to true.");
-	if (auto refresh_interval = optimization.get_optional<unsigned int>("local_cluster_connectivity_refresh_interval");
-		refresh_interval && *refresh_interval != 10)
-		fail_config("`optimization.local_cluster_connectivity_refresh_interval` is fixed to 10; remove the legacy field or set it to 10.");
-	config.optimization.sqem_update_lambda_line_plane =
-		require_value<float>(optimization, "sqem_update_lambda_line_plane");
-	if (auto lock_skeleton_connectivity = optimization.get_optional<bool>("lock_skeleton_connectivity");
-		lock_skeleton_connectivity && *lock_skeleton_connectivity)
-		fail_config("`optimization.lock_skeleton_connectivity` was removed; remove the legacy field or set it to false.");
-
-	const ptree& initialization = root.get_child("initialization");
-	config.initialization.seed = require_value<int>(initialization, "seed");
-	config.initialization.init_dilation_constant = require_value<float>(initialization, "init_dilation_constant");
+	if (auto optimization = root.get_child_optional("optimization"))
+	{
+		if (auto distance_mode = optimization->get_optional<std::string>("distance_mode");
+			distance_mode && *distance_mode != "line_quadric_distance_free_r" &&
+			*distance_mode != "line_quadric_distance_free_radius")
+			fail_config("`optimization.distance_mode` is fixed to free radius; migrate this legacy value.");
+		if (auto use_local_clusters = optimization->get_optional<bool>("use_local_clusters");
+			use_local_clusters && !*use_local_clusters)
+			fail_config("`optimization.use_local_clusters` is fixed to true; remove the legacy field or set it to true.");
+		if (auto refresh_interval = optimization->get_optional<unsigned int>("local_cluster_connectivity_refresh_interval");
+			refresh_interval && *refresh_interval != 10)
+			fail_config("`optimization.local_cluster_connectivity_refresh_interval` is fixed to 10; remove the legacy field or set it to 10.");
+		if (auto lock_skeleton_connectivity = optimization->get_optional<bool>("lock_skeleton_connectivity");
+			lock_skeleton_connectivity && *lock_skeleton_connectivity)
+			fail_config("`optimization.lock_skeleton_connectivity` was removed; remove the legacy field or set it to false.");
+	}
 
 	if (auto postprocess = root.get_child_optional("postprocess"))
 	{
@@ -304,13 +333,6 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 			fail_config("`postprocess.deg_face_deletion` was removed; migrate this legacy value.");
 		if (auto nm_two_layer = postprocess->get_optional<bool>("nm_two_layer_prune"); nm_two_layer && *nm_two_layer)
 			fail_config("`postprocess.nm_two_layer_prune` was removed; remove the field or set it to false.");
-		config.postprocess.residual_prune = get_value<bool>(*postprocess, "residual_prune", false);
-		config.postprocess.residual_prune_mode = get_value<std::string>(*postprocess, "residual_prune_mode", "collapsible_only");
-		const std::string& residual_prune_mode = config.postprocess.residual_prune_mode;
-		if (residual_prune_mode != "current" && residual_prune_mode != "keep_fully_non_manifold" &&
-			residual_prune_mode != "collapsible_only")
-			fail_config("`postprocess.residual_prune_mode` must be `current`, `keep_fully_non_manifold` or "
-						"`collapsible_only`; got: " + residual_prune_mode);
 		if (auto face_post_processing = postprocess->get_optional<bool>("face_post_processing");
 			face_post_processing && *face_post_processing)
 			fail_config("`postprocess.face_post_processing` was removed; remove the field or set it to false.");
@@ -399,14 +421,6 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 			validate_geometry_path(mesh_field, mesh_path, InputGeometryType::Mesh);
 		}
 	}
-	if (config.sampling.sample_radius <= 0.0f)
-		fail_config("`sampling.bridson.sample_radius` must be > 0");
-	if (config.sampling.candidates_per_parent < 1)
-		fail_config("`sampling.bridson.candidates_per_parent` must be >= 1");
-	if (config.sampling.parent_batch_size < 1)
-		fail_config("`sampling.bridson.parent_batch_size` must be >= 1");
-	if (config.input.ma_flip_prune_alpha_factor < 1.0f || config.input.ma_flip_prune_alpha_factor > 5.0f)
-		fail_config("`input.ma_flip_prune_alpha_factor` must be in [1.0, 5.0]");
 	if (!config.batch.enabled && config.output.skeleton_ply.empty())
 		fail_config("`output.skeleton_ply` is required in single-run mode");
 
