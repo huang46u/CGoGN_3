@@ -188,6 +188,22 @@ public:
 	{
 		return udf_stages::prune_residual_sheets(s_);
 	}
+	Status sample()
+	{
+		return udf_stages::sample(s_);
+	}
+	Status compute_fitting_data()
+	{
+		return udf_stages::compute_fitting_data(s_);
+	}
+	typename SpheresOptimizerType::Status update_spheres_once(Scalar sqem_update_lambda_line_plane)
+	{
+		return udf_stages::update_spheres_once(s_, sqem_update_lambda_line_plane);
+	}
+	Status fix_topology_and_prune()
+	{
+		return udf_stages::fix_topology_and_prune(s_);
+	}
 	Result run(const IterationCallback& iteration_callback = {})
 	{
 		return udf_stages::reconstruct(s_, iteration_callback);
