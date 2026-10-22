@@ -87,6 +87,9 @@ namespace cgogn::geometry
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
 struct ReconstructionState
 {
+	using Surface = SURFACE;
+	using Points = POINTS;
+	using NonManifold = NONMANIFOLD;
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
 	using SVertex = typename mesh_traits<SURFACE>::Vertex;
 	using SFace = typename mesh_traits<SURFACE>::Face;
