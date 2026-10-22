@@ -8,6 +8,8 @@
 #include <cgogn/core/utils/thread.h>
 #include <cgogn/geometry/algos/udf/neural_model_type.h>
 #include <cgogn/geometry/algos/udf/reconstruction.h>
+#include <cgogn/geometry/algos/udf/reconstruction_options.h>
+#include <cgogn/geometry/algos/udf/reconstruction_profiles.h>
 #include <cgogn/geometry/types/vector_traits.h>
 #include <cgogn/ui/portable-file-dialogs.h>
 
@@ -77,6 +79,9 @@ private:
 		// Neural model information shown in the UI; the model itself is owned by ReconstructionType.
 		bool neural_udf_loaded_ = false;
 		std::string neural_udf_model_path_ = "";
+
+		// Dataset profile currently applied to the options (see reconstruction_profile_names()).
+		std::string profile_ = "default";
 
 		// Sampling & Fitting Data
 		POINTS* samples_mesh_ = nullptr;
@@ -215,6 +220,25 @@ public:
 			params.reconstruction_->data().surface = selected_surface_;
 	}
 
+	// Reset every option to the table defaults, then the model-type defaults, then the dataset profile.
+	// The neural model type of the current reconstruction is kept.
+	void reset_options_to_profile(PointsParameters& p, const std::string& profile)
+	{
+		if (!p.reconstruction_)
+			return;
+		auto& options = p.reconstruction_->options();
+		const cgogn::geometry::NeuralModelType model_type = options.neural_model_type;
+		options = cgogn::geometry::ReconstructionOptions{};
+		options.neural_model_type = model_type;
+		options.apply_filtering = cgogn::geometry::default_apply_filtering(model_type);
+		options.recompute_normals_after_sampling =
+			cgogn::geometry::default_recompute_normals_after_sampling(model_type);
+		if (!cgogn::geometry::apply_reconstruction_profile(profile, options))
+			log_error("Unknown reconstruction profile: ", profile, '\n');
+		p.profile_ = profile;
+		p.sphere_update_lambda_.store(options.sqem_update_lambda_line_plane);
+	}
+
 	ReconstructionStatus load_neural_udf_model(POINTS& points, const std::string& model_path,
 											   cgogn::geometry::NeuralModelType model_type)
 	{
@@ -243,11 +267,9 @@ public:
 				return ReconstructionStatus::model_load_failed;
 			}
 			p.neural_udf_model_path_ = model_path;
-			// sampling defaults of the model type, the Sampling panel can still change them
-			auto& options = p.reconstruction_->options();
-			options.apply_filtering = cgogn::geometry::default_apply_filtering(model_type);
-			options.recompute_normals_after_sampling =
-				cgogn::geometry::default_recompute_normals_after_sampling(model_type);
+			// dataset profile guessed from the model type and path; the Sampling panel can change it
+			reset_options_to_profile(p, cgogn::geometry::guess_reconstruction_profile(true, model_type, model_path));
+			log_basic(p, "Reconstruction profile: ", p.profile_, '\n');
 			log_basic(p, "Loaded neural UDF model from: ", model_path, '\n');
 			return ReconstructionStatus::success;
 		}
@@ -362,7 +384,6 @@ private:
 
 		typename ReconstructionType::Data data{selected_surface_, p.points_, p.samples_mesh_, p.spheres_, p.skeleton_};
 		p.reconstruction_ = std::make_unique<ReconstructionType>(data);
-		p.reconstruction_->options().ma_flip_prune = false;
 		p.sphere_update_lambda_.store(p.reconstruction_->options().sqem_update_lambda_line_plane);
 		const ReconstructionStatus status = p.reconstruction_->initialize_data();
 		p.initialized_ = status == ReconstructionStatus::success;
@@ -812,11 +833,39 @@ protected:
 		if (ImGui::CollapsingHeader("Sampling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
 			ImGui::BeginDisabled(p.running_.load());
-			ImGui::InputFloat("Alpha", &options.alpha, 0.001f, 0.1f, "%.4f");
-			ImGui::InputFloat("Sample Radius", &options.sample_radius, 0.001f, 0.01f, "%.4f");
-			ImGui::InputInt("KNN K", &options.knn_k, 1, 5);
+			const auto& profile_names = cgogn::geometry::reconstruction_profile_names();
+			if (ImGui::BeginCombo("Profile", p.profile_.c_str()))
+			{
+				for (const std::string& name : profile_names)
+					if (ImGui::Selectable(name.c_str(), name == p.profile_))
+						reset_options_to_profile(p, name);
+				ImGui::EndCombo();
+			}
+			if (ImGui::InputFloat("Alpha", &options.alpha, 0.001f, 0.1f, "%.4f"))
+				options.alpha = std::clamp(options.alpha, float(cgogn::geometry::option_info::alpha.min),
+										   float(cgogn::geometry::option_info::alpha.max));
+			if (ImGui::InputFloat("Sample Radius", &options.sample_radius, 0.001f, 0.01f, "%.4f"))
+				options.sample_radius =
+					std::clamp(options.sample_radius, float(cgogn::geometry::option_info::sample_radius.min),
+							   float(cgogn::geometry::option_info::sample_radius.max));
+			if (ImGui::InputInt("KNN K", &options.knn_k, 1, 5))
+				options.knn_k = std::clamp(options.knn_k, int(cgogn::geometry::option_info::knn_k.min),
+										   int(cgogn::geometry::option_info::knn_k.max));
 			ImGui::Checkbox("Filter samples by distance to input", &options.apply_filtering);
 			ImGui::Checkbox("Recompute normals after sampling", &options.recompute_normals_after_sampling);
+			if (ImGui::InputInt("Bridson candidates per parent", &options.alpha_sampling_candidates_per_parent, 1, 10))
+				options.alpha_sampling_candidates_per_parent =
+					std::clamp(options.alpha_sampling_candidates_per_parent,
+							   int(cgogn::geometry::option_info::alpha_sampling_candidates_per_parent.min),
+							   int(cgogn::geometry::option_info::alpha_sampling_candidates_per_parent.max));
+			if (ImGui::InputInt("Bridson parent batch size", &options.alpha_sampling_parent_batch_size, 1, 64))
+				options.alpha_sampling_parent_batch_size =
+					std::clamp(options.alpha_sampling_parent_batch_size,
+							   int(cgogn::geometry::option_info::alpha_sampling_parent_batch_size.min),
+							   int(cgogn::geometry::option_info::alpha_sampling_parent_batch_size.max));
+			if (ImGui::InputInt("Seed", &options.seed, 1, 10))
+				options.seed = std::clamp(options.seed, int(cgogn::geometry::option_info::seed.min),
+										  int(cgogn::geometry::option_info::seed.max));
 			if (ImGui::Button("Sample UDF"))
 			{
 				load_alpha_samples_to_mesh(p);
@@ -847,7 +896,9 @@ protected:
 			ImGui::BeginDisabled(p.running_.load());
 			ImGui::Checkbox("Enable MAFlipPrune", &options.ma_flip_prune);
 			float ma_flip_prune_alpha_factor = static_cast<float>(options.ma_flip_prune_alpha_factor);
-			if (ImGui::SliderFloat("MAFlipPrune MF Alpha Factor", &ma_flip_prune_alpha_factor, 1.0f, 5.0f, "%.2f"))
+			if (ImGui::SliderFloat("MAFlipPrune MF Alpha Factor", &ma_flip_prune_alpha_factor,
+								   float(cgogn::geometry::option_info::ma_flip_prune_alpha_factor.ui_min),
+								   float(cgogn::geometry::option_info::ma_flip_prune_alpha_factor.ui_max), "%.2f"))
 				options.ma_flip_prune_alpha_factor = Scalar(ma_flip_prune_alpha_factor);
 			if (ImGui::Button("Compute Fitting Data"))
 			{
@@ -863,8 +914,9 @@ protected:
 				if (ImGui::CollapsingHeader("Sphere Fitting", ImGuiTreeNodeFlags_DefaultOpen))
 				{
 					ImGui::BeginDisabled(p.running_.load());
-					ImGui::SliderFloat("Init dilation constant", &options.init_dilation_constant, 0.001f, 0.01f,
-									   "%.4f");
+					ImGui::SliderFloat("Init dilation constant", &options.init_dilation_constant,
+									   float(cgogn::geometry::option_info::init_dilation_constant.ui_min),
+									   float(cgogn::geometry::option_info::init_dilation_constant.ui_max), "%.4f");
 					if (ImGui::Button("Init spheres"))
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
@@ -883,7 +935,10 @@ protected:
 					}
 					ImGui::EndDisabled();
 					float update_lambda = p.sphere_update_lambda_.load();
-					if (ImGui::SliderFloat("Update lambda", &update_lambda, 0.0f, 4.0f, "%.6f"))
+					if (ImGui::SliderFloat("Update lambda", &update_lambda,
+										   float(cgogn::geometry::option_info::sqem_update_lambda_line_plane.ui_min),
+										   float(cgogn::geometry::option_info::sqem_update_lambda_line_plane.ui_max),
+										   "%.6f"))
 					{
 						p.sphere_update_lambda_.store(update_lambda);
 						options.sqem_update_lambda_line_plane = update_lambda;
@@ -946,6 +1001,12 @@ protected:
 					if (!can_export_skeleton)
 						ImGui::EndDisabled();
 					ImGui::BeginDisabled(p.running_.load());
+					ImGui::Checkbox("Residual prune", &options.residual_prune);
+					ImGui::SameLine();
+					int residual_mode = static_cast<int>(options.residual_prune_mode);
+					if (ImGui::Combo("##ResidualPruneMode", &residual_mode,
+									 "current\0keep_fully_non_manifold\0collapsible_only\0"))
+						options.residual_prune_mode = static_cast<cgogn::geometry::ResidualPruneOption>(residual_mode);
 					if (ImGui::Button("Topology fix full pipeline"))
 					{
 						if (!p.running_)
@@ -960,6 +1021,10 @@ protected:
 								const ReconstructionStatus status = p.reconstruction_->fix_topology();
 								if (status == ReconstructionStatus::success)
 								{
+									// Same order as run(): residual sheet prune after fix_topology, if enabled.
+									if (p.reconstruction_->options().residual_prune &&
+										p.reconstruction_->prune_residual_sheets() != ReconstructionStatus::success)
+										log_error("[TopologyFull] residual sheet prune failed.\n");
 									p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
 									apply_skeleton_topology_results(p);
 								}
