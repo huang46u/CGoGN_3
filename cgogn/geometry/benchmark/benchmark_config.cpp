@@ -294,7 +294,7 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	{
 		config.profile = *profile;
 		if (!apply_reconstruction_profile(config.profile, config.reconstruction))
-			fail_config("unknown `profile`: " + config.profile + " (expected default, mf_organic, mf_abc or df)");
+			fail_config("unknown `profile`: " + config.profile + " (expected default, mf_organic, mf_abc or udf)");
 	}
 	for_each_option(config.reconstruction, [&](const OptionInfo& info, auto& value) {
 		if (std::string_view(info.json_key) == "input.neural_model_type")

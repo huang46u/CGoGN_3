@@ -38,7 +38,7 @@ namespace cgogn::geometry
 // Known profile names, in UI order.
 inline const std::vector<std::string>& reconstruction_profile_names()
 {
-	static const std::vector<std::string> names = {"default", "mf_organic", "mf_abc", "df"};
+	static const std::vector<std::string> names = {"default", "mf_organic", "mf_abc", "udf"};
 	return names;
 }
 
@@ -76,7 +76,7 @@ inline bool apply_reconstruction_profile(const std::string& name, Reconstruction
 	}
 
 	// Source: apps/configs/udf_benchmark_batch_deepfashion.json
-	if (name == "df")
+	if (name == "udf")
 	{
 		options.alpha = 0.002f;
 		options.sample_radius = 0.002f;
@@ -89,7 +89,7 @@ inline bool apply_reconstruction_profile(const std::string& name, Reconstruction
 }
 
 // Profile suggested for a neural model (used by the UI to pick a preset when a model is loaded).
-// Neural MF model with "/ABC/" in its path -> mf_abc, other MF -> mf_organic, neural UDF -> df, no model -> default.
+// Neural MF model with "/ABC/" in its path -> mf_abc, other MF -> mf_organic, neural UDF -> udf, no model -> default.
 inline std::string guess_reconstruction_profile(bool neural, NeuralModelType type, const std::string& model_path)
 {
 	if (!neural)
@@ -104,7 +104,7 @@ inline std::string guess_reconstruction_profile(bool neural, NeuralModelType typ
 		return "mf_organic";
 	}
 
-	return "df";
+	return "udf";
 }
 
 } // namespace cgogn::geometry
