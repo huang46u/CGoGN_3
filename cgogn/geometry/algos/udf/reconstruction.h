@@ -800,8 +800,6 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	params.ray_sampler_batch_size = static_cast<size_t>(std::max(1, options_.ray_sampler_batch_size));
 	params.bbox_min = bbox_min;
 	params.bbox_max = bbox_max;
-	params.alpha = Scalar(options_.alpha);
-	params.tolerance = Scalar(options_.tolerance);
 	auto compute_normals = [&](const std::vector<Vec3>& points, std::vector<Vec3>& normals,
 							   std::vector<uint8_t>& keep) {
 		keep.assign(points.size(), uint8_t(0));
