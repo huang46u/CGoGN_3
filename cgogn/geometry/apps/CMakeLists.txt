@@ -90,18 +90,73 @@ find_package(cgogn_rendering REQUIRED)
 #	endif()
 #endif()
 
-# ---- Torch (official-style) -------------------------------------------------
-find_package(Torch REQUIRED)
-message(STATUS "Torch found: ${Torch_DIR}")
+# ---- Torch (optional, official-style) ---------------------------------------
+# Torch is searched for only when CGOGN_USE_TORCH is ON. Without it, every UDF
+# executable is built without Torch and with CGOGN_UDF_WITH_TORCH=0.
+if (CGOGN_USE_TORCH)
+  find_package(Torch REQUIRED)
+  message(STATUS "Torch found: ${Torch_DIR}")
 
-# Official PyTorch C++ docs recommend appending TORCH_CXX_FLAGS
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+  # Official PyTorch C++ docs recommend appending TORCH_CXX_FLAGS
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
-# Helper: add an executable that links CGoGN + Torch (+ optional extras),
-# and copies Torch DLLs next to the exe on Windows/MSVC
-function(cgogn_add_torch_executable target)
+  # Helper: add an executable that links CGoGN + Torch (+ optional extras),
+  # and copies Torch DLLs next to the exe on Windows/MSVC
+  function(cgogn_add_torch_executable target)
+    # usage:
+    #   cgogn_add_torch_executable(name
+    #     SOURCES file1.cpp [file2.cpp ...]
+    #     EXTRA_LIBS libA libB ...
+    #   )
+    set(options)
+    set(oneValueArgs)
+    set(multiValueArgs SOURCES EXTRA_LIBS)
+    cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    add_executable(${target} ${ARG_SOURCES})
+
+    target_link_libraries(${target}
+      PRIVATE
+        cgogn::geometry
+        cgogn::core
+        cgogn::ui
+        cgogn::io
+        cgogn::rendering
+        ${CMAKE_DL_LIBS}
+        "${TORCH_LIBRARIES}"
+        ${ARG_EXTRA_LIBS}
+    )
+
+    set_property(TARGET ${target} PROPERTY CXX_STANDARD 17)
+    set_property(TARGET ${target} PROPERTY CXX_STANDARD_REQUIRED ON)
+
+    # On Windows with MSVC, copy libtorch DLLs next to the executable
+    if (MSVC)
+      file(GLOB TORCH_DLLS "${TORCH_INSTALL_PREFIX}/lib/*.dll")
+      if (TORCH_DLLS)
+        add_custom_command(TARGET ${target}
+          POST_BUILD
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                  ${TORCH_DLLS}
+                  $<TARGET_FILE_DIR:${target}>
+          COMMENT "Copying Torch DLLs to output directory"
+        )
+      endif()
+    endif()
+  endfunction()
+
+  # Torch-based executables
+  cgogn_add_torch_executable(ndf_skeleton
+    SOURCES ndf_skeleton.cpp
+  )
+endif()
+
+# Helper: UDF executables (udf_training, udf_benchmark, udf_residual_prune_test).
+# With Torch: linked against Torch, CGOGN_UDF_WITH_TORCH=1 (neural input available).
+# Without Torch: plain executable on the same cgogn libraries, CGOGN_UDF_WITH_TORCH=0.
+function(cgogn_add_udf_executable target)
   # usage:
-  #   cgogn_add_torch_executable(name
+  #   cgogn_add_udf_executable(name
   #     SOURCES file1.cpp [file2.cpp ...]
   #     EXTRA_LIBS libA libB ...
   #   )
@@ -110,52 +165,39 @@ function(cgogn_add_torch_executable target)
   set(multiValueArgs SOURCES EXTRA_LIBS)
   cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
-  add_executable(${target} ${ARG_SOURCES})
-
-  target_link_libraries(${target}
-    PRIVATE
-      cgogn::geometry
-      cgogn::core
-      cgogn::ui
-      cgogn::io
-      cgogn::rendering
-      ${CMAKE_DL_LIBS}
-      "${TORCH_LIBRARIES}"
-      ${ARG_EXTRA_LIBS}
-  )
-
-  set_property(TARGET ${target} PROPERTY CXX_STANDARD 17)
-  set_property(TARGET ${target} PROPERTY CXX_STANDARD_REQUIRED ON)
-
-  # On Windows with MSVC, copy libtorch DLLs next to the executable
-  if (MSVC)
-    file(GLOB TORCH_DLLS "${TORCH_INSTALL_PREFIX}/lib/*.dll")
-    if (TORCH_DLLS)
-      add_custom_command(TARGET ${target}
-        POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${TORCH_DLLS}
-                $<TARGET_FILE_DIR:${target}>
-        COMMENT "Copying Torch DLLs to output directory"
-      )
-    endif()
+  if (CGOGN_USE_TORCH)
+    cgogn_add_torch_executable(${target}
+      SOURCES ${ARG_SOURCES}
+      EXTRA_LIBS ${ARG_EXTRA_LIBS}
+    )
+    target_compile_definitions(${target} PRIVATE CGOGN_UDF_WITH_TORCH=1)
+  else()
+    add_executable(${target} ${ARG_SOURCES})
+    target_link_libraries(${target}
+      PRIVATE
+        cgogn::geometry
+        cgogn::core
+        cgogn::ui
+        cgogn::io
+        cgogn::rendering
+        ${CMAKE_DL_LIBS}
+        ${ARG_EXTRA_LIBS}
+    )
+    set_property(TARGET ${target} PROPERTY CXX_STANDARD 17)
+    set_property(TARGET ${target} PROPERTY CXX_STANDARD_REQUIRED ON)
+    target_compile_definitions(${target} PRIVATE CGOGN_UDF_WITH_TORCH=0)
   endif()
 endfunction()
-
-# Torch-based executables
-cgogn_add_torch_executable(ndf_skeleton
-  SOURCES ndf_skeleton.cpp
-)
 
 if (CGOGN_USE_CGAL)
   find_package(CGAL REQUIRED)
 
-  cgogn_add_torch_executable(udf_training
+  cgogn_add_udf_executable(udf_training
     SOURCES udf_training.cpp
     EXTRA_LIBS CGAL::CGAL
   )
 
-  cgogn_add_torch_executable(udf_benchmark
+  cgogn_add_udf_executable(udf_benchmark
     SOURCES
       udf_benchmark.cpp
       ../benchmark/benchmark_config.cpp
@@ -163,7 +205,7 @@ if (CGOGN_USE_CGAL)
     EXTRA_LIBS CGAL::CGAL
   )
 
-  cgogn_add_torch_executable(udf_residual_prune_test
+  cgogn_add_udf_executable(udf_residual_prune_test
     SOURCES udf_residual_prune_test.cpp
     EXTRA_LIBS CGAL::CGAL
   )
@@ -177,6 +219,10 @@ if (CGOGN_USE_CGAL)
     types/ray_level_set_sampler.h
     types/ray_level_set_sampler_traits.h
   )
+  if (NOT CGOGN_USE_TORCH)
+    # The neural headers need LibTorch; without it they are not part of the check.
+    list(FILTER UDF_CHECKED_HEADERS EXCLUDE REGEX "^algos/udf/neural/")
+  endif()
   set(UDF_HEADER_CHECK_SOURCES)
   foreach(header ${UDF_CHECKED_HEADERS})
     if (NOT header IN_LIST UDF_HEADER_CHECK_EXCLUDE)
@@ -187,8 +233,14 @@ if (CGOGN_USE_CGAL)
       list(APPEND UDF_HEADER_CHECK_SOURCES "${check_source}")
     endif()
   endforeach()
+  if (CGOGN_USE_TORCH)
+    set(UDF_HEADER_CHECK_TORCH_LIBS "${TORCH_LIBRARIES}")
+  else()
+    set(UDF_HEADER_CHECK_TORCH_LIBS)
+  endif()
   add_library(udf_header_check OBJECT ${UDF_HEADER_CHECK_SOURCES})
-  target_link_libraries(udf_header_check PRIVATE cgogn::geometry cgogn::core cgogn::io "${TORCH_LIBRARIES}" CGAL::CGAL)
+  target_link_libraries(udf_header_check PRIVATE cgogn::geometry cgogn::core cgogn::io ${UDF_HEADER_CHECK_TORCH_LIBS} CGAL::CGAL)
+  target_compile_definitions(udf_header_check PRIVATE CGOGN_UDF_WITH_TORCH=$<BOOL:${CGOGN_USE_TORCH}>)
   # cgogn::geometry does not export thirdparty/ (libacc) in its build interface; the apps get it through cgogn::ui
   target_include_directories(udf_header_check PRIVATE ${CGOGN_SOURCE_DIR}/thirdparty)
   set_property(TARGET udf_header_check PROPERTY CXX_STANDARD 17)

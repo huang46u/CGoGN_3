@@ -273,9 +273,18 @@ int main(int argc, char** argv)
 				   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 	const bool is_surface_file = (ext != "ply");
 
+#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
 	if (use_neural_udf)
 		return run_udf_training_app<cgogn::geometry::RaySamplerNeural>(filename, model_path, true, is_surface_file,
 																	   neural_is_mf);
+#else
+	if (use_neural_udf)
+	{
+		std::cerr << "udf_training was built without LibTorch (CGOGN_USE_TORCH=OFF): a .pt model cannot be loaded.\n";
+		return 1;
+	}
+	(void)neural_is_mf;
+#endif
 	if (is_surface_file)
 		return run_udf_training_app<cgogn::geometry::RaySamplerSurface>(filename, model_path, false, true, false);
 	return run_udf_training_app<cgogn::geometry::RaySamplerPointCloud>(filename, model_path, false, false, false);

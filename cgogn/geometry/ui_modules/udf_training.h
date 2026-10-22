@@ -6,7 +6,9 @@
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/core/utils/thread.h>
+#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
 #include <cgogn/geometry/algos/udf/neural/neural_distance_field.h>
+#endif
 #include <cgogn/geometry/algos/udf/neural_model_type.h>
 #include <cgogn/geometry/algos/udf/reconstruction.h>
 #include <cgogn/geometry/algos/udf/reconstruction_options.h>
@@ -32,7 +34,9 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
 #include <torch/torch.h>
+#endif
 #include <utility>
 
 namespace cgogn
@@ -336,6 +340,7 @@ protected:
 		timer_connection_ = boost::synapse::connect<App::timer_tick>(&app_, [this]() { handle_spheres_update_tick(); });
 		const OutputVerbosity startup_output_verbosity =
 			selected_points_ ? points_parameters_[selected_points_].output_verbosity_.load() : OUTPUT_NORMAL;
+#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
 		if (torch::cuda::is_available())
 		{
 			log_basic(startup_output_verbosity, "CUDA is available! Using GPU device 0.", '\n');
@@ -344,6 +349,9 @@ protected:
 		{
 			log_basic(startup_output_verbosity, "CUDA is not available! Using the CPU.", '\n');
 		}
+#else
+		log_basic(startup_output_verbosity, "Built without LibTorch: neural UDF input is not available.", '\n');
+#endif
 	}
 
 private:

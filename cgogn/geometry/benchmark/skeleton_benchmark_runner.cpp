@@ -3,7 +3,9 @@
 #include <cgogn/core/types/incidence_graph/incidence_graph.h>
 #include <cgogn/core/types/maps/cmap/cmap0.h>
 #include <cgogn/core/types/maps/cmap/cmap2.h>
+#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
 #include <cgogn/geometry/algos/udf/neural/neural_distance_field.h>
+#endif
 #include <cgogn/geometry/algos/udf/reconstruction.h>
 #include <cgogn/geometry/algos/udf/skeleton_ply_export.h>
 #include <cgogn/geometry/functions/bounding_box.h>
@@ -275,7 +277,11 @@ BenchmarkResult SkeletonBenchmarkRunner::run(const BenchmarkConfig& config) cons
 		result = run_impl<geometry::RaySamplerSurface>(config);
 		break;
 	case InputMode::NeuralUDF:
+#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
 		result = run_impl<geometry::RaySamplerNeural>(config);
+#else
+		throw std::runtime_error("udf_benchmark was built without LibTorch (CGOGN_USE_TORCH=OFF): neural_udf input is not available");
+#endif
 		break;
 	}
 	const auto total_end = std::chrono::high_resolution_clock::now();
