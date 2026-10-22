@@ -120,7 +120,7 @@ public:
 		if (skeleton_tets_.empty())
 			return Status::success;
 		TopologyParameters p(data_, skeleton_tets_);
-		return fix_topology_impl(p, evaluate_scores);
+		return run_topology_fix_pipeline(p, evaluate_scores);
 	}
 
 	Status prune_fully_non_manifold_triangles()
@@ -200,12 +200,6 @@ private:
 		return data_.skeleton && data_.spheres_optimizer && data_.skeleton_position && data_.skeleton_radius &&
 			data_.skeleton_source_sphere && data_.face_incident_tets && data_.edge_degree &&
 			data_.sphere_skeleton_vertex;
-	}
-
-	template <typename ScoreEvaluator>
-	Status fix_topology_impl(TopologyParameters& p, ScoreEvaluator& evaluate_scores)
-	{
-		return run_topology_fix_pipeline(p, evaluate_scores);
 	}
 
 
@@ -415,25 +409,6 @@ private:
 
 			return true;
 		});
-	}
-
-	void update_edge_degree_for_edge_ids(TopologyParameters& p, const std::unordered_set<uint32>& edge_ids)
-	{
-		if (!p.skeleton_ || !p.edge_degree_)
-			return;
-		for (uint32 edge_id : edge_ids)
-		{
-			if (edge_id == INVALID_INDEX)
-				continue;
-			const SkeletonEdge e = of_index<SkeletonEdge>(*p.skeleton_, edge_id);
-			if (!e.is_valid())
-				continue;
-			if (index_of(*p.skeleton_, e) != edge_id)
-				continue;
-
-			const uint32 deg = static_cast<uint32>(incident_faces(*p.skeleton_, e).size());
-			(*p.edge_degree_)[edge_id] = deg;
-		}
 	}
 
 	bool prune_fully_non_manifold_triangles(TopologyParameters& p)
