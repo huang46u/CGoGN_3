@@ -23,15 +23,7 @@
 #ifndef CGOGN_GEOMETRY_ALGOS_UDF_SKELETON_TOPOLOGY_H_
 #define CGOGN_GEOMETRY_ALGOS_UDF_SKELETON_TOPOLOGY_H_
 
-#include <cgogn/core/functions/attributes.h>
-#include <cgogn/core/functions/mesh_info.h>
-#include <cgogn/core/functions/traversals/edge.h>
-#include <cgogn/core/functions/traversals/face.h>
-#include <cgogn/core/functions/traversals/vertex.h>
-#include <cgogn/core/types/cell_marker.h>
 #include <cgogn/core/utils/numerics.h>
-#include <cgogn/geometry/algos/area.h>
-#include <cgogn/geometry/algos/udf/internal/skeleton_topology_types.h>
 #include <cgogn/geometry/algos/udf/internal/boundary_tet_prune.h>
 #include <cgogn/geometry/algos/udf/internal/dense_k5.h>
 #include <cgogn/geometry/algos/udf/internal/greedy_tet_removal.h>
@@ -39,24 +31,8 @@
 #include <cgogn/geometry/algos/udf/internal/quadrature_scores.h>
 #include <cgogn/geometry/algos/udf/internal/skeleton_build.h>
 #include <cgogn/geometry/algos/udf/internal/skeleton_mesh_ops.h>
-#include <cgogn/geometry/algos/udf/spheres_optimizer.h>
-#include <cgogn/geometry/types/vector_traits.h>
+#include <cgogn/geometry/algos/udf/internal/skeleton_topology_types.h>
 
-#include <Eigen/Dense>
-#include <Eigen/Eigenvalues>
-#include <libacc/kd_tree.h>
-
-#include <algorithm>
-#include <array>
-#include <cmath>
-#include <cstddef>
-#include <limits>
-#include <map>
-#include <memory>
-#include <queue>
-#include <set>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -74,20 +50,36 @@ public:
 	using SkeletonVertex = typename Types::SkeletonVertex;
 	using SkeletonEdge = typename Types::SkeletonEdge;
 	using SkeletonFace = typename Types::SkeletonFace;
-	template <typename T> using SphereAttribute = typename Types::template SphereAttribute<T>;
-	template <typename T> using SkeletonAttribute = typename Types::template SkeletonAttribute<T>;
+	template <typename T>
+	using SphereAttribute = typename Types::template SphereAttribute<T>;
+	template <typename T>
+	using SkeletonAttribute = typename Types::template SkeletonAttribute<T>;
 	using Data = typename Types::Data;
 	using Metrics = typename Types::Metrics;
 	using Status = typename Types::Status;
 	using ResidualPruneMode = typename Types::ResidualPruneMode;
 
-	explicit SkeletonTopology(Data data) : data_(std::move(data)) {}
+	explicit SkeletonTopology(Data data) : data_(std::move(data))
+	{
+	}
 	SkeletonTopology(const SkeletonTopology&) = delete;
 	SkeletonTopology& operator=(const SkeletonTopology&) = delete;
-	Data& data() { return data_; }
-	const Data& data() const { return data_; }
-	const Metrics& metrics() const { return metrics_; }
-	void set_residual_prune_mode(ResidualPruneMode mode) { residual_prune_mode_ = mode; }
+	Data& data()
+	{
+		return data_;
+	}
+	const Data& data() const
+	{
+		return data_;
+	}
+	const Metrics& metrics() const
+	{
+		return metrics_;
+	}
+	void set_residual_prune_mode(ResidualPruneMode mode)
+	{
+		residual_prune_mode_ = mode;
+	}
 
 	Status build_from_spheres()
 	{
@@ -141,15 +133,9 @@ public:
 	}
 
 private:
-	using SpheresOptimizerType = typename Types::SpheresOptimizerType;
-	using FaceKey = typename Types::FaceKey;
-	using Tet = typename Types::Tet;
 	using TetMap = typename Types::TetMap;
 	using Context = typename Types::Context;
-	using edge_hash = typename Types::edge_hash;
-	using edge_equal = typename Types::edge_equal;
 	using RemovalStats = typename Types::RemovalStats;
-	using SkeletonFaceDeletionOptions = typename Types::SkeletonFaceDeletionOptions;
 	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
 	using EdgeTetDeleteMode = typename Types::EdgeTetDeleteMode;
 	using MeshOps = skeleton_topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
@@ -166,24 +152,21 @@ private:
 	bool valid_data() const
 	{
 		return data_.skeleton && data_.spheres_optimizer && data_.skeleton_position && data_.skeleton_radius &&
-			data_.skeleton_source_sphere && data_.face_incident_tets && data_.edge_degree &&
-			data_.sphere_skeleton_vertex;
+			   data_.skeleton_source_sphere && data_.face_incident_tets && data_.edge_degree &&
+			   data_.sphere_skeleton_vertex;
 	}
-
-
 
 	//------------------------------//
 	//-----Topology correction------//
 	//------------------------------//
-
-
 
 	template <typename ScoreEvaluator>
 	Status run_topology_fix_pipeline(Context& p, ScoreEvaluator& evaluator)
 	{
 		if (!p.skeleton_ || !p.incident_tets_)
 			return Status::invalid_data;
-		const DenseFiveVertexDetectionResult dense_five_vertex_detection = DenseK5Repair::detect_k5_and_k5_minus_1_cells(p);
+		const DenseFiveVertexDetectionResult dense_five_vertex_detection =
+			DenseK5Repair::detect_k5_and_k5_minus_1_cells(p);
 		const std::vector<IndependentDenseFiveVertexRepairSeed> independent_dense_repair_seeds =
 			DenseK5Repair::collect_independent_dense_five_vertex_repair_seeds(p, dense_five_vertex_detection);
 		TopologyFixScoreCache score_cache;
@@ -195,8 +178,8 @@ private:
 			const RemovalStats boundary_stats = BoundaryTetPrune::run_boundary_tet_face_deletion(p, &score_cache);
 			RemovalStats simple_stats;
 			if (!p.skeleton_tets_.empty())
-				simple_stats = GreedyTetRemoval::run_edge_score_tet_mode_topology_fix(
-					p, EdgeTetDeleteMode::SimpleTet, score_cache, evaluator);
+				simple_stats = GreedyTetRemoval::run_edge_score_tet_mode_topology_fix(p, EdgeTetDeleteMode::SimpleTet,
+																					  score_cache, evaluator);
 			RemovalStats nonsimple_stats;
 			if (!p.skeleton_tets_.empty())
 				nonsimple_stats = GreedyTetRemoval::run_edge_score_tet_mode_topology_fix(
@@ -216,7 +199,8 @@ private:
 			if (round_removed_tets == 0)
 				break;
 		}
-		const IndependentDenseFiveVertexRepairStats repair_stats = DenseK5Repair::repair_isolated_independent_dense_five_vertex_regions(p, independent_dense_repair_seeds);
+		const IndependentDenseFiveVertexRepairStats repair_stats =
+			DenseK5Repair::repair_isolated_independent_dense_five_vertex_regions(p, independent_dense_repair_seeds);
 		p.metrics.repaired_dense_regions += repair_stats.repaired_regions;
 		p.metrics.added_faces += repair_stats.added_faces;
 		p.metrics.tet_count = static_cast<uint32>(p.skeleton_tets_.size());
