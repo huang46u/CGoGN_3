@@ -26,10 +26,17 @@
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
 #include <cgogn/core/functions/traversals/edge.h>
+#include <cgogn/core/functions/traversals/face.h>
+#include <cgogn/core/functions/traversals/vertex.h>
+#include <cgogn/core/types/cell_marker.h>
+#include <cgogn/core/utils/numerics.h>
 #include <cgogn/geometry/algos/area.h>
 #include <cgogn/geometry/algos/udf/spheres_optimizer.h>
+#include <cgogn/geometry/types/vector_traits.h>
+
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
+#include <libacc/kd_tree.h>
 
 #include <algorithm>
 #include <array>

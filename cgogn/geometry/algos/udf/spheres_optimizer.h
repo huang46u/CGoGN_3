@@ -25,6 +25,7 @@
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
+#include <cgogn/core/types/cell_marker.h>
 #include <cgogn/geometry/types/line_quadric.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/vector_traits.h>

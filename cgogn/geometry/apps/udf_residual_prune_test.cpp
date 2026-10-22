@@ -26,8 +26,8 @@
 #include <cgogn/core/types/incidence_graph/incidence_graph.h>
 #include <cgogn/core/types/maps/cmap/cmap0.h>
 #include <cgogn/core/utils/thread.h>
-// skeleton_topology.h is not self-contained; reconstruction.h pulls in the traversals it needs
-#include <cgogn/geometry/algos/udf/reconstruction.h>
+#include <cgogn/geometry/algos/udf/skeleton_topology.h>
+#include <cgogn/geometry/algos/udf/spheres_optimizer.h>
 
 #include <Eigen/Dense>
 

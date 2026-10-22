@@ -170,7 +170,7 @@ if (CGOGN_USE_CGAL)
 
   # Self-containment check: every UDF header is compiled alone in its own translation unit.
   # Headers listed in UDF_HEADER_CHECK_EXCLUDE are known not to be self-contained yet.
-  set(UDF_HEADER_CHECK_EXCLUDE algos/udf/skeleton_topology.h)
+  set(UDF_HEADER_CHECK_EXCLUDE)
   file(GLOB_RECURSE UDF_CHECKED_HEADERS CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/.."
     "${CMAKE_CURRENT_SOURCE_DIR}/../algos/udf/*.h")
   list(APPEND UDF_CHECKED_HEADERS
