@@ -9,6 +9,9 @@ vertex/radius differences <= --tolerance is reported as NUMERIC, anything else a
     python run_udf_regression.py            # compare against golden.json
     python run_udf_regression.py --update   # record golden.json and the golden PLYs from the current build
 
+Unless --prune-test none is given, the small-example unit test udf_residual_prune_test (next to --exe by default) is
+run as well and counted as one more case.
+
 Runs at below-normal priority on --cores (default 4-11) with matching OpenMP/MKL thread counts, to keep the machine
 usable; the result does not depend on the core count."""
 import argparse
@@ -94,6 +97,20 @@ def compare_numeric(ply, golden_ply, tolerance):
     return diff <= tolerance, f"max vertex/radius difference {diff:.3e}"
 
 
+def run_prune_test(exe):
+    if not os.path.exists(exe):
+        print(f"FAIL     residual_prune_test: {exe} not found (build udf_residual_prune_test or pass --prune-test none)")
+        return 1
+    p = subprocess.run([exe], cwd=os.path.dirname(exe), capture_output=True, text=True, errors="replace")
+    lines = p.stdout.strip().splitlines()
+    if p.returncode == 0 and lines and lines[-1].strip() == "PASS":
+        print("PASS     residual_prune_test")
+        return 0
+    print(f"FAIL     residual_prune_test: exit code {p.returncode}")
+    print(p.stdout + p.stderr)
+    return 1
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--exe", default=os.path.join(REPO, "build", "stage", "bin", "Release", "udf_benchmark.exe"))
@@ -102,6 +119,8 @@ def main():
     parser.add_argument("--tolerance", type=float, default=1e-9)
     parser.add_argument("--update", action="store_true", help="record golden.json and the golden PLYs")
     parser.add_argument("--only", nargs="*", help="run only these cases")
+    parser.add_argument("--prune-test", default=None,
+                        help="udf_residual_prune_test executable (default: next to --exe; 'none' to skip)")
     args = parser.parse_args()
 
     cases = json.load(open(os.path.join(HERE, "cases.json"), encoding="utf-8"))
@@ -145,6 +164,9 @@ def main():
             ok, detail = compare_numeric(os.path.join(run_dir, name + ".ply"), golden_ply, args.tolerance)
             print(f"{'NUMERIC ' if ok else 'FAIL    '} {name}: same counts, {detail}")
             failures += 0 if ok else 1
+    if not args.update and args.prune_test != "none":
+        failures += run_prune_test(args.prune_test or os.path.join(os.path.dirname(args.exe),
+                                                                   "udf_residual_prune_test" + os.path.splitext(args.exe)[1]))
     if args.update:
         with open(golden_path, "w", encoding="utf-8", newline="\n") as f:
             json.dump(golden, f, indent=2, sort_keys=True)

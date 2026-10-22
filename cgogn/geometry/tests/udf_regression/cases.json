@@ -25,6 +25,15 @@
     "initialization": {"seed": 42, "init_dilation_constant": 0.01},
     "postprocess": {"residual_prune": true}
   },
+  "neural_udf_df_48_2": {
+    "input": {"mode": "neural_udf", "geometry_type": "point_cloud", "neural_model_type": "udf", "ma_flip_prune": true,
+              "input_path": "data/skeleton/udf/deepfashion/model/48-2.ply",
+              "neural_udf_model_path": "data/skeleton/udf/deepfashion/weight/48-2.pt"},
+    "sampling": {"alpha": 0.002, "knn_k": 10, "bridson": {"sample_radius": 0.002}},
+    "optimization": {"sqem_update_lambda_line_plane": 0.2},
+    "initialization": {"seed": 42, "init_dilation_constant": 0.01},
+    "postprocess": {"residual_prune": true}
+  },
   "point_cloud_df_48_2": {
     "input": {"mode": "point_cloud", "geometry_type": "point_cloud", "neural_model_type": "udf", "ma_flip_prune": true,
               "input_path": "data/skeleton/udf/deepfashion/model/48-2.ply"},

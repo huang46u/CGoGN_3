@@ -19,6 +19,16 @@
     },
     "sha256": "cc0b795f49e2c6cfaf9747b2703cb5a831869e88691cb4669ae4fb68ab1bcc8a"
   },
+  "neural_udf_df_48_2": {
+    "counts": {
+      "final_spheres": 5227,
+      "sample_points": 421528,
+      "skeleton_edges": 15466,
+      "skeleton_faces": 10230,
+      "skeleton_vertices": 5227
+    },
+    "sha256": "88c0ed69291e910fa03068023fb34571cc203e2a4e377342456ddd4b0fe89db7"
+  },
   "point_cloud_df_48_2": {
     "counts": {
       "final_spheres": 7860,
