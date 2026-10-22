@@ -98,27 +98,7 @@ struct NonManifoldPrune
 				remove_face(*p.skeleton_, f);
 				removed_any_faces = true;
 				++removed_face_count;
-
-				std::vector<SkeletonVertex> candidate_vertices;
-				candidate_vertices.reserve(affected_edges.size() * 2);
-				for (const SkeletonEdge& e : affected_edges)
-				{
-					if (!e.is_valid())
-						continue;
-					for (const SkeletonVertex& v : incident_vertices(*p.skeleton_, e))
-						candidate_vertices.push_back(v);
-					if (incident_faces(*p.skeleton_, e).empty())
-						remove_edge(*p.skeleton_, e);
-				}
-				for (const SkeletonVertex& v : candidate_vertices)
-				{
-					if (!v.is_valid())
-						continue;
-					const uint32 vertex_id = index_of(*p.skeleton_, v);
-					if (vertex_id == INVALID_INDEX || !incident_edges(*p.skeleton_, v).empty())
-						continue;
-					MeshOps::remove_skeleton_vertex_and_linked_sphere(p, v);
-				}
+				MeshOps::remove_orphan_edges_from_removed_face_edges(p, affected_edges);
 			}
 		}
 
