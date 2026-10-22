@@ -2591,7 +2591,7 @@ private:
 	Data data_;
 	TetMap skeleton_tets_;
 	Metrics metrics_;
-	ResidualPruneMode residual_prune_mode_ = ResidualPruneMode::current;
+	ResidualPruneMode residual_prune_mode_ = ResidualPruneMode::collapsible_only;
 };
 
 } // namespace geometry

@@ -131,7 +131,7 @@ public:
 		int seed = 42;
 		float init_dilation_constant = 0.001f;
 		bool residual_prune = false;
-		int residual_prune_mode = 0; // 0 current, 1 keep_fully_non_manifold, 2 collapsible_only
+		int residual_prune_mode = 2; // 0 current, 1 keep_fully_non_manifold, 2 collapsible_only
 		int alpha_sampling_candidates_per_parent = 12;
 		int alpha_sampling_parent_batch_size = 1024;
 	};

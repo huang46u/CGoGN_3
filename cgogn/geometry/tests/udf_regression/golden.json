@@ -3,11 +3,11 @@
     "counts": {
       "final_spheres": 1600,
       "sample_points": 149147,
-      "skeleton_edges": 4659,
-      "skeleton_faces": 3056,
+      "skeleton_edges": 4658,
+      "skeleton_faces": 3059,
       "skeleton_vertices": 1600
     },
-    "sha256": "9889ae5ea89be4e5f1a9c409e87db50448f0bc21cf1daf00e4cfd269921ff72f"
+    "sha256": "18fcbadacdbc6fd9c772f27ada3a9cfedf2c5b6096bc163fc33671ae41151400"
   },
   "mf_organic_bug": {
     "counts": {

@@ -69,7 +69,7 @@ struct BenchmarkInitializationConfig
 struct BenchmarkPostprocessConfig
 {
 	bool residual_prune = false;
-	std::string residual_prune_mode = "current";
+	std::string residual_prune_mode = "collapsible_only";
 };
 
 struct BenchmarkRuntimeConfig

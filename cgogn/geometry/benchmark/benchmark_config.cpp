@@ -310,7 +310,7 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		if (auto nm_two_layer = postprocess->get_optional<bool>("nm_two_layer_prune"); nm_two_layer && *nm_two_layer)
 			fail_config("`postprocess.nm_two_layer_prune` was removed; remove the field or set it to false.");
 		config.postprocess.residual_prune = get_value<bool>(*postprocess, "residual_prune", false);
-		config.postprocess.residual_prune_mode = get_value<std::string>(*postprocess, "residual_prune_mode", "current");
+		config.postprocess.residual_prune_mode = get_value<std::string>(*postprocess, "residual_prune_mode", "collapsible_only");
 		const std::string& residual_prune_mode = config.postprocess.residual_prune_mode;
 		if (residual_prune_mode != "current" && residual_prune_mode != "keep_fully_non_manifold" &&
 			residual_prune_mode != "collapsible_only")
