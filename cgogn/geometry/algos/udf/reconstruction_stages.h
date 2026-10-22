@@ -122,6 +122,9 @@ template <typename State>
 typename State::Counts counts(State& s);
 
 template <typename State>
+typename State::Repairs repairs(State& s);
+
+template <typename State>
 void build_sample_kdtree(State& s);
 
 template <typename State>
@@ -202,6 +205,7 @@ void reset(State& s)
 	s.field.reset();
 	s.fitting_data_computed = false;
 	s.samples_before_filtering = 0;
+	s.ma_repairs = {};
 	s.initialized = false;
 }
 
@@ -295,6 +299,15 @@ typename State::Counts counts(State& s)
 	if (s.optimizer)
 		c.optimization_iterations = s.optimizer->metrics().iteration;
 	return c;
+}
+
+template <typename State>
+typename State::Repairs repairs(State& s)
+{
+	typename State::Repairs r = s.ma_repairs;
+	if (s.optimizer)
+		r.sphere_update_nonfinite = s.optimizer->metrics().sphere_update_nonfinite;
+	return r;
 }
 
 template <typename State>
@@ -742,6 +755,9 @@ typename State::Status compute_initial_medial_axis(State& s)
 	const bool mf_model = neural_input && s.options.neural_model_type == NeuralModelType::mf;
 	const bool udf_model = neural_input && s.options.neural_model_type == NeuralModelType::udf;
 	const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(10), Scalar(0));
+	// repair counters (atomic: run_shrinking_ball_for_vertex runs in parallel); they do not affect the result
+	s.ma_repairs = {};
+	std::atomic<uint32> degenerate_normals{0}, shrink_fallbacks{0}, secondary_from_nn{0};
 	auto run_shrinking_ball_for_vertex = [&](PVertex v) -> bool {
 		if (!v.is_valid())
 			return false;
@@ -755,7 +771,10 @@ typename State::Status compute_initial_medial_axis(State& s)
 		if (can_shrink)
 			n.normalize();
 		else
+		{
 			n = Vec3(0, 0, 1);
+			degenerate_normals.fetch_add(1, std::memory_order_relaxed);
+		}
 		Vec3 center = pt - n * fallback_radius;
 		Scalar radius = fallback_radius;
 		PVertex secondary;
@@ -769,6 +788,8 @@ typename State::Status compute_initial_medial_axis(State& s)
 				radius = r1;
 				secondary = q1;
 			}
+			else
+				shrink_fallbacks.fetch_add(1, std::memory_order_relaxed);
 		}
 		if (!center.allFinite())
 			center = pt - n * fallback_radius;
@@ -778,7 +799,10 @@ typename State::Status compute_initial_medial_axis(State& s)
 		{
 			std::pair<uint32, Scalar> nn;
 			if (s.sample_kdtree->find_nn(center - n * radius, &nn) && nn.first < s.sample_vertices.size())
+			{
 				secondary = s.sample_vertices[nn.first];
+				secondary_from_nn.fetch_add(1, std::memory_order_relaxed);
+			}
 		}
 		(*s.sample_ma_position)[idx] = center;
 		(*s.sample_ma_radius)[idx] = std::max(radius, fallback_radius);
@@ -890,7 +914,12 @@ typename State::Status compute_initial_medial_axis(State& s)
 				}
 			}
 		}
+		s.ma_repairs.ma_flip_flipped = flipped;
+		s.ma_repairs.ma_flip_deleted = deleted;
 	}
+	s.ma_repairs.ma_degenerate_normals = degenerate_normals.load();
+	s.ma_repairs.ma_shrink_fallbacks = shrink_fallbacks.load();
+	s.ma_repairs.ma_secondary_from_nn = secondary_from_nn.load();
 	build_sample_kdtree(s);
 	return Status::success;
 }
@@ -1047,6 +1076,7 @@ typename State::Result reconstruct(State& s, const typename State::IterationCall
 	s.topology.reset();
 	s.fitting_data_computed = false;
 	s.samples_before_filtering = 0;
+	s.ma_repairs = {};
 	auto run_stage = [](float64& time, auto&& stage) {
 		const auto start = std::chrono::high_resolution_clock::now();
 		const Status status = stage();
@@ -1095,6 +1125,7 @@ typename State::Result reconstruct(State& s, const typename State::IterationCall
 	}
 	r.status = Status::success;
 	r.counts = counts(s);
+	r.repairs = repairs(s);
 	return r;
 }
 

@@ -213,6 +213,10 @@ public:
 	{
 		return udf_stages::counts(s_);
 	}
+	ReconstructionRepairs repairs() const
+	{
+		return udf_stages::repairs(s_);
+	}
 
 	NONMANIFOLD* skeleton() const
 	{

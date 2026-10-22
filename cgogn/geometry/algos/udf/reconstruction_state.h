@@ -140,12 +140,14 @@ struct ReconstructionState
 
 	using Timing = ReconstructionTiming;
 	using Counts = ReconstructionCounts;
+	using Repairs = ReconstructionRepairs;
 
 	struct Result
 	{
 		Status status = Status::invalid_data;
 		Timing timing;
 		Counts counts;
+		Repairs repairs;
 	};
 
 	using IterationCallback = std::function<void(const SpheresOptimizerMetrics&)>;
@@ -166,6 +168,8 @@ struct ReconstructionState
 	bool fitting_data_computed = false;
 	bool initialized = false;
 	uint32 samples_before_filtering = 0;
+	// set by compute_initial_medial_axis; sphere_update_nonfinite is read from the optimizer by repairs()
+	Repairs ma_repairs;
 
 	std::shared_ptr<PointAttribute<Vec3>> input_position, input_normal;
 	std::shared_ptr<PointAttribute<std::vector<PVertex>>> input_knn;

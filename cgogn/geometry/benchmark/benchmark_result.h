@@ -48,6 +48,7 @@ struct BenchmarkResult
 	ReconstructionTiming timing;
 	BenchmarkExtraTiming extra_timing;
 	BenchmarkResidualPruneStats residual_prune;
+	ReconstructionRepairs repairs;
 };
 
 // single table shared by the console summary and the timing JSON export; order here is the JSON key order

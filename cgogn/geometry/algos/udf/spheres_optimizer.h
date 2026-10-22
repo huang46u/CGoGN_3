@@ -32,6 +32,7 @@
 #include <libacc/kd_tree.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -113,6 +114,8 @@ public:
 		float64 sphere_update_total_ms = 0.0;
 		float64 error_total_ms = 0.0;
 		bool sphere_topology_changed = false;
+		// sphere updates skipped because the solve gave non-finite values (sum over the iterations)
+		uint32 sphere_update_nonfinite = 0;
 	};
 
 	enum class Status
@@ -281,6 +284,7 @@ public:
 			update_sphere_line_quadric_distance_free_radius(v);
 			return true;
 		});
+		metrics_.sphere_update_nonfinite += nonfinite_updates_.exchange(0);
 		const auto update_end = std::chrono::high_resolution_clock::now();
 		metrics_.sphere_update_total_ms += std::chrono::duration<float64, std::milli>(update_end - update_start).count();
 
@@ -589,7 +593,10 @@ private:
 		const Vec3 b = (bs + data_.sqem_update_lambda_line_plane * bl) - Asr * fixed_radius;
 		center = A.ldlt().solve(b);
 		if (!center.allFinite())
+		{
+			nonfinite_updates_.fetch_add(1, std::memory_order_relaxed);
 			return;
+		}
 		(*data_.sphere_position)[sphere_index] = center;
 		(*data_.sphere_radius)[sphere_index] = fixed_radius;
 	}
@@ -627,7 +634,10 @@ private:
 		const Vec4 b = q._b + data_.sqem_update_lambda_line_plane * bl_ext;
 		const Vec4 s = A.completeOrthogonalDecomposition().solve(b);
 		if (!s.allFinite())
+		{
+			nonfinite_updates_.fetch_add(1, std::memory_order_relaxed);
 			return;
+		}
 		Scalar nearest_ma_radius = Scalar(0);
 		const bool too_large = try_get_nearest_sample_ma_radius(s.head<3>(), nearest_ma_radius) &&
 			(s[3] > nearest_ma_radius * Scalar(1.5));
@@ -717,6 +727,8 @@ private:
 	Data data_;
 	Metrics metrics_;
 	bool convergence_reached_ = false;
+	// non-finite solves of the current update pass (sphere updates run in parallel)
+	std::atomic<uint32> nonfinite_updates_{0};
 	uint32 post_convergence_iterations_ = 0;
 };
 
