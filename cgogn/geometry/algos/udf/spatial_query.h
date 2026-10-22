@@ -1,6 +1,7 @@
 #ifndef CGOGN_GEOMETRY_ALGOS_UDF_SPATIAL_QUERY_H_
 #define CGOGN_GEOMETRY_ALGOS_UDF_SPATIAL_QUERY_H_
 
+#include <cgogn/core/utils/numerics.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <libacc/bvh_tree.h>

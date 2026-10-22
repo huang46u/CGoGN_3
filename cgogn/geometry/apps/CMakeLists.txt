@@ -167,6 +167,33 @@ if (CGOGN_USE_CGAL)
     SOURCES udf_residual_prune_test.cpp
     EXTRA_LIBS CGAL::CGAL
   )
+
+  # Self-containment check: every UDF header is compiled alone in its own translation unit.
+  # Headers listed in UDF_HEADER_CHECK_EXCLUDE are known not to be self-contained yet.
+  set(UDF_HEADER_CHECK_EXCLUDE algos/udf/skeleton_topology.h)
+  file(GLOB_RECURSE UDF_CHECKED_HEADERS CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/.."
+    "${CMAKE_CURRENT_SOURCE_DIR}/../algos/udf/*.h")
+  list(APPEND UDF_CHECKED_HEADERS
+    types/neural_field_forward.h
+    types/ray_level_set_sampler.h
+    types/ray_level_set_sampler_traits.h
+  )
+  set(UDF_HEADER_CHECK_SOURCES)
+  foreach(header ${UDF_CHECKED_HEADERS})
+    if (NOT header IN_LIST UDF_HEADER_CHECK_EXCLUDE)
+      string(MAKE_C_IDENTIFIER "${header}" header_id)
+      set(check_source "${CMAKE_CURRENT_BINARY_DIR}/udf_header_check/${header_id}.cpp")
+      file(CONFIGURE OUTPUT "${check_source}" CONTENT "#include <cgogn/geometry/${header}>
+")
+      list(APPEND UDF_HEADER_CHECK_SOURCES "${check_source}")
+    endif()
+  endforeach()
+  add_library(udf_header_check OBJECT ${UDF_HEADER_CHECK_SOURCES})
+  target_link_libraries(udf_header_check PRIVATE cgogn::geometry cgogn::core cgogn::io "${TORCH_LIBRARIES}" CGAL::CGAL)
+  # cgogn::geometry does not export thirdparty/ (libacc) in its build interface; the apps get it through cgogn::ui
+  target_include_directories(udf_header_check PRIVATE ${CGOGN_SOURCE_DIR}/thirdparty)
+  set_property(TARGET udf_header_check PROPERTY CXX_STANDARD 17)
+  set_property(TARGET udf_header_check PROPERTY CXX_STANDARD_REQUIRED ON)
 endif()
 add_executable(filtering filtering.cpp)
 target_link_libraries(filtering
