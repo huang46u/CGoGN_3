@@ -3,7 +3,7 @@
     "input": {"mode": "neural_udf", "geometry_type": "mesh", "neural_model_type": "mf", "ma_flip_prune": true,
               "input_path": "data/skeleton/QMDF/ABC/model/ABC_066.obj",
               "neural_udf_model_path": "data/skeleton/QMDF/ABC/weight/ABC_066.pt"},
-    "sampling": {"alpha": 0.005, "knn_k": 10, "bridson": {"sample_radius": 0.002}},
+    "sampling": {"alpha": 0.005, "knn_k": 10, "bridson": {"sample_radius": 0.002, "candidates_per_parent": 60, "parent_batch_size": 102}},
     "optimization": {"sqem_update_lambda_line_plane": 0.2},
     "initialization": {"seed": 42, "init_dilation_constant": 0.01},
     "postprocess": {"residual_prune": true}
@@ -12,7 +12,7 @@
     "input": {"mode": "neural_udf", "geometry_type": "mesh", "neural_model_type": "mf", "ma_flip_prune": true,
               "input_path": "data/skeleton/QMDF/organic/model/bug.off",
               "neural_udf_model_path": "data/skeleton/QMDF/organic/weight/bug.pt"},
-    "sampling": {"alpha": 0.005, "knn_k": 10, "bridson": {"sample_radius": 0.002}},
+    "sampling": {"alpha": 0.005, "knn_k": 10, "bridson": {"sample_radius": 0.002, "candidates_per_parent": 120, "parent_batch_size": 102}},
     "optimization": {"sqem_update_lambda_line_plane": 0.2},
     "initialization": {"seed": 42, "init_dilation_constant": 0.01},
     "postprocess": {"residual_prune": true}

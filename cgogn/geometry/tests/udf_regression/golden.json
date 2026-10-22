@@ -1,23 +1,23 @@
 {
   "mf_abc_066": {
     "counts": {
-      "final_spheres": 1600,
-      "sample_points": 149147,
-      "skeleton_edges": 4658,
-      "skeleton_faces": 3059,
-      "skeleton_vertices": 1600
+      "final_spheres": 1669,
+      "sample_points": 157657,
+      "skeleton_edges": 4868,
+      "skeleton_faces": 3200,
+      "skeleton_vertices": 1669
     },
-    "sha256": "18fcbadacdbc6fd9c772f27ada3a9cfedf2c5b6096bc163fc33671ae41151400"
+    "sha256": "f228a7dbb6acf293d3f506ee9c56425481d0349014c28e7d1d527a0dd637b264"
   },
   "mf_organic_bug": {
     "counts": {
-      "final_spheres": 596,
-      "sample_points": 65821,
-      "skeleton_edges": 1389,
-      "skeleton_faces": 794,
-      "skeleton_vertices": 596
+      "final_spheres": 608,
+      "sample_points": 69850,
+      "skeleton_edges": 1420,
+      "skeleton_faces": 813,
+      "skeleton_vertices": 608
     },
-    "sha256": "4c69085dbe6fa6c099c1fc4eaa4ae2f856528301256d5d0d67f850aa9d5ae7be"
+    "sha256": "cc0b795f49e2c6cfaf9747b2703cb5a831869e88691cb4669ae4fb68ab1bcc8a"
   },
   "point_cloud_df_48_2": {
     "counts": {

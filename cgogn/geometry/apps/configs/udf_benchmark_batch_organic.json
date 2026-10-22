@@ -11,7 +11,9 @@
     "apply_filtering": false,
     "recompute_normals_after_sampling": true,
     "bridson": {
-      "sample_radius": 0.0020
+      "sample_radius": 0.0020,
+      "candidates_per_parent": 120,
+      "parent_batch_size": 102
     }
   },
   "optimization": {
