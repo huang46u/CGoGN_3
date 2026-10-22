@@ -31,13 +31,11 @@
 #include <libacc/kd_tree.h>
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <set>
 #include <unordered_set>
 #include <utility>
@@ -340,7 +338,6 @@ public:
 		});
 		parallel_foreach_cell(*data_.samples_mesh, [&](Vertex v) {
 			const uint32 v_index = index_of(*data_.samples_mesh, v);
-			const Scalar area = (*data_.sample_area)[v_index];
 			const Vertex owner = (*data_.sample_sphere)[v_index];
 			const uint32 owner_index = owner.is_valid() ? index_of(*data_.spheres, owner) : INVALID_INDEX;
 			Scalar min_distance = std::numeric_limits<Scalar>::max();
@@ -387,14 +384,18 @@ public:
 			}
 			else
 				foreach_cell(*data_.spheres, [&](Vertex candidate) { evaluate_candidate(candidate); return true; });
-			(*data_.sample_sphere)[v_index] = closest_sphere;
-			if (!closest_sphere.is_valid() || closest_index == INVALID_INDEX)
-			{
+			(*data_.sample_sphere)[v_index] = closest_index == INVALID_INDEX ? Vertex() : closest_sphere;
+			return true;
+		});
+		// clusters are filled in sample order, so the sums over a cluster do not depend on thread scheduling
+		foreach_cell(*data_.samples_mesh, [&](Vertex v) {
+			const uint32 v_index = index_of(*data_.samples_mesh, v);
+			const Vertex sphere = (*data_.sample_sphere)[v_index];
+			if (!sphere.is_valid())
 				return true;
-			}
-			std::lock_guard<std::mutex> lock(cluster_mutexes_[closest_index % cluster_mutexes_.size()]);
-			(*data_.sphere_cluster)[closest_index].push_back(v);
-			(*data_.sphere_cluster_area)[closest_index] += area;
+			const uint32 sphere_index = index_of(*data_.spheres, sphere);
+			(*data_.sphere_cluster)[sphere_index].push_back(v);
+			(*data_.sphere_cluster_area)[sphere_index] += (*data_.sample_area)[v_index];
 			return true;
 		});
 	}
@@ -716,7 +717,6 @@ private:
 	Metrics metrics_;
 	bool convergence_reached_ = false;
 	uint32 post_convergence_iterations_ = 0;
-	std::array<std::mutex, 43> cluster_mutexes_;
 };
 
 } // namespace geometry
