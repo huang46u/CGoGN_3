@@ -4,6 +4,7 @@
 #include <cgogn/core/types/maps/cmap/cmap0.h>
 #include <cgogn/core/types/maps/cmap/cmap2.h>
 #include <cgogn/geometry/algos/udf/reconstruction.h>
+#include <cgogn/geometry/algos/udf/skeleton_ply_export.h>
 #include <cgogn/geometry/functions/bounding_box.h>
 #include <cgogn/io/point/ply.h>
 #include <cgogn/io/surface/obj.h>
@@ -187,7 +188,9 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 			: 0.0;
 
 	const auto export_start = std::chrono::high_resolution_clock::now();
-	if (!reconstruction.export_skeleton_ply(config.output.skeleton_ply))
+	if (!(reconstruction.skeleton() && geometry::export_skeleton_ply(*reconstruction.skeleton(),
+			reconstruction.skeleton_position_attribute(), reconstruction.skeleton_radius_attribute(),
+			config.output.skeleton_ply)))
 		throw std::runtime_error("Could not export skeleton: " + config.output.skeleton_ply);
 	const auto counts_after_export = reconstruction.counts();
 	if (counts_after_export.skeleton_vertices != result.counts.skeleton_vertices ||

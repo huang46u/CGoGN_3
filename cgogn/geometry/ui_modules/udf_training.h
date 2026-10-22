@@ -10,6 +10,7 @@
 #include <cgogn/geometry/algos/udf/reconstruction.h>
 #include <cgogn/geometry/algos/udf/reconstruction_options.h>
 #include <cgogn/geometry/algos/udf/reconstruction_profiles.h>
+#include <cgogn/geometry/algos/udf/skeleton_ply_export.h>
 #include <cgogn/geometry/types/vector_traits.h>
 #include <cgogn/ui/portable-file-dialogs.h>
 
@@ -994,7 +995,10 @@ protected:
 						if (!filename.empty())
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
-							if (!p.reconstruction_->export_skeleton_ply(filename))
+							if (!(p.reconstruction_->skeleton() &&
+								  geometry::export_skeleton_ply(
+									  *p.reconstruction_->skeleton(), p.reconstruction_->skeleton_position_attribute(),
+									  p.reconstruction_->skeleton_radius_attribute(), filename)))
 								log_error("Failed to export skeleton PLY: ", filename, '\n');
 						}
 					}
