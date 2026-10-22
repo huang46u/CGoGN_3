@@ -100,7 +100,7 @@ private:
 
 		// Skeleton
 		NONMANIFOLD* skeleton_ = nullptr;
-		bool skeleton_invalidated_ = false;
+		std::atomic<bool> skeleton_invalidated_{false};
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_position_ = nullptr;
 		std::shared_ptr<NMAttribute<Scalar>> skeleton_radius_ = nullptr;
 		std::shared_ptr<NMAttribute<std::set<std::size_t>>> incident_tets_ = nullptr;
@@ -436,20 +436,6 @@ private:
 		return Vec4(1.0, 0.0, 0.0, transparency);
 	}
 
-	void log_skeleton_topology_summary(const PointsParameters& p, const char* prefix) const
-	{
-		if (!p.reconstruction_) return;
-		const auto& metrics = p.reconstruction_->skeleton_topology().metrics();
-		log_basic(p, prefix, " rounds=", metrics.topology_rounds,
-				  " boundary_removed_tets=", metrics.boundary_removed_tets,
-				  " simple_removed_tets=", metrics.simple_removed_tets,
-				  " nonsimple_removed_tets=", metrics.nonsimple_removed_tets,
-				  " removed_faces=", metrics.removed_faces, " removed_edges=", metrics.removed_edges,
-				  " removed_tets=", metrics.removed_tets, " remaining_tets=", metrics.tet_count,
-				  " repaired_regions=", metrics.repaired_dense_regions, " added_spheres=", metrics.added_spheres.size(),
-				  " added_faces=", metrics.added_faces, " residual_removed_sheets=", metrics.residual_removed_sheets,
-				  " residual_removed_faces=", metrics.residual_removed_faces, '\n');
-	}
 	void apply_skeleton_topology_results(PointsParameters& p)
 	{
 		if (!p.reconstruction_) return;
@@ -921,10 +907,7 @@ protected:
 							const ReconstructionStatus status = p.reconstruction_->build_skeleton();
 							p.skeleton_invalidated_ = status != ReconstructionStatus::success;
 							if (status == ReconstructionStatus::success)
-							{
-								log_basic(p, "[SkeletonBuild] tets=", p.reconstruction_->skeleton_topology().metrics().tet_count, '\n');
 								refresh_skeleton_topology_colors(p);
-							}
 							update_render_data(p, RenderUpdateMode::all_current_data);
 						}
 					}
@@ -965,7 +948,6 @@ protected:
 								if (status == ReconstructionStatus::success)
 								{
 									p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
-									log_skeleton_topology_summary(p, "[TopologyFull]");
 									apply_skeleton_topology_results(p);
 								}
 								else
