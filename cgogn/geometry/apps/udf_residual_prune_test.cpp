@@ -149,6 +149,21 @@ void build_scenario_b(Graph& g, Builder& builder)
 	builder.support_edge(vd, va);
 }
 
+// scenario C: complete 2-complex on 5 vertices (all 10 triangles). Every edge is shared by 3 triangles, so every
+// triangle is fully non-manifold and all of them are removed in the same batch; every edge then becomes an orphan
+// edge and every vertex an isolated vertex (covers the edge and vertex removal of the orphan cleanup).
+void build_scenario_c(Graph& g, Builder& builder)
+{
+	(void)g;
+	std::vector<GVertex> v;
+	for (int i = 0; i < 5; ++i)
+		v.push_back(builder.vertex());
+	for (int i = 0; i < 5; ++i)
+		for (int j = i + 1; j < 5; ++j)
+			for (int k = j + 1; k < 5; ++k)
+				builder.triangle(v[i], v[j], v[k]);
+}
+
 const char* mode_name(Mode mode)
 {
 	switch (mode)
@@ -164,9 +179,10 @@ const char* mode_name(Mode mode)
 }
 
 // returns true when every check of this (scenario, mode) pair passes
-bool run_case(bool scenario_b, Mode mode)
+bool run_case(char scenario, Mode mode)
 {
-	const char* scenario = scenario_b ? "B" : "A";
+	const bool scenario_b = scenario == 'B';
+	const bool scenario_c = scenario == 'C';
 
 	Graph skeleton;
 	Points spheres;
@@ -182,6 +198,8 @@ bool run_case(bool scenario_b, Mode mode)
 	Builder builder(skeleton);
 	if (scenario_b)
 		build_scenario_b(skeleton, builder);
+	else if (scenario_c)
+		build_scenario_c(skeleton, builder);
 	else
 		build_scenario_a(skeleton, builder);
 
@@ -209,6 +227,7 @@ bool run_case(bool scenario_b, Mode mode)
 	const long long chi_after = after.chi();
 	const long long deleted_faces = before.faces - after.faces;
 	const long long removed_edges = before.edges - after.edges;
+	const long long removed_vertices = before.vertices - after.vertices;
 	const bool current = mode == Mode::current;
 	const bool collapsible = mode == Mode::collapsible_only;
 
@@ -217,7 +236,17 @@ bool run_case(bool scenario_b, Mode mode)
 	long long expected_removed_edges = 0;
 	long long expected_fully_nm = 0;
 	long long expected_residual_removed = 0;
-	if (!scenario_b)
+	long long expected_removed_vertices = 0;
+	if (scenario_c)
+	{
+		// the 10 triangles are removed by the fully non-manifold step only in current mode, together with the 10
+		// orphan edges and the 5 isolated vertices
+		expected_deleted_faces = current ? 10 : 0;
+		expected_fully_nm = current ? 10 : 0;
+		expected_removed_edges = current ? 10 : 0;
+		expected_removed_vertices = current ? 5 : 0;
+	}
+	else if (!scenario_b)
 	{
 		// T is removed by the fully non-manifold step only in current mode
 		expected_deleted_faces = current ? 1 : 0;
@@ -236,17 +265,20 @@ bool run_case(bool scenario_b, Mode mode)
 	std::vector<std::string> errors;
 	if (status != Topology::Status::success)
 		errors.push_back("prune_residual_sheets did not return success");
-	if (before.vertices != after.vertices)
-		errors.push_back("vertex count changed (vertex removal path was not expected)");
+	if (removed_vertices != expected_removed_vertices)
+		errors.push_back("removed vertices: expected " + std::to_string(expected_removed_vertices) + ", got " +
+						 std::to_string(removed_vertices));
 	if (deleted_faces != expected_deleted_faces)
 		errors.push_back("deleted faces: expected " + std::to_string(expected_deleted_faces) + ", got " +
 						 std::to_string(deleted_faces));
 	if (removed_edges != expected_removed_edges)
 		errors.push_back("removed edges: expected " + std::to_string(expected_removed_edges) + ", got " +
 						 std::to_string(removed_edges));
-	if (chi_after != chi_before - expected_deleted_faces + expected_removed_edges)
-		errors.push_back("chi_after: expected " + std::to_string(chi_before - expected_deleted_faces + expected_removed_edges) +
-						 ", got " + std::to_string(chi_after));
+	const long long expected_chi_after =
+		chi_before - expected_deleted_faces + expected_removed_edges - expected_removed_vertices;
+	if (chi_after != expected_chi_after)
+		errors.push_back("chi_after: expected " + std::to_string(expected_chi_after) + ", got " +
+						 std::to_string(chi_after));
 	if (m.residual_chi_before != chi_before || m.residual_chi_after != chi_after)
 		errors.push_back("metrics chi values do not match the skeleton");
 	if (static_cast<long long>(m.residual_fully_nm_removed_faces) != expected_fully_nm)
@@ -261,7 +293,8 @@ bool run_case(bool scenario_b, Mode mode)
 	const bool ok = errors.empty();
 	std::cout << "[scenario " << scenario << "][" << mode_name(mode) << "] chi_before=" << chi_before
 			  << " chi_after=" << chi_after << " deleted_faces=" << deleted_faces
-			  << " removed_edges=" << removed_edges << (ok ? " PASS" : " FAIL") << '\n';
+			  << " removed_edges=" << removed_edges << " removed_vertices=" << removed_vertices
+			  << (ok ? " PASS" : " FAIL") << '\n';
 	for (const std::string& e : errors)
 		std::cout << "  FAIL: " << e << '\n';
 	return ok;
@@ -274,9 +307,9 @@ int main()
 	cgogn::thread_start(0);
 	int failed_cases = 0;
 	const Mode modes[] = {Mode::current, Mode::keep_fully_non_manifold, Mode::collapsible_only};
-	for (bool scenario_b : {false, true})
+	for (char scenario : {'A', 'B', 'C'})
 		for (Mode mode : modes)
-			if (!run_case(scenario_b, mode))
+			if (!run_case(scenario, mode))
 				++failed_cases;
 	cgogn::thread_stop();
 
