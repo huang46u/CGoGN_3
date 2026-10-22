@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -44,6 +45,36 @@
 
 namespace cgogn::geometry::skeleton_topology_detail
 {
+
+// Greedy removal of tets that have a simple face (a face owned by this tet only): the first face removed must be
+// simple, and at most one face that becomes dangling is removed in the second step.
+struct SimpleTetPolicy
+{
+	static bool accepts_tet(bool has_simple_face)
+	{
+		return has_simple_face;
+	}
+	static bool accepts_first_face(std::size_t face_tet_count)
+	{
+		return face_tet_count == 1;
+	}
+	static constexpr std::size_t max_second_step_faces = 1;
+};
+
+// Greedy removal of the remaining (non-simple) tets: any face of the tet may go first, and every face that becomes
+// dangling is removed in the second step.
+struct NonSimpleTetPolicy
+{
+	static bool accepts_tet(bool has_simple_face)
+	{
+		return !has_simple_face;
+	}
+	static bool accepts_first_face(std::size_t /*face_tet_count*/)
+	{
+		return true;
+	}
+	static constexpr std::size_t max_second_step_faces = std::numeric_limits<std::size_t>::max();
+};
 
 template <typename POINTS, typename NONMANIFOLD>
 struct GreedyTetRemoval
@@ -55,13 +86,11 @@ struct GreedyTetRemoval
 	using Tet = typename Types::Tet;
 	using RemovalStats = typename Types::RemovalStats;
 	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
-	using EdgeTetDeleteMode = typename Types::EdgeTetDeleteMode;
 	using MeshOps = skeleton_topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
 	using QuadratureScores = skeleton_topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
 
-	template <typename ScoreEvaluator>
-	static RemovalStats run_edge_score_tet_mode_topology_fix(Context& p, EdgeTetDeleteMode mode,
-															 TopologyFixScoreCache& score_cache,
+	template <typename Policy, typename ScoreEvaluator>
+	static RemovalStats run_edge_score_tet_mode_topology_fix(Context& p, TopologyFixScoreCache& score_cache,
 															 ScoreEvaluator& evaluator)
 	{
 		RemovalStats stats;
@@ -245,7 +274,7 @@ struct GreedyTetRemoval
 						const uint32 idf = index_of(*p.skeleton_, ef);
 						if (idf == INVALID_INDEX || !has_face_budget(idf))
 							continue;
-						if (mode == EdgeTetDeleteMode::SimpleTet && (*p.incident_tets_)[idf].size() != 1)
+						if (!Policy::accepts_first_face((*p.incident_tets_)[idf].size()))
 							continue;
 						const Scalar face_score = get_face_score(idf);
 						if (!edge_has_candidate || face_score > best_face_on_edge_score + face_eps)
@@ -412,9 +441,7 @@ struct GreedyTetRemoval
 
 		auto build_step_candidate = [&](std::size_t tet_id, StepCandidate& out_candidate) -> bool {
 			const bool is_simple_tet = tet_has_simple_face(tet_id);
-			if (mode == EdgeTetDeleteMode::SimpleTet && !is_simple_tet)
-				return false;
-			if (mode == EdgeTetDeleteMode::NonSimpleTet && is_simple_tet)
+			if (!Policy::accepts_tet(is_simple_tet))
 				return false;
 
 			SkeletonEdge best_edge_local;
@@ -578,8 +605,8 @@ struct GreedyTetRemoval
 			}
 			std::sort(created_deg1_faces.begin(), created_deg1_faces.end(),
 					  [](const FaceChoice& a, const FaceChoice& b) { return a.score > b.score; });
-			if (mode == EdgeTetDeleteMode::SimpleTet && created_deg1_faces.size() > 1)
-				created_deg1_faces.resize(1);
+			if (created_deg1_faces.size() > Policy::max_second_step_faces)
+				created_deg1_faces.resize(Policy::max_second_step_faces);
 
 			for (const FaceChoice& fc : created_deg1_faces)
 			{

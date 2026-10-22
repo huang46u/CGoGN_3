@@ -201,12 +201,6 @@ struct SkeletonTopologyTypes
 		std::unordered_map<uint32, Scalar> face_scores;
 		bool initialized = false;
 	};
-
-	enum class EdgeTetDeleteMode
-	{
-		SimpleTet,
-		NonSimpleTet
-	};
 };
 
 } // namespace cgogn::geometry::skeleton_topology_detail

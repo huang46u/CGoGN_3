@@ -137,7 +137,6 @@ private:
 	using Context = typename Types::Context;
 	using RemovalStats = typename Types::RemovalStats;
 	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
-	using EdgeTetDeleteMode = typename Types::EdgeTetDeleteMode;
 	using MeshOps = skeleton_topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
 	using SkeletonBuild = skeleton_topology_detail::SkeletonBuild<POINTS, NONMANIFOLD>;
 	using QuadratureScores = skeleton_topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
@@ -178,12 +177,12 @@ private:
 			const RemovalStats boundary_stats = BoundaryTetPrune::run_boundary_tet_face_deletion(p, &score_cache);
 			RemovalStats simple_stats;
 			if (!p.skeleton_tets_.empty())
-				simple_stats = GreedyTetRemoval::run_edge_score_tet_mode_topology_fix(p, EdgeTetDeleteMode::SimpleTet,
-																					  score_cache, evaluator);
+				simple_stats = GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<
+					skeleton_topology_detail::SimpleTetPolicy>(p, score_cache, evaluator);
 			RemovalStats nonsimple_stats;
 			if (!p.skeleton_tets_.empty())
-				nonsimple_stats = GreedyTetRemoval::run_edge_score_tet_mode_topology_fix(
-					p, EdgeTetDeleteMode::NonSimpleTet, score_cache, evaluator);
+				nonsimple_stats = GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<
+					skeleton_topology_detail::NonSimpleTetPolicy>(p, score_cache, evaluator);
 			const uint32 round_end_tets = static_cast<uint32>(p.skeleton_tets_.size());
 			const uint32 round_removed_tets = round_start_tets - round_end_tets;
 			++p.metrics.topology_rounds;
