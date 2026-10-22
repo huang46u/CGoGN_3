@@ -205,6 +205,14 @@ if (CGOGN_USE_CGAL)
     EXTRA_LIBS CGAL::CGAL
   )
 
+  cgogn_add_udf_executable(udf_stage_sequence_test
+    SOURCES
+      udf_stage_sequence_test.cpp
+      ../benchmark/benchmark_config.cpp
+      ../benchmark/skeleton_benchmark_runner.cpp
+    EXTRA_LIBS CGAL::CGAL
+  )
+
   cgogn_add_udf_executable(udf_residual_prune_test
     SOURCES udf_residual_prune_test.cpp
     EXTRA_LIBS CGAL::CGAL

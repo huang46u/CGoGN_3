@@ -103,35 +103,8 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	Points input_points, samples, spheres;
 	NonManifold skeleton;
 	const bool neural = config.input.mode == InputMode::NeuralUDF;
-	const bool use_surface = config.input.mode == InputMode::SurfaceMesh ||
-							 (neural && config.input.geometry_type == InputGeometryType::Mesh);
 	const auto input_start = std::chrono::high_resolution_clock::now();
-	if (use_surface)
-	{
-		if (!import_surface(surface, result.input_path))
-			throw std::runtime_error("Could not import surface mesh: " + result.input_path);
-		auto position = get_attribute<Vec3, mesh_traits<Surface>::Vertex>(surface, "position");
-		if (!position)
-			throw std::runtime_error("Imported surface has no position attribute.");
-		geometry::rescale_centered(*position, 1);
-		if (neural && config.reconstruction.neural_model_type == NeuralModelType::udf)
-		{
-			geometry::normalize_centered(*position);
-		}
-	}
-	else
-	{
-		if (!import_points(input_points, result.input_path))
-			throw std::runtime_error("Could not import point cloud (PLY required): " + result.input_path);
-		auto position = get_attribute<Vec3, mesh_traits<Points>::Vertex>(input_points, "position");
-		if (!position)
-			throw std::runtime_error("Imported point cloud has no position attribute.");
-		geometry::rescale_centered(*position, 1);
-		if (neural && config.reconstruction.neural_model_type == NeuralModelType::udf)
-		{
-			geometry::normalize_centered(*position);
-		}
-	}
+	const bool use_surface = load_benchmark_input(config, surface, input_points);
 	const auto input_end = std::chrono::high_resolution_clock::now();
 	result.extra_timing.input_loading_ms = std::chrono::duration<double, std::milli>(input_end - input_start).count();
 
@@ -263,6 +236,43 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 }
 
 } // namespace
+
+bool load_benchmark_input(const BenchmarkConfig& config, CMap2& surface, CMap0& input_points)
+{
+	using Surface = CMap2;
+	using Points = CMap0;
+	const std::string input_path = geometry_input_path_for_run(config);
+	const bool neural = config.input.mode == InputMode::NeuralUDF;
+	const bool use_surface = config.input.mode == InputMode::SurfaceMesh ||
+							 (neural && config.input.geometry_type == InputGeometryType::Mesh);
+	if (use_surface)
+	{
+		if (!import_surface(surface, input_path))
+			throw std::runtime_error("Could not import surface mesh: " + input_path);
+		auto position = get_attribute<Vec3, mesh_traits<Surface>::Vertex>(surface, "position");
+		if (!position)
+			throw std::runtime_error("Imported surface has no position attribute.");
+		geometry::rescale_centered(*position, 1);
+		if (neural && config.reconstruction.neural_model_type == NeuralModelType::udf)
+		{
+			geometry::normalize_centered(*position);
+		}
+	}
+	else
+	{
+		if (!import_points(input_points, input_path))
+			throw std::runtime_error("Could not import point cloud (PLY required): " + input_path);
+		auto position = get_attribute<Vec3, mesh_traits<Points>::Vertex>(input_points, "position");
+		if (!position)
+			throw std::runtime_error("Imported point cloud has no position attribute.");
+		geometry::rescale_centered(*position, 1);
+		if (neural && config.reconstruction.neural_model_type == NeuralModelType::udf)
+		{
+			geometry::normalize_centered(*position);
+		}
+	}
+	return use_surface;
+}
 
 BenchmarkResult SkeletonBenchmarkRunner::run(const BenchmarkConfig& config) const
 {

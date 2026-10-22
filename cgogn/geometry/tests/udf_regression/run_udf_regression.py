@@ -12,6 +12,9 @@ vertex/radius differences <= --tolerance is reported as NUMERIC, anything else a
 Unless --prune-test none is given, the small-example unit test udf_residual_prune_test (next to --exe by default) is
 run as well and counted as one more case.
 
+Unless --stage-test none is given, udf_stage_sequence_test (next to --exe by default) is run on the cases of
+--stage-test-cases: the staged pipeline of the UI and run() must give the same counts and a byte-identical skeleton.
+
 Runs at below-normal priority on --cores (default 4-11) with matching OpenMP/MKL thread counts, to keep the machine
 usable; the result does not depend on the core count."""
 import argparse
@@ -48,6 +51,28 @@ def read_ply(path):
     return vertices, lines[nv:]
 
 
+def launch(exe, cfg_path, log_path, cores):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("UDF_")}
+    env.update({k: str(len(cores)) for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")})
+    flags = 0
+    if os.name == "nt":
+        flags = subprocess.BELOW_NORMAL_PRIORITY_CLASS | CREATE_SUSPENDED
+    with open(log_path, "w", encoding="utf-8", errors="replace") as log:
+        p = subprocess.Popen([exe, cfg_path], cwd=os.path.dirname(exe), stdout=log, stderr=subprocess.STDOUT,
+                             env=env, creationflags=flags)
+        try:
+            import psutil
+            proc = psutil.Process(p.pid)
+            proc.cpu_affinity(cores)
+            if os.name == "nt":
+                proc.resume()
+        except ImportError:
+            if os.name == "nt":
+                raise SystemExit("psutil is required on Windows (the process is started suspended)")
+        rc = p.wait()
+    return rc
+
+
 def run_case(exe, name, case, out_dir, cores):
     cfg = json.loads(json.dumps(case))
     for key in ("input_path", "neural_udf_model_path"):
@@ -61,25 +86,8 @@ def run_case(exe, name, case, out_dir, cores):
             os.remove(f)
     with open(stem + "_cfg.json", "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=1)
-    env = {k: v for k, v in os.environ.items() if not k.startswith("UDF_")}
-    env.update({k: str(len(cores)) for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")})
-    flags = 0
-    if os.name == "nt":
-        flags = subprocess.BELOW_NORMAL_PRIORITY_CLASS | CREATE_SUSPENDED
     start = time.time()
-    with open(stem + ".log", "w", encoding="utf-8", errors="replace") as log:
-        p = subprocess.Popen([exe, stem + "_cfg.json"], cwd=os.path.dirname(exe), stdout=log, stderr=subprocess.STDOUT,
-                             env=env, creationflags=flags)
-        try:
-            import psutil
-            proc = psutil.Process(p.pid)
-            proc.cpu_affinity(cores)
-            if os.name == "nt":
-                proc.resume()
-        except ImportError:
-            if os.name == "nt":
-                raise SystemExit("psutil is required on Windows (the process is started suspended)")
-        rc = p.wait()
+    rc = launch(exe, stem + "_cfg.json", stem + ".log", cores)
     elapsed = time.time() - start
     if rc != 0 or not os.path.exists(stem + ".ply"):
         return None, elapsed
@@ -95,6 +103,28 @@ def compare_numeric(ply, golden_ply, tolerance):
         return False, "connectivity differs"
     diff = max((abs(x - y) for ra, rb in zip(va, vb) for x, y in zip(ra, rb)), default=0.0)
     return diff <= tolerance, f"max vertex/radius difference {diff:.3e}"
+
+
+def run_stage_test(exe, name, case, out_dir, cores):
+    cfg = json.loads(json.dumps(case))
+    for key in ("input_path", "neural_udf_model_path"):
+        if cfg["input"].get(key):
+            cfg["input"][key] = os.path.join(REPO, cfg["input"][key]).replace("\\", "/")
+    stem = os.path.join(out_dir, name + "_stagetest")
+    cfg["benchmark"] = {"num_measure_runs": 1, "verbose": False}
+    cfg["output"] = {"skeleton_ply": stem + ".ply", "timing_json": stem + "_timing.json"}
+    with open(stem + "_cfg.json", "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=1)
+    rc = launch(exe, stem + "_cfg.json", stem + ".log", cores)
+    with open(stem + ".log", encoding="utf-8", errors="replace") as f:
+        log_lines = f.read().splitlines()
+    non_empty = [l.strip() for l in log_lines if l.strip()]
+    if rc == 0 and non_empty and non_empty[-1] == "PASS":
+        print(f"PASS     stage_sequence:{name}")
+        return 0
+    print(f"FAIL     stage_sequence:{name}: exit code {rc}")
+    print("\n".join(log_lines[-20:]))
+    return 1
 
 
 def run_prune_test(exe):
@@ -121,6 +151,10 @@ def main():
     parser.add_argument("--only", nargs="*", help="run only these cases")
     parser.add_argument("--prune-test", default=None,
                         help="udf_residual_prune_test executable (default: next to --exe; 'none' to skip)")
+    parser.add_argument("--stage-test", default=None,
+                        help="udf_stage_sequence_test executable (default: next to --exe; 'none' to skip)")
+    parser.add_argument("--stage-test-cases", nargs="*", default=["surface_horse", "mf_organic_bug"],
+                        help="cases for the stage sequence test")
     args = parser.parse_args()
 
     cases = json.load(open(os.path.join(HERE, "cases.json"), encoding="utf-8"))
@@ -164,6 +198,16 @@ def main():
             ok, detail = compare_numeric(os.path.join(run_dir, name + ".ply"), golden_ply, args.tolerance)
             print(f"{'NUMERIC ' if ok else 'FAIL    '} {name}: same counts, {detail}")
             failures += 0 if ok else 1
+    if not args.update and args.stage_test != "none":
+        stage_cases = [name for name in args.stage_test_cases if name in cases]
+        stage_exe = args.stage_test or os.path.join(os.path.dirname(args.exe),
+                                                    "udf_stage_sequence_test" + os.path.splitext(args.exe)[1])
+        if stage_cases and not os.path.exists(stage_exe):
+            print(f"FAIL     stage_sequence: {stage_exe} not found (build udf_stage_sequence_test or pass --stage-test none)")
+            failures += 1
+        else:
+            for name in stage_cases:
+                failures += run_stage_test(stage_exe, name, cases[name], run_dir, cores)
     if not args.update and args.prune_test != "none":
         failures += run_prune_test(args.prune_test or os.path.join(os.path.dirname(args.exe),
                                                                    "udf_residual_prune_test" + os.path.splitext(args.exe)[1]))
