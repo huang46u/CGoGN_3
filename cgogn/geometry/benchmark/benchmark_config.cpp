@@ -347,6 +347,7 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	const ptree& benchmark_tree = root.get_child("benchmark");
 	config.benchmark.num_measure_runs = get_value<int>(benchmark_tree, "num_measure_runs", 1);
 	config.benchmark.verbose = get_value<bool>(benchmark_tree, "verbose", true);
+	config.benchmark.sequential = get_value<bool>(benchmark_tree, "sequential", false);
 
 	if (auto batch = root.get_child_optional("batch"))
 	{

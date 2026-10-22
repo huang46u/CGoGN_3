@@ -44,6 +44,9 @@ struct BenchmarkRuntimeConfig
 {
 	int num_measure_runs = 1;
 	bool verbose = true;
+	// runs the reconstruction without thread pool workers (every parallel loop on the calling thread); used to check
+	// that the sequential and the parallel runs give the same skeleton
+	bool sequential = false;
 };
 
 struct BenchmarkOutputConfig

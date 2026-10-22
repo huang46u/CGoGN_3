@@ -3,6 +3,7 @@
 #include <cgogn/core/types/incidence_graph/incidence_graph.h>
 #include <cgogn/core/types/maps/cmap/cmap0.h>
 #include <cgogn/core/types/maps/cmap/cmap2.h>
+#include <cgogn/core/utils/thread_pool.h>
 #if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
 #include <cgogn/geometry/algos/udf/neural/neural_distance_field.h>
 #endif
@@ -193,6 +194,7 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 		put_option_value(benchmark_config, info.json_key, value);
 	});
 	benchmark_config.put("profile", config.profile.empty() ? std::string("none") : config.profile);
+	benchmark_config.put("benchmark.sequential", config.benchmark.sequential);
 	root.add_child("benchmark_config", benchmark_config);
 
 	boost::property_tree::ptree counts;
@@ -277,6 +279,19 @@ bool load_benchmark_input(const BenchmarkConfig& config, CMap2& surface, CMap0& 
 BenchmarkResult SkeletonBenchmarkRunner::run(const BenchmarkConfig& config) const
 {
 	const auto total_start = std::chrono::high_resolution_clock::now();
+	// benchmark.sequential: no thread pool worker during the run, all workers again afterwards (also on exceptions)
+	struct WorkerCountGuard
+	{
+		bool active;
+		~WorkerCountGuard()
+		{
+			if (active)
+				thread_pool()->set_nb_workers();
+		}
+	};
+	const WorkerCountGuard worker_count_guard{config.benchmark.sequential};
+	if (config.benchmark.sequential)
+		thread_pool()->set_nb_workers(0);
 	BenchmarkResult result;
 	switch (config.input.mode)
 	{

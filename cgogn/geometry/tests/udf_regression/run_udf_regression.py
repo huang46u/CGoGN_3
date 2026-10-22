@@ -12,6 +12,9 @@ vertex/radius differences <= --tolerance is reported as NUMERIC, anything else a
 Unless --prune-test none is given, the small-example unit test udf_residual_prune_test (next to --exe by default) is
 run as well and counted as one more case.
 
+Unless --sequential-cases none is given, the cases of --sequential-cases are run again with benchmark.sequential
+(no thread pool worker) and compared with the same golden result: the sequential and the parallel runs must agree.
+
 Unless --stage-test none is given, udf_stage_sequence_test (next to --exe by default) is run on the cases of
 --stage-test-cases: the staged pipeline of the UI and run() must give the same counts and a byte-identical skeleton.
 
@@ -73,13 +76,13 @@ def launch(exe, cfg_path, log_path, cores):
     return rc
 
 
-def run_case(exe, name, case, out_dir, cores):
+def run_case(exe, name, case, out_dir, cores, sequential=False):
     cfg = json.loads(json.dumps(case))
     for key in ("input_path", "neural_udf_model_path"):
         if cfg["input"].get(key):
             cfg["input"][key] = os.path.join(REPO, cfg["input"][key]).replace("\\", "/")
     stem = os.path.join(out_dir, name)
-    cfg["benchmark"] = {"num_measure_runs": 1, "verbose": False}
+    cfg["benchmark"] = {"num_measure_runs": 1, "verbose": False, "sequential": sequential}
     cfg["output"] = {"skeleton_ply": stem + ".ply", "timing_json": stem + "_timing.json"}
     for f in (stem + ".ply", stem + "_timing.json"):
         if os.path.exists(f):
@@ -127,6 +130,25 @@ def run_stage_test(exe, name, case, out_dir, cores):
     return 1
 
 
+def check_result(label, result, elapsed, expected, run_ply, golden_ply, tolerance):
+    """Prints the comparison of one run with its golden result and returns the number of failures (0 or 1)."""
+    if expected is None:
+        print(f"FAIL     {label}: no golden result, run with --update first")
+        return 1
+    if result["sha256"] == expected["sha256"]:
+        print(f"PASS     {label}: identical skeleton ({elapsed:.1f} s)")
+        return 0
+    if result["counts"] != expected["counts"]:
+        print(f"FAIL     {label}: counts {result['counts']} != golden {expected['counts']}")
+        return 1
+    if not os.path.exists(golden_ply):
+        print(f"FAIL     {label}: skeleton differs (same counts), golden PLY missing for a numeric comparison")
+        return 1
+    ok, detail = compare_numeric(run_ply, golden_ply, tolerance)
+    print(f"{'NUMERIC ' if ok else 'FAIL    '} {label}: same counts, {detail}")
+    return 0 if ok else 1
+
+
 def run_prune_test(exe):
     if not os.path.exists(exe):
         print(f"FAIL     residual_prune_test: {exe} not found (build udf_residual_prune_test or pass --prune-test none)")
@@ -151,6 +173,8 @@ def main():
     parser.add_argument("--only", nargs="*", help="run only these cases")
     parser.add_argument("--prune-test", default=None,
                         help="udf_residual_prune_test executable (default: next to --exe; 'none' to skip)")
+    parser.add_argument("--sequential-cases", nargs="*", default=["mf_organic_bug"],
+                        help="cases also run with benchmark.sequential and compared with the same golden ('none' to skip)")
     parser.add_argument("--stage-test", default=None,
                         help="udf_stage_sequence_test executable (default: next to --exe; 'none' to skip)")
     parser.add_argument("--stage-test-cases", nargs="*", default=["surface_horse", "mf_organic_bug"],
@@ -180,24 +204,19 @@ def main():
             shutil.copyfile(os.path.join(run_dir, name + ".ply"), os.path.join(golden_dir, name + ".ply"))
             print(f"RECORDED {name}: {result['counts']} ({elapsed:.1f} s)")
             continue
-        expected = golden.get(name)
-        if expected is None:
-            print(f"FAIL     {name}: no golden result, run with --update first")
-            failures += 1
-        elif result["sha256"] == expected["sha256"]:
-            print(f"PASS     {name}: identical skeleton ({elapsed:.1f} s)")
-        elif result["counts"] != expected["counts"]:
-            print(f"FAIL     {name}: counts {result['counts']} != golden {expected['counts']}")
-            failures += 1
-        else:
-            golden_ply = os.path.join(golden_dir, name + ".ply")
-            if not os.path.exists(golden_ply):
-                print(f"FAIL     {name}: skeleton differs (same counts), golden PLY missing for a numeric comparison")
+        failures += check_result(name, result, elapsed, golden.get(name), os.path.join(run_dir, name + ".ply"),
+                                 os.path.join(golden_dir, name + ".ply"), args.tolerance)
+    if not args.update and args.sequential_cases != ["none"]:
+        for name in [n for n in args.sequential_cases if n in cases]:
+            seq_name = name + "_sequential"
+            result, elapsed = run_case(args.exe, seq_name, cases[name], run_dir, cores, sequential=True)
+            if result is None:
+                print(f"FAIL     sequential:{name}: udf_benchmark failed, see {os.path.join(run_dir, seq_name)}.log")
                 failures += 1
                 continue
-            ok, detail = compare_numeric(os.path.join(run_dir, name + ".ply"), golden_ply, args.tolerance)
-            print(f"{'NUMERIC ' if ok else 'FAIL    '} {name}: same counts, {detail}")
-            failures += 0 if ok else 1
+            failures += check_result("sequential:" + name, result, elapsed, golden.get(name),
+                                     os.path.join(run_dir, seq_name + ".ply"), os.path.join(golden_dir, name + ".ply"),
+                                     args.tolerance)
     if not args.update and args.stage_test != "none":
         stage_cases = [name for name in args.stage_test_cases if name in cases]
         stage_exe = args.stage_test or os.path.join(os.path.dirname(args.exe),
