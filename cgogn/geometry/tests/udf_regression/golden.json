@@ -1,0 +1,42 @@
+{
+  "mf_abc_066": {
+    "counts": {
+      "final_spheres": 1600,
+      "sample_points": 149147,
+      "skeleton_edges": 4659,
+      "skeleton_faces": 3056,
+      "skeleton_vertices": 1600
+    },
+    "sha256": "9889ae5ea89be4e5f1a9c409e87db50448f0bc21cf1daf00e4cfd269921ff72f"
+  },
+  "mf_organic_bug": {
+    "counts": {
+      "final_spheres": 596,
+      "sample_points": 65821,
+      "skeleton_edges": 1389,
+      "skeleton_faces": 794,
+      "skeleton_vertices": 596
+    },
+    "sha256": "4c69085dbe6fa6c099c1fc4eaa4ae2f856528301256d5d0d67f850aa9d5ae7be"
+  },
+  "point_cloud_df_48_2": {
+    "counts": {
+      "final_spheres": 7860,
+      "sample_points": 567238,
+      "skeleton_edges": 22679,
+      "skeleton_faces": 14541,
+      "skeleton_vertices": 7860
+    },
+    "sha256": "aeb92dcbbead323bcb0f8ee750aceb6a6c7aa1abc3200a8749fdf0512ae596b9"
+  },
+  "surface_horse": {
+    "counts": {
+      "final_spheres": 3232,
+      "sample_points": 367751,
+      "skeleton_edges": 9690,
+      "skeleton_faces": 6460,
+      "skeleton_vertices": 3232
+    },
+    "sha256": "6f65311d8ee5568687602f2a9efb50043cab10c4f503c92ae33a5b3a6c7336aa"
+  }
+}

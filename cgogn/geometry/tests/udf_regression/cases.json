@@ -1,0 +1,36 @@
+{
+  "mf_abc_066": {
+    "input": {"mode": "neural_udf", "geometry_type": "mesh", "neural_model_type": "mf", "ma_flip_prune": true,
+              "input_path": "data/skeleton/QMDF/ABC/model/ABC_066.obj",
+              "neural_udf_model_path": "data/skeleton/QMDF/ABC/weight/ABC_066.pt"},
+    "sampling": {"alpha": 0.005, "knn_k": 10, "bridson": {"sample_radius": 0.002}},
+    "optimization": {"sqem_update_lambda_line_plane": 0.2},
+    "initialization": {"seed": 42, "init_dilation_constant": 0.01},
+    "postprocess": {"residual_prune": true}
+  },
+  "mf_organic_bug": {
+    "input": {"mode": "neural_udf", "geometry_type": "mesh", "neural_model_type": "mf", "ma_flip_prune": true,
+              "input_path": "data/skeleton/QMDF/organic/model/bug.off",
+              "neural_udf_model_path": "data/skeleton/QMDF/organic/weight/bug.pt"},
+    "sampling": {"alpha": 0.005, "knn_k": 10, "bridson": {"sample_radius": 0.002}},
+    "optimization": {"sqem_update_lambda_line_plane": 0.2},
+    "initialization": {"seed": 42, "init_dilation_constant": 0.01},
+    "postprocess": {"residual_prune": true}
+  },
+  "surface_horse": {
+    "input": {"mode": "surface_mesh", "geometry_type": "mesh", "neural_model_type": "udf", "ma_flip_prune": true,
+              "input_path": "data/skeleton/QMDF/organic/model/horse.off"},
+    "sampling": {"alpha": 0.005, "knn_k": 10, "bridson": {"sample_radius": 0.002}},
+    "optimization": {"sqem_update_lambda_line_plane": 0.2},
+    "initialization": {"seed": 42, "init_dilation_constant": 0.01},
+    "postprocess": {"residual_prune": true}
+  },
+  "point_cloud_df_48_2": {
+    "input": {"mode": "point_cloud", "geometry_type": "point_cloud", "neural_model_type": "udf", "ma_flip_prune": true,
+              "input_path": "data/skeleton/udf/deepfashion/model/48-2.ply"},
+    "sampling": {"alpha": 0.0015, "knn_k": 10, "bridson": {"sample_radius": 0.0015}},
+    "optimization": {"sqem_update_lambda_line_plane": 0.2},
+    "initialization": {"seed": 42, "init_dilation_constant": 0.0075},
+    "postprocess": {"residual_prune": true}
+  }
+}
