@@ -18,9 +18,6 @@
 #include <cgogn/geometry/algos/udf/alpha_sampling.h>
 #include <cgogn/geometry/algos/udf/distance_field.h>
 #include <cgogn/geometry/algos/udf/input_geometry.h>
-#include <cgogn/geometry/algos/udf/neural_alpha_projection.h>
-#include <cgogn/geometry/algos/udf/neural_distance_field.h>
-#include <cgogn/geometry/algos/udf/neural_field_query.h>
 #include <cgogn/geometry/algos/udf/reconstruction_options.h>
 #include <cgogn/geometry/algos/udf/reconstruction_stats.h>
 #include <cgogn/geometry/algos/udf/sample_processing.h>
@@ -35,7 +32,6 @@
 #include <cgogn/geometry/functions/bounding_box.h>
 #include <cgogn/geometry/functions/normal.h>
 #include <cgogn/geometry/types/line_quadric.h>
-#include <cgogn/geometry/types/neural_field_forward.h>
 #include <cgogn/geometry/types/ray_level_set_sampler.h>
 #include <cgogn/geometry/types/ray_level_set_sampler_traits.h>
 #include <cgogn/geometry/types/spatial_grid.h>

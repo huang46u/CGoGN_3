@@ -174,11 +174,8 @@ if (CGOGN_USE_CGAL)
   file(GLOB_RECURSE UDF_CHECKED_HEADERS CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/.."
     "${CMAKE_CURRENT_SOURCE_DIR}/../algos/udf/*.h")
   list(APPEND UDF_CHECKED_HEADERS
-    types/neural_field_forward.h
     types/ray_level_set_sampler.h
     types/ray_level_set_sampler_traits.h
-    types/ray_level_set_sampler_torch.h
-    types/neural_ray_traits.h
   )
   set(UDF_HEADER_CHECK_SOURCES)
   foreach(header ${UDF_CHECKED_HEADERS})

@@ -6,6 +6,7 @@
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/core/utils/thread.h>
+#include <cgogn/geometry/algos/udf/neural/neural_distance_field.h>
 #include <cgogn/geometry/algos/udf/neural_model_type.h>
 #include <cgogn/geometry/algos/udf/reconstruction.h>
 #include <cgogn/geometry/algos/udf/reconstruction_options.h>

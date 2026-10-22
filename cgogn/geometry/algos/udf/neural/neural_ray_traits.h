@@ -1,7 +1,7 @@
-#ifndef CGOGN_GEOMETRY_TYPES_NEURAL_RAY_TRAITS_H_
-#define CGOGN_GEOMETRY_TYPES_NEURAL_RAY_TRAITS_H_
+#ifndef CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_NEURAL_RAY_TRAITS_H_
+#define CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_NEURAL_RAY_TRAITS_H_
 
-#include <cgogn/geometry/types/neural_field_forward.h>
+#include <cgogn/geometry/algos/udf/neural/neural_field_forward.h>
 #include <cgogn/geometry/types/ray_level_set_sampler_traits.h>
 
 #include <torch/torch.h>
@@ -54,4 +54,4 @@ struct RaySamplerTraits<RaySamplerNeural, SURFACE, POINTS>
 
 } // namespace cgogn
 
-#endif // CGOGN_GEOMETRY_TYPES_NEURAL_RAY_TRAITS_H_
+#endif // CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_NEURAL_RAY_TRAITS_H_

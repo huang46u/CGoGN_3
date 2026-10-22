@@ -86,9 +86,6 @@ class SurfaceDistanceField;
 template <typename SURFACE, typename POINTS>
 class PointCloudDistanceField;
 
-template <typename SURFACE, typename POINTS>
-class NeuralDistanceField;
-
 // Maps a ray sampler tag to the distance field class that implements it.
 template <typename RaySamplerTag, typename SURFACE, typename POINTS>
 struct DistanceFieldFor;
@@ -105,11 +102,7 @@ struct DistanceFieldFor<RaySamplerPointCloud, SURFACE, POINTS>
 	using type = PointCloudDistanceField<SURFACE, POINTS>;
 };
 
-template <typename SURFACE, typename POINTS>
-struct DistanceFieldFor<RaySamplerNeural, SURFACE, POINTS>
-{
-	using type = NeuralDistanceField<SURFACE, POINTS>;
-};
+// the neural specialization is in neural/neural_distance_field.h; include it to reconstruct from a neural field
 
 } // namespace cgogn::geometry
 

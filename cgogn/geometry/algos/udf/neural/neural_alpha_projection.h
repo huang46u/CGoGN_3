@@ -20,12 +20,12 @@
  * Contact information: cgogn@unistra.fr                                        *
  *                                                                              *
  *******************************************************************************/
-#ifndef CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_ALPHA_PROJECTION_H_
-#define CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_ALPHA_PROJECTION_H_
+#ifndef CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_NEURAL_ALPHA_PROJECTION_H_
+#define CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_NEURAL_ALPHA_PROJECTION_H_
 
 #include <cgogn/geometry/algos/udf/alpha_projection.h>
 #include <cgogn/geometry/algos/udf/normal_utils.h>
-#include <cgogn/geometry/types/neural_field_forward.h>
+#include <cgogn/geometry/algos/udf/neural/neural_field_forward.h>
 
 #include <algorithm>
 #include <cmath>
@@ -214,4 +214,4 @@ inline bool project_points_to_alpha(const NeuralFieldForward& udf, const std::ve
 
 } // namespace cgogn
 
-#endif // CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_ALPHA_PROJECTION_H_
+#endif // CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_NEURAL_ALPHA_PROJECTION_H_

@@ -1,8 +1,8 @@
-#ifndef CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_FIELD_QUERY_H_
-#define CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_FIELD_QUERY_H_
+#ifndef CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_NEURAL_FIELD_QUERY_H_
+#define CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_NEURAL_FIELD_QUERY_H_
 
-#include <cgogn/geometry/types/neural_field_forward.h>
-#include <cgogn/geometry/algos/udf/neural_alpha_projection.h>
+#include <cgogn/geometry/algos/udf/neural/neural_field_forward.h>
+#include <cgogn/geometry/algos/udf/neural/neural_alpha_projection.h>
 #include <cgogn/geometry/algos/udf/normal_utils.h>
 
 #include <algorithm>
@@ -117,4 +117,4 @@ inline bool evaluate_udf_values_sdf(const NeuralFieldForward& field, const std::
 
 } // namespace cgogn
 
-#endif // CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_FIELD_QUERY_H_
+#endif // CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_NEURAL_FIELD_QUERY_H_

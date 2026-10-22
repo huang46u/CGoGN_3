@@ -20,22 +20,22 @@
  * Contact information: cgogn@unistra.fr                                        *
  *                                                                              *
  *******************************************************************************/
-#ifndef CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_DISTANCE_FIELD_H_
-#define CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_DISTANCE_FIELD_H_
+#ifndef CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_NEURAL_DISTANCE_FIELD_H_
+#define CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_NEURAL_DISTANCE_FIELD_H_
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
 #include <cgogn/geometry/algos/udf/alpha_projection.h>
 #include <cgogn/geometry/algos/udf/distance_field.h>
 #include <cgogn/geometry/algos/udf/input_geometry.h>
-#include <cgogn/geometry/algos/udf/neural_alpha_projection.h>
-#include <cgogn/geometry/algos/udf/neural_field_query.h>
+#include <cgogn/geometry/algos/udf/neural/neural_alpha_projection.h>
+#include <cgogn/geometry/algos/udf/neural/neural_field_forward.h>
+#include <cgogn/geometry/algos/udf/neural/neural_field_query.h>
+#include <cgogn/geometry/algos/udf/neural/neural_ray_traits.h>
+#include <cgogn/geometry/algos/udf/neural/ray_level_set_sampler_torch.h>
 #include <cgogn/geometry/algos/udf/neural_model_type.h>
 #include <cgogn/geometry/algos/udf/reconstruction_options.h>
 #include <cgogn/geometry/functions/bounding_box.h>
-#include <cgogn/geometry/types/neural_field_forward.h>
-#include <cgogn/geometry/types/neural_ray_traits.h>
-#include <cgogn/geometry/types/ray_level_set_sampler_torch.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <torch/script.h>
@@ -207,6 +207,13 @@ private:
 	const ReconstructionOptions& options_;
 };
 
+// Neural specialization of the distance field selection (the primary template is in distance_field.h)
+template <typename SURFACE, typename POINTS>
+struct DistanceFieldFor<RaySamplerNeural, SURFACE, POINTS>
+{
+	using type = NeuralDistanceField<SURFACE, POINTS>;
+};
+
 } // namespace cgogn::geometry
 
-#endif // CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_DISTANCE_FIELD_H_
+#endif // CGOGN_GEOMETRY_ALGOS_UDF_NEURAL_NEURAL_DISTANCE_FIELD_H_
