@@ -124,7 +124,6 @@ private:
 		std::atomic<uint32> update_rate_{20};
 		std::atomic<float32> sphere_update_lambda_{0.2f};
 		SpheresOptimizerMetrics metrics_snapshot_{};
-
 	};
 
 public:
@@ -207,7 +206,8 @@ public:
 		if (!points_provider_)
 			throw std::runtime_error("UDFTraining points provider is not initialized before set_selected_points().");
 		if (!non_manifold_provider_)
-			throw std::runtime_error("UDFTraining non-manifold provider is not initialized before set_selected_points().");
+			throw std::runtime_error(
+				"UDFTraining non-manifold provider is not initialized before set_selected_points().");
 		selected_points_ = &p;
 		init_points_data(p);
 		PointsParameters& params = points_parameters_[selected_points_];
@@ -265,7 +265,6 @@ public:
 		}
 	}
 
-
 	void load_alpha_samples_to_mesh(PointsParameters& p)
 	{
 		if (!p.reconstruction_)
@@ -310,12 +309,9 @@ protected:
 		skeleton_render_ = static_cast<SurfaceRender<NONMANIFOLD>*>(
 			app_.module("SurfaceRender (" + std::string{mesh_traits<NONMANIFOLD>::name} + ")"));
 
-		timer_connection_ = boost::synapse::connect<App::timer_tick>(&app_, [this]() {
-			handle_spheres_update_tick();
-		});
-		const OutputVerbosity startup_output_verbosity = selected_points_
-			? points_parameters_[selected_points_].output_verbosity_.load()
-			: OUTPUT_NORMAL;
+		timer_connection_ = boost::synapse::connect<App::timer_tick>(&app_, [this]() { handle_spheres_update_tick(); });
+		const OutputVerbosity startup_output_verbosity =
+			selected_points_ ? points_parameters_[selected_points_].output_verbosity_.load() : OUTPUT_NORMAL;
 		if (torch::cuda::is_available())
 		{
 			log_basic(startup_output_verbosity, "CUDA is available! Using GPU device 0.", '\n');
@@ -338,7 +334,7 @@ private:
 
 		const std::string sample_name = points_provider_->mesh_name(m) + "_samples";
 		p.samples_mesh_ = points_provider_->has_mesh(sample_name) ? points_provider_->mesh(sample_name)
-																 : points_provider_->add_mesh(sample_name);
+																  : points_provider_->add_mesh(sample_name);
 		points_provider_->clear_mesh(*p.samples_mesh_);
 		p.samples_position_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_mesh_, "position");
 		p.samples_normal_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_mesh_, "normal");
@@ -357,7 +353,7 @@ private:
 
 		const std::string skeleton_name = points_provider_->mesh_name(m) + "_skeleton";
 		p.skeleton_ = non_manifold_provider_->has_mesh(skeleton_name) ? non_manifold_provider_->mesh(skeleton_name)
-																	   : non_manifold_provider_->add_mesh(skeleton_name);
+																	  : non_manifold_provider_->add_mesh(skeleton_name);
 		p.skeleton_position_ = get_or_add_attribute<Vec3, NMVertex>(*p.skeleton_, "position");
 		p.skeleton_radius_ = get_or_add_attribute<Scalar, NMVertex>(*p.skeleton_, "radius");
 		p.incident_tets_ = get_or_add_attribute<std::set<std::size_t>, NMFace>(*p.skeleton_, "incident_tets");
@@ -398,7 +394,6 @@ private:
 		});
 	}
 
-
 	void update_spheres_color(PointsParameters& p)
 	{
 		parallel_foreach_cell(*p.spheres_, [&](PVertex v) -> bool {
@@ -406,7 +401,7 @@ private:
 			if (p.error_as_spheres_color_)
 				(*p.spheres_color_)[v_index] =
 					color_map((*p.spheres_error_)[v_index], p.metrics_snapshot_.minimum_error,
-											  p.metrics_snapshot_.maximum_error, p.spheres_transparency_);
+							  p.metrics_snapshot_.maximum_error, p.spheres_transparency_);
 			else
 			{
 				const Vec4& c = (*p.spheres_cluster_color_)[v_index];
@@ -438,31 +433,43 @@ private:
 
 	void apply_skeleton_topology_results(PointsParameters& p)
 	{
-		if (!p.reconstruction_) return;
+		if (!p.reconstruction_)
+			return;
 		const auto& metrics = p.reconstruction_->skeleton_topology().metrics();
 		for (PVertex sphere : metrics.added_spheres)
 		{
 			const uint32 id = p.spheres_ ? index_of(*p.spheres_, sphere) : INVALID_INDEX;
-			if (id == INVALID_INDEX) continue;
-			if (p.spheres_color_) (*p.spheres_color_)[id] = Vec4(0.95, 0.25, 0.15, 1.0);
-			if (p.spheres_cluster_color_) (*p.spheres_cluster_color_)[id] = Vec4(0.95, 0.25, 0.15, 1.0);
+			if (id == INVALID_INDEX)
+				continue;
+			if (p.spheres_color_)
+				(*p.spheres_color_)[id] = Vec4(0.95, 0.25, 0.15, 1.0);
+			if (p.spheres_cluster_color_)
+				(*p.spheres_cluster_color_)[id] = Vec4(0.95, 0.25, 0.15, 1.0);
 		}
 		refresh_skeleton_topology_colors(p);
 		if (non_manifold_provider_ && p.skeleton_)
 		{
 			non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
-			if (p.skeleton_position_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
-			if (p.skeleton_radius_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_radius_.get());
-			if (p.skeleton_edge_color_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
-			if (p.skeleton_face_color_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
+			if (p.skeleton_position_)
+				non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
+			if (p.skeleton_radius_)
+				non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_radius_.get());
+			if (p.skeleton_edge_color_)
+				non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
+			if (p.skeleton_face_color_)
+				non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
 		}
 		if (points_provider_ && p.spheres_)
 		{
 			points_provider_->emit_connectivity_changed(*p.spheres_);
-			if (p.spheres_position_) points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_position_.get());
-			if (p.spheres_radius_) points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_radius_.get());
-			if (p.spheres_color_) points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_color_.get());
-			if (p.spheres_cluster_color_) points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_cluster_color_.get());
+			if (p.spheres_position_)
+				points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_position_.get());
+			if (p.spheres_radius_)
+				points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_radius_.get());
+			if (p.spheres_color_)
+				points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_color_.get());
+			if (p.spheres_cluster_color_)
+				points_provider_->emit_attribute_changed(*p.spheres_, p.spheres_cluster_color_.get());
 		}
 	}
 	void refresh_skeleton_topology_colors(PointsParameters& p)
@@ -485,6 +492,7 @@ private:
 			return true;
 		});
 	}
+
 protected:
 	enum class RenderUpdateMode : uint8
 	{
@@ -533,10 +541,14 @@ protected:
 		if (non_manifold_provider_ && p.skeleton_)
 		{
 			non_manifold_provider_->emit_connectivity_changed(*p.skeleton_);
-			if (p.skeleton_position_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
-			if (p.skeleton_radius_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_radius_.get());
-			if (p.skeleton_edge_color_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
-			if (p.skeleton_face_color_) non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
+			if (p.skeleton_position_)
+				non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_position_.get());
+			if (p.skeleton_radius_)
+				non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_radius_.get());
+			if (p.skeleton_edge_color_)
+				non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
+			if (p.skeleton_face_color_)
+				non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
 		}
 	}
 
@@ -652,8 +664,8 @@ protected:
 				active->running_.store(false);
 			}
 			const auto end = std::chrono::high_resolution_clock::now();
-			log_basic(*active, "Sphere optimizations time: ",
-					  std::chrono::duration<Scalar>(end - start).count(), "s", '\n');
+			log_basic(*active, "Sphere optimizations time: ", std::chrono::duration<Scalar>(end - start).count(), "s",
+					  '\n');
 			log_basic(*active, "Nb iterations: ", final_metrics.iteration, '\n');
 			cgogn::thread_stop();
 			boost::synapse::emit<App::timer_tick>(&app_);
@@ -680,7 +692,7 @@ protected:
 			std::lock_guard<std::mutex> lock(active->mutex_);
 			running = active->running_.load();
 			should_render = (running && active->preview_render_during_sphere_update_.load()) ||
-						(!running && active->render_refresh_requested_.load());
+							(!running && active->render_refresh_requested_.load());
 			active->metrics_snapshot_ = active->reconstruction_->spheres_optimizer().metrics();
 			active->render_refresh_requested_.store(false);
 		}
@@ -851,7 +863,8 @@ protected:
 				if (ImGui::CollapsingHeader("Sphere Fitting", ImGuiTreeNodeFlags_DefaultOpen))
 				{
 					ImGui::BeginDisabled(p.running_.load());
-					ImGui::SliderFloat("Init dilation constant", &options.init_dilation_constant, 0.001f, 0.01f, "%.4f");
+					ImGui::SliderFloat("Init dilation constant", &options.init_dilation_constant, 0.001f, 0.01f,
+									   "%.4f");
 					if (ImGui::Button("Init spheres"))
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
@@ -897,7 +910,6 @@ protected:
 					}
 					ImGui::EndDisabled();
 
-
 					ImGui::BeginDisabled(p.running_.load());
 					if (ImGui::Button("Build Skeleton"))
 					{
@@ -913,16 +925,17 @@ protected:
 					}
 					ImGui::EndDisabled();
 					const bool running = p.running_.load();
-					const bool skeleton_export_available =
-						!running && !p.skeleton_invalidated_ && p.skeleton_ && p.skeleton_position_ && p.skeleton_radius_ &&
-						nb_cells<NMVertex>(*p.skeleton_) > 0;
+					const bool skeleton_export_available = !running && !p.skeleton_invalidated_ && p.skeleton_ &&
+														   p.skeleton_position_ && p.skeleton_radius_ &&
+														   nb_cells<NMVertex>(*p.skeleton_) > 0;
 					const bool can_export_skeleton = skeleton_export_available;
 					ImGui::TextDisabled(skeleton_export_available ? "ready" : "missing");
 					if (!can_export_skeleton)
 						ImGui::BeginDisabled();
 					if (ImGui::Button("Export skeleton PLY"))
 					{
-						const std::string filename = pfd::save_file("Export skeleton PLY", "skeleton.ply", {"PLY", "*.ply"}).result();
+						const std::string filename =
+							pfd::save_file("Export skeleton PLY", "skeleton.ply", {"PLY", "*.ply"}).result();
 						if (!filename.empty())
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
@@ -1007,14 +1020,11 @@ protected:
 					ImGui::Text("Max error: %f", metrics.maximum_error);
 
 					ImGui::Separator();
-
 				}
-
 			}
 			else
 			{
-				ImGui::TextColored(ImVec4(1, 1, 0, 1),
-								   "Compute fitting data to enable sphere fitting.");
+				ImGui::TextColored(ImVec4(1, 1, 0, 1), "Compute fitting data to enable sphere fitting.");
 			}
 		}
 	}
@@ -1033,7 +1043,6 @@ private:
 	std::shared_ptr<boost::synapse::connection> timer_connection_;
 	std::thread spheres_update_thread_;
 	PointsParameters* active_spheres_update_ = nullptr;
-
 };
 
 } // namespace ui
