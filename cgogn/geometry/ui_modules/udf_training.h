@@ -297,15 +297,9 @@ public:
 	{
 		if (!p.reconstruction_)
 			return;
-		const ReconstructionStatus status = p.reconstruction_->sample_alpha_level_set();
-		if (status != ReconstructionStatus::success)
+		if (p.reconstruction_->sample() != ReconstructionStatus::success)
 		{
 			log_error("Alpha level set sampling failed.", '\n');
-			return;
-		}
-		if (p.reconstruction_->apply_sampling_filtering() != ReconstructionStatus::success)
-		{
-			log_error("Sampling filtering failed.", '\n');
 			return;
 		}
 		if (p.samples_color_)
@@ -403,10 +397,7 @@ private:
 	{
 		if (!p.reconstruction_ || p.fitting_data_computed_)
 			return;
-		ReconstructionType& reconstruction = *p.reconstruction_;
-		if (reconstruction.build_kdtree_and_normals() != ReconstructionStatus::success ||
-			reconstruction.compute_fitting_primitives() != ReconstructionStatus::success ||
-			reconstruction.compute_initial_medial_axis() != ReconstructionStatus::success)
+		if (p.reconstruction_->compute_fitting_data() != ReconstructionStatus::success)
 		{
 			log_error("Failed to compute fitting data.", '\n');
 			return;
@@ -640,7 +631,7 @@ protected:
 						if (active->stop_requested_.load())
 							break;
 						const Scalar lambda = Scalar(active->sphere_update_lambda_.load());
-						status = optimizer.update_once(lambda);
+						status = active->reconstruction_->update_spheres_once(lambda);
 						metrics = optimizer.metrics();
 						if (metrics.sphere_topology_changed)
 							active->skeleton_invalidated_ = true;
@@ -960,7 +951,7 @@ protected:
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							SpheresOptimizerType& optimizer = p.reconstruction_->spheres_optimizer();
-							optimizer.update_once(Scalar(options.sqem_update_lambda_line_plane));
+							p.reconstruction_->update_spheres_once(Scalar(options.sqem_update_lambda_line_plane));
 							p.metrics_snapshot_ = optimizer.metrics();
 							if (optimizer.metrics().sphere_topology_changed)
 							{
@@ -1031,13 +1022,10 @@ protected:
 							}
 							else
 							{
-								const ReconstructionStatus status = p.reconstruction_->fix_topology();
+								// Same order as run(): residual sheet prune after fix_topology, if enabled.
+								const ReconstructionStatus status = p.reconstruction_->fix_topology_and_prune();
 								if (status == ReconstructionStatus::success)
 								{
-									// Same order as run(): residual sheet prune after fix_topology, if enabled.
-									if (p.reconstruction_->options().residual_prune &&
-										p.reconstruction_->prune_residual_sheets() != ReconstructionStatus::success)
-										log_error("[TopologyFull] residual sheet prune failed.\n");
 									p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
 									apply_skeleton_topology_results(p);
 								}
