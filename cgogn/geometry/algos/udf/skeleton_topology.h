@@ -31,6 +31,7 @@
 #include <cgogn/core/types/cell_marker.h>
 #include <cgogn/core/utils/numerics.h>
 #include <cgogn/geometry/algos/area.h>
+#include <cgogn/geometry/algos/udf/internal/skeleton_topology_types.h>
 #include <cgogn/geometry/algos/udf/spheres_optimizer.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
@@ -61,51 +62,17 @@ template <typename POINTS, typename NONMANIFOLD>
 class SkeletonTopology
 {
 public:
-	using SphereVertex = typename mesh_traits<POINTS>::Vertex;
-	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
-	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
-	using SkeletonFace = typename mesh_traits<NONMANIFOLD>::Face;
-	template <typename T> using SphereAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
-	template <typename T> using SkeletonAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
-
-	struct Data
-	{
-		NONMANIFOLD* skeleton = nullptr;
-		SpheresOptimizer<POINTS>* spheres_optimizer = nullptr;
-		std::shared_ptr<SphereAttribute<SkeletonVertex>> sphere_skeleton_vertex;
-		std::shared_ptr<SkeletonAttribute<Vec3>> skeleton_position;
-		std::shared_ptr<SkeletonAttribute<Scalar>> skeleton_radius;
-		std::shared_ptr<SkeletonAttribute<SphereVertex>> skeleton_source_sphere;
-		std::shared_ptr<SkeletonAttribute<std::set<std::size_t>>> face_incident_tets;
-		std::shared_ptr<SkeletonAttribute<uint32>> edge_degree;
-	};
-
-	struct Metrics
-	{
-		uint32 tet_count = 0;
-		uint32 topology_rounds = 0;
-		uint32 boundary_removed_tets = 0;
-		uint32 simple_removed_tets = 0;
-		uint32 nonsimple_removed_tets = 0;
-		uint32 removed_faces = 0;
-		uint32 removed_edges = 0;
-		uint32 removed_tets = 0;
-		uint32 repaired_dense_regions = 0;
-		uint32 added_faces = 0;
-		uint32 residual_removed_sheets = 0;
-		uint32 residual_removed_faces = 0;
-		int32 residual_chi_before = 0;
-		int32 residual_chi_after = 0;
-		uint32 residual_fully_nm_removed_faces = 0;
-		uint32 residual_small_sheets = 0;
-		uint32 residual_small_sheets_guarded = 0;
-		uint32 residual_small_sheets_with_boundary_edge = 0;
-		uint32 residual_small_sheets_without_boundary_edge = 0;
-		std::vector<SphereVertex> added_spheres;
-	};
-
-	enum class Status { success, invalid_data, score_evaluation_failed };
-	enum class ResidualPruneMode { current, keep_fully_non_manifold, collapsible_only };
+	using Types = skeleton_topology_detail::SkeletonTopologyTypes<POINTS, NONMANIFOLD>;
+	using SphereVertex = typename Types::SphereVertex;
+	using SkeletonVertex = typename Types::SkeletonVertex;
+	using SkeletonEdge = typename Types::SkeletonEdge;
+	using SkeletonFace = typename Types::SkeletonFace;
+	template <typename T> using SphereAttribute = typename Types::template SphereAttribute<T>;
+	template <typename T> using SkeletonAttribute = typename Types::template SkeletonAttribute<T>;
+	using Data = typename Types::Data;
+	using Metrics = typename Types::Metrics;
+	using Status = typename Types::Status;
+	using ResidualPruneMode = typename Types::ResidualPruneMode;
 
 	explicit SkeletonTopology(Data data) : data_(std::move(data)) {}
 	SkeletonTopology(const SkeletonTopology&) = delete;
@@ -120,7 +87,7 @@ public:
 		if (!valid_data())
 			return Status::invalid_data;
 		metrics_ = Metrics{};
-		TopologyParameters p(data_, skeleton_tets_);
+		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
 		if (!compute_skeleton(p))
 			return Status::invalid_data;
 		metrics_.tet_count = static_cast<uint32>(skeleton_tets_.size());
@@ -135,7 +102,7 @@ public:
 		metrics_ = Metrics{};
 		if (skeleton_tets_.empty())
 			return Status::success;
-		TopologyParameters p(data_, skeleton_tets_);
+		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
 		return run_topology_fix_pipeline(p, evaluate_scores);
 	}
 
@@ -143,7 +110,7 @@ public:
 	{
 		if (!valid_data())
 			return Status::invalid_data;
-		TopologyParameters p(data_, skeleton_tets_);
+		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
 		return prune_fully_non_manifold_triangles(p) ? Status::success : Status::invalid_data;
 	}
 
@@ -151,7 +118,7 @@ public:
 	{
 		if (!valid_data())
 			return;
-		TopologyParameters p(data_, skeleton_tets_);
+		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
 		compute_edge_degree(p);
 	}
 
@@ -160,56 +127,24 @@ public:
 		if (!valid_data())
 			return Status::invalid_data;
 		metrics_ = Metrics{};
-		TopologyParameters p(data_, skeleton_tets_);
+		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
 		run_residual_sheet_prune(p);
 		metrics_.tet_count = static_cast<uint32>(skeleton_tets_.size());
 		return Status::success;
 	}
 
 private:
-	using SpheresOptimizerType = SpheresOptimizer<POINTS>;
-	using FaceKey = std::array<uint32, 3>;
-
-	struct Tet { SkeletonFace faces[4]; };
-	using TetMap = std::unordered_map<std::size_t, Tet>;
-	struct TopologyParameters
-	{
-		TetMap& skeleton_tets_;
-		NONMANIFOLD*& skeleton_;
-		POINTS*& samples_mesh_;
-		std::shared_ptr<SphereAttribute<std::vector<SphereVertex>>>& samples_knn_;
-		std::shared_ptr<SphereAttribute<SphereVertex>>& samples_sphere_;
-		const acc::KDTree<3, uint32>*& samples_kdtree_;
-		POINTS*& spheres_;
-		std::shared_ptr<SphereAttribute<Vec3>>& spheres_position_;
-		std::shared_ptr<SphereAttribute<Scalar>>& spheres_radius_;
-		std::shared_ptr<SphereAttribute<std::vector<SphereVertex>>>& spheres_cluster_;
-		std::shared_ptr<SphereAttribute<std::vector<SphereVertex>>>& spheres_neighbor_clusters_;
-		std::shared_ptr<SphereAttribute<Scalar>>& spheres_error_;
-		std::shared_ptr<SphereAttribute<SkeletonVertex>>& spheres_skeleton_vertex_;
-		std::shared_ptr<SkeletonAttribute<Vec3>>& skeleton_position_;
-		std::shared_ptr<SkeletonAttribute<Scalar>>& skeleton_radius_;
-		std::shared_ptr<SkeletonAttribute<std::set<std::size_t>>>& incident_tets_;
-		std::shared_ptr<SkeletonAttribute<SphereVertex>>& skeleton_source_sphere_;
-		std::shared_ptr<SkeletonAttribute<uint32>>& edge_degree_;
-		SpheresOptimizerType*& spheres_optimizer_;
-
-		TopologyParameters(Data& d, TetMap& t) : skeleton_tets_(t), skeleton_(d.skeleton),
-			samples_mesh_(d.spheres_optimizer->data().samples_mesh),
-			samples_knn_(d.spheres_optimizer->data().sample_knn),
-			samples_sphere_(d.spheres_optimizer->data().sample_sphere),
-			samples_kdtree_(d.spheres_optimizer->data().sample_kdtree),
-			spheres_(d.spheres_optimizer->data().spheres),
-			spheres_position_(d.spheres_optimizer->data().sphere_position),
-			spheres_radius_(d.spheres_optimizer->data().sphere_radius),
-			spheres_cluster_(d.spheres_optimizer->data().sphere_cluster),
-			spheres_neighbor_clusters_(d.spheres_optimizer->data().sphere_neighbors),
-			spheres_error_(d.spheres_optimizer->data().sphere_error),
-			spheres_skeleton_vertex_(d.sphere_skeleton_vertex), skeleton_position_(d.skeleton_position),
-			skeleton_radius_(d.skeleton_radius), incident_tets_(d.face_incident_tets),
-			skeleton_source_sphere_(d.skeleton_source_sphere),
-			edge_degree_(d.edge_degree), spheres_optimizer_(d.spheres_optimizer) {}
-	};
+	using SpheresOptimizerType = typename Types::SpheresOptimizerType;
+	using FaceKey = typename Types::FaceKey;
+	using Tet = typename Types::Tet;
+	using TetMap = typename Types::TetMap;
+	using Context = typename Types::Context;
+	using edge_hash = typename Types::edge_hash;
+	using edge_equal = typename Types::edge_equal;
+	using RemovalStats = typename Types::RemovalStats;
+	using SkeletonFaceDeletionOptions = typename Types::SkeletonFaceDeletionOptions;
+	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
+	using EdgeTetDeleteMode = typename Types::EdgeTetDeleteMode;
 
 	bool valid_data() const
 	{
@@ -219,7 +154,7 @@ private:
 	}
 
 
-	bool remove_skeleton_vertex_and_linked_sphere(TopologyParameters& p, const SkeletonVertex& v)
+	bool remove_skeleton_vertex_and_linked_sphere(Context& p, const SkeletonVertex& v)
 	{
 		if (!p.skeleton_ || !v.is_valid())
 			return false;
@@ -245,26 +180,7 @@ private:
 		return true;
 	}
 
-	struct edge_hash
-	{
-		std::size_t operator()(const std::pair<uint32, uint32>& edge) const
-		{
-			const uint32 a = std::min(edge.first, edge.second);
-			const uint32 b = std::max(edge.first, edge.second);
-			return std::hash<uint64>()((uint64(a) << 32) | uint64(b));
-		}
-	};
-
-	struct edge_equal
-	{
-		bool operator()(const std::pair<uint32, uint32>& edge1, const std::pair<uint32, uint32>& edge2) const
-		{
-			return ((edge1.first == edge2.first && edge1.second == edge2.second) ||
-					(edge1.first == edge2.second && edge1.second == edge2.first));
-		}
-	};
-
-	bool compute_skeleton(TopologyParameters& p)
+	bool compute_skeleton(Context& p)
 	{
 		p.spheres_optimizer_->compute_sphere_neighbors();
 		if (!p.samples_mesh_ || !p.samples_sphere_ || !p.samples_knn_)
@@ -413,7 +329,7 @@ private:
 	//-----Topology correction------//
 	//------------------------------//
 
-	void compute_edge_degree(TopologyParameters& p)
+	void compute_edge_degree(Context& p)
 	{
 		parallel_foreach_cell(*p.skeleton_, [&](SkeletonEdge e) {
 			auto in_face = incident_faces(*p.skeleton_, e);
@@ -427,7 +343,7 @@ private:
 		});
 	}
 
-	bool prune_fully_non_manifold_triangles(TopologyParameters& p)
+	bool prune_fully_non_manifold_triangles(Context& p)
 	{
 		if (!p.skeleton_)
 			return false;
@@ -496,29 +412,29 @@ private:
 			}
 		}
 
-		metrics_.residual_fully_nm_removed_faces += removed_face_count;
+		p.metrics.residual_fully_nm_removed_faces += removed_face_count;
 		if (p.edge_degree_ && removed_any_faces)
 			compute_edge_degree(p);
 
 		return true;
 	}
 
-	int32 skeleton_euler_characteristic(const TopologyParameters& p) const
+	int32 skeleton_euler_characteristic(const Context& p) const
 	{
 		return static_cast<int32>(nb_cells<SkeletonVertex>(*p.skeleton_)) -
 			static_cast<int32>(nb_cells<SkeletonEdge>(*p.skeleton_)) +
 			static_cast<int32>(nb_cells<SkeletonFace>(*p.skeleton_));
 	}
 
-	void run_residual_sheet_prune(TopologyParameters& p)
+	void run_residual_sheet_prune(Context& p)
 	{
 		if (!p.skeleton_ || !p.incident_tets_)
 			return;
 
-		metrics_.residual_chi_before = skeleton_euler_characteristic(p);
-		auto record_chi_after = [&]() { metrics_.residual_chi_after = skeleton_euler_characteristic(p); };
+		p.metrics.residual_chi_before = skeleton_euler_characteristic(p);
+		auto record_chi_after = [&]() { p.metrics.residual_chi_after = skeleton_euler_characteristic(p); };
 		compute_edge_degree(p);
-		if (residual_prune_mode_ == ResidualPruneMode::current)
+		if (p.residual_prune_mode == ResidualPruneMode::current)
 			prune_fully_non_manifold_triangles(p);
 
 		std::vector<SkeletonFace> faces;
@@ -665,20 +581,20 @@ private:
 			bool delete_sheet = delete_by_small_sheet && !keep_by_isolated_edge_guard;
 			if (delete_by_small_sheet)
 			{
-				++metrics_.residual_small_sheets;
+				++p.metrics.residual_small_sheets;
 				if (keep_by_isolated_edge_guard)
-					++metrics_.residual_small_sheets_guarded;
+					++p.metrics.residual_small_sheets_guarded;
 				else
 				{
 					const bool has_boundary_edge = sheet_has_boundary_edge(it_faces->second);
 					if (has_boundary_edge)
-						++metrics_.residual_small_sheets_with_boundary_edge;
+						++p.metrics.residual_small_sheets_with_boundary_edge;
 					else
-						++metrics_.residual_small_sheets_without_boundary_edge;
+						++p.metrics.residual_small_sheets_without_boundary_edge;
 					// a single-face sheet without a boundary edge is a fully non-manifold triangle
 					if (!has_boundary_edge &&
-						(residual_prune_mode_ == ResidualPruneMode::collapsible_only ||
-						 (residual_prune_mode_ == ResidualPruneMode::keep_fully_non_manifold && face_count == 1)))
+						(p.residual_prune_mode == ResidualPruneMode::collapsible_only ||
+						 (p.residual_prune_mode == ResidualPruneMode::keep_fully_non_manifold && face_count == 1)))
 						delete_sheet = false;
 				}
 			}
@@ -694,7 +610,7 @@ private:
 		if (face_ids_to_delete.empty())
 		{
 			compute_edge_degree(p);
-			if (residual_prune_mode_ == ResidualPruneMode::current)
+			if (p.residual_prune_mode == ResidualPruneMode::current)
 				prune_fully_non_manifold_triangles(p);
 			record_chi_after();
 			return;
@@ -707,14 +623,14 @@ private:
 			return;
 		}
 
-		metrics_.residual_removed_sheets += deleted_sheet_count;
-		metrics_.residual_removed_faces += deletion_stats.removed_faces;
+		p.metrics.residual_removed_sheets += deleted_sheet_count;
+		p.metrics.residual_removed_faces += deletion_stats.removed_faces;
 		compute_edge_degree(p);
-		if (residual_prune_mode_ == ResidualPruneMode::current)
+		if (p.residual_prune_mode == ResidualPruneMode::current)
 			prune_fully_non_manifold_triangles(p);
 		record_chi_after();
 	}
-	uint32 remove_orphan_edges_from_removed_face_edges(TopologyParameters& p, const std::vector<SkeletonEdge>& face_edges)
+	uint32 remove_orphan_edges_from_removed_face_edges(Context& p, const std::vector<SkeletonEdge>& face_edges)
 	{
 		uint32 removed_edges = 0;
 		std::vector<SkeletonVertex> candidate_vertices;
@@ -746,7 +662,7 @@ private:
 		return removed_edges;
 	}
 
-	std::unordered_set<uint32> collect_current_orphan_edge_ids(TopologyParameters& p)
+	std::unordered_set<uint32> collect_current_orphan_edge_ids(Context& p)
 	{
 		std::unordered_set<uint32> orphan_edge_ids;
 		if (!p.skeleton_)
@@ -765,7 +681,7 @@ private:
 		return orphan_edge_ids;
 	}
 
-	void remove_global_orphan_skeleton_elements(TopologyParameters& p, uint32* out_removed_edges = nullptr,
+	void remove_global_orphan_skeleton_elements(Context& p, uint32* out_removed_edges = nullptr,
 												const std::unordered_set<uint32>* preserved_orphan_edge_ids = nullptr)
 	{
 		uint32 removed_edges = 0;
@@ -832,28 +748,7 @@ private:
 			*out_removed_edges = removed_edges;
 	}
 
-	struct RemovalStats
-	{
-		uint32 removed_faces = 0;
-		uint32 removed_edges = 0;
-		uint32 removed_tets = 0;
-
-		RemovalStats& operator+=(const RemovalStats& o)
-		{
-			removed_faces += o.removed_faces;
-			removed_edges += o.removed_edges;
-			removed_tets += o.removed_tets;
-			return *this;
-		}
-	};
-
-	struct SkeletonFaceDeletionOptions
-	{
-		bool remove_incident_orphan_edges_immediately = true;
-		bool remove_global_orphan_elements_after_batch = true;
-	};
-
-	bool delete_skeleton_face_id_set(TopologyParameters& p, const std::unordered_set<uint32>& face_ids_to_delete,
+	bool delete_skeleton_face_id_set(Context& p, const std::unordered_set<uint32>& face_ids_to_delete,
 									 RemovalStats& out_stats,
 									 const SkeletonFaceDeletionOptions& options = {})
 	{
@@ -932,7 +827,7 @@ private:
 	}
 
 	template <typename ScoreEvaluator>
-	bool compute_skeleton_face_scores(TopologyParameters& p, ScoreEvaluator& evaluator,
+	bool compute_skeleton_face_scores(Context& p, ScoreEvaluator& evaluator,
 							  const std::unordered_set<uint32>& face_ids,
 								  std::unordered_map<uint32, Scalar>& face_scores, bool normalize_by_area)
 	{
@@ -1110,7 +1005,7 @@ private:
 		return true;
 	}
 
-	std::unordered_set<uint32> collect_current_tet_edge_ids(TopologyParameters& p)
+	std::unordered_set<uint32> collect_current_tet_edge_ids(Context& p)
 	{
 		std::unordered_set<uint32> tet_edge_ids;
 		if (!p.skeleton_)
@@ -1138,7 +1033,7 @@ private:
 	}
 
 	template <typename ScoreEvaluator>
-	bool compute_skeleton_edge_scores_gauss3_normalized(TopologyParameters& p, ScoreEvaluator& evaluator,
+	bool compute_skeleton_edge_scores_gauss3_normalized(Context& p, ScoreEvaluator& evaluator,
 										 const std::unordered_set<uint32>& edge_ids,
 										std::unordered_map<uint32, Scalar>& edge_scores)
 	{
@@ -1213,16 +1108,9 @@ private:
 		return true;
 	}
 
-	struct TopologyFixScoreCache
-	{
-		std::unordered_map<uint32, Scalar> edge_scores;
-		std::unordered_map<uint32, Scalar> face_scores;
-		bool initialized = false;
-	};
-
 	template <typename ScoreEvaluator>
 	bool initialize_topology_fix_score_cache(
-		TopologyParameters& p, ScoreEvaluator& evaluator, TopologyFixScoreCache& cache)
+		Context& p, ScoreEvaluator& evaluator, TopologyFixScoreCache& cache)
 	{
 		if (cache.initialized)
 			return true;
@@ -1240,7 +1128,7 @@ private:
 
 
 	void erase_topology_fix_scores_for_removed_faces_and_orphan_edges(
-		TopologyParameters& p, TopologyFixScoreCache* cache, const std::unordered_set<uint32>& removed_face_ids,
+		Context& p, TopologyFixScoreCache* cache, const std::unordered_set<uint32>& removed_face_ids,
 		const std::vector<SkeletonEdge>& affected_edges)
 	{
 		if (!cache)
@@ -1262,15 +1150,9 @@ private:
 		}
 	}
 
-	enum class EdgeTetDeleteMode
-	{
-		SimpleTet,
-		NonSimpleTet
-	};
-
 	template <typename ScoreEvaluator>
 	RemovalStats run_edge_score_tet_mode_topology_fix(
-		TopologyParameters& p, EdgeTetDeleteMode mode, TopologyFixScoreCache& score_cache, ScoreEvaluator& evaluator)
+		Context& p, EdgeTetDeleteMode mode, TopologyFixScoreCache& score_cache, ScoreEvaluator& evaluator)
 	{
 		RemovalStats stats;
 		if (!p.skeleton_ || !p.incident_tets_)
@@ -1840,7 +1722,7 @@ private:
 		std::vector<std::array<uint32, 5>> independent_k5_minus_1_regions;
 	};
 
-	DenseFiveVertexDetectionResult detect_k5_and_k5_minus_1_cells(TopologyParameters& p)
+	DenseFiveVertexDetectionResult detect_k5_and_k5_minus_1_cells(Context& p)
 	{
 		DenseFiveVertexDetectionResult result;
 		if (!p.skeleton_)
@@ -1978,7 +1860,7 @@ private:
 	}
 
 	RemovalStats run_boundary_tet_face_deletion(
-		TopologyParameters& p, TopologyFixScoreCache* score_cache = nullptr)
+		Context& p, TopologyFixScoreCache* score_cache = nullptr)
 	{
 		RemovalStats stats;
 
@@ -2124,7 +2006,7 @@ private:
 
 
 
-	std::unordered_set<uint32> collect_current_tet_face_id_whitelist(TopologyParameters& p)
+	std::unordered_set<uint32> collect_current_tet_face_id_whitelist(Context& p)
 	{
 		std::unordered_set<uint32> tet_face_ids;
 		tet_face_ids.reserve(nb_cells<SkeletonFace>(*p.skeleton_));
@@ -2155,7 +2037,7 @@ private:
 		uint32 added_faces = 0;
 	};
 
-	bool is_live_sphere_vertex(TopologyParameters& p, const SphereVertex& sphere, uint32& sphere_index)
+	bool is_live_sphere_vertex(Context& p, const SphereVertex& sphere, uint32& sphere_index)
 	{
 		sphere_index = INVALID_INDEX;
 		if (!p.spheres_ || !sphere.is_valid() || sphere.dart_.index_ >= p.spheres_->darts_.maximum_index())
@@ -2164,7 +2046,7 @@ private:
 		return sphere_index != INVALID_INDEX;
 	}
 
-	bool is_live_skeleton_vertex(TopologyParameters& p, const SkeletonVertex& vertex, uint32& vertex_index)
+	bool is_live_skeleton_vertex(Context& p, const SkeletonVertex& vertex, uint32& vertex_index)
 	{
 		vertex_index = INVALID_INDEX;
 		if (!p.skeleton_ || !vertex.is_valid())
@@ -2174,7 +2056,7 @@ private:
 	}
 
 	std::vector<IndependentDenseFiveVertexRepairSeed> collect_independent_dense_five_vertex_repair_seeds(
-		TopologyParameters& p, const DenseFiveVertexDetectionResult& detection)
+		Context& p, const DenseFiveVertexDetectionResult& detection)
 	{
 		std::vector<IndependentDenseFiveVertexRepairSeed> seeds;
 		seeds.reserve(detection.independent_exact_k5_regions.size() +
@@ -2214,7 +2096,7 @@ private:
 		return seeds;
 	}
 
-	bool find_skeleton_edge_between(TopologyParameters& p, const SkeletonVertex& a, const SkeletonVertex& b, SkeletonEdge& out_edge)
+	bool find_skeleton_edge_between(Context& p, const SkeletonVertex& a, const SkeletonVertex& b, SkeletonEdge& out_edge)
 	{
 		out_edge = SkeletonEdge();
 		if (!p.skeleton_ || !a.is_valid() || !b.is_valid() || a == b)
@@ -2235,7 +2117,7 @@ private:
 		return false;
 	}
 
-	bool face_is_inside_vertex_set(TopologyParameters& p, const SkeletonFace& face,
+	bool face_is_inside_vertex_set(Context& p, const SkeletonFace& face,
 								   const std::unordered_set<uint32>& vertex_ids)
 	{
 		if (!p.skeleton_ || !face.is_valid())
@@ -2263,7 +2145,7 @@ private:
 	};
 
 	IndependentDenseFiveVertexRepairResult repair_independent_dense_five_vertex_region(
-		TopologyParameters& p, const IndependentDenseFiveVertexRepairSeed& seed, uint32& out_added_faces)
+		Context& p, const IndependentDenseFiveVertexRepairSeed& seed, uint32& out_added_faces)
 	{
 		out_added_faces = 0;
 		if (!p.spheres_ || !p.spheres_position_ || !p.spheres_radius_ || !p.spheres_neighbor_clusters_ ||
@@ -2461,7 +2343,7 @@ private:
 		if (!center_sphere.is_valid())
 			return IndependentDenseFiveVertexRepairResult::MissingVertices;
 		const uint32 center_sphere_id = index_of(*p.spheres_, center_sphere);
-		metrics_.added_spheres.push_back(center_sphere);
+		p.metrics.added_spheres.push_back(center_sphere);
 
 		const SkeletonVertex center_vertex = add_vertex(*p.skeleton_);
 		value<Vec3>(*p.skeleton_, p.skeleton_position_, center_vertex) = centroid;
@@ -2494,7 +2376,7 @@ private:
 	}
 
 	IndependentDenseFiveVertexRepairStats repair_isolated_independent_dense_five_vertex_regions(
-		TopologyParameters& p, const std::vector<IndependentDenseFiveVertexRepairSeed>& seeds)
+		Context& p, const std::vector<IndependentDenseFiveVertexRepairSeed>& seeds)
 	{
 		IndependentDenseFiveVertexRepairStats stats;
 		std::vector<IndependentDenseFiveVertexRepairSeed> live_seeds;
@@ -2551,7 +2433,7 @@ private:
 		return stats;
 	}
 	template <typename ScoreEvaluator>
-	Status run_topology_fix_pipeline(TopologyParameters& p, ScoreEvaluator& evaluator)
+	Status run_topology_fix_pipeline(Context& p, ScoreEvaluator& evaluator)
 	{
 		if (!p.skeleton_ || !p.incident_tets_)
 			return Status::invalid_data;
@@ -2575,23 +2457,23 @@ private:
 					p, EdgeTetDeleteMode::NonSimpleTet, score_cache, evaluator);
 			const uint32 round_end_tets = static_cast<uint32>(p.skeleton_tets_.size());
 			const uint32 round_removed_tets = round_start_tets - round_end_tets;
-			++metrics_.topology_rounds;
-			metrics_.boundary_removed_tets += boundary_stats.removed_tets;
-			metrics_.simple_removed_tets += simple_stats.removed_tets;
-			metrics_.nonsimple_removed_tets += nonsimple_stats.removed_tets;
+			++p.metrics.topology_rounds;
+			p.metrics.boundary_removed_tets += boundary_stats.removed_tets;
+			p.metrics.simple_removed_tets += simple_stats.removed_tets;
+			p.metrics.nonsimple_removed_tets += nonsimple_stats.removed_tets;
 			RemovalStats round_stats = boundary_stats;
 			round_stats += simple_stats;
 			round_stats += nonsimple_stats;
-			metrics_.removed_faces += round_stats.removed_faces;
-			metrics_.removed_edges += round_stats.removed_edges;
-			metrics_.removed_tets += round_removed_tets;
+			p.metrics.removed_faces += round_stats.removed_faces;
+			p.metrics.removed_edges += round_stats.removed_edges;
+			p.metrics.removed_tets += round_removed_tets;
 			if (round_removed_tets == 0)
 				break;
 		}
 		const IndependentDenseFiveVertexRepairStats repair_stats = repair_isolated_independent_dense_five_vertex_regions(p, independent_dense_repair_seeds);
-		metrics_.repaired_dense_regions += repair_stats.repaired_regions;
-		metrics_.added_faces += repair_stats.added_faces;
-		metrics_.tet_count = static_cast<uint32>(p.skeleton_tets_.size());
+		p.metrics.repaired_dense_regions += repair_stats.repaired_regions;
+		p.metrics.added_faces += repair_stats.added_faces;
+		p.metrics.tet_count = static_cast<uint32>(p.skeleton_tets_.size());
 		return Status::success;
 	}
 
