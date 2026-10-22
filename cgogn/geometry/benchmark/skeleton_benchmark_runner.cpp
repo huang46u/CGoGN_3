@@ -72,6 +72,15 @@ bool import_surface(CMap2& surface, const std::string& filename)
 	return false;
 }
 
+int residual_prune_mode_index(const std::string& mode)
+{
+	if (mode == "keep_fully_non_manifold")
+		return 1;
+	if (mode == "collapsible_only")
+		return 2;
+	return 0;
+}
+
 template <typename RaySamplerTag>
 BenchmarkResult run_impl(const BenchmarkConfig& config)
 {
@@ -142,6 +151,9 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	options.seed = config.initialization.seed;
 	options.init_dilation_constant = config.initialization.init_dilation_constant;
 	options.residual_prune = config.postprocess.residual_prune;
+	options.residual_prune_mode = residual_prune_mode_index(config.postprocess.residual_prune_mode);
+	options.alpha_sampling_candidates_per_parent = config.sampling.candidates_per_parent;
+	options.alpha_sampling_parent_batch_size = config.sampling.parent_batch_size;
 
 	Reconstruction reconstruction(data, options);
 	const auto preprocessing_start = std::chrono::high_resolution_clock::now();
@@ -173,6 +185,18 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 
 	result.counts = reconstruction_result.counts;
 	result.timing = reconstruction_result.timing;
+	const auto& topology_metrics = reconstruction.skeleton_topology().metrics();
+	result.residual_prune.residual_removed_sheets = topology_metrics.residual_removed_sheets;
+	result.residual_prune.residual_removed_faces = topology_metrics.residual_removed_faces;
+	result.residual_prune.residual_chi_before = topology_metrics.residual_chi_before;
+	result.residual_prune.residual_chi_after = topology_metrics.residual_chi_after;
+	result.residual_prune.residual_fully_nm_removed_faces = topology_metrics.residual_fully_nm_removed_faces;
+	result.residual_prune.residual_small_sheets = topology_metrics.residual_small_sheets;
+	result.residual_prune.residual_small_sheets_guarded = topology_metrics.residual_small_sheets_guarded;
+	result.residual_prune.residual_small_sheets_with_boundary_edge =
+		topology_metrics.residual_small_sheets_with_boundary_edge;
+	result.residual_prune.residual_small_sheets_without_boundary_edge =
+		topology_metrics.residual_small_sheets_without_boundary_edge;
 	result.extra_timing.average_iteration_ms =
 		reconstruction_result.counts.optimization_iterations > 0
 			? reconstruction_result.timing.optimization_ms / reconstruction_result.counts.optimization_iterations
@@ -206,6 +230,9 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	benchmark_config.put("input.ma_flip_prune", config.input.ma_flip_prune);
 	benchmark_config.put("input.ma_flip_prune_alpha_factor", config.input.ma_flip_prune_alpha_factor);
 	benchmark_config.put("postprocess.residual_prune", config.postprocess.residual_prune);
+	benchmark_config.put("postprocess.residual_prune_mode", config.postprocess.residual_prune_mode);
+	benchmark_config.put("sampling.bridson.candidates_per_parent", config.sampling.candidates_per_parent);
+	benchmark_config.put("sampling.bridson.parent_batch_size", config.sampling.parent_batch_size);
 	benchmark_config.put("sampling.apply_filtering",
 						 config.sampling.apply_filtering.value_or(default_apply_filtering(config.input.neural_model_type)));
 	benchmark_config.put("sampling.recompute_normals_after_sampling",
@@ -224,6 +251,21 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	counts.put("skeleton_faces", result.counts.skeleton_faces);
 	counts.put("optimization_iterations", result.counts.optimization_iterations);
 	root.add_child("counts", counts);
+
+	boost::property_tree::ptree residual_prune;
+	residual_prune.put("mode", config.postprocess.residual_prune_mode);
+	residual_prune.put("residual_removed_sheets", result.residual_prune.residual_removed_sheets);
+	residual_prune.put("residual_removed_faces", result.residual_prune.residual_removed_faces);
+	residual_prune.put("residual_chi_before", result.residual_prune.residual_chi_before);
+	residual_prune.put("residual_chi_after", result.residual_prune.residual_chi_after);
+	residual_prune.put("residual_fully_nm_removed_faces", result.residual_prune.residual_fully_nm_removed_faces);
+	residual_prune.put("residual_small_sheets", result.residual_prune.residual_small_sheets);
+	residual_prune.put("residual_small_sheets_guarded", result.residual_prune.residual_small_sheets_guarded);
+	residual_prune.put("residual_small_sheets_with_boundary_edge",
+					   result.residual_prune.residual_small_sheets_with_boundary_edge);
+	residual_prune.put("residual_small_sheets_without_boundary_edge",
+					   result.residual_prune.residual_small_sheets_without_boundary_edge);
+	root.add_child("residual_prune", residual_prune);
 
 	boost::property_tree::ptree timing;
 	for (const auto& field : kBenchmarkTimingFields)

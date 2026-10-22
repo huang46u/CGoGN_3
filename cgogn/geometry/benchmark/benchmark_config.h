@@ -48,6 +48,8 @@ struct BenchmarkSamplingConfig
 	float alpha = 0.005f;
 	int knn_k = 10;
 	float sample_radius = 0.0025f;
+	int candidates_per_parent = 12;
+	int parent_batch_size = 1024;
 	// unset: default of the neural model type (default_apply_filtering / default_recompute_normals_after_sampling)
 	std::optional<bool> apply_filtering;
 	std::optional<bool> recompute_normals_after_sampling;
@@ -67,6 +69,7 @@ struct BenchmarkInitializationConfig
 struct BenchmarkPostprocessConfig
 {
 	bool residual_prune = false;
+	std::string residual_prune_mode = "current";
 };
 
 struct BenchmarkRuntimeConfig

@@ -162,6 +162,11 @@ if (CGOGN_USE_CGAL)
       ../benchmark/skeleton_benchmark_runner.cpp
     EXTRA_LIBS CGAL::CGAL
   )
+
+  cgogn_add_torch_executable(udf_residual_prune_test
+    SOURCES udf_residual_prune_test.cpp
+    EXTRA_LIBS CGAL::CGAL
+  )
 endif()
 add_executable(filtering filtering.cpp)
 target_link_libraries(filtering

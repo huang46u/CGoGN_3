@@ -43,6 +43,14 @@ namespace cgogn
 namespace geometry
 {
 
+namespace detail
+{
+
+inline constexpr size_t alpha_sampling_candidates_per_parent = 12;
+inline constexpr size_t alpha_sampling_parent_batch_size = 1024;
+
+} // namespace detail
+
 struct AlphaSamplingParameters
 {
 	Scalar sample_radius = Scalar(0);
@@ -50,6 +58,8 @@ struct AlphaSamplingParameters
 	size_t ray_sampler_batch_size = 1;
 	Vec3 bbox_min = Vec3(0, 0, 0);
 	Vec3 bbox_max = Vec3(1, 1, 1);
+	size_t candidates_per_parent = detail::alpha_sampling_candidates_per_parent;
+	size_t parent_batch_size = detail::alpha_sampling_parent_batch_size;
 };
 
 struct AlphaSamplingResult
@@ -64,8 +74,6 @@ namespace detail
 
 inline constexpr Scalar alpha_sampling_outer_radius_scale = Scalar(1.25);
 inline constexpr size_t alpha_sampling_warmup_iterations = 2;
-inline constexpr size_t alpha_sampling_candidates_per_parent = 12;
-inline constexpr size_t alpha_sampling_parent_batch_size = 1024;
 inline constexpr size_t alpha_sampling_max_samples = 10000000;
 
 inline void build_stable_tangent_basis(const Vec3& normal_in, Vec3& tangent_u, Vec3& tangent_v)
@@ -135,7 +143,7 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 
 	// cell = radius, so every neighbor closer than radius lies in the 27 surrounding cells
 	const Scalar grid_cell_size = std::max(parameters.sample_radius, Scalar(1e-8));
-	const size_t parent_batch_size = detail::alpha_sampling_parent_batch_size;
+	const size_t parent_batch_size = parameters.parent_batch_size;
 	const size_t max_samples = detail::alpha_sampling_max_samples;
 	const size_t seed_rays_per_round =
 		std::max<size_t>(1, parameters.ray_sampler_batch_size) * detail::alpha_sampling_warmup_iterations;
@@ -152,7 +160,7 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 	result.normals.reserve(initial_reserve);
 	active_indices.reserve(initial_reserve);
 	active_slot_of_sample.reserve(initial_reserve);
-	raw_candidates.reserve(parent_batch_size * detail::alpha_sampling_candidates_per_parent);
+	raw_candidates.reserve(parent_batch_size * parameters.candidates_per_parent);
 
 	auto add_sample = [&](const Vec3& position, const Vec3& normal) {
 		const uint32 sample_index = static_cast<uint32>(result.positions.size());
@@ -227,7 +235,7 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 		raw_candidates.clear();
 		std::uniform_real_distribution<Scalar> uniform(Scalar(0), Scalar(1));
 		for (uint32 parent_index : selected_parents)
-			for (size_t candidate_index = 0; candidate_index < detail::alpha_sampling_candidates_per_parent;
+			for (size_t candidate_index = 0; candidate_index < parameters.candidates_per_parent;
 				 candidate_index++)
 				raw_candidates.push_back(detail::sample_tangent_annulus_candidate(
 					result.positions[parent_index], result.normals[parent_index], parameters.sample_radius, uniform, generator));
@@ -250,8 +258,8 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 				break;
 			const uint32 parent_index = selected_parents[parent_batch_index];
 			bool parent_found_new_sample = false;
-			const size_t candidate_begin = parent_batch_index * detail::alpha_sampling_candidates_per_parent;
-			for (size_t candidate_offset = 0; candidate_offset < detail::alpha_sampling_candidates_per_parent;
+			const size_t candidate_begin = parent_batch_index * parameters.candidates_per_parent;
+			for (size_t candidate_offset = 0; candidate_offset < parameters.candidates_per_parent;
 				 candidate_offset++)
 			{
 				if (result.positions.size() >= max_samples)

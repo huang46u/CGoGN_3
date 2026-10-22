@@ -87,10 +87,18 @@ public:
 		uint32 added_faces = 0;
 		uint32 residual_removed_sheets = 0;
 		uint32 residual_removed_faces = 0;
+		int32 residual_chi_before = 0;
+		int32 residual_chi_after = 0;
+		uint32 residual_fully_nm_removed_faces = 0;
+		uint32 residual_small_sheets = 0;
+		uint32 residual_small_sheets_guarded = 0;
+		uint32 residual_small_sheets_with_boundary_edge = 0;
+		uint32 residual_small_sheets_without_boundary_edge = 0;
 		std::vector<SphereVertex> added_spheres;
 	};
 
 	enum class Status { success, invalid_data, score_evaluation_failed };
+	enum class ResidualPruneMode { current, keep_fully_non_manifold, collapsible_only };
 
 	explicit SkeletonTopology(Data data) : data_(std::move(data)) {}
 	SkeletonTopology(const SkeletonTopology&) = delete;
@@ -98,6 +106,7 @@ public:
 	Data& data() { return data_; }
 	const Data& data() const { return data_; }
 	const Metrics& metrics() const { return metrics_; }
+	void set_residual_prune_mode(ResidualPruneMode mode) { residual_prune_mode_ = mode; }
 
 	Status build_from_spheres()
 	{
@@ -417,6 +426,7 @@ private:
 			return false;
 
 		bool removed_any_faces = false;
+		uint32 removed_face_count = 0;
 
 		for (;;)
 		{
@@ -454,6 +464,7 @@ private:
 				const std::vector<SkeletonEdge> affected_edges = incident_edges(*p.skeleton_, f);
 				remove_face(*p.skeleton_, f);
 				removed_any_faces = true;
+				++removed_face_count;
 
 				std::vector<SkeletonVertex> candidate_vertices;
 				candidate_vertices.reserve(affected_edges.size() * 2);
@@ -478,10 +489,18 @@ private:
 			}
 		}
 
+		metrics_.residual_fully_nm_removed_faces += removed_face_count;
 		if (p.edge_degree_ && removed_any_faces)
 			compute_edge_degree(p);
 
 		return true;
+	}
+
+	int32 skeleton_euler_characteristic(const TopologyParameters& p) const
+	{
+		return static_cast<int32>(nb_cells<SkeletonVertex>(*p.skeleton_)) -
+			static_cast<int32>(nb_cells<SkeletonEdge>(*p.skeleton_)) +
+			static_cast<int32>(nb_cells<SkeletonFace>(*p.skeleton_));
 	}
 
 	void run_residual_sheet_prune(TopologyParameters& p)
@@ -489,8 +508,11 @@ private:
 		if (!p.skeleton_ || !p.incident_tets_)
 			return;
 
+		metrics_.residual_chi_before = skeleton_euler_characteristic(p);
+		auto record_chi_after = [&]() { metrics_.residual_chi_after = skeleton_euler_characteristic(p); };
 		compute_edge_degree(p);
-		prune_fully_non_manifold_triangles(p);
+		if (residual_prune_mode_ == ResidualPruneMode::current)
+			prune_fully_non_manifold_triangles(p);
 
 		std::vector<SkeletonFace> faces;
 		faces.reserve(nb_cells<SkeletonFace>(*p.skeleton_));
@@ -507,7 +529,10 @@ private:
 			return true;
 		});
 		if (faces.empty())
+		{
+			record_chi_after();
 			return;
+		}
 
 		std::vector<uint32> parents(faces.size());
 		std::vector<uint32> ranks(faces.size(), 0);
@@ -601,6 +626,23 @@ private:
 			return false;
 		};
 
+		auto sheet_has_boundary_edge = [&](const std::vector<uint32>& face_ids) -> bool {
+			for (uint32 face_id : face_ids)
+			{
+				if (face_id == INVALID_INDEX)
+					continue;
+				const SkeletonFace f = of_index<SkeletonFace>(*p.skeleton_, face_id);
+				if (!f.is_valid() || index_of(*p.skeleton_, f) != face_id)
+					continue;
+				for (const SkeletonEdge& e : incident_edges(*p.skeleton_, f))
+				{
+					if (e.is_valid() && incident_faces(*p.skeleton_, e).size() == 1)
+						return true;
+				}
+			}
+			return false;
+		};
+
 		uint32 deleted_sheet_count = 0;
 		std::unordered_set<uint32> face_ids_to_delete;
 		for (uint32 sheet_label : sorted_sheet_labels)
@@ -613,7 +655,26 @@ private:
 			const bool delete_by_small_sheet = (face_count <= forced_delete_max_face_count);
 			const bool keep_by_isolated_edge_guard =
 				delete_by_small_sheet && sheet_has_vertex_connected_to_isolated_edge(it_faces->second);
-			const bool delete_sheet = delete_by_small_sheet && !keep_by_isolated_edge_guard;
+			bool delete_sheet = delete_by_small_sheet && !keep_by_isolated_edge_guard;
+			if (delete_by_small_sheet)
+			{
+				++metrics_.residual_small_sheets;
+				if (keep_by_isolated_edge_guard)
+					++metrics_.residual_small_sheets_guarded;
+				else
+				{
+					const bool has_boundary_edge = sheet_has_boundary_edge(it_faces->second);
+					if (has_boundary_edge)
+						++metrics_.residual_small_sheets_with_boundary_edge;
+					else
+						++metrics_.residual_small_sheets_without_boundary_edge;
+					// a single-face sheet without a boundary edge is a fully non-manifold triangle
+					if (!has_boundary_edge &&
+						(residual_prune_mode_ == ResidualPruneMode::collapsible_only ||
+						 (residual_prune_mode_ == ResidualPruneMode::keep_fully_non_manifold && face_count == 1)))
+						delete_sheet = false;
+				}
+			}
 			if (!delete_sheet)
 				continue;
 
@@ -626,18 +687,25 @@ private:
 		if (face_ids_to_delete.empty())
 		{
 			compute_edge_degree(p);
-			prune_fully_non_manifold_triangles(p);
+			if (residual_prune_mode_ == ResidualPruneMode::current)
+				prune_fully_non_manifold_triangles(p);
+			record_chi_after();
 			return;
 		}
 
 		RemovalStats deletion_stats;
 		if (!delete_skeleton_face_id_set(p, face_ids_to_delete, deletion_stats))
+		{
+			record_chi_after();
 			return;
+		}
 
 		metrics_.residual_removed_sheets += deleted_sheet_count;
 		metrics_.residual_removed_faces += deletion_stats.removed_faces;
 		compute_edge_degree(p);
-		prune_fully_non_manifold_triangles(p);
+		if (residual_prune_mode_ == ResidualPruneMode::current)
+			prune_fully_non_manifold_triangles(p);
+		record_chi_after();
 	}
 	uint32 remove_orphan_edges_from_removed_face_edges(TopologyParameters& p, const std::vector<SkeletonEdge>& face_edges)
 	{
@@ -2523,6 +2591,7 @@ private:
 	Data data_;
 	TetMap skeleton_tets_;
 	Metrics metrics_;
+	ResidualPruneMode residual_prune_mode_ = ResidualPruneMode::current;
 };
 
 } // namespace geometry

@@ -25,6 +25,20 @@ struct BenchmarkExtraTiming
 	double average_iteration_ms = 0.0;
 };
 
+// residual sheet prune statistics copied from SkeletonTopology::metrics() after reconstruction
+struct BenchmarkResidualPruneStats
+{
+	uint32 residual_removed_sheets = 0;
+	uint32 residual_removed_faces = 0;
+	int32 residual_chi_before = 0;
+	int32 residual_chi_after = 0;
+	uint32 residual_fully_nm_removed_faces = 0;
+	uint32 residual_small_sheets = 0;
+	uint32 residual_small_sheets_guarded = 0;
+	uint32 residual_small_sheets_with_boundary_edge = 0;
+	uint32 residual_small_sheets_without_boundary_edge = 0;
+};
+
 struct BenchmarkResult
 {
 	std::string input_mode;
@@ -33,6 +47,7 @@ struct BenchmarkResult
 	ReconstructionCounts counts;
 	ReconstructionTiming timing;
 	BenchmarkExtraTiming extra_timing;
+	BenchmarkResidualPruneStats residual_prune;
 };
 
 // single table shared by the console summary and the timing JSON export; order here is the JSON key order

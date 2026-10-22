@@ -131,6 +131,9 @@ public:
 		int seed = 42;
 		float init_dilation_constant = 0.001f;
 		bool residual_prune = false;
+		int residual_prune_mode = 0; // 0 current, 1 keep_fully_non_manifold, 2 collapsible_only
+		int alpha_sampling_candidates_per_parent = 12;
+		int alpha_sampling_parent_batch_size = 1024;
 	};
 
 	using Timing = ReconstructionTiming;
@@ -798,6 +801,8 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	params.sample_radius = Scalar(options_.sample_radius);
 	params.seed = static_cast<uint32>(options_.seed);
 	params.ray_sampler_batch_size = static_cast<size_t>(std::max(1, options_.ray_sampler_batch_size));
+	params.candidates_per_parent = static_cast<size_t>(std::max(1, options_.alpha_sampling_candidates_per_parent));
+	params.parent_batch_size = static_cast<size_t>(std::max(1, options_.alpha_sampling_parent_batch_size));
 	params.bbox_min = bbox_min;
 	params.bbox_max = bbox_max;
 	auto compute_normals = [&](const std::vector<Vec3>& points, std::vector<Vec3>& normals,
@@ -1171,6 +1176,7 @@ template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RayS
 typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status UDFReconstruction<
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::prune_residual_sheets()
 {
+	topology_for().set_residual_prune_mode(static_cast<typename TopologyType::ResidualPruneMode>(options_.residual_prune_mode));
 	return topology_for().prune_residual_sheets() == TopologyType::Status::success ? Status::success
 																	   : Status::topology_fix_failed;
 }

@@ -276,6 +276,8 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		config.sampling.recompute_normals_after_sampling = *recompute_normals;
 	const ptree& bridson = sampling.get_child("bridson");
 	config.sampling.sample_radius = require_value<float>(bridson, "sample_radius");
+	config.sampling.candidates_per_parent = get_value<int>(bridson, "candidates_per_parent", 12);
+	config.sampling.parent_batch_size = get_value<int>(bridson, "parent_batch_size", 1024);
 
 	const ptree& optimization = root.get_child("optimization");
 	if (auto distance_mode = optimization.get_optional<std::string>("distance_mode");
@@ -308,6 +310,12 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		if (auto nm_two_layer = postprocess->get_optional<bool>("nm_two_layer_prune"); nm_two_layer && *nm_two_layer)
 			fail_config("`postprocess.nm_two_layer_prune` was removed; remove the field or set it to false.");
 		config.postprocess.residual_prune = get_value<bool>(*postprocess, "residual_prune", false);
+		config.postprocess.residual_prune_mode = get_value<std::string>(*postprocess, "residual_prune_mode", "current");
+		const std::string& residual_prune_mode = config.postprocess.residual_prune_mode;
+		if (residual_prune_mode != "current" && residual_prune_mode != "keep_fully_non_manifold" &&
+			residual_prune_mode != "collapsible_only")
+			fail_config("`postprocess.residual_prune_mode` must be `current`, `keep_fully_non_manifold` or "
+						"`collapsible_only`; got: " + residual_prune_mode);
 		if (auto face_post_processing = postprocess->get_optional<bool>("face_post_processing");
 			face_post_processing && *face_post_processing)
 			fail_config("`postprocess.face_post_processing` was removed; remove the field or set it to false.");
@@ -398,6 +406,10 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	}
 	if (config.sampling.sample_radius <= 0.0f)
 		fail_config("`sampling.bridson.sample_radius` must be > 0");
+	if (config.sampling.candidates_per_parent < 1)
+		fail_config("`sampling.bridson.candidates_per_parent` must be >= 1");
+	if (config.sampling.parent_batch_size < 1)
+		fail_config("`sampling.bridson.parent_batch_size` must be >= 1");
 	if (config.input.ma_flip_prune_alpha_factor < 1.0f || config.input.ma_flip_prune_alpha_factor > 5.0f)
 		fail_config("`input.ma_flip_prune_alpha_factor` must be in [1.0, 5.0]");
 	if (!config.batch.enabled && config.output.skeleton_ply.empty())
