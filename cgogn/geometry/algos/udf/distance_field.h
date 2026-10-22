@@ -64,7 +64,7 @@ enum class FieldPrepareResult
 	model_not_loaded
 };
 
-// Reconstruction data a field may need. The pointers are non-owning: the owner is UDFReconstruction::data_ and the
+// Reconstruction data a field may need. The pointers are non-owning: the owner is ReconstructionState::data and the
 // attributes are the ones created by UDFReconstruction::initialize_data().
 template <typename SURFACE, typename POINTS>
 struct PrepareInputs

@@ -19,6 +19,7 @@
 #include <cgogn/geometry/algos/udf/distance_field.h>
 #include <cgogn/geometry/algos/udf/input_geometry.h>
 #include <cgogn/geometry/algos/udf/reconstruction_options.h>
+#include <cgogn/geometry/algos/udf/reconstruction_state.h>
 #include <cgogn/geometry/algos/udf/reconstruction_stats.h>
 #include <cgogn/geometry/algos/udf/sample_processing.h>
 #include <cgogn/geometry/algos/udf/skeleton_topology.h>
@@ -85,150 +86,125 @@ template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RayS
 class UDFReconstruction
 {
 public:
-	using PVertex = typename mesh_traits<POINTS>::Vertex;
-	using SVertex = typename mesh_traits<SURFACE>::Vertex;
-	using SFace = typename mesh_traits<SURFACE>::Face;
-	using NMVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
-	using NMEdge = typename mesh_traits<NONMANIFOLD>::Edge;
-	using NMFace = typename mesh_traits<NONMANIFOLD>::Face;
-	using SpheresOptimizerType = SpheresOptimizer<POINTS>;
-	using SpheresOptimizerMetrics = typename SpheresOptimizerType::Metrics;
-	using TopologyType = SkeletonTopology<POINTS, NONMANIFOLD>;
-	using Field = typename DistanceFieldFor<RaySamplerTag, SURFACE, POINTS>::type;
-	using RayConfig = typename Field::RayConfig;
-	using RayTraits = typename RayConfig::SamplerTraits;
-	using RaySampler = typename Field::RaySampler;
-	using RayParams = typename RaySampler::Params;
-	using PAttribute = typename mesh_traits<POINTS>::template Attribute<Vec3>;
+	using State = ReconstructionState<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>;
+
+	using PVertex = typename State::PVertex;
+	using SVertex = typename State::SVertex;
+	using SFace = typename State::SFace;
+	using NMVertex = typename State::NMVertex;
+	using NMEdge = typename State::NMEdge;
+	using NMFace = typename State::NMFace;
+	using SpheresOptimizerType = typename State::SpheresOptimizerType;
+	using SpheresOptimizerMetrics = typename State::SpheresOptimizerMetrics;
+	using TopologyType = typename State::TopologyType;
+	using Field = typename State::Field;
+	using RayConfig = typename State::RayConfig;
+	using RayTraits = typename State::RayTraits;
+	using RaySampler = typename State::RaySampler;
+	using RayParams = typename State::RayParams;
+	using PAttribute = typename State::PAttribute;
 	template <typename T>
-	using PointAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
+	using PointAttribute = typename State::template PointAttribute<T>;
 	template <typename T>
-	using SurfaceAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
+	using SurfaceAttribute = typename State::template SurfaceAttribute<T>;
 	template <typename T>
-	using SkeletonAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
+	using SkeletonAttribute = typename State::template SkeletonAttribute<T>;
 
-	using NeuralModelType = cgogn::geometry::NeuralModelType;
-	enum class Status
+	using NeuralModelType = typename State::NeuralModelType;
+	using Status = typename State::Status;
+	using Data = typename State::Data;
+	using Options = typename State::Options;
+	using Timing = typename State::Timing;
+	using Counts = typename State::Counts;
+	using Result = typename State::Result;
+	using IterationCallback = typename State::IterationCallback;
+
+	explicit UDFReconstruction(Data data, Options options = {})
 	{
-		success,
-		invalid_data,
-		model_load_failed,
-		sampling_failed,
-		fitting_failed,
-		medial_axis_failed,
-		sphere_initialization_failed,
-		optimization_failed,
-		skeleton_build_failed,
-		topology_fix_failed
-	};
-
-	struct Data
-	{
-		SURFACE* surface = nullptr;
-		POINTS* input_points = nullptr;
-		POINTS* samples = nullptr;
-		POINTS* spheres = nullptr;
-		NONMANIFOLD* skeleton = nullptr;
-	};
-
-	using Options = ReconstructionOptions;
-
-	using Timing = ReconstructionTiming;
-	using Counts = ReconstructionCounts;
-
-	struct Result
-	{
-		Status status = Status::invalid_data;
-		Timing timing;
-		Counts counts;
-	};
-
-	using IterationCallback = std::function<void(const SpheresOptimizerMetrics&)>;
-
-	explicit UDFReconstruction(Data data, Options options = {}) : data_(data), options_(options)
-	{
+		s_.data = data;
+		s_.options = options;
 	}
 	UDFReconstruction(const UDFReconstruction&) = delete;
 	UDFReconstruction& operator=(const UDFReconstruction&) = delete;
 
 	Data& data()
 	{
-		input_.invalidate();
-		return data_;
+		s_.input.invalidate();
+		return s_.data;
 	}
 	const Data& data() const
 	{
-		return data_;
+		return s_.data;
 	}
 	Options& options()
 	{
-		return options_;
+		return s_.options;
 	}
 	const Options& options() const
 	{
-		return options_;
+		return s_.options;
 	}
 
 	void reset()
 	{
-		input_.invalidate();
-		sample_kdtree_.reset();
-		sample_ma_kdtree_.reset();
-		sample_vertices_.clear();
-		sample_ma_vertices_.clear();
-		ray_sampler_.reset();
-		optimizer_.reset();
-		topology_.reset();
-		field_.reset();
-		fitting_data_computed_ = false;
-		samples_before_filtering_ = 0;
-		initialized_ = false;
+		s_.input.invalidate();
+		s_.sample_kdtree.reset();
+		s_.sample_ma_kdtree.reset();
+		s_.sample_vertices.clear();
+		s_.sample_ma_vertices.clear();
+		s_.ray_sampler.reset();
+		s_.optimizer.reset();
+		s_.topology.reset();
+		s_.field.reset();
+		s_.fitting_data_computed = false;
+		s_.samples_before_filtering = 0;
+		s_.initialized = false;
 	}
 
 	Status initialize_data()
 	{
-		if (initialized_)
+		if (s_.initialized)
 			return Status::success;
-		if (!data_.input_points || !data_.samples || !data_.spheres || !data_.skeleton)
+		if (!s_.data.input_points || !s_.data.samples || !s_.data.spheres || !s_.data.skeleton)
 			return Status::invalid_data;
-		input_position_ = get_or_add_attribute<Vec3, PVertex>(*data_.input_points, "position");
-		input_normal_ = get_or_add_attribute<Vec3, PVertex>(*data_.input_points, "normal");
-		input_knn_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*data_.input_points, "knn");
-		sample_position_ = get_or_add_attribute<Vec3, PVertex>(*data_.samples, "position");
-		sample_normal_ = get_or_add_attribute<Vec3, PVertex>(*data_.samples, "normal");
-		sample_area_ = get_or_add_attribute<Scalar, PVertex>(*data_.samples, "area");
-		sample_knn_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*data_.samples, "knn");
-		sample_quadric_ = get_or_add_attribute<Spherical_Quadric, PVertex>(*data_.samples, "quadric");
-		sample_line_quadric_ = get_or_add_attribute<Line_Quadric, PVertex>(*data_.samples, "line_quadric");
-		sample_ma_position_ = get_or_add_attribute<Vec3, PVertex>(*data_.samples, "ma_position");
-		sample_ma_radius_ = get_or_add_attribute<Scalar, PVertex>(*data_.samples, "ma_radius");
-		sample_ma_secondary_ = get_or_add_attribute<PVertex, PVertex>(*data_.samples, "ma_secondary_vertex");
-		sample_sphere_ = get_or_add_attribute<PVertex, PVertex>(*data_.samples, "sphere");
-		sample_error_ = get_or_add_attribute<Scalar, PVertex>(*data_.samples, "error");
-		sphere_position_ = get_or_add_attribute<Vec3, PVertex>(*data_.spheres, "position");
-		sphere_radius_ = get_or_add_attribute<Scalar, PVertex>(*data_.spheres, "radius");
-		sphere_cluster_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*data_.spheres, "cluster");
-		sphere_cluster_area_ = get_or_add_attribute<Scalar, PVertex>(*data_.spheres, "cluster_area");
-		sphere_cluster_color_ = get_or_add_attribute<Vec4, PVertex>(*data_.spheres, "cluster_color");
-		sphere_neighbors_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*data_.spheres, "neighbor_clusters");
-		sphere_error_ = get_or_add_attribute<Scalar, PVertex>(*data_.spheres, "error");
-		sphere_error_raw_ = get_or_add_attribute<Scalar, PVertex>(*data_.spheres, "error_not_normalized");
-		sphere_skeleton_vertex_ = get_or_add_attribute<NMVertex, PVertex>(*data_.spheres, "skeleton_vertex");
-		skeleton_position_ = get_or_add_attribute<Vec3, NMVertex>(*data_.skeleton, "position");
-		skeleton_radius_ = get_or_add_attribute<Scalar, NMVertex>(*data_.skeleton, "radius");
-		skeleton_source_sphere_ = get_or_add_attribute<PVertex, NMVertex>(*data_.skeleton, "source_sphere");
-		skeleton_incident_tets_ = get_or_add_attribute<std::set<std::size_t>, NMFace>(*data_.skeleton, "incident_tets");
-		skeleton_edge_degree_ = get_or_add_attribute<uint32, NMEdge>(*data_.skeleton, "degree");
-		initialized_ = input_position_ && sample_position_ && sample_normal_ && sphere_position_ && skeleton_position_;
-		input_.bind(data_.surface, data_.input_points, input_position_, input_normal_);
-		return initialized_ ? Status::success : Status::invalid_data;
+		s_.input_position = get_or_add_attribute<Vec3, PVertex>(*s_.data.input_points, "position");
+		s_.input_normal = get_or_add_attribute<Vec3, PVertex>(*s_.data.input_points, "normal");
+		s_.input_knn = get_or_add_attribute<std::vector<PVertex>, PVertex>(*s_.data.input_points, "knn");
+		s_.sample_position = get_or_add_attribute<Vec3, PVertex>(*s_.data.samples, "position");
+		s_.sample_normal = get_or_add_attribute<Vec3, PVertex>(*s_.data.samples, "normal");
+		s_.sample_area = get_or_add_attribute<Scalar, PVertex>(*s_.data.samples, "area");
+		s_.sample_knn = get_or_add_attribute<std::vector<PVertex>, PVertex>(*s_.data.samples, "knn");
+		s_.sample_quadric = get_or_add_attribute<Spherical_Quadric, PVertex>(*s_.data.samples, "quadric");
+		s_.sample_line_quadric = get_or_add_attribute<Line_Quadric, PVertex>(*s_.data.samples, "line_quadric");
+		s_.sample_ma_position = get_or_add_attribute<Vec3, PVertex>(*s_.data.samples, "ma_position");
+		s_.sample_ma_radius = get_or_add_attribute<Scalar, PVertex>(*s_.data.samples, "ma_radius");
+		s_.sample_ma_secondary = get_or_add_attribute<PVertex, PVertex>(*s_.data.samples, "ma_secondary_vertex");
+		s_.sample_sphere = get_or_add_attribute<PVertex, PVertex>(*s_.data.samples, "sphere");
+		s_.sample_error = get_or_add_attribute<Scalar, PVertex>(*s_.data.samples, "error");
+		s_.sphere_position = get_or_add_attribute<Vec3, PVertex>(*s_.data.spheres, "position");
+		s_.sphere_radius = get_or_add_attribute<Scalar, PVertex>(*s_.data.spheres, "radius");
+		s_.sphere_cluster = get_or_add_attribute<std::vector<PVertex>, PVertex>(*s_.data.spheres, "cluster");
+		s_.sphere_cluster_area = get_or_add_attribute<Scalar, PVertex>(*s_.data.spheres, "cluster_area");
+		s_.sphere_cluster_color = get_or_add_attribute<Vec4, PVertex>(*s_.data.spheres, "cluster_color");
+		s_.sphere_neighbors = get_or_add_attribute<std::vector<PVertex>, PVertex>(*s_.data.spheres, "neighbor_clusters");
+		s_.sphere_error = get_or_add_attribute<Scalar, PVertex>(*s_.data.spheres, "error");
+		s_.sphere_error_raw = get_or_add_attribute<Scalar, PVertex>(*s_.data.spheres, "error_not_normalized");
+		s_.sphere_skeleton_vertex = get_or_add_attribute<NMVertex, PVertex>(*s_.data.spheres, "skeleton_vertex");
+		s_.skeleton_position = get_or_add_attribute<Vec3, NMVertex>(*s_.data.skeleton, "position");
+		s_.skeleton_radius = get_or_add_attribute<Scalar, NMVertex>(*s_.data.skeleton, "radius");
+		s_.skeleton_source_sphere = get_or_add_attribute<PVertex, NMVertex>(*s_.data.skeleton, "source_sphere");
+		s_.skeleton_incident_tets = get_or_add_attribute<std::set<std::size_t>, NMFace>(*s_.data.skeleton, "incident_tets");
+		s_.skeleton_edge_degree = get_or_add_attribute<uint32, NMEdge>(*s_.data.skeleton, "degree");
+		s_.initialized = s_.input_position && s_.sample_position && s_.sample_normal && s_.sphere_position && s_.skeleton_position;
+		s_.input.bind(s_.data.surface, s_.data.input_points, s_.input_position, s_.input_normal);
+		return s_.initialized ? Status::success : Status::invalid_data;
 	}
 
 	Status load_neural_model(const std::filesystem::path& path, NeuralModelType type)
 	{
-		if (!field_.load_model(path, type))
+		if (!s_.field.load_model(path, type))
 			return Status::model_load_failed;
-		options_.neural_model_type = type;
+		s_.options.neural_model_type = type;
 		return Status::success;
 	}
 
@@ -247,39 +223,39 @@ public:
 	Counts counts() const
 	{
 		Counts c;
-		if (data_.input_points)
-			c.input_points = nb_cells<PVertex>(*data_.input_points);
-		if (data_.surface)
-			c.input_vertices = nb_cells<SVertex>(*data_.surface);
+		if (s_.data.input_points)
+			c.input_points = nb_cells<PVertex>(*s_.data.input_points);
+		if (s_.data.surface)
+			c.input_vertices = nb_cells<SVertex>(*s_.data.surface);
 		else
 			c.input_vertices = c.input_points;
-		if (data_.samples)
-			c.samples = nb_cells<PVertex>(*data_.samples);
-		c.samples_before_filtering = samples_before_filtering_;
-		if (data_.spheres)
-			c.spheres = nb_cells<PVertex>(*data_.spheres);
-		if (data_.skeleton)
+		if (s_.data.samples)
+			c.samples = nb_cells<PVertex>(*s_.data.samples);
+		c.samples_before_filtering = s_.samples_before_filtering;
+		if (s_.data.spheres)
+			c.spheres = nb_cells<PVertex>(*s_.data.spheres);
+		if (s_.data.skeleton)
 		{
-			c.skeleton_vertices = nb_cells<NMVertex>(*data_.skeleton);
-			c.skeleton_edges = nb_cells<NMEdge>(*data_.skeleton);
-			c.skeleton_faces = nb_cells<NMFace>(*data_.skeleton);
+			c.skeleton_vertices = nb_cells<NMVertex>(*s_.data.skeleton);
+			c.skeleton_edges = nb_cells<NMEdge>(*s_.data.skeleton);
+			c.skeleton_faces = nb_cells<NMFace>(*s_.data.skeleton);
 		}
-		if (optimizer_)
-			c.optimization_iterations = optimizer_->metrics().iteration;
+		if (s_.optimizer)
+			c.optimization_iterations = s_.optimizer->metrics().iteration;
 		return c;
 	}
 
 	NONMANIFOLD* skeleton() const
 	{
-		return data_.skeleton;
+		return s_.data.skeleton;
 	}
 	const std::shared_ptr<SkeletonAttribute<Vec3>>& skeleton_position_attribute() const
 	{
-		return skeleton_position_;
+		return s_.skeleton_position;
 	}
 	const std::shared_ptr<SkeletonAttribute<Scalar>>& skeleton_radius_attribute() const
 	{
-		return skeleton_radius_;
+		return s_.skeleton_radius;
 	}
 
 	SpheresOptimizerType& spheres_optimizer()
@@ -292,47 +268,7 @@ public:
 	}
 
 private:
-	Data data_;
-	Options options_;
-	std::unique_ptr<RaySampler> ray_sampler_;
-	InputGeometry<SURFACE, POINTS> input_;
-	// distance field of the input kind (CPU fields or the neural model); it refers to input_ and options_, so it is
-	// declared after them
-	Field field_{input_, options_};
-	std::unique_ptr<acc::KDTree<3, uint32>> sample_kdtree_;
-	std::unique_ptr<acc::KDTree<3, uint32>> sample_ma_kdtree_;
-	std::vector<PVertex> sample_vertices_;
-	std::vector<PVertex> sample_ma_vertices_;
-	std::unique_ptr<SpheresOptimizerType> optimizer_;
-	std::unique_ptr<TopologyType> topology_;
-	bool fitting_data_computed_ = false;
-	bool initialized_ = false;
-	uint32 samples_before_filtering_ = 0;
-
-	std::shared_ptr<PointAttribute<Vec3>> input_position_, input_normal_;
-	std::shared_ptr<PointAttribute<std::vector<PVertex>>> input_knn_;
-	std::shared_ptr<PointAttribute<Vec3>> sample_position_, sample_normal_;
-	std::shared_ptr<PointAttribute<Scalar>> sample_area_;
-	std::shared_ptr<PointAttribute<std::vector<PVertex>>> sample_knn_;
-	std::shared_ptr<PointAttribute<Spherical_Quadric>> sample_quadric_;
-	std::shared_ptr<PointAttribute<Line_Quadric>> sample_line_quadric_;
-	std::shared_ptr<PointAttribute<Vec3>> sample_ma_position_;
-	std::shared_ptr<PointAttribute<Scalar>> sample_ma_radius_;
-	std::shared_ptr<PointAttribute<PVertex>> sample_ma_secondary_, sample_sphere_;
-	std::shared_ptr<PointAttribute<Scalar>> sample_error_;
-	std::shared_ptr<PointAttribute<Vec3>> sphere_position_;
-	std::shared_ptr<PointAttribute<Scalar>> sphere_radius_;
-	std::shared_ptr<PointAttribute<std::vector<PVertex>>> sphere_cluster_;
-	std::shared_ptr<PointAttribute<Scalar>> sphere_cluster_area_;
-	std::shared_ptr<PointAttribute<Vec4>> sphere_cluster_color_;
-	std::shared_ptr<PointAttribute<std::vector<PVertex>>> sphere_neighbors_;
-	std::shared_ptr<PointAttribute<Scalar>> sphere_error_, sphere_error_raw_;
-	std::shared_ptr<PointAttribute<NMVertex>> sphere_skeleton_vertex_;
-	std::shared_ptr<SkeletonAttribute<Vec3>> skeleton_position_;
-	std::shared_ptr<SkeletonAttribute<Scalar>> skeleton_radius_;
-	std::shared_ptr<SkeletonAttribute<PVertex>> skeleton_source_sphere_;
-	std::shared_ptr<SkeletonAttribute<std::set<std::size_t>>> skeleton_incident_tets_;
-	std::shared_ptr<SkeletonAttribute<uint32>> skeleton_edge_degree_;
+	State s_;
 
 	void build_sample_kdtree();
 	void recompute_samples_normals_from_input();
@@ -358,81 +294,81 @@ private:
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
 void UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::build_sample_kdtree()
 {
-	sample_kdtree_.reset();
-	sample_ma_kdtree_.reset();
-	sample_vertices_.clear();
-	sample_ma_vertices_.clear();
-	if (!data_.samples || !sample_position_)
+	s_.sample_kdtree.reset();
+	s_.sample_ma_kdtree.reset();
+	s_.sample_vertices.clear();
+	s_.sample_ma_vertices.clear();
+	if (!s_.data.samples || !s_.sample_position)
 		return;
 	std::vector<Vec3> positions;
 	std::vector<Vec3> ma_positions;
-	foreach_cell(*data_.samples, [&](PVertex v) {
-		const uint32 idx = index_of(*data_.samples, v);
-		positions.push_back((*sample_position_)[idx]);
-		sample_vertices_.push_back(v);
-		const Vec3 ma = (*sample_ma_position_)[idx];
-		if (ma.allFinite() && (*sample_ma_radius_)[idx] > Scalar(0))
+	foreach_cell(*s_.data.samples, [&](PVertex v) {
+		const uint32 idx = index_of(*s_.data.samples, v);
+		positions.push_back((*s_.sample_position)[idx]);
+		s_.sample_vertices.push_back(v);
+		const Vec3 ma = (*s_.sample_ma_position)[idx];
+		if (ma.allFinite() && (*s_.sample_ma_radius)[idx] > Scalar(0))
 		{
 			ma_positions.push_back(ma);
-			sample_ma_vertices_.push_back(v);
+			s_.sample_ma_vertices.push_back(v);
 		}
 		return true;
 	});
 	if (!positions.empty())
-		sample_kdtree_ = std::make_unique<acc::KDTree<3, uint32>>(positions);
+		s_.sample_kdtree = std::make_unique<acc::KDTree<3, uint32>>(positions);
 	if (!ma_positions.empty())
-		sample_ma_kdtree_ = std::make_unique<acc::KDTree<3, uint32>>(ma_positions);
+		s_.sample_ma_kdtree = std::make_unique<acc::KDTree<3, uint32>>(ma_positions);
 }
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
 void UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::recompute_samples_normals_from_input()
 {
-	input_.bind(data_.surface, data_.input_points, input_position_, input_normal_);
-	if (!input_.input_kdtree() && data_.surface)
+	s_.input.bind(s_.data.surface, s_.data.input_points, s_.input_position, s_.input_normal);
+	if (!s_.input.input_kdtree() && s_.data.surface)
 	{
-		input_.build_surface_bvh();
-		if (input_.surface_bvh())
+		s_.input.build_surface_bvh();
+		if (s_.input.surface_bvh())
 		{
-			foreach_cell(*data_.samples, [&](PVertex v) {
-				const uint32 idx = index_of(*data_.samples, v);
-				const Vec3& position = (*sample_position_)[idx];
+			foreach_cell(*s_.data.samples, [&](PVertex v) {
+				const uint32 idx = index_of(*s_.data.samples, v);
+				const Vec3& position = (*s_.sample_position)[idx];
 				std::pair<uint32, Vec3> closest;
 				Vec3 normal(0, 0, 1);
-				if (input_.surface_bvh()->closest_point(position, &closest))
+				if (s_.input.surface_bvh()->closest_point(position, &closest))
 				{
 					normal = unit_normal_or_z(position - closest.second);
 				}
-				(*sample_normal_)[idx] = normal;
+				(*s_.sample_normal)[idx] = normal;
 				return true;
 			});
 			return;
 		}
 	}
-	if (input_.input_kdtree() && data_.input_points)
+	if (s_.input.input_kdtree() && s_.data.input_points)
 	{
-		foreach_cell(*data_.samples, [&](PVertex v) {
-			const uint32 idx = index_of(*data_.samples, v);
-			const Vec3& position = (*sample_position_)[idx];
+		foreach_cell(*s_.data.samples, [&](PVertex v) {
+			const uint32 idx = index_of(*s_.data.samples, v);
+			const Vec3& position = (*s_.sample_position)[idx];
 			std::pair<uint32, Scalar> nearest;
 			Vec3 normal(0, 0, 1);
-			if (input_.input_kdtree()->find_nn(position, &nearest) && nearest.first < input_.input_vertices().size())
+			if (s_.input.input_kdtree()->find_nn(position, &nearest) && nearest.first < s_.input.input_vertices().size())
 			{
-				const uint32 input_idx = index_of(*data_.input_points, input_.input_vertices()[nearest.first]);
+				const uint32 input_idx = index_of(*s_.data.input_points, s_.input.input_vertices()[nearest.first]);
 				if (input_idx != INVALID_INDEX)
 				{
-					normal = position - (*input_position_)[input_idx];
+					normal = position - (*s_.input_position)[input_idx];
 					if (normal.squaredNorm() < Scalar(1e-12))
-						normal = (*input_normal_)[input_idx];
+						normal = (*s_.input_normal)[input_idx];
 					normal = unit_normal_or_z(normal);
 				}
 			}
-			(*sample_normal_)[idx] = normal;
+			(*s_.sample_normal)[idx] = normal;
 			return true;
 		});
 		return;
 	}
-	foreach_cell(*data_.samples, [&](PVertex v) {
-		(*sample_normal_)[index_of(*data_.samples, v)] = Vec3(0, 0, 1);
+	foreach_cell(*s_.data.samples, [&](PVertex v) {
+		(*s_.sample_normal)[index_of(*s_.data.samples, v)] = Vec3(0, 0, 1);
 		return true;
 	});
 }
@@ -440,24 +376,24 @@ void UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::recompute_s
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
 bool UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::recompute_sample_normal_pca(PVertex vertex)
 {
-	if (!data_.samples || !sample_kdtree_ || !vertex.is_valid())
+	if (!s_.data.samples || !s_.sample_kdtree || !vertex.is_valid())
 		return false;
-	const int k = std::max(3, options_.knn_k);
-	const uint32 vertex_index = index_of(*data_.samples, vertex);
+	const int k = std::max(3, s_.options.knn_k);
+	const uint32 vertex_index = index_of(*s_.data.samples, vertex);
 	if (vertex_index == INVALID_INDEX)
 		return false;
-	const Vec3& center = (*sample_position_)[vertex_index];
+	const Vec3& center = (*s_.sample_position)[vertex_index];
 	std::vector<std::pair<uint32, Scalar>> neighbors_index;
-	sample_kdtree_->find_nns(center, k + 1, &neighbors_index);
+	s_.sample_kdtree->find_nns(center, k + 1, &neighbors_index);
 	std::vector<Vec3> neighbors;
 	neighbors.reserve(k);
 	for (const auto& item : neighbors_index)
 	{
-		const PVertex neighbor = sample_vertices_[item.first];
+		const PVertex neighbor = s_.sample_vertices[item.first];
 		if (neighbor == vertex)
 			continue;
-		const uint32 neighbor_index = index_of(*data_.samples, neighbor);
-		neighbors.push_back((*sample_position_)[neighbor_index]);
+		const uint32 neighbor_index = index_of(*s_.data.samples, neighbor);
+		neighbors.push_back((*s_.sample_position)[neighbor_index]);
 		if (static_cast<int>(neighbors.size()) >= k)
 			break;
 	}
@@ -488,11 +424,11 @@ bool UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::recompute_s
 	Vec3 normal(eigenvector(0), eigenvector(1), eigenvector(2));
 	if (normal.squaredNorm() < Scalar(1e-12))
 		return false;
-	const Vec3 current = (*sample_normal_)[vertex_index];
+	const Vec3 current = (*s_.sample_normal)[vertex_index];
 	if (current.squaredNorm() > Scalar(1e-12) && normal.dot(current) < Scalar(0))
 		normal = -normal;
 	normal.normalize();
-	(*sample_normal_)[vertex_index] = normal;
+	(*s_.sample_normal)[vertex_index] = normal;
 	return true;
 }
 
@@ -501,34 +437,34 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Spheres
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::optimizer_for()
 {
 	typename SpheresOptimizerType::Data d;
-	d.samples_mesh = data_.samples;
-	d.spheres = data_.spheres;
-	d.sample_position = sample_position_;
-	d.sample_area = sample_area_;
-	d.sample_knn = sample_knn_;
-	d.sample_quadric = sample_quadric_;
-	d.sample_line_quadric = sample_line_quadric_;
-	d.sample_ma_position = sample_ma_position_;
-	d.sample_ma_radius = sample_ma_radius_;
-	d.sample_ma_secondary_vertex = sample_ma_secondary_;
-	d.sample_sphere = sample_sphere_;
-	d.sample_error = sample_error_;
-	d.sphere_position = sphere_position_;
-	d.sphere_radius = sphere_radius_;
-	d.sphere_cluster = sphere_cluster_;
-	d.sphere_cluster_area = sphere_cluster_area_;
-	d.sphere_cluster_color = sphere_cluster_color_;
-	d.sphere_neighbors = sphere_neighbors_;
-	d.sphere_error = sphere_error_;
-	d.sphere_error_not_normalized = sphere_error_raw_;
-	d.sample_kdtree = sample_kdtree_.get();
-	d.sample_kdtree_vertices = &sample_vertices_;
-	d.sqem_update_lambda_line_plane = Scalar(options_.sqem_update_lambda_line_plane);
-	if (!optimizer_)
-		optimizer_ = std::make_unique<SpheresOptimizerType>(std::move(d));
+	d.samples_mesh = s_.data.samples;
+	d.spheres = s_.data.spheres;
+	d.sample_position = s_.sample_position;
+	d.sample_area = s_.sample_area;
+	d.sample_knn = s_.sample_knn;
+	d.sample_quadric = s_.sample_quadric;
+	d.sample_line_quadric = s_.sample_line_quadric;
+	d.sample_ma_position = s_.sample_ma_position;
+	d.sample_ma_radius = s_.sample_ma_radius;
+	d.sample_ma_secondary_vertex = s_.sample_ma_secondary;
+	d.sample_sphere = s_.sample_sphere;
+	d.sample_error = s_.sample_error;
+	d.sphere_position = s_.sphere_position;
+	d.sphere_radius = s_.sphere_radius;
+	d.sphere_cluster = s_.sphere_cluster;
+	d.sphere_cluster_area = s_.sphere_cluster_area;
+	d.sphere_cluster_color = s_.sphere_cluster_color;
+	d.sphere_neighbors = s_.sphere_neighbors;
+	d.sphere_error = s_.sphere_error;
+	d.sphere_error_not_normalized = s_.sphere_error_raw;
+	d.sample_kdtree = s_.sample_kdtree.get();
+	d.sample_kdtree_vertices = &s_.sample_vertices;
+	d.sqem_update_lambda_line_plane = Scalar(s_.options.sqem_update_lambda_line_plane);
+	if (!s_.optimizer)
+		s_.optimizer = std::make_unique<SpheresOptimizerType>(std::move(d));
 	else
-		optimizer_->data() = std::move(d);
-	return *optimizer_;
+		s_.optimizer->data() = std::move(d);
+	return *s_.optimizer;
 }
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
@@ -536,19 +472,19 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Topolog
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::topology_for()
 {
 	typename TopologyType::Data d;
-	d.skeleton = data_.skeleton;
+	d.skeleton = s_.data.skeleton;
 	d.spheres_optimizer = &optimizer_for();
-	d.sphere_skeleton_vertex = sphere_skeleton_vertex_;
-	d.skeleton_position = skeleton_position_;
-	d.skeleton_radius = skeleton_radius_;
-	d.skeleton_source_sphere = skeleton_source_sphere_;
-	d.face_incident_tets = skeleton_incident_tets_;
-	d.edge_degree = skeleton_edge_degree_;
-	if (!topology_)
-		topology_ = std::make_unique<TopologyType>(std::move(d));
+	d.sphere_skeleton_vertex = s_.sphere_skeleton_vertex;
+	d.skeleton_position = s_.skeleton_position;
+	d.skeleton_radius = s_.skeleton_radius;
+	d.skeleton_source_sphere = s_.skeleton_source_sphere;
+	d.face_incident_tets = s_.skeleton_incident_tets;
+	d.edge_degree = s_.skeleton_edge_degree;
+	if (!s_.topology)
+		s_.topology = std::make_unique<TopologyType>(std::move(d));
 	else
-		topology_->data() = std::move(d);
-	return *topology_;
+		s_.topology->data() = std::move(d);
+	return *s_.topology;
 }
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
@@ -557,69 +493,69 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 {
 	if (initialize_data() != Status::success)
 		return Status::invalid_data;
-	input_.bind(data_.surface, data_.input_points, input_position_, input_normal_);
-	input_.invalidate();
-	input_.build_input_kdtree();
-	const PrepareInputs<SURFACE, POINTS> inputs{data_.surface, data_.input_points, input_position_, input_normal_,
-												input_knn_};
-	if (const FieldPrepareResult prepared = field_.prepare(inputs); prepared != FieldPrepareResult::ok)
+	s_.input.bind(s_.data.surface, s_.data.input_points, s_.input_position, s_.input_normal);
+	s_.input.invalidate();
+	s_.input.build_input_kdtree();
+	const PrepareInputs<SURFACE, POINTS> inputs{s_.data.surface, s_.data.input_points, s_.input_position, s_.input_normal,
+												s_.input_knn};
+	if (const FieldPrepareResult prepared = s_.field.prepare(inputs); prepared != FieldPrepareResult::ok)
 		return status_of(prepared);
 
 	Vec3 bbox_min(0, 0, 0), bbox_max(1, 1, 1);
-	if (const FieldPrepareResult boxed = field_.sampling_box(inputs, bbox_min, bbox_max);
+	if (const FieldPrepareResult boxed = s_.field.sampling_box(inputs, bbox_min, bbox_max);
 		boxed != FieldPrepareResult::ok)
 		return status_of(boxed);
 	const Scalar padding = udf_constants::sampling_padding;
 	bbox_min -= Vec3(padding, padding, padding);
 	bbox_max += Vec3(padding, padding, padding);
 
-	RayTraits traits = field_.ray_traits(inputs);
+	RayTraits traits = s_.field.ray_traits(inputs);
 	if (!traits.is_ready())
 		return Status::invalid_data;
 	RayParams ray_params;
 	ray_params.bbox_expand = udf_constants::ray_box_relative_expand;
-	ray_params.alpha = Scalar(options_.alpha);
-	ray_params.tol = Scalar(options_.tolerance);
+	ray_params.alpha = Scalar(s_.options.alpha);
+	ray_params.tol = Scalar(s_.options.tolerance);
 	ray_params.step_bound = Scalar(2.0);
-	ray_params.batch_size = std::max(1, options_.ray_sampler_batch_size);
-	ray_params.max_iterations = options_.udf_max_iterations;
-	ray_params.min_active_rays = options_.udf_min_active_rays;
+	ray_params.batch_size = std::max(1, s_.options.ray_sampler_batch_size);
+	ray_params.max_iterations = s_.options.udf_max_iterations;
+	ray_params.min_active_rays = s_.options.udf_min_active_rays;
 	ray_params.max_outer_iterations = 10;
-	ray_params.seed = options_.seed;
-	if (!ray_sampler_)
-		ray_sampler_ = field_.make_ray_sampler(ray_params);
+	ray_params.seed = s_.options.seed;
+	if (!s_.ray_sampler)
+		s_.ray_sampler = s_.field.make_ray_sampler(ray_params);
 	else
-		field_.configure_ray_sampler(*ray_sampler_, ray_params);
+		s_.field.configure_ray_sampler(*s_.ray_sampler, ray_params);
 	AlphaSamplingParameters params;
-	params.sample_radius = Scalar(options_.sample_radius);
-	params.seed = static_cast<uint32>(options_.seed);
-	params.ray_sampler_batch_size = static_cast<size_t>(std::max(1, options_.ray_sampler_batch_size));
-	params.candidates_per_parent = static_cast<size_t>(std::max(1, options_.alpha_sampling_candidates_per_parent));
-	params.parent_batch_size = static_cast<size_t>(std::max(1, options_.alpha_sampling_parent_batch_size));
+	params.sample_radius = Scalar(s_.options.sample_radius);
+	params.seed = static_cast<uint32>(s_.options.seed);
+	params.ray_sampler_batch_size = static_cast<size_t>(std::max(1, s_.options.ray_sampler_batch_size));
+	params.candidates_per_parent = static_cast<size_t>(std::max(1, s_.options.alpha_sampling_candidates_per_parent));
+	params.parent_batch_size = static_cast<size_t>(std::max(1, s_.options.alpha_sampling_parent_batch_size));
 	params.bbox_min = bbox_min;
 	params.bbox_max = bbox_max;
 	auto compute_normals = [&](const std::vector<Vec3>& points, std::vector<Vec3>& normals,
 							   std::vector<uint8_t>& keep) {
 		keep.assign(points.size(), uint8_t(0));
 		normals.assign(points.size(), Vec3(0, 0, 1));
-		return field_.normals(points, normals, keep);
+		return s_.field.normals(points, normals, keep);
 	};
-	const AlphaProjectionParameters pp{Scalar(options_.alpha), Scalar(options_.tolerance), bbox_min, bbox_max, 1};
+	const AlphaProjectionParameters pp{Scalar(s_.options.alpha), Scalar(s_.options.tolerance), bbox_min, bbox_max, 1};
 	auto project_points = [&](const std::vector<Vec3>& points, AlphaProjectionResult& projection) {
-		return field_.project(points, pp, projection);
+		return s_.field.project(points, pp, projection);
 	};
 	AlphaSamplingResult result =
-		geometry::sample_alpha_level_set(traits, *ray_sampler_, params, compute_normals, project_points);
+		geometry::sample_alpha_level_set(traits, *s_.ray_sampler, params, compute_normals, project_points);
 	if (!result.success || result.positions.empty())
 		return Status::sampling_failed;
-	clear(*data_.samples);
-	samples_before_filtering_ = static_cast<uint32>(result.positions.size());
+	clear(*s_.data.samples);
+	s_.samples_before_filtering = static_cast<uint32>(result.positions.size());
 	for (size_t i = 0; i < result.positions.size(); ++i)
 	{
-		PVertex v = add_vertex(*data_.samples);
-		const uint32 idx = index_of(*data_.samples, v);
-		(*sample_position_)[idx] = result.positions[i];
-		(*sample_normal_)[idx] = result.normals[i];
+		PVertex v = add_vertex(*s_.data.samples);
+		const uint32 idx = index_of(*s_.data.samples, v);
+		(*s_.sample_position)[idx] = result.positions[i];
+		(*s_.sample_normal)[idx] = result.normals[i];
 	}
 	build_sample_kdtree();
 	return Status::success;
@@ -629,50 +565,50 @@ template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RayS
 typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status UDFReconstruction<
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::apply_sampling_filtering()
 {
-	if (!options_.apply_filtering || !data_.samples || nb_cells<PVertex>(*data_.samples) == 0)
+	if (!s_.options.apply_filtering || !s_.data.samples || nb_cells<PVertex>(*s_.data.samples) == 0)
 		return Status::success;
-	input_.bind(data_.surface, data_.input_points, input_position_, input_normal_);
-	input_.build_input_kdtree();
-	if (!input_.input_kdtree())
-		input_.build_surface_bvh();
+	s_.input.bind(s_.data.surface, s_.data.input_points, s_.input_position, s_.input_normal);
+	s_.input.build_input_kdtree();
+	if (!s_.input.input_kdtree())
+		s_.input.build_surface_bvh();
 	std::vector<Vec3> kept, kept_normals;
-	kept.reserve(nb_cells<PVertex>(*data_.samples));
-	foreach_cell(*data_.samples, [&](PVertex v) {
-		const Vec3 p = (*sample_position_)[index_of(*data_.samples, v)];
+	kept.reserve(nb_cells<PVertex>(*s_.data.samples));
+	foreach_cell(*s_.data.samples, [&](PVertex v) {
+		const Vec3 p = (*s_.sample_position)[index_of(*s_.data.samples, v)];
 		bool within_distance = false;
-		const Scalar max_distance = Scalar(options_.alpha) + udf_constants::filter_margin;
-		if (input_.input_kdtree())
+		const Scalar max_distance = Scalar(s_.options.alpha) + udf_constants::filter_margin;
+		if (s_.input.input_kdtree())
 		{
 			std::pair<uint32, Scalar> nearest;
-			within_distance = input_.input_kdtree()->find_nn(p, &nearest, max_distance);
+			within_distance = s_.input.input_kdtree()->find_nn(p, &nearest, max_distance);
 		}
-		else if (input_.surface_bvh())
+		else if (s_.input.surface_bvh())
 		{
 			std::pair<uint32, Vec3> closest;
-			within_distance = input_.surface_bvh()->closest_point(p, &closest, max_distance);
+			within_distance = s_.input.surface_bvh()->closest_point(p, &closest, max_distance);
 		}
 		if (within_distance)
 		{
 			kept.push_back(p);
-			kept_normals.push_back((*sample_normal_)[index_of(*data_.samples, v)]);
+			kept_normals.push_back((*s_.sample_normal)[index_of(*s_.data.samples, v)]);
 		}
 		return true;
 	});
-	const size_t before = nb_cells<PVertex>(*data_.samples);
+	const size_t before = nb_cells<PVertex>(*s_.data.samples);
 	if (kept.size() == before)
 		return Status::success;
-	clear(*data_.samples);
+	clear(*s_.data.samples);
 	for (size_t i = 0; i < kept.size(); ++i)
 	{
-		PVertex v = add_vertex(*data_.samples);
-		(*sample_position_)[index_of(*data_.samples, v)] = kept[i];
-		(*sample_normal_)[index_of(*data_.samples, v)] = kept_normals[i];
+		PVertex v = add_vertex(*s_.data.samples);
+		(*s_.sample_position)[index_of(*s_.data.samples, v)] = kept[i];
+		(*s_.sample_normal)[index_of(*s_.data.samples, v)] = kept_normals[i];
 	}
-	fitting_data_computed_ = false;
+	s_.fitting_data_computed = false;
 	if (kept.empty())
 	{
-		sample_kdtree_.reset();
-		sample_vertices_.clear();
+		s_.sample_kdtree.reset();
+		s_.sample_vertices.clear();
 		return Status::success;
 	}
 	// neural samples keep their projection normals (the network gradient); for point cloud / surface input the
@@ -687,14 +623,14 @@ template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RayS
 typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status UDFReconstruction<
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::build_kdtree_and_normals()
 {
-	if (!data_.samples || nb_cells<PVertex>(*data_.samples) == 0)
+	if (!s_.data.samples || nb_cells<PVertex>(*s_.data.samples) == 0)
 		return Status::invalid_data;
-	if (!sample_kdtree_)
+	if (!s_.sample_kdtree)
 		return Status::invalid_data;
 	// PCA for every input: neural samples already carry the network gradient, and for MF models that gradient
 	// is not orthogonal to the medial axis.
-	if (options_.recompute_normals_after_sampling)
-		parallel_foreach_cell(*data_.samples, [&](PVertex v) {
+	if (s_.options.recompute_normals_after_sampling)
+		parallel_foreach_cell(*s_.data.samples, [&](PVertex v) {
 			recompute_sample_normal_pca(v);
 			return true;
 		});
@@ -705,13 +641,13 @@ template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RayS
 typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status UDFReconstruction<
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::compute_fitting_primitives()
 {
-	if (!data_.samples || !sample_kdtree_)
+	if (!s_.data.samples || !s_.sample_kdtree)
 		return Status::invalid_data;
-	compute_samples_area(*data_.samples, *sample_position_, *sample_normal_, *sample_area_, *sample_knn_,
-						 *sample_kdtree_, sample_vertices_, options_.knn_k, Scalar(options_.alpha));
-	compute_quadrics(*data_.samples, *sample_position_, *sample_normal_, *sample_area_, *sample_knn_, *sample_quadric_,
-					 *sample_line_quadric_, options_.knn_k);
-	fitting_data_computed_ = true;
+	compute_samples_area(*s_.data.samples, *s_.sample_position, *s_.sample_normal, *s_.sample_area, *s_.sample_knn,
+						 *s_.sample_kdtree, s_.sample_vertices, s_.options.knn_k, Scalar(s_.options.alpha));
+	compute_quadrics(*s_.data.samples, *s_.sample_position, *s_.sample_normal, *s_.sample_area, *s_.sample_knn, *s_.sample_quadric,
+					 *s_.sample_line_quadric, s_.options.knn_k);
+	s_.fitting_data_computed = true;
 	return Status::success;
 }
 
@@ -719,22 +655,22 @@ template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RayS
 typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status UDFReconstruction<
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::compute_initial_medial_axis()
 {
-	if (!data_.samples || !sample_kdtree_)
+	if (!s_.data.samples || !s_.sample_kdtree)
 		return Status::invalid_data;
-	const Scalar fallback_radius = Scalar(options_.alpha);
+	const Scalar fallback_radius = Scalar(s_.options.alpha);
 	const Scalar min_norm = Scalar(1e-12);
-	const bool neural_input = Field::is_neural_type && field_.loaded();
-	const bool mf_model = neural_input && options_.neural_model_type == NeuralModelType::mf;
-	const bool udf_model = neural_input && options_.neural_model_type == NeuralModelType::udf;
+	const bool neural_input = Field::is_neural_type && s_.field.loaded();
+	const bool mf_model = neural_input && s_.options.neural_model_type == NeuralModelType::mf;
+	const bool udf_model = neural_input && s_.options.neural_model_type == NeuralModelType::udf;
 	const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(10), Scalar(0));
 	auto run_shrinking_ball_for_vertex = [&](PVertex v) -> bool {
 		if (!v.is_valid())
 			return false;
-		const uint32 idx = index_of(*data_.samples, v);
+		const uint32 idx = index_of(*s_.data.samples, v);
 		if (idx == INVALID_INDEX)
 			return false;
-		const Vec3& pt = (*sample_position_)[idx];
-		Vec3 n = (*sample_normal_)[idx];
+		const Vec3& pt = (*s_.sample_position)[idx];
+		Vec3 n = (*s_.sample_normal)[idx];
 		const bool normal_finite = n.allFinite();
 		const bool can_shrink = normal_finite && n.squaredNorm() > min_norm;
 		if (can_shrink)
@@ -747,7 +683,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 		if (can_shrink)
 		{
 			auto [c1, r1, q1] =
-				geometry::shrinking_ball_center<PVertex>(pt, n, sample_kdtree_.get(), sample_vertices_, initial_radius);
+				geometry::shrinking_ball_center<PVertex>(pt, n, s_.sample_kdtree.get(), s_.sample_vertices, initial_radius);
 			if (c1.allFinite() && std::isfinite(static_cast<double>(r1)) && r1 > Scalar(0))
 			{
 				center = c1;
@@ -759,25 +695,25 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 			center = pt - n * fallback_radius;
 		if (!std::isfinite(static_cast<double>(radius)) || radius <= Scalar(0))
 			radius = fallback_radius;
-		if (!secondary.is_valid() && sample_kdtree_ && !sample_vertices_.empty())
+		if (!secondary.is_valid() && s_.sample_kdtree && !s_.sample_vertices.empty())
 		{
 			std::pair<uint32, Scalar> nn;
-			if (sample_kdtree_->find_nn(center - n * radius, &nn) && nn.first < sample_vertices_.size())
-				secondary = sample_vertices_[nn.first];
+			if (s_.sample_kdtree->find_nn(center - n * radius, &nn) && nn.first < s_.sample_vertices.size())
+				secondary = s_.sample_vertices[nn.first];
 		}
-		(*sample_ma_position_)[idx] = center;
-		(*sample_ma_radius_)[idx] = std::max(radius, fallback_radius);
-		(*sample_ma_secondary_)[idx] = secondary;
+		(*s_.sample_ma_position)[idx] = center;
+		(*s_.sample_ma_radius)[idx] = std::max(radius, fallback_radius);
+		(*s_.sample_ma_secondary)[idx] = secondary;
 		return true;
 	};
 	auto run_all = [&] {
-		parallel_foreach_cell(*data_.samples, [&](PVertex v) {
+		parallel_foreach_cell(*s_.data.samples, [&](PVertex v) {
 			run_shrinking_ball_for_vertex(v);
 			return true;
 		});
 	};
 	run_all();
-	if (options_.ma_flip_prune)
+	if (s_.options.ma_flip_prune)
 	{
 		uint32 flipped = 0, deleted = 0;
 		std::vector<uint32> flipped_indices;
@@ -786,25 +722,25 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 		const Scalar mf_threshold =
 			fallback_radius * std::max(udf_constants::mf_flip_alpha_factor_min,
 									   std::min(udf_constants::mf_flip_alpha_factor_max,
-												Scalar(options_.ma_flip_prune_alpha_factor)));
+												Scalar(s_.options.ma_flip_prune_alpha_factor)));
 		const bool supported = mf_model || !Field::is_neural_type || neural_input;
 		auto scores = [&](const std::vector<Vec3>& points, std::vector<Scalar>& values,
 						  std::vector<Scalar>& sdf) -> bool {
 			sdf.clear();
 			if (!mf_model)
 				return evaluate_topology_scores(points, values);
-			return field_.values_sdf(points, values, sdf);
+			return s_.field.values_sdf(points, values, sdf);
 		};
 		if (supported)
 		{
 			std::vector<PVertex> vertices;
 			std::vector<Vec3> centers;
-			vertices.reserve(nb_cells<PVertex>(*data_.samples));
+			vertices.reserve(nb_cells<PVertex>(*s_.data.samples));
 			centers.reserve(vertices.capacity());
-			foreach_cell(*data_.samples, [&](PVertex v) {
-				const uint32 i = index_of(*data_.samples, v);
+			foreach_cell(*s_.data.samples, [&](PVertex v) {
+				const uint32 i = index_of(*s_.data.samples, v);
 				vertices.push_back(v);
-				centers.push_back((*sample_ma_position_)[i]);
+				centers.push_back((*s_.sample_ma_position)[i]);
 				return true;
 			});
 			std::vector<Scalar> values, sdf;
@@ -818,14 +754,14 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 				flipped_indices.reserve(retry.size());
 				for (PVertex v : retry)
 				{
-					const uint32 i = index_of(*data_.samples, v);
+					const uint32 i = index_of(*s_.data.samples, v);
 					if (i == INVALID_INDEX)
 						continue;
-					Vec3 n = (*sample_normal_)[i];
+					Vec3 n = (*s_.sample_normal)[i];
 					if (n.squaredNorm() > min_norm)
 					{
 						n.normalize();
-						(*sample_normal_)[i] = -n;
+						(*s_.sample_normal)[i] = -n;
 						flipped_indices.push_back(i);
 						++flipped;
 					}
@@ -836,11 +772,11 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 					std::vector<PVertex> active;
 					for (PVertex v : candidates)
 					{
-						uint32 i = index_of(*data_.samples, v);
+						uint32 i = index_of(*s_.data.samples, v);
 						if (i != INVALID_INDEX)
 						{
 							active.push_back(v);
-							p.push_back((*sample_ma_position_)[i]);
+							p.push_back((*s_.sample_ma_position)[i]);
 						}
 					}
 					std::vector<Scalar> val, sd;
@@ -851,20 +787,20 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 						if ((mf_model && i < sd.size() && sd[i] > Scalar(0)) ||
 							val[i] > (mf_model ? mf_threshold : udf_threshold))
 						{
-							remove_vertex(*data_.samples, active[i]);
+							remove_vertex(*s_.data.samples, active[i]);
 							++removed;
 						}
 					return removed;
 				};
 				deleted += prune(retry);
-				if (deleted > 0 && !flipped_indices.empty() && nb_cells<PVertex>(*data_.samples) > 0)
+				if (deleted > 0 && !flipped_indices.empty() && nb_cells<PVertex>(*s_.data.samples) > 0)
 				{
 					build_sample_kdtree();
 					std::vector<PVertex> survivors;
 					survivors.reserve(flipped_indices.size());
 					for (uint32 i : flipped_indices)
 					{
-						PVertex v = of_index<PVertex>(*data_.samples, i);
+						PVertex v = of_index<PVertex>(*s_.data.samples, i);
 						if (v.is_valid())
 							survivors.push_back(v);
 					}
@@ -885,9 +821,9 @@ template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RayS
 typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status UDFReconstruction<
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::initialize_spheres()
 {
-	if (!fitting_data_computed_ || !data_.samples || !data_.spheres)
+	if (!s_.fitting_data_computed || !s_.data.samples || !s_.data.spheres)
 		return Status::invalid_data;
-	if (!optimizer_for().initialize_from_samples(Scalar(options_.init_dilation_constant)))
+	if (!optimizer_for().initialize_from_samples(Scalar(s_.options.init_dilation_constant)))
 		return Status::sphere_initialization_failed;
 	return Status::success;
 }
@@ -901,7 +837,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	typename SpheresOptimizerType::Status status = SpheresOptimizerType::Status::running;
 	while (status == SpheresOptimizerType::Status::running)
 	{
-		status = optimizer.update_once(Scalar(options_.sqem_update_lambda_line_plane));
+		status = optimizer.update_once(Scalar(s_.options.sqem_update_lambda_line_plane));
 		if (callback)
 			callback(optimizer.metrics());
 	}
@@ -932,7 +868,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::prune_residual_sheets()
 {
 	topology_for().set_residual_prune_mode(
-		static_cast<typename TopologyType::ResidualPruneMode>(static_cast<int>(options_.residual_prune_mode)));
+		static_cast<typename TopologyType::ResidualPruneMode>(static_cast<int>(s_.options.residual_prune_mode)));
 	return topology_for().prune_residual_sheets() == TopologyType::Status::success ? Status::success
 																	   : Status::topology_fix_failed;
 }
@@ -941,25 +877,25 @@ template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RayS
 bool UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::evaluate_topology_scores(
 	const std::vector<Vec3>& points, std::vector<Scalar>& values)
 {
-	input_.bind(data_.surface, data_.input_points, input_position_, input_normal_);
-	if (Field::is_neural_type && options_.neural_model_type == NeuralModelType::mf)
+	s_.input.bind(s_.data.surface, s_.data.input_points, s_.input_position, s_.input_normal);
+	if (Field::is_neural_type && s_.options.neural_model_type == NeuralModelType::mf)
 	{
 		// MF: mf - |sdf| is not a stable medial axis (its minimum is above zero and varies a lot over a shape),
 		// so the score is the distance to the medial point of the nearest sample instead of the network value
-		if (!sample_ma_kdtree_)
+		if (!s_.sample_ma_kdtree)
 			return false;
 		values.resize(points.size(), Scalar(0));
 		detail::parallel_for_index(points.size(), [&](std::size_t i) {
 			std::pair<uint32, Scalar> nearest;
-			if (!sample_ma_kdtree_->find_nn(points[i], &nearest) || nearest.first >= sample_ma_vertices_.size())
+			if (!s_.sample_ma_kdtree->find_nn(points[i], &nearest) || nearest.first >= s_.sample_ma_vertices.size())
 				return;
-			const uint32 sid = index_of(*data_.samples, sample_ma_vertices_[nearest.first]);
+			const uint32 sid = index_of(*s_.data.samples, s_.sample_ma_vertices[nearest.first]);
 			if (sid != INVALID_INDEX)
-				values[i] = (points[i] - (*sample_ma_position_)[sid]).norm();
+				values[i] = (points[i] - (*s_.sample_ma_position)[sid]).norm();
 		});
 		return true;
 	}
-	return field_.distances(points, values);
+	return s_.field.distances(points, values);
 }
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
@@ -967,21 +903,21 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Result 
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::run(const IterationCallback& callback)
 {
 	Result r;
-	input_.invalidate();
-	if (data_.samples)
-		clear(*data_.samples);
-	if (data_.spheres)
-		clear(*data_.spheres);
-	if (data_.skeleton)
-		clear(*data_.skeleton);
-	sample_kdtree_.reset();
-	sample_ma_kdtree_.reset();
-	sample_vertices_.clear();
-	sample_ma_vertices_.clear();
-	optimizer_.reset();
-	topology_.reset();
-	fitting_data_computed_ = false;
-	samples_before_filtering_ = 0;
+	s_.input.invalidate();
+	if (s_.data.samples)
+		clear(*s_.data.samples);
+	if (s_.data.spheres)
+		clear(*s_.data.spheres);
+	if (s_.data.skeleton)
+		clear(*s_.data.skeleton);
+	s_.sample_kdtree.reset();
+	s_.sample_ma_kdtree.reset();
+	s_.sample_vertices.clear();
+	s_.sample_ma_vertices.clear();
+	s_.optimizer.reset();
+	s_.topology.reset();
+	s_.fitting_data_computed = false;
+	s_.samples_before_filtering = 0;
 	auto run_stage = [](float64& time, auto&& stage) {
 		const auto start = std::chrono::high_resolution_clock::now();
 		const Status status = stage();
@@ -992,7 +928,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Result 
 		return r;
 	if ((r.status = run_stage(r.timing.sampling_ms, [&] { return sample_alpha_level_set(); })) != Status::success)
 		return r;
-	r.counts.samples_before_filtering = samples_before_filtering_;
+	r.counts.samples_before_filtering = s_.samples_before_filtering;
 	if ((r.status = run_stage(r.timing.sample_filtering_ms, [&] { return apply_sampling_filtering(); })) !=
 		Status::success)
 		return r;
@@ -1010,17 +946,17 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Result 
 		return r;
 	if ((r.status = run_stage(r.timing.optimization_ms, [&] { return optimize_spheres(callback); })) != Status::success)
 		return r;
-	if (optimizer_)
+	if (s_.optimizer)
 	{
-		r.timing.cluster_ms = optimizer_->metrics().cluster_total_ms;
-		r.timing.sphere_update_ms = optimizer_->metrics().sphere_update_total_ms;
-		r.timing.error_ms = optimizer_->metrics().error_total_ms;
+		r.timing.cluster_ms = s_.optimizer->metrics().cluster_total_ms;
+		r.timing.sphere_update_ms = s_.optimizer->metrics().sphere_update_total_ms;
+		r.timing.error_ms = s_.optimizer->metrics().error_total_ms;
 	}
 	if ((r.status = run_stage(r.timing.skeleton_construction_ms, [&] { return build_skeleton(); })) != Status::success)
 		return r;
 	if ((r.status = run_stage(r.timing.topology_processing_ms, [&] { return fix_topology(); })) != Status::success)
 		return r;
-	if (options_.residual_prune)
+	if (s_.options.residual_prune)
 	{
 		float64 residual_ms = 0.0;
 		if ((r.status = run_stage(residual_ms, [&] { return prune_residual_sheets(); })) != Status::success)

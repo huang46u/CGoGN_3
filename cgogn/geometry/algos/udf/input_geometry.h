@@ -61,7 +61,7 @@ public:
 	template <typename T>
 	using SurfaceAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
 
-	// non-owning pointers to the input (the owner is UDFReconstruction::data_)
+	// non-owning pointers to the input (the owner is ReconstructionState::data)
 	struct
 	{
 		SURFACE* surface = nullptr;
