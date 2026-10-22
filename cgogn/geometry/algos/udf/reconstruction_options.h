@@ -117,7 +117,7 @@ inline bool parse(const std::string& value, NeuralModelType& out)
   X(int,                 udf_min_active_rays,            100,                                   "sampling.ray.min_active_rays",              0, 1 << 24, 0, 10000) \
   X(float,               sqem_update_lambda_line_plane,  0.2f,                                  "optimization.sqem_update_lambda_line_plane", 0.0, 100.0, 0.0, 4.0) \
   X(int,                 seed,                           42,                                    "initialization.seed",                       0, 2147483647, 0, 1000) \
-  X(float,               init_dilation_constant,         0.001f,                                "initialization.init_dilation_constant",     1e-6, 1.0, 0.001, 0.01) \
+  X(float,               init_dilation_constant,         0.01f,                                 "initialization.init_dilation_constant",     1e-6, 1.0, 0.001, 0.01) \
   X(bool,                residual_prune,                 false,                                 "postprocess.residual_prune",                0, 1, 0, 1) \
   X(ResidualPruneOption, residual_prune_mode,            ResidualPruneOption::collapsible_only, "postprocess.residual_prune_mode",           0, 0, 0, 0)
 // clang-format on
