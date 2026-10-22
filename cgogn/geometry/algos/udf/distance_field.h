@@ -40,22 +40,20 @@ namespace cgogn::geometry
 //   - PointCloudDistanceField: the unsigned distance to an oriented point cloud (k-d tree queries);
 //   - NeuralDistanceField: a TorchScript network that predicts the UDF or the MF value of the input.
 // Every field is constructed from the InputGeometry caches and the ReconstructionOptions of the reconstruction, and
-// provides the following interface. CPU fields hold no model: load_model() returns false, reset() does nothing,
-// loaded() is false, and they have no forward() / workspace() / device() (those are used only in neural branches):
-//   RayConfig, RayTraits, is_neural_type      types of the ray sampler and compile-time kind of the field
-//   prepare(inputs)                           [2a] before sampling: build caches or check the field is usable
-//   sampling_box(inputs, min, max)            [2a] bounding box of the input, before padding
-//   ray_traits(inputs)                        [2a] traits of the ray sampler (valid until the sampling ends)
-//   sampling_device()                         [2a] device of the ray sampler
-//   normals(points, normals, keep)            [2a] normals of the candidate points, keep flags the usable ones
-//   project(points, parameters, result)       [2a] projection of the points onto the alpha level set
-//   load_model(path, type) / reset() / loaded() [2a] neural model life cycle (CPU fields: no model)
-//   forward() / workspace() / device()        [2a] neural state, used by the neural branches (CPU fields: none)
-//   distances(points, values)                 [2b] topology scores of the points (used by scores / MA flip)
-//   values_sdf(points, values, sdf)           [2b] MF value and sdf of the points (used by scores / MA flip)
-//   is_neural()                               [2b] neural and model loaded (used by MA flip)
-//   recompute_normals_from_input_after_filtering [2b] constant: whether the normals are recomputed from the input after
-//                                             the sampling filter (used by the sampling filter)
+// provides the following interface (the CPU fields hold no model, see the notes on each method):
+//   RayConfig, RayTraits, is_neural_type         types of the ray sampler and compile-time kind of the field
+//   prepare(inputs)                              build the caches, or report that the field is not usable yet
+//   sampling_box(inputs, min, max)               bounding box of the input, before padding
+//   ray_traits(inputs)                           traits of the ray sampler (valid until the sampling ends)
+//   sampling_device()                            device of the ray sampler
+//   normals(points, normals, keep)               normals of the candidate points, keep flags the usable ones
+//   project(points, parameters, result)          projection of the points onto the alpha level set
+//   load_model(path, type) / reset() / loaded()  neural model life cycle (CPU fields: no model, loaded() is false)
+//   distances(points, values)                    topology scores of the points (unsigned distance to the input)
+//   values_sdf(points, values, sdf)              MF value and sdf of the points (CPU fields: returns false)
+//   recompute_normals_from_input_after_filtering constant: whether the normals are recomputed from the input after
+//                                                the sampling filter
+//   forward() / workspace() / device()           neural state (neural fields only)
 
 // Result of the preparation and sampling-box steps of a field.
 enum class FieldPrepareResult

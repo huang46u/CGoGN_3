@@ -168,6 +168,21 @@ public:
 		return true;
 	}
 
+	// topology scores: the UDF value of the network at the points
+	bool distances(const std::vector<Vec3>& points, std::vector<Scalar>& values)
+	{
+		return evaluate_udf_values(forward(), points, static_cast<size_t>(options_.batch_size), values);
+	}
+
+	// MF value and sdf of the network at the points
+	bool values_sdf(const std::vector<Vec3>& points, std::vector<Scalar>& values, std::vector<Scalar>& sdf)
+	{
+		return evaluate_udf_values_sdf(forward(), points, static_cast<size_t>(options_.batch_size), values, sdf);
+	}
+
+	// the normals of the samples are the network gradient: they are not recomputed from the input after the filter
+	static constexpr bool recompute_normals_from_input_after_filtering = false;
+
 private:
 	// the neural state of the field: the device, the module, whether it is loaded and the wrapper of the module
 	torch::Device device_ = torch::cuda::is_available() ? torch::Device(torch::kCUDA, 0) : torch::Device(torch::kCPU);

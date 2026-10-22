@@ -701,7 +701,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	}
 	// neural samples keep their projection normals (the network gradient); for point cloud / surface input the
 	// normal is recomputed at the projected position from the input
-	if constexpr (!std::is_same_v<RaySamplerTag, RaySamplerNeural>)
+	if constexpr (Field::recompute_normals_from_input_after_filtering)
 		recompute_samples_normals_from_input();
 	build_sample_kdtree();
 	return Status::success;
@@ -747,7 +747,7 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 		return Status::invalid_data;
 	const Scalar fallback_radius = Scalar(options_.alpha);
 	const Scalar min_norm = Scalar(1e-12);
-	const bool neural_input = std::is_same_v<RaySamplerTag, RaySamplerNeural> && field_.loaded();
+	const bool neural_input = Field::is_neural_type && field_.loaded();
 	const bool mf_model = neural_input && options_.neural_model_type == NeuralModelType::mf;
 	const bool udf_model = neural_input && options_.neural_model_type == NeuralModelType::udf;
 	const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(10), Scalar(0));
@@ -811,18 +811,13 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 			fallback_radius * std::max(udf_constants::mf_flip_alpha_factor_min,
 									   std::min(udf_constants::mf_flip_alpha_factor_max,
 												Scalar(options_.ma_flip_prune_alpha_factor)));
-		const bool supported = mf_model || std::is_same_v<RaySamplerTag, RaySamplerSurface> ||
-							   std::is_same_v<RaySamplerTag, RaySamplerPointCloud> || neural_input;
+		const bool supported = mf_model || !Field::is_neural_type || neural_input;
 		auto scores = [&](const std::vector<Vec3>& points, std::vector<Scalar>& values,
 						  std::vector<Scalar>& sdf) -> bool {
 			sdf.clear();
-			if constexpr (Field::is_neural_type)
-			{
-				if (mf_model)
-					return evaluate_udf_values_sdf(field_.forward(), points, static_cast<size_t>(options_.batch_size),
-												   values, sdf);
-			}
-			return evaluate_topology_scores(points, values);
+			if (!mf_model)
+				return evaluate_topology_scores(points, values);
+			return field_.values_sdf(points, values, sdf);
 		};
 		if (supported)
 		{
@@ -971,70 +966,24 @@ bool UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::evaluate_to
 	const std::vector<Vec3>& points, std::vector<Scalar>& values)
 {
 	input_.bind(data_.surface, data_.input_points, input_position_, input_normal_);
-	if constexpr (std::is_same_v<RaySamplerTag, RaySamplerNeural>)
+	if (Field::is_neural_type && options_.neural_model_type == NeuralModelType::mf)
 	{
-		if (options_.neural_model_type == NeuralModelType::mf)
-		{
-			// MF: mf - |sdf| is not a stable medial axis (its minimum is above zero and varies a lot over a shape),
-			// so the score is the distance to the medial point of the nearest sample instead of the network value
-			if (!sample_ma_kdtree_)
-				return false;
-			values.resize(points.size(), Scalar(0));
-			detail::parallel_for_index(points.size(), [&](std::size_t i) {
-				std::pair<uint32, Scalar> nearest;
-				if (!sample_ma_kdtree_->find_nn(points[i], &nearest) || nearest.first >= sample_ma_vertices_.size())
-					return;
-				const uint32 sid = index_of(*data_.samples, sample_ma_vertices_[nearest.first]);
-				if (sid != INVALID_INDEX)
-					values[i] = (points[i] - (*sample_ma_position_)[sid]).norm();
-			});
-			return true;
-		}
-		return evaluate_udf_values(field_.forward(), points, static_cast<size_t>(options_.batch_size), values);
-	}
-	else if constexpr (std::is_same_v<RaySamplerTag, RaySamplerSurface>)
-	{
-		input_.build_surface_bvh();
-		if (!input_.surface_bvh())
+		// MF: mf - |sdf| is not a stable medial axis (its minimum is above zero and varies a lot over a shape),
+		// so the score is the distance to the medial point of the nearest sample instead of the network value
+		if (!sample_ma_kdtree_)
 			return false;
-		values.resize(points.size());
-		std::atomic<bool> all_found{true};
+		values.resize(points.size(), Scalar(0));
 		detail::parallel_for_index(points.size(), [&](std::size_t i) {
-			uint32 primitive;
-			Vec3 closest;
-			Scalar distance;
-			if (!query_surface_closest_point(*input_.surface_bvh(), points[i], primitive, closest, distance))
-			{
-				all_found = false;
+			std::pair<uint32, Scalar> nearest;
+			if (!sample_ma_kdtree_->find_nn(points[i], &nearest) || nearest.first >= sample_ma_vertices_.size())
 				return;
-			}
-			values[i] = distance;
+			const uint32 sid = index_of(*data_.samples, sample_ma_vertices_[nearest.first]);
+			if (sid != INVALID_INDEX)
+				values[i] = (points[i] - (*sample_ma_position_)[sid]).norm();
 		});
-		if (!all_found)
-			return false;
 		return true;
 	}
-	else
-	{
-		input_.build_input_kdtree();
-		if (!input_.input_kdtree())
-			return false;
-		values.resize(points.size());
-		std::atomic<bool> all_found{true};
-		detail::parallel_for_index(points.size(), [&](std::size_t i) {
-			uint32 point;
-			Scalar distance;
-			if (!query_point_cloud_nearest_point(*input_.input_kdtree(), points[i], point, distance))
-			{
-				all_found = false;
-				return;
-			}
-			values[i] = distance;
-		});
-		if (!all_found)
-			return false;
-		return true;
-	}
+	return field_.distances(points, values);
 }
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
