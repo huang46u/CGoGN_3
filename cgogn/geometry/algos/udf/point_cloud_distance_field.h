@@ -35,12 +35,14 @@
 #include <cgogn/geometry/algos/udf/sample_processing.h>
 #include <cgogn/geometry/algos/udf/spatial_query.h>
 #include <cgogn/geometry/functions/bounding_box.h>
+#include <cgogn/geometry/types/ray_level_set_sampler.h>
 #include <cgogn/geometry/types/ray_level_set_sampler_traits.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <tuple>
 #include <vector>
 
@@ -57,6 +59,7 @@ public:
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
 	using RayConfig = RaySamplerTraits<RaySamplerPointCloud, SURFACE, POINTS>;
 	using RayTraits = typename RayConfig::SamplerTraits;
+	using RaySampler = RayLevelSetSampler<RayTraits>;
 	static constexpr bool is_neural_type = false;
 
 	PointCloudDistanceField(InputGeometry<SURFACE, POINTS>& input, const ReconstructionOptions& options)
@@ -86,9 +89,14 @@ public:
 							   inputs.input_knn.get(), input_.input_kdtree().get(), &input_.input_vertices());
 	}
 
-	torch::Device sampling_device() const
+	std::unique_ptr<RaySampler> make_ray_sampler(const typename RaySampler::Params& params) const
 	{
-		return torch::kCPU;
+		return std::make_unique<RaySampler>(params);
+	}
+
+	void configure_ray_sampler(RaySampler& sampler, const typename RaySampler::Params& params) const
+	{
+		sampler.set_params(params);
 	}
 
 	bool normals(const std::vector<Vec3>& points, std::vector<Vec3>& normals, std::vector<uint8_t>& keep)

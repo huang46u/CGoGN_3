@@ -34,7 +34,8 @@
 #include <cgogn/geometry/algos/udf/reconstruction_options.h>
 #include <cgogn/geometry/functions/bounding_box.h>
 #include <cgogn/geometry/types/neural_field_forward.h>
-#include <cgogn/geometry/types/ray_level_set_sampler_traits.h>
+#include <cgogn/geometry/types/neural_ray_traits.h>
+#include <cgogn/geometry/types/ray_level_set_sampler_torch.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <torch/script.h>
@@ -43,6 +44,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <tuple>
 #include <vector>
 
@@ -60,6 +62,7 @@ public:
 	using SVertex = typename mesh_traits<SURFACE>::Vertex;
 	using RayConfig = RaySamplerTraits<RaySamplerNeural, SURFACE, POINTS>;
 	using RayTraits = typename RayConfig::SamplerTraits;
+	using RaySampler = TorchRayLevelSetSampler<RayTraits>;
 	static constexpr bool is_neural_type = true;
 
 	NeuralDistanceField(InputGeometry<SURFACE, POINTS>& input, const ReconstructionOptions& options)
@@ -144,9 +147,15 @@ public:
 		return RayConfig::make(sampling_field_);
 	}
 
-	torch::Device sampling_device() const
+	std::unique_ptr<RaySampler> make_ray_sampler(const typename RaySampler::Params& params) const
 	{
-		return device_;
+		return std::make_unique<RaySampler>(params, device_);
+	}
+
+	void configure_ray_sampler(RaySampler& sampler, const typename RaySampler::Params& params) const
+	{
+		sampler.set_params(params);
+		sampler.set_device(device_);
 	}
 
 	bool normals(const std::vector<Vec3>& points, std::vector<Vec3>& normals, std::vector<uint8_t>& keep)

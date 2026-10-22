@@ -3,7 +3,6 @@
 
 #include <cgogn/core/functions/mesh_info.h>
 #include <cgogn/geometry/algos/udf/spatial_query.h>
-#include <cgogn/geometry/types/neural_field_forward.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <libacc/bvh_tree.h>
@@ -32,45 +31,9 @@ struct RaySamplerPointCloud
 {
 };
 
-struct NeuralFieldRayTraits
-{
-	static constexpr bool kUsesTorch = true;
-	NeuralFieldForward* field = nullptr;
-
-	bool is_ready() const
-	{
-		return field && field->is_loaded();
-	}
-
-	const torch::Device& device() const
-	{
-		return field->device();
-	}
-
-	std::pair<torch::Tensor, torch::Tensor> eval_values_sdf(const torch::Tensor& points) const
-	{
-		if (!field)
-			return {torch::Tensor(), torch::Tensor()};
-		return field->forward_values_sdf_gpu(points);
-	}
-};
-
 template <typename RaySamplerTag, typename SURFACE, typename POINTS>
 struct RaySamplerTraits
 {
-};
-
-template <typename SURFACE, typename POINTS>
-struct RaySamplerTraits<RaySamplerNeural, SURFACE, POINTS>
-{
-	using SamplerTraits = NeuralFieldRayTraits;
-
-	static SamplerTraits make(NeuralFieldForward& field)
-	{
-		SamplerTraits traits;
-		traits.field = &field;
-		return traits;
-	}
 };
 
 template <typename SURFACE>

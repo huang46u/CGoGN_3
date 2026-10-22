@@ -101,7 +101,7 @@ public:
 	using Field = typename DistanceFieldFor<RaySamplerTag, SURFACE, POINTS>::type;
 	using RayConfig = typename Field::RayConfig;
 	using RayTraits = typename RayConfig::SamplerTraits;
-	using RaySampler = RayLevelSetSampler<RayTraits>;
+	using RaySampler = typename Field::RaySampler;
 	using RayParams = typename RaySampler::Params;
 	using PAttribute = typename mesh_traits<POINTS>::template Attribute<Vec3>;
 	template <typename T>
@@ -590,14 +590,10 @@ typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status 
 	ray_params.min_active_rays = options_.udf_min_active_rays;
 	ray_params.max_outer_iterations = 10;
 	ray_params.seed = options_.seed;
-	torch::Device sampling_device = field_.sampling_device();
 	if (!ray_sampler_)
-		ray_sampler_ = std::make_unique<RaySampler>(ray_params, sampling_device);
+		ray_sampler_ = field_.make_ray_sampler(ray_params);
 	else
-	{
-		ray_sampler_->set_params(ray_params);
-		ray_sampler_->set_device(sampling_device);
-	}
+		field_.configure_ray_sampler(*ray_sampler_, ray_params);
 	AlphaSamplingParameters params;
 	params.sample_radius = Scalar(options_.sample_radius);
 	params.seed = static_cast<uint32>(options_.seed);
