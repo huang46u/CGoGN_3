@@ -119,7 +119,6 @@ bool is_batch_case_completed(const BenchmarkConfig& config);
 
 std::string to_string(InputMode value);
 std::string to_string(InputGeometryType value);
-std::string to_string(NeuralModelType value);
 
 } // namespace benchmark
 

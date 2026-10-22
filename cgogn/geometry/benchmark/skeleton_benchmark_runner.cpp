@@ -151,7 +151,8 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	options.seed = config.initialization.seed;
 	options.init_dilation_constant = config.initialization.init_dilation_constant;
 	options.residual_prune = config.postprocess.residual_prune;
-	options.residual_prune_mode = residual_prune_mode_index(config.postprocess.residual_prune_mode);
+	options.residual_prune_mode =
+		static_cast<ResidualPruneOption>(residual_prune_mode_index(config.postprocess.residual_prune_mode));
 	options.alpha_sampling_candidates_per_parent = config.sampling.candidates_per_parent;
 	options.alpha_sampling_parent_batch_size = config.sampling.parent_batch_size;
 

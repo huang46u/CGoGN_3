@@ -1,0 +1,160 @@
+/*******************************************************************************
+ * CGoGN: Combinatorial and Geometric modeling with Generic N-dimensional Maps  *
+ * Copyright (C), IGG Group, ICube, University of Strasbourg, France            *
+ *                                                                              *
+ * This library is free software; you can redistribute it and/or modify it      *
+ * under the terms of the GNU Lesser General Public License as published by the *
+ * Free Software Foundation; either version 2.1 of the License, or (at your     *
+ * option) any later version.                                                   *
+ *                                                                              *
+ * This library is distributed in the hope that it will be useful, but WITHOUT *
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or        *
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License *
+ * for more details.                                                            *
+ *                                                                              *
+ * You should have received a copy of the GNU Lesser General Public License     *
+ * along with this library; if not, write to the Free Software Foundation,      *
+ * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA.           *
+ *                                                                              *
+ * Web site: http://cgogn.unistra.fr/                                           *
+ * Contact information: cgogn@unistra.fr                                        *
+ *                                                                              *
+ *******************************************************************************/
+#ifndef CGOGN_GEOMETRY_ALGOS_UDF_RECONSTRUCTION_OPTIONS_H_
+#define CGOGN_GEOMETRY_ALGOS_UDF_RECONSTRUCTION_OPTIONS_H_
+
+#include <cgogn/geometry/algos/udf/neural_model_type.h>
+
+#include <string>
+
+namespace cgogn::geometry
+{
+
+// Residual sheet prune mode (postprocess.residual_prune_mode); same order as SkeletonTopology::ResidualPruneMode.
+enum class ResidualPruneOption
+{
+	current,
+	keep_fully_non_manifold,
+	collapsible_only
+};
+
+inline std::string to_string(ResidualPruneOption value)
+{
+	switch (value)
+	{
+	case ResidualPruneOption::current:
+		return "current";
+	case ResidualPruneOption::keep_fully_non_manifold:
+		return "keep_fully_non_manifold";
+	case ResidualPruneOption::collapsible_only:
+	default:
+		return "collapsible_only";
+	}
+}
+
+inline bool parse(const std::string& value, ResidualPruneOption& out)
+{
+	if (value == "current")
+	{
+		out = ResidualPruneOption::current;
+		return true;
+	}
+	if (value == "keep_fully_non_manifold")
+	{
+		out = ResidualPruneOption::keep_fully_non_manifold;
+		return true;
+	}
+	if (value == "collapsible_only")
+	{
+		out = ResidualPruneOption::collapsible_only;
+		return true;
+	}
+	return false;
+}
+
+inline std::string to_string(NeuralModelType value)
+{
+	return value == NeuralModelType::mf ? "mf" : "udf";
+}
+
+inline bool parse(const std::string& value, NeuralModelType& out)
+{
+	if (value == "udf")
+	{
+		out = NeuralModelType::udf;
+		return true;
+	}
+	if (value == "mf")
+	{
+		out = NeuralModelType::mf;
+		return true;
+	}
+	return false;
+}
+
+// X(type, name, default, json key, min, max, ui_min, ui_max)
+//   json key : path in the benchmark config / timing JSON (dotted)
+//   min, max : accepted range (checked by the benchmark config loader), unused for bool/enum
+//   ui_min, ui_max : slider range in the UI
+// udf_min_active_rays: neural seed rays, a ray batch ends once fewer than this many rays are still marching (0 = off)
+// residual_prune_mode: 0 current, 1 keep_fully_non_manifold, 2 collapsible_only
+// clang-format off
+#define CGOGN_UDF_RECONSTRUCTION_OPTIONS(X) \
+  X(NeuralModelType,     neural_model_type,              NeuralModelType::udf,                  "input.neural_model_type",                   0, 0, 0, 0) \
+  X(bool,                ma_flip_prune,                  true,                                  "input.ma_flip_prune",                       0, 1, 0, 1) \
+  X(float,               ma_flip_prune_alpha_factor,     1.0f,                                  "input.ma_flip_prune_alpha_factor",          1.0, 5.0, 1.0, 5.0) \
+  X(float,               alpha,                          0.005f,                                "sampling.alpha",                            1e-6, 1.0, 0.0005, 0.05) \
+  X(int,                 knn_k,                          10,                                    "sampling.knn_k",                            3, 1000, 3, 50) \
+  X(bool,                apply_filtering,                true,                                  "sampling.apply_filtering",                  0, 1, 0, 1) \
+  X(bool,                recompute_normals_after_sampling, false,                               "sampling.recompute_normals_after_sampling", 0, 1, 0, 1) \
+  X(float,               sample_radius,                  0.0025f,                               "sampling.bridson.sample_radius",            1e-6, 1.0, 0.0005, 0.02) \
+  X(int,                 alpha_sampling_candidates_per_parent, 12,                              "sampling.bridson.candidates_per_parent",    1, 100000, 1, 200) \
+  X(int,                 alpha_sampling_parent_batch_size, 1024,                                "sampling.bridson.parent_batch_size",        1, 1 << 24, 1, 4096) \
+  X(int,                 ray_sampler_batch_size,         8192,                                  "sampling.ray.batch_size",                   1, 1 << 24, 1, 65536) \
+  X(int,                 batch_size,                     1048576,                               "sampling.ray.query_batch_size",             1, 1 << 30, 1, 1 << 22) \
+  X(float,               tolerance,                      1e-6f,                                 "sampling.ray.tolerance",                    1e-12, 1.0, 1e-9, 1e-3) \
+  X(int,                 udf_max_iterations,             3000,                                  "sampling.ray.max_iterations",               1, 1 << 24, 1, 10000) \
+  X(int,                 udf_min_active_rays,            100,                                   "sampling.ray.min_active_rays",              0, 1 << 24, 0, 10000) \
+  X(float,               sqem_update_lambda_line_plane,  0.2f,                                  "optimization.sqem_update_lambda_line_plane", 0.0, 100.0, 0.0, 4.0) \
+  X(int,                 seed,                           42,                                    "initialization.seed",                       0, 2147483647, 0, 1000) \
+  X(float,               init_dilation_constant,         0.001f,                                "initialization.init_dilation_constant",     1e-6, 1.0, 0.001, 0.01) \
+  X(bool,                residual_prune,                 false,                                 "postprocess.residual_prune",                0, 1, 0, 1) \
+  X(ResidualPruneOption, residual_prune_mode,            ResidualPruneOption::collapsible_only, "postprocess.residual_prune_mode",           0, 0, 0, 0)
+// clang-format on
+
+struct ReconstructionOptions
+{
+#define CGOGN_UDF_OPTION_MEMBER(T, name, def, key, lo, hi, ui_lo, ui_hi) T name = def;
+	CGOGN_UDF_RECONSTRUCTION_OPTIONS(CGOGN_UDF_OPTION_MEMBER)
+#undef CGOGN_UDF_OPTION_MEMBER
+};
+
+struct OptionInfo
+{
+	const char* name;
+	const char* json_key;
+	double min, max, ui_min, ui_max;
+};
+
+// option_info::alpha.ui_min etc.
+namespace option_info
+{
+#define CGOGN_UDF_OPTION_INFO(T, name, def, key, lo, hi, ui_lo, ui_hi)                                                 \
+	inline constexpr OptionInfo name{#name, key, lo, hi, ui_lo, ui_hi};
+CGOGN_UDF_RECONSTRUCTION_OPTIONS(CGOGN_UDF_OPTION_INFO)
+#undef CGOGN_UDF_OPTION_INFO
+} // namespace option_info
+
+// f(const OptionInfo&, T& value) for every option, in table order.
+// Options = ReconstructionOptions or const ReconstructionOptions
+template <typename Options, typename F>
+void for_each_option(Options& options, F&& f)
+{
+#define CGOGN_UDF_OPTION_VISIT(T, name, def, key, lo, hi, ui_lo, ui_hi) f(option_info::name, options.name);
+	CGOGN_UDF_RECONSTRUCTION_OPTIONS(CGOGN_UDF_OPTION_VISIT)
+#undef CGOGN_UDF_OPTION_VISIT
+}
+
+} // namespace cgogn::geometry
+
+#endif // CGOGN_GEOMETRY_ALGOS_UDF_RECONSTRUCTION_OPTIONS_H_

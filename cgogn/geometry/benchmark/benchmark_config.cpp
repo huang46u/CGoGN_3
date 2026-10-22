@@ -233,11 +233,6 @@ std::string to_string(InputGeometryType value)
 	return value == InputGeometryType::Mesh ? "mesh" : "point_cloud";
 }
 
-std::string to_string(NeuralModelType value)
-{
-	return value == NeuralModelType::mf ? "mf" : "udf";
-}
-
 BenchmarkConfig load_benchmark_config(const std::string& path)
 {
 	const fs::path config_path = fs::absolute(path).lexically_normal();

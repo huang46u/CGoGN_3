@@ -18,6 +18,7 @@
 #include <cgogn/geometry/algos/udf/alpha_sampling.h>
 #include <cgogn/geometry/algos/udf/neural_alpha_projection.h>
 #include <cgogn/geometry/algos/udf/neural_field_query.h>
+#include <cgogn/geometry/algos/udf/reconstruction_options.h>
 #include <cgogn/geometry/algos/udf/reconstruction_stats.h>
 #include <cgogn/geometry/algos/udf/sample_processing.h>
 #include <cgogn/geometry/algos/udf/skeleton_topology.h>
@@ -130,30 +131,7 @@ public:
 		NONMANIFOLD* skeleton = nullptr;
 	};
 
-	struct Options
-	{
-		NeuralModelType neural_model_type = NeuralModelType::udf;
-		bool ma_flip_prune = true;
-		float ma_flip_prune_alpha_factor = 1.0f;
-		float alpha = 0.005f;
-		int knn_k = 10;
-		bool apply_filtering = true;
-		bool recompute_normals_after_sampling = false;
-		int ray_sampler_batch_size = 8192;
-		int batch_size = 1048576;
-		float tolerance = 1e-6f;
-		int udf_max_iterations = 3000;
-		// neural seed rays: end a ray batch once fewer than this many rays are still marching (0 = off)
-		int udf_min_active_rays = 100;
-		float sample_radius = 0.0025f;
-		float sqem_update_lambda_line_plane = 0.2f;
-		int seed = 42;
-		float init_dilation_constant = 0.001f;
-		bool residual_prune = false;
-		int residual_prune_mode = 2; // 0 current, 1 keep_fully_non_manifold, 2 collapsible_only
-		int alpha_sampling_candidates_per_parent = 12;
-		int alpha_sampling_parent_batch_size = 1024;
-	};
+	using Options = ReconstructionOptions;
 
 	using Timing = ReconstructionTiming;
 	using Counts = ReconstructionCounts;
@@ -1198,7 +1176,8 @@ template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RayS
 typename UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::Status UDFReconstruction<
 	SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>::prune_residual_sheets()
 {
-	topology_for().set_residual_prune_mode(static_cast<typename TopologyType::ResidualPruneMode>(options_.residual_prune_mode));
+	topology_for().set_residual_prune_mode(
+		static_cast<typename TopologyType::ResidualPruneMode>(static_cast<int>(options_.residual_prune_mode)));
 	return topology_for().prune_residual_sheets() == TopologyType::Status::success ? Status::success
 																	   : Status::topology_fix_failed;
 }
