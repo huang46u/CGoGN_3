@@ -32,6 +32,8 @@
 #include <cgogn/core/utils/numerics.h>
 #include <cgogn/geometry/algos/area.h>
 #include <cgogn/geometry/algos/udf/internal/skeleton_topology_types.h>
+#include <cgogn/geometry/algos/udf/internal/quadrature_scores.h>
+#include <cgogn/geometry/algos/udf/internal/skeleton_build.h>
 #include <cgogn/geometry/algos/udf/internal/skeleton_mesh_ops.h>
 #include <cgogn/geometry/algos/udf/spheres_optimizer.h>
 #include <cgogn/geometry/types/vector_traits.h>
@@ -89,7 +91,7 @@ public:
 			return Status::invalid_data;
 		metrics_ = Metrics{};
 		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
-		if (!compute_skeleton(p))
+		if (!SkeletonBuild::compute_skeleton(p))
 			return Status::invalid_data;
 		metrics_.tet_count = static_cast<uint32>(skeleton_tets_.size());
 		return Status::success;
@@ -147,6 +149,8 @@ private:
 	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
 	using EdgeTetDeleteMode = typename Types::EdgeTetDeleteMode;
 	using MeshOps = skeleton_topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
+	using SkeletonBuild = skeleton_topology_detail::SkeletonBuild<POINTS, NONMANIFOLD>;
+	using QuadratureScores = skeleton_topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
 
 	bool valid_data() const
 	{
@@ -155,150 +159,6 @@ private:
 			data_.sphere_skeleton_vertex;
 	}
 
-
-	bool compute_skeleton(Context& p)
-	{
-		p.spheres_optimizer_->compute_sphere_neighbors();
-		if (!p.samples_mesh_ || !p.samples_sphere_ || !p.samples_knn_)
-			return false;
-		clear(*p.skeleton_);
-		std::map<FaceKey, SkeletonFace> skeleton_faces_map;
-		auto get_face_key = [](uint32 i1, uint32 i2, uint32 i3) -> FaceKey {
-			std::array<uint32, 3> key = {i1, i2, i3};
-			std::sort(key.begin(), key.end());
-			return key;
-		};
-		std::vector<std::array<uint32, 4>> raw_tets;
-		if (p.spheres_skeleton_vertex_)
-		{
-			foreach_cell(*p.spheres_, [&](SphereVertex pv) -> bool {
-				const uint32 sphere_index = index_of(*p.spheres_, pv);
-				if (sphere_index != INVALID_INDEX)
-					(*p.spheres_skeleton_vertex_)[sphere_index] = SkeletonVertex();
-				return true;
-			});
-		}
-		foreach_cell(*p.spheres_, [&](SphereVertex pv) -> bool {
-			uint32 pv_index = index_of(*p.spheres_, pv);
-			SkeletonVertex nmv = add_vertex(*p.skeleton_);
-			const uint32 skeleton_index = index_of(*p.skeleton_, nmv);
-			(*p.skeleton_position_)[skeleton_index] = (*p.spheres_position_)[pv_index];
-			(*p.skeleton_radius_)[skeleton_index] = (*p.spheres_radius_)[pv_index];
-			if (p.spheres_skeleton_vertex_)
-				(*p.spheres_skeleton_vertex_)[pv_index] = nmv;
-			if (p.skeleton_source_sphere_)
-				value<SphereVertex>(*p.skeleton_, p.skeleton_source_sphere_, nmv) = pv;
-			return true;
-		});
-
-		std::unordered_map<std::pair<uint32, uint32>, SkeletonEdge, edge_hash, edge_equal> edge_indices;
-
-		foreach_cell(*p.spheres_, [&](SphereVertex pv) -> bool {
-			uint32 pv_index = index_of(*p.spheres_, pv);
-			SkeletonVertex nmv1 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[pv_index] : SkeletonVertex();
-			const std::vector<SphereVertex>& neighbors = (*p.spheres_neighbor_clusters_)[pv_index];
-			for (SphereVertex neighbor : neighbors)
-			{
-				uint32 n_index = index_of(*p.spheres_, neighbor);
-				SkeletonVertex nmv2 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[n_index] : SkeletonVertex();
-				std::vector<SkeletonVertex> av = adjacent_vertices_through_edge(*p.skeleton_, nmv1);
-				if (std::find(av.begin(), av.end(), nmv2) == av.end())
-				{
-					SkeletonEdge e = add_edge(*p.skeleton_, nmv1, nmv2);
-					edge_indices[{index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv2)}] = e;
-				}
-			}
-			return true;
-		});
-
-		foreach_cell(*p.spheres_, [&](SphereVertex pv) -> bool {
-			uint32 idx1 = index_of(*p.spheres_, pv);
-			SkeletonVertex nmv1 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[idx1] : SkeletonVertex();
-			const std::vector<SphereVertex>& n_pv = (*p.spheres_neighbor_clusters_)[idx1];
-			for (const SphereVertex& ne1 : n_pv)
-			{
-				uint32 idx2 = index_of(*p.spheres_, ne1);
-				if (idx1 >= idx2)
-					continue;
-				SkeletonVertex nmv2 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[idx2] : SkeletonVertex();
-				const std::vector<SphereVertex>& ne_ne1 = (*p.spheres_neighbor_clusters_)[idx2];
-				for (const SphereVertex& ne2 : ne_ne1)
-				{
-					if (!std::binary_search(n_pv.begin(), n_pv.end(), ne2))
-						continue;
-					uint32 idx3 = index_of(*p.spheres_, ne2);
-					if (idx2 >= idx3)
-						continue;
-
-					SkeletonVertex nmv3 = p.spheres_skeleton_vertex_ ? (*p.spheres_skeleton_vertex_)[idx3] : SkeletonVertex();
-
-					const auto e12 = edge_indices.find({index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv2)});
-					const auto e23 = edge_indices.find({index_of(*p.skeleton_, nmv2), index_of(*p.skeleton_, nmv3)});
-					const auto e13 = edge_indices.find({index_of(*p.skeleton_, nmv1), index_of(*p.skeleton_, nmv3)});
-					if (e12 == edge_indices.end() || e23 == edge_indices.end() || e13 == edge_indices.end())
-						continue;
-					std::vector<SkeletonEdge> edges;
-					edges.reserve(3);
-					edges.push_back(e12->second);
-					edges.push_back(e23->second);
-					edges.push_back(e13->second);
-					SkeletonFace new_face = add_face(*p.skeleton_, edges);
-
-					skeleton_faces_map[get_face_key(idx1, idx2, idx3)] = new_face;
-
-					const std::vector<SphereVertex>& ne_ne2 = (*p.spheres_neighbor_clusters_)[idx3];
-
-					for (const SphereVertex& ne3 : ne_ne2)
-					{
-						uint32 idx4 = index_of(*p.spheres_, ne3);
-						if (idx3 >= idx4)
-							continue;
-						bool connected_v1 = std::binary_search(n_pv.begin(), n_pv.end(), ne3);
-						bool connected_v2 = std::binary_search(ne_ne1.begin(), ne_ne1.end(), ne3);
-						if (connected_v1 && connected_v2)
-						{
-							raw_tets.push_back({idx1, idx2, idx3, idx4});
-						}
-					}
-				}
-			}
-			return true;
-		});
-
-		// Resolve Tets
-		p.skeleton_tets_.clear();
-		p.skeleton_tets_.reserve(raw_tets.size());
-		foreach_cell(*p.skeleton_, [&](SkeletonFace f) -> bool {
-			value<std::set<std::size_t>>(*p.skeleton_, p.incident_tets_, f).clear();
-			return true;
-		});
-		std::size_t tet_index = 0;
-		for (const auto& rt : raw_tets)
-		{
-			Tet new_tet;
-			uint32 v[4] = {rt[0], rt[1], rt[2], rt[3]};
-
-			FaceKey keys[4] = {get_face_key(v[1], v[2], v[3]), get_face_key(v[0], v[2], v[3]),
-								 get_face_key(v[0], v[1], v[3]), get_face_key(v[0], v[1], v[2])};
-
-			for (uint32 i = 0; i < 4; ++i)
-			{
-				auto it = skeleton_faces_map.find(keys[i]);
-				if (it != skeleton_faces_map.end())
-				{
-					SkeletonFace f = it->second;
-					new_tet.faces[i] = f;
-
-					value<std::set<size_t>>(*p.skeleton_, p.incident_tets_, f).insert(tet_index);
-
-				}
-			}
-			p.skeleton_tets_.insert({tet_index, new_tet});
-			tet_index++;
-		}
-		MeshOps::compute_edge_degree(p);
-		return true;
-	}
 
 
 	//------------------------------//
@@ -592,329 +452,8 @@ private:
 			prune_fully_non_manifold_triangles(p);
 		record_chi_after();
 	}
-	template <typename ScoreEvaluator>
-	bool compute_skeleton_face_scores(Context& p, ScoreEvaluator& evaluator,
-							  const std::unordered_set<uint32>& face_ids,
-								  std::unordered_map<uint32, Scalar>& face_scores, bool normalize_by_area)
-	{
-		if (!p.skeleton_ || !p.skeleton_position_)
-			return false;
-		if (face_ids.empty())
-		{
-			face_scores.clear();
-			return true;
-		}
-
-		struct AdaptiveTriangleTask
-		{
-			uint32 face_id = INVALID_INDEX;
-			Vec3 a;
-			Vec3 b;
-			Vec3 c;
-			uint32 depth = 0;
-		};
-
-		static const std::array<std::array<Scalar, 3>, 7> dunavant7_bary = {{
-			{{Scalar(1.0 / 3.0), Scalar(1.0 / 3.0), Scalar(1.0 / 3.0)}},
-			{{Scalar(0.470142064105115), Scalar(0.470142064105115), Scalar(0.059715871789770)}},
-			{{Scalar(0.470142064105115), Scalar(0.059715871789770), Scalar(0.470142064105115)}},
-			{{Scalar(0.059715871789770), Scalar(0.470142064105115), Scalar(0.470142064105115)}},
-			{{Scalar(0.101286507323456), Scalar(0.101286507323456), Scalar(0.797426985353087)}},
-			{{Scalar(0.101286507323456), Scalar(0.797426985353087), Scalar(0.101286507323456)}},
-			{{Scalar(0.797426985353087), Scalar(0.101286507323456), Scalar(0.101286507323456)}},
-		}};
-		static const std::array<Scalar, 7> dunavant7_w = {
-			Scalar(0.225000000000000), Scalar(0.132394152788506), Scalar(0.132394152788506),
-			Scalar(0.132394152788506), Scalar(0.125939180544827), Scalar(0.125939180544827),
-			Scalar(0.125939180544827)};
-
-		auto subdivide_triangle = [&](const AdaptiveTriangleTask& tri, std::vector<AdaptiveTriangleTask>& out) {
-			const Vec3 ab = (tri.a + tri.b) * Scalar(0.5);
-			const Vec3 bc = (tri.b + tri.c) * Scalar(0.5);
-			const Vec3 ca = (tri.c + tri.a) * Scalar(0.5);
-			const uint32 next_depth = tri.depth + 1;
-			out.push_back({tri.face_id, tri.a, ab, ca, next_depth});
-			out.push_back({tri.face_id, ab, tri.b, bc, next_depth});
-			out.push_back({tri.face_id, ca, bc, tri.c, next_depth});
-			out.push_back({tri.face_id, ab, bc, ca, next_depth});
-		};
-
-		face_scores.clear();
-		face_scores.reserve(face_ids.size());
-		std::vector<AdaptiveTriangleTask> pending_tris;
-		pending_tris.reserve(face_ids.size() * 2);
-		foreach_cell(*p.skeleton_, [&](SkeletonFace f) -> bool {
-			const uint32 idf = index_of(*p.skeleton_, f);
-			if (idf == INVALID_INDEX)
-				return true;
-			if (face_ids.find(idf) == face_ids.end())
-				return true;
-			face_scores[idf] = Scalar(0);
-			if (!f.is_valid())
-				return true;
-			const std::vector<SkeletonVertex> vertices = incident_vertices(*p.skeleton_, f);
-			if (vertices.size() < 3)
-				return true;
-			const Vec3 p0 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[0]);
-			for (uint32 i = 1; i + 1 < vertices.size(); ++i)
-			{
-				const Vec3 p1 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[i]);
-				const Vec3 p2 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[i + 1]);
-				if (!(geometry::area(p0, p1, p2) > Scalar(0)))
-					continue;
-				pending_tris.push_back({idf, p0, p1, p2, 0});
-			}
-			return true;
-		});
-
-		while (!pending_tris.empty())
-		{
-			std::vector<AdaptiveTriangleTask> next_tris;
-			next_tris.reserve(pending_tris.size() * 2);
-
-			struct TriBatchMeta
-			{
-				size_t tri_idx = 0;
-				size_t sample_offset = 0;
-				Scalar area = Scalar(0);
-			};
-			std::vector<TriBatchMeta> tri_batch;
-			tri_batch.reserve(pending_tris.size());
-
-			std::vector<Vec3> sample_points;
-			sample_points.reserve(pending_tris.size() * 7);
-
-			for (size_t tri_idx = 0; tri_idx < pending_tris.size(); ++tri_idx)
-			{
-				const AdaptiveTriangleTask& tri = pending_tris[tri_idx];
-				const Scalar tri_area = geometry::area(tri.a, tri.b, tri.c);
-				if (!(tri_area > Scalar(0)))
-					continue;
-				const size_t sample_offset = sample_points.size();
-				for (uint32 k = 0; k < 7; ++k)
-				{
-					const Scalar l0 = dunavant7_bary[k][0];
-					const Scalar l1 = dunavant7_bary[k][1];
-					const Scalar l2 = dunavant7_bary[k][2];
-					sample_points.push_back(tri.a * l0 + tri.b * l1 + tri.c * l2);
-				}
-				tri_batch.push_back({tri_idx, sample_offset, tri_area});
-			}
-
-			if (sample_points.empty())
-			{
-				pending_tris.clear();
-				break;
-			}
-
-		std::vector<Scalar> score_values;
-			if (!evaluator(sample_points, score_values))
-				return false;
-
-			for (const TriBatchMeta& tri_eval : tri_batch)
-			{
-				const AdaptiveTriangleTask& tri = pending_tris[tri_eval.tri_idx];
-				Scalar weighted_mean = Scalar(0);
-				Scalar min_udf = std::numeric_limits<Scalar>::max();
-				Scalar max_udf = std::numeric_limits<Scalar>::lowest();
-				for (uint32 k = 0; k < 7; ++k)
-				{
-					const Scalar u = score_values[tri_eval.sample_offset + k];
-					weighted_mean += dunavant7_w[k] * u;
-					min_udf = std::min(min_udf, u);
-					max_udf = std::max(max_udf, u);
-				}
-
-				const Scalar tri_integral = tri_eval.area * weighted_mean;
-				const Scalar udf_range = max_udf - min_udf;
-				const Scalar refine_threshold =
-					std::max(Scalar(1e-4), Scalar(0.35) * std::max(weighted_mean, Scalar(0)));
-				const bool should_refine = (tri.depth < 2) && (udf_range > refine_threshold);
-
-				if (should_refine)
-				{
-					subdivide_triangle(tri, next_tris);
-				}
-				else
-				{
-					face_scores[tri.face_id] += tri_integral;
-				}
-			}
-			pending_tris.swap(next_tris);
-		}
-
-		if (normalize_by_area)
-		{
-			foreach_cell(*p.skeleton_, [&](SkeletonFace f) -> bool {
-				const uint32 face_id = index_of(*p.skeleton_, f);
-				auto it_score = face_scores.find(face_id);
-				if (face_id == INVALID_INDEX || it_score == face_scores.end())
-					return true;
-				const std::vector<SkeletonVertex> vertices = incident_vertices(*p.skeleton_, f);
-				if (vertices.size() < 3)
-				{
-					it_score->second = Scalar(0);
-					return true;
-				}
-				const Vec3 p0 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[0]);
-				Scalar area = Scalar(0);
-				for (uint32 i = 1; i + 1 < vertices.size(); ++i)
-				{
-					const Vec3 p1 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[i]);
-					const Vec3 p2 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[i + 1]);
-					area += geometry::area(p0, p1, p2);
-				}
-				it_score->second = (area > Scalar(0)) ? (it_score->second / area) : Scalar(0);
-				return true;
-			});
-		}
-		return true;
-	}
-
-	std::unordered_set<uint32> collect_current_tet_edge_ids(Context& p)
-	{
-		std::unordered_set<uint32> tet_edge_ids;
-		if (!p.skeleton_)
-			return tet_edge_ids;
-		tet_edge_ids.reserve(nb_cells<SkeletonEdge>(*p.skeleton_));
-		for (const auto& kv : p.skeleton_tets_)
-		{
-			const Tet& tet = kv.second;
-			for (uint32 i = 0; i < 4; ++i)
-			{
-				const SkeletonFace f = tet.faces[i];
-				if (!f.is_valid())
-					continue;
-				for (SkeletonEdge e : incident_edges(*p.skeleton_, f))
-				{
-					if (!e.is_valid())
-						continue;
-					const uint32 ide = index_of(*p.skeleton_, e);
-					if (ide != INVALID_INDEX)
-						tet_edge_ids.insert(ide);
-				}
-			}
-		}
-		return tet_edge_ids;
-	}
-
-	template <typename ScoreEvaluator>
-	bool compute_skeleton_edge_scores_gauss3_normalized(Context& p, ScoreEvaluator& evaluator,
-										 const std::unordered_set<uint32>& edge_ids,
-										std::unordered_map<uint32, Scalar>& edge_scores)
-	{
-		if (!p.skeleton_ || !p.skeleton_position_)
-			return false;
-		edge_scores.clear();
-		if (edge_ids.empty())
-			return true;
-
-		static const Scalar gauss3_xi[3] = {Scalar(-0.7745966692414834), Scalar(0.0), Scalar(0.7745966692414834)};
-		static const Scalar gauss3_w_ref[3] = {Scalar(0.5555555555555556), Scalar(0.8888888888888888),
-											   Scalar(0.5555555555555556)};
-		static const Scalar gauss3_w_01[3] = {Scalar(0.5) * gauss3_w_ref[0], Scalar(0.5) * gauss3_w_ref[1],
-											  Scalar(0.5) * gauss3_w_ref[2]};
-
-		struct EdgeBatchMeta
-		{
-			uint32 edge_id = INVALID_INDEX;
-			size_t sample_offset = 0;
-		};
-
-		edge_scores.reserve(edge_ids.size());
-		std::vector<EdgeBatchMeta> edge_batch;
-		edge_batch.reserve(edge_ids.size());
-		std::vector<Vec3> sample_points;
-		sample_points.reserve(edge_ids.size() * 3);
-
-		foreach_cell(*p.skeleton_, [&](SkeletonEdge e) -> bool {
-			if (!e.is_valid())
-				return true;
-			const uint32 ide = index_of(*p.skeleton_, e);
-			if (ide == INVALID_INDEX)
-				return true;
-			if (edge_ids.find(ide) == edge_ids.end())
-				return true;
-			edge_scores[ide] = Scalar(0);
-
-			const std::vector<SkeletonVertex> verts = incident_vertices(*p.skeleton_, e);
-			if (verts.size() != 2)
-				return true;
-
-			const Vec3 p0 = value<Vec3>(*p.skeleton_, p.skeleton_position_, verts[0]);
-			const Vec3 p1 = value<Vec3>(*p.skeleton_, p.skeleton_position_, verts[1]);
-			const Scalar edge_len = (p1 - p0).norm();
-			if (!(edge_len > Scalar(0)))
-				return true;
-
-			const size_t sample_offset = sample_points.size();
-			for (uint32 k = 0; k < 3; ++k)
-			{
-				const Scalar t = Scalar(0.5) * (gauss3_xi[k] + Scalar(1.0));
-				sample_points.push_back(p0 * (Scalar(1.0) - t) + p1 * t);
-			}
-			edge_batch.push_back({ide, sample_offset});
-			return true;
-		});
-
-		if (sample_points.empty())
-			return true;
-
-		std::vector<Scalar> score_values;
-		if (!evaluator(sample_points, score_values))
-			return false;
-
-		for (const EdgeBatchMeta& edge_eval : edge_batch)
-		{
-			Scalar avg_udf = Scalar(0);
-			for (uint32 k = 0; k < 3; ++k)
-				avg_udf += gauss3_w_01[k] * score_values[edge_eval.sample_offset + k];
-			edge_scores[edge_eval.edge_id] = avg_udf;
-		}
-		return true;
-	}
-
-	template <typename ScoreEvaluator>
-	bool initialize_topology_fix_score_cache(
-		Context& p, ScoreEvaluator& evaluator, TopologyFixScoreCache& cache)
-	{
-		if (cache.initialized)
-			return true;
-		const std::unordered_set<uint32> tet_face_ids = collect_current_tet_face_id_whitelist(p);
-		const std::unordered_set<uint32> tet_edge_ids = collect_current_tet_edge_ids(p);
-		if (!compute_skeleton_edge_scores_gauss3_normalized(p, evaluator, tet_edge_ids, cache.edge_scores))
-			return false;
-		if (!compute_skeleton_face_scores(p, evaluator, tet_face_ids, cache.face_scores, false))
-			return false;
-		cache.initialized = true;
-		return true;
-	}
 
 
-
-
-	void erase_topology_fix_scores_for_removed_faces_and_orphan_edges(
-		Context& p, TopologyFixScoreCache* cache, const std::unordered_set<uint32>& removed_face_ids,
-		const std::vector<SkeletonEdge>& affected_edges)
-	{
-		if (!cache)
-			return;
-		for (uint32 face_id : removed_face_ids)
-			cache->face_scores.erase(face_id);
-
-		std::unordered_set<uint32> seen_edge_ids;
-		seen_edge_ids.reserve(affected_edges.size() * 2 + 1);
-		for (SkeletonEdge e : affected_edges)
-		{
-			if (!e.is_valid())
-				continue;
-			const uint32 ide = index_of(*p.skeleton_, e);
-			if (ide == INVALID_INDEX || !seen_edge_ids.insert(ide).second)
-				continue;
-			if (incident_faces(*p.skeleton_, e).empty())
-				cache->edge_scores.erase(ide);
-		}
-	}
 
 	template <typename ScoreEvaluator>
 	RemovalStats run_edge_score_tet_mode_topology_fix(
@@ -924,7 +463,7 @@ private:
 		if (!p.skeleton_ || !p.incident_tets_)
 			return stats;
 
-		if (!initialize_topology_fix_score_cache(p, evaluator, score_cache))
+		if (!QuadratureScores::initialize_topology_fix_score_cache(p, evaluator, score_cache))
 			return stats;
 		auto& edge_score_cache = score_cache.edge_scores;
 		auto& face_score_cache = score_cache.face_scores;
@@ -1195,7 +734,7 @@ private:
 				++out_removed_faces;
 			}
 
-			erase_topology_fix_scores_for_removed_faces_and_orphan_edges(p, &score_cache, removed_face_ids, affected_edges);
+			QuadratureScores::erase_topology_fix_scores_for_removed_faces_and_orphan_edges(p, &score_cache, removed_face_ids, affected_edges);
 			out_removed_edges += MeshOps::remove_orphan_edges_from_removed_face_edges(p, affected_edges);
 			out_tets_to_erase = std::move(tets_to_remove_local);
 			return true;
@@ -1747,7 +1286,7 @@ private:
 				remove_face(*p.skeleton_, f_del);
 				++stats.removed_faces;
 			}
-			erase_topology_fix_scores_for_removed_faces_and_orphan_edges(p, score_cache, removed_face_ids, affected_edges);
+			QuadratureScores::erase_topology_fix_scores_for_removed_faces_and_orphan_edges(p, score_cache, removed_face_ids, affected_edges);
 			if (cand.edge.is_valid())
 			{
 				const auto edge_in_faces = incident_faces(*p.skeleton_, cand.edge);
@@ -1771,26 +1310,6 @@ private:
 	}
 
 
-
-	std::unordered_set<uint32> collect_current_tet_face_id_whitelist(Context& p)
-	{
-		std::unordered_set<uint32> tet_face_ids;
-		tet_face_ids.reserve(nb_cells<SkeletonFace>(*p.skeleton_));
-		for (const auto& kv : p.skeleton_tets_)
-		{
-			const Tet& tet = kv.second;
-			for (uint32 i = 0; i < 4; ++i)
-			{
-				const SkeletonFace f = tet.faces[i];
-				if (!f.is_valid())
-					continue;
-				const uint32 idf = index_of(*p.skeleton_, f);
-				if (idf != INVALID_INDEX)
-					tet_face_ids.insert(idf);
-			}
-		}
-		return tet_face_ids;
-	}
 
 	struct IndependentDenseFiveVertexRepairSeed
 	{
@@ -2186,7 +1705,7 @@ private:
 		const std::vector<IndependentDenseFiveVertexRepairSeed> independent_dense_repair_seeds =
 			collect_independent_dense_five_vertex_repair_seeds(p, dense_five_vertex_detection);
 		TopologyFixScoreCache score_cache;
-		if (!initialize_topology_fix_score_cache(p, evaluator, score_cache))
+		if (!QuadratureScores::initialize_topology_fix_score_cache(p, evaluator, score_cache))
 			return Status::score_evaluation_failed;
 		while (!p.skeleton_tets_.empty())
 		{
