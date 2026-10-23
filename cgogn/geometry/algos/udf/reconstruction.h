@@ -52,12 +52,15 @@
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -240,7 +243,42 @@ public:
 		return udf_stages::topology_for(s_);
 	}
 
+	// Read-only display scores for the training UI, indexed by index_of(face) / index_of(edge). Cells that are not
+	// adjacent to a current tet get NaN. Returns nullopt if the skeleton is missing or the UDF cannot be evaluated.
+	std::optional<std::vector<Scalar>> skeleton_face_scores(bool normalize_by_area)
+	{
+		if (!s_.data.skeleton)
+			return std::nullopt;
+		std::unordered_map<uint32, Scalar> scores;
+		auto evaluator = [this](const std::vector<Vec3>& points, std::vector<Scalar>& values) {
+			return udf_stages::evaluate_topology_scores(s_, points, values);
+		};
+		if (!skeleton_topology().tet_face_udf_scores(evaluator, normalize_by_area, scores))
+			return std::nullopt;
+		return dense_scores<NMFace>(scores);
+	}
+
 private:
+	template <typename CELL>
+	std::vector<Scalar> dense_scores(const std::unordered_map<uint32, Scalar>& scores)
+	{
+		NONMANIFOLD& skeleton = *s_.data.skeleton;
+		uint32 size = 0;
+		foreach_cell(skeleton, [&](CELL c) -> bool {
+			const uint32 id = index_of(skeleton, c);
+			if (id != INVALID_INDEX)
+				size = std::max(size, id + 1);
+			return true;
+		});
+		std::vector<Scalar> values(size, std::numeric_limits<Scalar>::quiet_NaN());
+		for (const auto& kv : scores)
+		{
+			if (kv.first < size)
+				values[kv.first] = kv.second;
+		}
+		return values;
+	}
+
 	State s_;
 };
 

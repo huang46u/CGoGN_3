@@ -34,6 +34,7 @@
 #include <cgogn/geometry/algos/udf/internal/skeleton_topology_types.h>
 
 #include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -145,6 +146,22 @@ public:
 		std::sort(mask.face_ids.begin(), mask.face_ids.end());
 		std::sort(mask.edge_ids.begin(), mask.edge_ids.end());
 		return mask;
+	}
+
+	// Read-only: UDF score of each face adjacent to a current tet, keyed by index_of(face). Same integral as the
+	// topology-fix cache (QuadratureScores::compute_skeleton_face_scores), optionally divided by the face area.
+	// The skeleton and the tet set are not modified. Returns false if the scores cannot be evaluated.
+	template <typename ScoreEvaluator>
+	bool tet_face_udf_scores(ScoreEvaluator& evaluate_scores, bool normalize_by_area,
+							 std::unordered_map<uint32, Scalar>& face_scores)
+	{
+		face_scores.clear();
+		if (!valid_data())
+			return false;
+		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
+		const std::unordered_set<uint32> face_ids = QuadratureScores::collect_current_tet_face_id_whitelist(p);
+		return QuadratureScores::compute_skeleton_face_scores(p, evaluate_scores, face_ids, face_scores,
+															  normalize_by_area);
 	}
 
 	Status prune_residual_sheets()

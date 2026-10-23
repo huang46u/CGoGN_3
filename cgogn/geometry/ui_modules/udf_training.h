@@ -28,6 +28,7 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -637,6 +638,58 @@ private:
 		});
 	}
 
+	// V0 colormaps: cells with a score are colored by color_map over the range of those scores (0.5 if the range is
+	// empty, as in V0); NaN (cell not adjacent to a tet) gets the dim fallback color.
+	template <typename CELL>
+	void color_cells_by_scores(PointsParameters& p, const std::vector<Scalar>& scores,
+							   const std::shared_ptr<NMAttribute<Vec3>>& attribute, const Vec3& fallback)
+	{
+		Scalar score_min = std::numeric_limits<Scalar>::max();
+		Scalar score_max = std::numeric_limits<Scalar>::lowest();
+		for (const Scalar v : scores)
+		{
+			if (std::isnan(v))
+				continue;
+			score_min = std::min(score_min, v);
+			score_max = std::max(score_max, v);
+		}
+		const bool has_range = score_max > score_min;
+		foreach_cell(*p.skeleton_, [&](CELL c) -> bool {
+			const uint32 id = index_of(*p.skeleton_, c);
+			Vec3 color = fallback;
+			if (id < scores.size() && !std::isnan(scores[id]))
+			{
+				const Vec4 rgba = has_range ? color_map(std::clamp(scores[id], score_min, score_max), score_min,
+														score_max, 1.0f)
+											: color_map(Scalar(0.5), Scalar(0), Scalar(1), 1.0f);
+				color = Vec3(rgba[0], rgba[1], rgba[2]);
+			}
+			value<Vec3>(*p.skeleton_, attribute, c) = color;
+			return true;
+		});
+	}
+
+	// V0 "Tet face UDF colormap (Integral / Normalized)": read-only, only the face colors change.
+	bool mark_tet_face_udf_color(PointsParameters& p, bool normalize_by_area)
+	{
+		if (!skeleton_colors_ready(p))
+		{
+			p.last_error_ = "No skeleton: build the skeleton first.";
+			log_error(p.last_error_, '\n');
+			return false;
+		}
+		const auto scores = p.reconstruction_->skeleton_face_scores(normalize_by_area);
+		if (!scores)
+		{
+			p.last_error_ = "Failed to evaluate the face UDF scores (is the distance field loaded?).";
+			log_error(p.last_error_, '\n');
+			return false;
+		}
+		color_cells_by_scores<NMFace>(p, *scores, p.skeleton_face_color_, Vec3(0.2, 0.2, 0.2));
+		p.last_error_.clear();
+		return true;
+	}
+
 protected:
 	enum class RenderUpdateMode : uint8
 	{
@@ -1221,6 +1274,26 @@ protected:
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							mark_skeleton_face_components_color(p);
 							emit_skeleton_colors_changed(p);
+						}
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Tet face UDF colormap (Integral)"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							if (mark_tet_face_udf_color(p, false))
+								emit_skeleton_colors_changed(p);
+						}
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Tet face UDF colormap (Normalized)"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							if (mark_tet_face_udf_color(p, true))
+								emit_skeleton_colors_changed(p);
 						}
 					}
 					ImGui::EndDisabled();
