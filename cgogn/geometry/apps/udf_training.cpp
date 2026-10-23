@@ -142,7 +142,7 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 		const auto model_status = udf.load_neural_udf_model(
 			*p, model_path,
 			neural_is_mf ? cgogn::geometry::NeuralModelType::mf : cgogn::geometry::NeuralModelType::udf);
-		if (model_status !=
+		if (model_status.code !=
 			cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag>::ReconstructionStatus::success)
 			return 1;
 		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);

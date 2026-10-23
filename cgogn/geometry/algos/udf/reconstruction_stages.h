@@ -271,7 +271,7 @@ typename State::StatusInfo load_neural_model(State& s, const std::filesystem::pa
 	using Status = typename State::Status;
 
 	if (!s.field.load_model(path, type))
-		return Status::model_load_failed;
+		return typename State::StatusInfo{Status::model_load_failed, "load_neural_model: " + s.field.load_error()};
 	s.options.neural_model_type = type;
 	return Status::success;
 }

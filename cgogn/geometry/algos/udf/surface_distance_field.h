@@ -42,6 +42,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -156,6 +157,11 @@ public:
 	bool load_model(const std::filesystem::path& /*path*/, NeuralModelType /*type*/)
 	{
 		return false;
+	}
+	const std::string& load_error() const
+	{
+		static const std::string no_model = "this distance field holds no neural model";
+		return no_model;
 	}
 	void reset()
 	{

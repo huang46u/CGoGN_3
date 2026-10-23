@@ -65,6 +65,7 @@ public:
 	using SpheresOptimizerStatus = typename SpheresOptimizerType::Status;
 	using ReconstructionType = geometry::UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>;
 	using ReconstructionStatus = typename ReconstructionType::Status;
+	using ReconstructionStatusInfo = typename ReconstructionType::StatusInfo;
 
 	enum OutputVerbosity : uint32
 	{
@@ -73,6 +74,12 @@ public:
 	};
 
 private:
+	// "<action>: <message>" for the log and the panel; the colon is left out when the message is empty
+	static std::string with_message(const std::string& action, const std::string& message)
+	{
+		return message.empty() ? action : action + ": " + message;
+	}
+
 	struct PointsParameters
 	{
 		bool initialized_ = false;
@@ -85,6 +92,9 @@ private:
 		// Neural model information shown in the UI; the model itself is owned by ReconstructionType.
 		bool neural_udf_loaded_ = false;
 		std::string neural_udf_model_path_ = "";
+
+		// Reason of the last failed stage, shown in red in the Neural UDF panel; cleared when the stage succeeds.
+		std::string last_error_;
 
 		// Dataset profile currently applied to the options (see reconstruction_profile_names()).
 		std::string profile_ = "default";
@@ -245,7 +255,7 @@ public:
 		p.sphere_update_lambda_.store(options.sqem_update_lambda_line_plane);
 	}
 
-	ReconstructionStatus load_neural_udf_model(POINTS& points, const std::string& model_path,
+	ReconstructionStatusInfo load_neural_udf_model(POINTS& points, const std::string& model_path,
 											   cgogn::geometry::NeuralModelType model_type)
 	{
 		PointsParameters& p = points_parameters_[&points];
@@ -254,25 +264,29 @@ public:
 		p.neural_udf_model_path_.clear();
 		if (!p.initialized_ || !p.reconstruction_)
 		{
-			log_error("Failed to initialize UDF reconstruction data.\n");
+			p.last_error_ = "Failed to initialize UDF reconstruction data.";
+			log_error(p.last_error_, '\n');
 			return ReconstructionStatus::invalid_data;
 		}
 		try
 		{
 			if (!std::filesystem::exists(model_path))
 			{
-				log_error("Neural UDF model file does not exist: ", model_path, '\n');
+				p.last_error_ = "Neural UDF model file does not exist: " + model_path;
+				log_error(p.last_error_, '\n');
 				return ReconstructionStatus::model_load_failed;
 			}
 			log_basic(p, "Loading Neural UDF model from: ", model_path, '\n');
-			const ReconstructionStatus status = p.reconstruction_->load_neural_model(model_path, model_type);
-			p.neural_udf_loaded_ = status == ReconstructionStatus::success;
+			const auto status = p.reconstruction_->load_neural_model(model_path, model_type);
+			p.neural_udf_loaded_ = status.code == ReconstructionStatus::success;
 			if (!p.neural_udf_loaded_)
 			{
-				log_error("Error loading Neural UDF model: loader rejected the model.\n");
-				return ReconstructionStatus::model_load_failed;
+				p.last_error_ = with_message("Error loading Neural UDF model: loader rejected the model", status.message);
+				log_error(p.last_error_, '\n');
+				return status;
 			}
 			p.neural_udf_model_path_ = model_path;
+			p.last_error_.clear();
 			// dataset profile guessed from the model type and path; the Sampling panel can change it
 			reset_options_to_profile(p, cgogn::geometry::guess_reconstruction_profile(true, model_type, model_path));
 			log_basic(p, "Reconstruction profile: ", p.profile_, '\n');
@@ -281,13 +295,15 @@ public:
 		}
 		catch (const std::exception& e)
 		{
-			log_error("Error loading Neural UDF model: ", e.what(), '\n');
+			p.last_error_ = std::string("Error loading Neural UDF model: ") + e.what();
+			log_error(p.last_error_, '\n');
 			p.neural_udf_loaded_ = false;
 			return ReconstructionStatus::model_load_failed;
 		}
 		catch (...)
 		{
-			log_error("Error loading Neural UDF model: unknown exception.\n");
+			p.last_error_ = "Error loading Neural UDF model: unknown exception.";
+			log_error(p.last_error_, '\n');
 			p.neural_udf_loaded_ = false;
 			return ReconstructionStatus::model_load_failed;
 		}
@@ -297,11 +313,14 @@ public:
 	{
 		if (!p.reconstruction_)
 			return;
-		if (p.reconstruction_->sample() != ReconstructionStatus::success)
+		const auto status = p.reconstruction_->sample();
+		if (status.code != ReconstructionStatus::success)
 		{
-			log_error("Alpha level set sampling failed.", '\n');
+			p.last_error_ = with_message("Alpha level set sampling failed", status.message);
+			log_error(p.last_error_, '\n');
 			return;
 		}
+		p.last_error_.clear();
 		if (p.samples_color_)
 			p.samples_color_->fill(Vec4(0.0, 0.0, 0.0, 1.0));
 		refresh_sample_normals_color(p);
@@ -389,19 +408,26 @@ private:
 		typename ReconstructionType::Data data{selected_surface_, p.points_, p.samples_mesh_, p.spheres_, p.skeleton_};
 		p.reconstruction_ = std::make_unique<ReconstructionType>(data);
 		p.sphere_update_lambda_.store(p.reconstruction_->options().sqem_update_lambda_line_plane);
-		const ReconstructionStatus status = p.reconstruction_->initialize_data();
-		p.initialized_ = status == ReconstructionStatus::success;
+		const auto status = p.reconstruction_->initialize_data();
+		p.initialized_ = status.code == ReconstructionStatus::success;
+		if (p.initialized_)
+			p.last_error_.clear();
+		else
+			p.last_error_ = with_message("Failed to initialize reconstruction data", status.message);
 	}
 
 	void compute_fitting_data(PointsParameters& p)
 	{
 		if (!p.reconstruction_ || p.fitting_data_computed_)
 			return;
-		if (p.reconstruction_->compute_fitting_data() != ReconstructionStatus::success)
+		const auto status = p.reconstruction_->compute_fitting_data();
+		if (status.code != ReconstructionStatus::success)
 		{
-			log_error("Failed to compute fitting data.", '\n');
+			p.last_error_ = with_message("Failed to compute fitting data", status.message);
+			log_error(p.last_error_, '\n');
 			return;
 		}
+		p.last_error_.clear();
 		p.fitting_data_computed_ = true;
 	}
 
@@ -555,10 +581,15 @@ protected:
 
 		if (mode == RenderUpdateMode::rebuild_skeleton_and_update_all)
 		{
-			const ReconstructionStatus status = p.reconstruction_->build_skeleton();
-			p.skeleton_invalidated_ = status != ReconstructionStatus::success;
-			if (status == ReconstructionStatus::success)
+			const auto status = p.reconstruction_->build_skeleton();
+			p.skeleton_invalidated_ = status.code != ReconstructionStatus::success;
+			if (status.code == ReconstructionStatus::success)
+			{
+				p.last_error_.clear();
 				refresh_skeleton_topology_colors(p);
+			}
+			else
+				p.last_error_ = with_message("Failed to build skeleton", status.message);
 		}
 		if (non_manifold_provider_ && p.skeleton_)
 		{
@@ -829,6 +860,8 @@ protected:
 				ImGui::Separator();
 				ImGui::Text("Alpha Level Set Sampling Settings");
 			}
+			if (!p.last_error_.empty())
+				ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "%s", p.last_error_.c_str());
 		}
 		// Sampling
 		if (ImGui::CollapsingHeader("Sampling", ImGuiTreeNodeFlags_DefaultOpen))
@@ -921,11 +954,17 @@ protected:
 					if (ImGui::Button("Init spheres"))
 					{
 						std::lock_guard<std::mutex> lock(p.mutex_);
-						if (!p.reconstruction_ ||
-							p.reconstruction_->initialize_spheres() != ReconstructionStatus::success)
-							log_error("Failed to initialize spheres.\n");
+						ReconstructionStatusInfo status{ReconstructionStatus::invalid_data};
+						if (p.reconstruction_)
+							status = p.reconstruction_->initialize_spheres();
+						if (status.code != ReconstructionStatus::success)
+						{
+							p.last_error_ = with_message("Failed to initialize spheres", status.message);
+							log_error(p.last_error_, '\n');
+						}
 						else
 						{
+							p.last_error_.clear();
 							p.skeleton_invalidated_ = true;
 							if (p.skeleton_)
 								clear(*p.skeleton_);
@@ -972,10 +1011,15 @@ protected:
 						if (!p.running_)
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
-							const ReconstructionStatus status = p.reconstruction_->build_skeleton();
-							p.skeleton_invalidated_ = status != ReconstructionStatus::success;
-							if (status == ReconstructionStatus::success)
+							const auto status = p.reconstruction_->build_skeleton();
+							p.skeleton_invalidated_ = status.code != ReconstructionStatus::success;
+							if (status.code == ReconstructionStatus::success)
+							{
+								p.last_error_.clear();
 								refresh_skeleton_topology_colors(p);
+							}
+							else
+								p.last_error_ = with_message("Failed to build skeleton", status.message);
 							update_render_data(p, RenderUpdateMode::all_current_data);
 						}
 					}
@@ -1023,14 +1067,18 @@ protected:
 							else
 							{
 								// Same order as run(): residual sheet prune after fix_topology, if enabled.
-								const ReconstructionStatus status = p.reconstruction_->fix_topology_and_prune();
-								if (status == ReconstructionStatus::success)
+								const auto status = p.reconstruction_->fix_topology_and_prune();
+								if (status.code == ReconstructionStatus::success)
 								{
+									p.last_error_.clear();
 									p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
 									apply_skeleton_topology_results(p);
 								}
 								else
-									log_error("[TopologyFull] score evaluation failed or topology data is invalid.\n");
+								{
+									p.last_error_ = with_message("[TopologyFull] score evaluation failed or topology data is invalid", status.message);
+									log_error(p.last_error_, '\n');
+								}
 							}
 						}
 					}

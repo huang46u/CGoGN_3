@@ -45,6 +45,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -79,14 +80,22 @@ public:
 			neural_model_.eval();
 			neural_model_loaded_ = true;
 			neural_field_ = NeuralFieldForward(&neural_model_, true, device_);
+			load_error_.clear();
 			return true;
 		}
-		catch (const c10::Error&)
+		catch (const c10::Error& e)
 		{
 			neural_model_loaded_ = false;
 			neural_field_ = NeuralFieldForward(&neural_model_, false, device_);
+			load_error_ = e.what_without_backtrace();
 			return false;
 		}
+	}
+
+	// the reason of the last failed load_model (empty after a successful load)
+	const std::string& load_error() const
+	{
+		return load_error_;
 	}
 
 	void reset()
@@ -197,6 +206,7 @@ private:
 	torch::Device device_ = torch::cuda::is_available() ? torch::Device(torch::kCUDA, 0) : torch::Device(torch::kCPU);
 	torch::jit::Module neural_model_;
 	bool neural_model_loaded_ = false;
+	std::string load_error_;
 	// one wrapper for the loaded model: it remembers the output layout found by its first forward, so MF models
 	// do not go through autograd again on every call
 	NeuralFieldForward neural_field_{&neural_model_, false, device_};
