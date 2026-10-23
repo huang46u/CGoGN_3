@@ -1274,7 +1274,9 @@ protected:
 
 		// Topology Fix. While the sphere update runs, the topology is not read (the update thread writes it), so
 		// the step stays visible with its parameters disabled, as before.
-		const bool has_tets = !running && p.reconstruction_->skeleton_topology().has_tets();
+		// Read the existing topology object: skeleton_topology() would rebuild its data (or create it) every frame.
+		const auto& topology = p.reconstruction_->state().topology;
+		const bool has_tets = !running && spheres_ready && skeleton_built && topology && topology->has_tets();
 		const bool topology_fix_step = spheres_ready && skeleton_built && (running || has_tets);
 		if (topology_fix_step && ImGui::CollapsingHeader("Topology Fix", ImGuiTreeNodeFlags_DefaultOpen))
 		{
