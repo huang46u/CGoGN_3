@@ -34,6 +34,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
 #include <torch/torch.h>
 #endif
@@ -560,6 +561,25 @@ private:
 			return;
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
+	}
+
+	// V0 "Boundary tet mask": faces of boundary tets yellow, other faces dim gray. The longest degree-2 edge of
+	// each boundary tet is orange, other edges dim gray. The V0 K5 mask is not included.
+	void mark_boundary_tets_color(PointsParameters& p)
+	{
+		const auto mask = p.reconstruction_->skeleton_topology().boundary_tet_mask();
+		const std::unordered_set<uint32> boundary_faces(mask.face_ids.begin(), mask.face_ids.end());
+		const std::unordered_set<uint32> boundary_edges(mask.edge_ids.begin(), mask.edge_ids.end());
+		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			const bool hit = boundary_faces.count(index_of(*p.skeleton_, f)) > 0;
+			value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = hit ? Vec3(1.0, 0.85, 0.1) : Vec3(0.12, 0.12, 0.12);
+			return true;
+		});
+		foreach_cell(*p.skeleton_, [&](NMEdge e) -> bool {
+			const bool hit = boundary_edges.count(index_of(*p.skeleton_, e)) > 0;
+			value<Vec3>(*p.skeleton_, p.skeleton_edge_color_, e) = hit ? Vec3(1.0, 0.45, 0.05) : Vec3(0.1, 0.1, 0.1);
+			return true;
+		});
 	}
 
 protected:
@@ -1125,6 +1145,16 @@ protected:
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							refresh_skeleton_topology_colors(p);
+							emit_skeleton_colors_changed(p);
+						}
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Boundary tet mask"))
+					{
+						if (!p.running_ && skeleton_colors_ready(p))
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							mark_boundary_tets_color(p);
 							emit_skeleton_colors_changed(p);
 						}
 					}

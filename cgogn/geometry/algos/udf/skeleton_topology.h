@@ -33,6 +33,8 @@
 #include <cgogn/geometry/algos/udf/internal/skeleton_mesh_ops.h>
 #include <cgogn/geometry/algos/udf/internal/skeleton_topology_types.h>
 
+#include <algorithm>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -119,6 +121,30 @@ public:
 			return;
 		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
 		MeshOps::compute_edge_degree(p);
+	}
+
+	// Read-only: ids (index_of) of the faces of the current boundary tets, and of the longest degree-2 edge of each
+	// such tet. Intended for display only; the skeleton and the tet set are not modified.
+	struct BoundaryTetMask
+	{
+		std::vector<uint32> face_ids;
+		std::vector<uint32> edge_ids;
+	};
+
+	BoundaryTetMask boundary_tet_mask()
+	{
+		BoundaryTetMask mask;
+		if (!valid_data())
+			return mask;
+		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
+		std::unordered_set<uint32> face_ids;
+		std::unordered_set<uint32> edge_ids;
+		BoundaryTetPrune::collect_boundary_tet_mask(p, face_ids, edge_ids);
+		mask.face_ids.assign(face_ids.begin(), face_ids.end());
+		mask.edge_ids.assign(edge_ids.begin(), edge_ids.end());
+		std::sort(mask.face_ids.begin(), mask.face_ids.end());
+		std::sort(mask.edge_ids.begin(), mask.edge_ids.end());
+		return mask;
 	}
 
 	Status prune_residual_sheets()
