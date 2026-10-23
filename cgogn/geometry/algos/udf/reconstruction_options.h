@@ -102,7 +102,7 @@ inline bool parse(const std::string& value, NeuralModelType& out)
 #define CGOGN_UDF_RECONSTRUCTION_OPTIONS(X) \
   X(NeuralModelType,     neural_model_type,              NeuralModelType::udf,                  "input.neural_model_type",                   0, 0, 0, 0) \
   X(bool,                ma_flip_prune,                  true,                                  "input.ma_flip_prune",                       0, 1, 0, 1) \
-  X(float,               ma_flip_prune_alpha_factor,     1.0f,                                  "input.ma_flip_prune_alpha_factor",          1.0, 5.0, 1.0, 5.0) \
+  X(float,               ma_flip_prune_alpha_factor,     1.5f,                                "input.ma_flip_prune_alpha_factor",          1.0, 5.0, 1.0, 5.0) \
   X(float,               alpha,                          0.005f,                                "sampling.alpha",                            1e-6, 1.0, 0.0005, 0.05) \
   X(int,                 knn_k,                          10,                                    "sampling.knn_k",                            3, 1000, 3, 50) \
   X(bool,                apply_filtering,                true,                                  "sampling.apply_filtering",                  0, 1, 0, 1) \

@@ -7,7 +7,7 @@
     "neural_udf_model_path": "D:/Code/CGoGN_3/data/skeleton/udf/deepfashion/weight/1-12.pt",
     "neural_model_type": "udf",
     "ma_flip_prune": true,
-    "ma_flip_prune_alpha_factor": 1.0
+    "ma_flip_prune_alpha_factor": 1.5
   },
   "sampling": {
     "alpha": 0.005,

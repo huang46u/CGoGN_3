@@ -4,7 +4,7 @@
     "geometry_type": "mesh",
     "neural_model_type": "mf",
     "ma_flip_prune": true,
-    "ma_flip_prune_alpha_factor": 1.0
+    "ma_flip_prune_alpha_factor": 1.5
   },
   "sampling": {
     "alpha": 0.0030,

@@ -3,7 +3,7 @@
     "mode": "neural_udf",
     "neural_model_type": "udf",
     "ma_flip_prune": false,
-    "ma_flip_prune_alpha_factor": 1.0
+    "ma_flip_prune_alpha_factor": 1.5
   },
   "sampling": {
     "alpha": 0.002,
