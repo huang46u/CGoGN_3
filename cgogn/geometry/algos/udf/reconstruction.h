@@ -258,6 +258,19 @@ public:
 		return dense_scores<NMFace>(scores);
 	}
 
+	std::optional<std::vector<Scalar>> skeleton_edge_scores_gauss3()
+	{
+		if (!s_.data.skeleton)
+			return std::nullopt;
+		std::unordered_map<uint32, Scalar> scores;
+		auto evaluator = [this](const std::vector<Vec3>& points, std::vector<Scalar>& values) {
+			return udf_stages::evaluate_topology_scores(s_, points, values);
+		};
+		if (!skeleton_topology().tet_edge_gauss3_scores(evaluator, scores))
+			return std::nullopt;
+		return dense_scores<NMEdge>(scores);
+	}
+
 private:
 	template <typename CELL>
 	std::vector<Scalar> dense_scores(const std::unordered_map<uint32, Scalar>& scores)

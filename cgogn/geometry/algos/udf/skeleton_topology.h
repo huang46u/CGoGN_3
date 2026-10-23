@@ -164,6 +164,20 @@ public:
 															  normalize_by_area);
 	}
 
+	// Read-only: 3-point Gauss UDF average along each edge adjacent to a current tet, keyed by index_of(edge). Same
+	// values as the topology-fix cache (QuadratureScores::compute_skeleton_edge_scores_gauss3_normalized).
+	template <typename ScoreEvaluator>
+	bool tet_edge_gauss3_scores(ScoreEvaluator& evaluate_scores, std::unordered_map<uint32, Scalar>& edge_scores)
+	{
+		edge_scores.clear();
+		if (!valid_data())
+			return false;
+		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
+		const std::unordered_set<uint32> edge_ids = QuadratureScores::collect_current_tet_edge_ids(p);
+		return QuadratureScores::compute_skeleton_edge_scores_gauss3_normalized(p, evaluate_scores, edge_ids,
+																				edge_scores);
+	}
+
 	Status prune_residual_sheets()
 	{
 		if (!valid_data())

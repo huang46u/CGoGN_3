@@ -690,6 +690,27 @@ private:
 		return true;
 	}
 
+	// V0 "Edge UDF score colormap (Gauss3)": read-only, only the edge colors change.
+	bool mark_tet_edge_gauss3_color(PointsParameters& p)
+	{
+		if (!skeleton_colors_ready(p))
+		{
+			p.last_error_ = "No skeleton: build the skeleton first.";
+			log_error(p.last_error_, '\n');
+			return false;
+		}
+		const auto scores = p.reconstruction_->skeleton_edge_scores_gauss3();
+		if (!scores)
+		{
+			p.last_error_ = "Failed to evaluate the edge UDF scores (is the distance field loaded?).";
+			log_error(p.last_error_, '\n');
+			return false;
+		}
+		color_cells_by_scores<NMEdge>(p, *scores, p.skeleton_edge_color_, Vec3(0.08, 0.08, 0.08));
+		p.last_error_.clear();
+		return true;
+	}
+
 protected:
 	enum class RenderUpdateMode : uint8
 	{
@@ -1293,6 +1314,15 @@ protected:
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							if (mark_tet_face_udf_color(p, true))
+								emit_skeleton_colors_changed(p);
+						}
+					}
+					if (ImGui::Button("Edge UDF score colormap (Gauss3)"))
+					{
+						if (!p.running_)
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							if (mark_tet_edge_gauss3_color(p))
 								emit_skeleton_colors_changed(p);
 						}
 					}
