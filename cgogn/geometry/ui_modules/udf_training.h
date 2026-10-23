@@ -523,10 +523,17 @@ private:
 	void refresh_skeleton_topology_colors(PointsParameters& p)
 	{
 		p.reconstruction_->skeleton_topology().compute_edge_degree();
+		// Edge colors as in V0: degree 1 blue, degree 2 green, degree > 2 red, all others dim gray.
 		foreach_cell(*p.skeleton_, [&](NMEdge e) {
-			auto in_face = incident_faces(*p.skeleton_, e);
-			value<Vec3>(*p.skeleton_, p.skeleton_edge_color_, e) =
-				in_face.size() == 1 ? Vec3(0.0, 0.0, 1.0) : Vec3(0.0, 0.0, 0.0);
+			const std::size_t degree = incident_faces(*p.skeleton_, e).size();
+			Vec3 color(0.15, 0.15, 0.15);
+			if (degree == 1)
+				color = Vec3(0.0, 0.0, 1.0);
+			else if (degree == 2)
+				color = Vec3(0.0, 1.0, 0.0);
+			else if (degree > 2)
+				color = Vec3(1.0, 0.2, 0.1);
+			value<Vec3>(*p.skeleton_, p.skeleton_edge_color_, e) = color;
 			return true;
 		});
 		parallel_foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
@@ -539,6 +546,20 @@ private:
 				value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) = Vec3(0.0, 0.0, 0.0);
 			return true;
 		});
+	}
+
+	// The skeleton coloring helpers below only change colors; they never change the skeleton topology.
+	bool skeleton_colors_ready(const PointsParameters& p) const
+	{
+		return p.skeleton_ && p.skeleton_edge_color_ && p.skeleton_face_color_;
+	}
+
+	void emit_skeleton_colors_changed(PointsParameters& p)
+	{
+		if (!non_manifold_provider_ || !p.skeleton_)
+			return;
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_edge_color_.get());
+		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
 	}
 
 protected:
@@ -1097,6 +1118,17 @@ protected:
 					bool preview = p.preview_render_during_sphere_update_.load();
 					if (ImGui::Checkbox("Preview during update", &preview))
 						p.preview_render_during_sphere_update_.store(preview);
+					ImGui::BeginDisabled(p.running_.load());
+					if (ImGui::Button("Topology colors"))
+					{
+						if (!p.running_ && skeleton_colors_ready(p))
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							refresh_skeleton_topology_colors(p);
+							emit_skeleton_colors_changed(p);
+						}
+					}
+					ImGui::EndDisabled();
 					if (!p.running_)
 					{
 						if (ImGui::Button("Start spheres update"))
