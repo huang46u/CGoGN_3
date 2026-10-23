@@ -941,14 +941,11 @@ protected:
 		if (!running && spheres_update_thread_.joinable())
 			spheres_update_thread_.join();
 
-		if (running)
-			update_render_data(*active, RenderUpdateMode::all_current_data);
-		else
-		{
-			if (active->skeleton_invalidated_ && active->skeleton_)
-				clear(*active->skeleton_);
-			update_render_data(*active, RenderUpdateMode::rebuild_skeleton_and_update_all);
-		}
+		// The preview rebuilds the skeleton from the current spheres, like the final refresh;
+		// update_render_data holds the worker mutex while it runs.
+		if (active->skeleton_invalidated_ && active->skeleton_)
+			clear(*active->skeleton_);
+		update_render_data(*active, RenderUpdateMode::rebuild_skeleton_and_update_all);
 		for (View* v : linked_views_)
 			v->request_update();
 		if (!running)
