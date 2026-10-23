@@ -79,6 +79,10 @@ public:
 	{
 		return metrics_;
 	}
+	bool has_tets() const
+	{
+		return !skeleton_tets_.empty();
+	}
 	void set_residual_prune_mode(ResidualPruneMode mode)
 	{
 		residual_prune_mode_ = mode;

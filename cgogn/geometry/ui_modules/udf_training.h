@@ -87,6 +87,7 @@ private:
 	{
 		bool initialized_ = false;
 		bool fitting_data_computed_ = false; // UI workflow gate for the sphere-fitting controls.
+		bool spheres_initialized_ = false; // UI workflow gate for the sphere-optimization controls; reset with the fitting data.
 		std::unique_ptr<ReconstructionType> reconstruction_;
 		// Input Points
 		POINTS* points_ = nullptr;
@@ -1049,9 +1050,11 @@ protected:
 				ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "%s", p.last_error_.c_str());
 		}
 		// Sampling
+		const bool running = p.running_.load();
+		const bool has_samples = p.samples_mesh_ && nb_cells<PVertex>(*p.samples_mesh_) > 0;
 		if (ImGui::CollapsingHeader("Sampling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
-			ImGui::BeginDisabled(p.running_.load());
+			ImGui::BeginDisabled(running);
 			const auto& profile_names = cgogn::geometry::reconstruction_profile_names();
 			if (ImGui::BeginCombo("Profile", p.profile_.c_str()))
 			{
@@ -1085,317 +1088,320 @@ protected:
 			if (ImGui::InputInt("Seed", &options.seed, 1, 10))
 				options.seed = std::clamp(options.seed, int(cgogn::geometry::option_info::seed.min),
 										  int(cgogn::geometry::option_info::seed.max));
-			if (ImGui::Button("Sample UDF"))
-			{
-				load_alpha_samples_to_mesh(p);
-				p.fitting_data_computed_ = false;
-			}
-			ImGui::SameLine();
-			if (ImGui::Button("Clear Samples"))
-			{
-				if (p.samples_mesh_)
-					points_provider_->clear_mesh(*p.samples_mesh_);
-				p.fitting_data_computed_ = false;
-			}
 			ImGui::EndDisabled();
-
+			if (!running)
+			{
+				if (ImGui::Button("Sample UDF"))
+				{
+					load_alpha_samples_to_mesh(p);
+					p.fitting_data_computed_ = false;
+					p.spheres_initialized_ = false;
+				}
+				if (has_samples)
+				{
+					ImGui::SameLine();
+					if (ImGui::Button("Clear Samples"))
+					{
+						if (p.samples_mesh_)
+							points_provider_->clear_mesh(*p.samples_mesh_);
+						p.fitting_data_computed_ = false;
+						p.spheres_initialized_ = false;
+					}
+				}
+			}
 			if (p.samples_mesh_)
 				ImGui::Text("Number of samples: %zu", nb_cells<PVertex>(*p.samples_mesh_));
 		}
 
-		bool has_samples = p.samples_mesh_ && nb_cells<PVertex>(*p.samples_mesh_) > 0;
-
 		if (!has_samples)
 		{
 			ImGui::TextColored(ImVec4(1, 1, 0, 1), "Please sample points first.");
+			return;
 		}
-		else
+
+		// Fitting Data
+		if (ImGui::CollapsingHeader("Fitting Data", ImGuiTreeNodeFlags_DefaultOpen))
 		{
-			ImGui::Separator();
-			ImGui::BeginDisabled(p.running_.load());
+			ImGui::BeginDisabled(running);
 			ImGui::Checkbox("Enable MAFlipPrune", &options.ma_flip_prune);
 			float ma_flip_prune_alpha_factor = static_cast<float>(options.ma_flip_prune_alpha_factor);
 			if (ImGui::SliderFloat("MAFlipPrune MF Alpha Factor", &ma_flip_prune_alpha_factor,
 								   float(cgogn::geometry::option_info::ma_flip_prune_alpha_factor.ui_min),
 								   float(cgogn::geometry::option_info::ma_flip_prune_alpha_factor.ui_max), "%.2f"))
 				options.ma_flip_prune_alpha_factor = Scalar(ma_flip_prune_alpha_factor);
-			if (ImGui::Button("Compute Fitting Data"))
+			ImGui::EndDisabled();
+			if (!running && ImGui::Button("Compute Fitting Data"))
 			{
 				p.fitting_data_computed_ = false;
+				p.spheres_initialized_ = false;
 				compute_fitting_data(p);
 				update_render_data(p, RenderUpdateMode::all_current_data);
 			}
+		}
+		if (!p.fitting_data_computed_)
+		{
+			ImGui::TextColored(ImVec4(1, 1, 0, 1), "Compute fitting data to enable sphere fitting.");
+			return;
+		}
+
+		// Sphere Fitting
+		if (ImGui::CollapsingHeader("Sphere Fitting", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			ImGui::BeginDisabled(running);
+			ImGui::SliderFloat("Init dilation constant", &options.init_dilation_constant,
+							   float(cgogn::geometry::option_info::init_dilation_constant.ui_min),
+							   float(cgogn::geometry::option_info::init_dilation_constant.ui_max), "%.4f");
 			ImGui::EndDisabled();
-			const bool sphere_fit_ready = p.fitting_data_computed_;
-			if (sphere_fit_ready)
+			if (!running && ImGui::Button("Init spheres"))
 			{
-				// Sphere Fitting
-				if (ImGui::CollapsingHeader("Sphere Fitting", ImGuiTreeNodeFlags_DefaultOpen))
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				ReconstructionStatusInfo status{ReconstructionStatus::invalid_data};
+				if (p.reconstruction_)
+					status = p.reconstruction_->initialize_spheres();
+				p.spheres_initialized_ = status.code == ReconstructionStatus::success;
+				if (status.code != ReconstructionStatus::success)
 				{
-					ImGui::BeginDisabled(p.running_.load());
-					ImGui::SliderFloat("Init dilation constant", &options.init_dilation_constant,
-									   float(cgogn::geometry::option_info::init_dilation_constant.ui_min),
-									   float(cgogn::geometry::option_info::init_dilation_constant.ui_max), "%.4f");
-					if (ImGui::Button("Init spheres"))
-					{
-						std::lock_guard<std::mutex> lock(p.mutex_);
-						ReconstructionStatusInfo status{ReconstructionStatus::invalid_data};
-						if (p.reconstruction_)
-							status = p.reconstruction_->initialize_spheres();
-						if (status.code != ReconstructionStatus::success)
-						{
-							p.last_error_ = with_message("Failed to initialize spheres", status.message);
-							log_error(p.last_error_, '\n');
-						}
-						else
-						{
-							p.last_error_.clear();
-							p.skeleton_invalidated_ = true;
-							if (p.skeleton_)
-								clear(*p.skeleton_);
-							set_post_init_sphere_render_state(p);
-							p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
-							update_render_data(p, RenderUpdateMode::rebuild_skeleton_and_update_all);
-						}
-					}
-					ImGui::EndDisabled();
-					float update_lambda = p.sphere_update_lambda_.load();
-					if (ImGui::SliderFloat("Update lambda", &update_lambda,
-										   float(cgogn::geometry::option_info::sqem_update_lambda_line_plane.ui_min),
-										   float(cgogn::geometry::option_info::sqem_update_lambda_line_plane.ui_max),
-										   "%.6f"))
-					{
-						p.sphere_update_lambda_.store(update_lambda);
-						options.sqem_update_lambda_line_plane = update_lambda;
-					}
-					ImGui::BeginDisabled(p.running_.load());
-					if (ImGui::Button("Update spheres"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							SpheresOptimizerType& optimizer = p.reconstruction_->spheres_optimizer();
-							p.reconstruction_->update_spheres_once(Scalar(options.sqem_update_lambda_line_plane));
-							p.metrics_snapshot_ = optimizer.metrics();
-							if (optimizer.metrics().sphere_topology_changed)
-							{
-								p.skeleton_invalidated_ = true;
-								if (p.skeleton_)
-								{
-									clear(*p.skeleton_);
-								}
-							}
-							update_render_data(p, RenderUpdateMode::rebuild_skeleton_and_update_all);
-						}
-					}
-					ImGui::EndDisabled();
+					p.last_error_ = with_message("Failed to initialize spheres", status.message);
+					log_error(p.last_error_, '\n');
+				}
+				else
+				{
+					p.last_error_.clear();
+					p.skeleton_invalidated_ = true;
+					if (p.skeleton_)
+						clear(*p.skeleton_);
+					set_post_init_sphere_render_state(p);
+					p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
+					update_render_data(p, RenderUpdateMode::rebuild_skeleton_and_update_all);
+				}
+			}
+			if (!p.spheres_initialized_)
+				ImGui::TextColored(ImVec4(1, 1, 0, 1), "Init spheres to continue.");
+		}
 
-					ImGui::BeginDisabled(p.running_.load());
-					if (ImGui::Button("Build Skeleton"))
+		// Sphere Optimization
+		const bool spheres_ready = p.spheres_initialized_;
+		if (spheres_ready && ImGui::CollapsingHeader("Sphere Optimization", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			float update_lambda = p.sphere_update_lambda_.load();
+			if (ImGui::SliderFloat("Update lambda", &update_lambda,
+								   float(cgogn::geometry::option_info::sqem_update_lambda_line_plane.ui_min),
+								   float(cgogn::geometry::option_info::sqem_update_lambda_line_plane.ui_max), "%.6f"))
+			{
+				p.sphere_update_lambda_.store(update_lambda);
+				options.sqem_update_lambda_line_plane = update_lambda;
+			}
+			if (!running && ImGui::Button("Update spheres"))
+			{
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				SpheresOptimizerType& optimizer = p.reconstruction_->spheres_optimizer();
+				p.reconstruction_->update_spheres_once(Scalar(options.sqem_update_lambda_line_plane));
+				p.metrics_snapshot_ = optimizer.metrics();
+				if (optimizer.metrics().sphere_topology_changed)
+				{
+					p.skeleton_invalidated_ = true;
+					if (p.skeleton_)
 					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							const auto status = p.reconstruction_->build_skeleton();
-							p.skeleton_invalidated_ = status.code != ReconstructionStatus::success;
-							if (status.code == ReconstructionStatus::success)
-							{
-								p.last_error_.clear();
-								refresh_skeleton_topology_colors(p);
-							}
-							else
-								p.last_error_ = with_message("Failed to build skeleton", status.message);
-							update_render_data(p, RenderUpdateMode::all_current_data);
-						}
+						clear(*p.skeleton_);
 					}
-					ImGui::EndDisabled();
-					const bool running = p.running_.load();
-					const bool skeleton_export_available = !running && !p.skeleton_invalidated_ && p.skeleton_ &&
-														   p.skeleton_position_ && p.skeleton_radius_ &&
-														   nb_cells<NMVertex>(*p.skeleton_) > 0;
-					const bool can_export_skeleton = skeleton_export_available;
-					ImGui::TextDisabled(skeleton_export_available ? "ready" : "missing");
-					if (!can_export_skeleton)
-						ImGui::BeginDisabled();
-					if (ImGui::Button("Export skeleton PLY"))
-					{
-						const std::string filename =
-							pfd::save_file("Export skeleton PLY", "skeleton.ply", {"PLY", "*.ply"}).result();
-						if (!filename.empty())
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							if (!(p.reconstruction_->skeleton() &&
-								  geometry::export_skeleton_ply(
-									  *p.reconstruction_->skeleton(), p.reconstruction_->skeleton_position_attribute(),
-									  p.reconstruction_->skeleton_radius_attribute(), filename)))
-								log_error("Failed to export skeleton PLY: ", filename, '\n');
-						}
-					}
-					if (!can_export_skeleton)
-						ImGui::EndDisabled();
-					ImGui::BeginDisabled(p.running_.load());
-					ImGui::Checkbox("Residual prune", &options.residual_prune);
-					ImGui::SameLine();
-					int residual_mode = static_cast<int>(options.residual_prune_mode);
-					if (ImGui::Combo("##ResidualPruneMode", &residual_mode,
-									 "current\0keep_fully_non_manifold\0collapsible_only\0"))
-						options.residual_prune_mode = static_cast<cgogn::geometry::ResidualPruneOption>(residual_mode);
-					if (ImGui::Button("Topology fix full pipeline"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							if (p.skeleton_invalidated_)
-							{
-								log_error("Topology fix requires a skeleton built from the current sphere set.\n");
-							}
-							else
-							{
-								// Same order as run(): residual sheet prune after fix_topology, if enabled.
-								const auto status = p.reconstruction_->fix_topology_and_prune();
-								if (status.code == ReconstructionStatus::success)
-								{
-									p.last_error_.clear();
-									p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
-									apply_skeleton_topology_results(p);
-								}
-								else
-								{
-									p.last_error_ = with_message("[TopologyFull] score evaluation failed or topology data is invalid", status.message);
-									log_error(p.last_error_, '\n');
-								}
-							}
-						}
-					}
-					ImGui::EndDisabled();
-					ImGui::SameLine();
+				}
+				update_render_data(p, RenderUpdateMode::rebuild_skeleton_and_update_all);
+			}
+			if (!running)
+			{
+				if (ImGui::Button("Start spheres update"))
+					start_spheres_update(p);
+			}
+			else if (ImGui::Button("Stop spheres update"))
+				stop_spheres_update(p);
 
-					bool slow_down = p.slow_down_.load();
-					if (ImGui::Checkbox("Slow down", &slow_down))
-						p.slow_down_.store(slow_down);
-					if (slow_down)
+			bool slow_down = p.slow_down_.load();
+			if (ImGui::Checkbox("Slow down", &slow_down))
+				p.slow_down_.store(slow_down);
+			if (slow_down)
+			{
+				int update_rate = static_cast<int>(p.update_rate_.load());
+				if (ImGui::SliderInt("Update rate", &update_rate, 1, 100))
+					p.update_rate_.store(static_cast<uint32>(update_rate));
+			}
+			bool preview = p.preview_render_during_sphere_update_.load();
+			if (ImGui::Checkbox("Preview during update", &preview))
+				p.preview_render_during_sphere_update_.store(preview);
+			if (ImGui::Checkbox("Error as color", &p.error_as_spheres_color_))
+			{
+				if (!running)
+				{
+					std::lock_guard<std::mutex> lock(p.mutex_);
+					update_render_data(p, RenderUpdateMode::spheres_only);
+				}
+			}
+			if (ImGui::SliderFloat("Transparency", &p.spheres_transparency_, 0.0f, 1.0f))
+			{
+				if (!running)
+				{
+					std::lock_guard<std::mutex> lock(p.mutex_);
+					update_render_data(p, RenderUpdateMode::all_current_data);
+				}
+			}
+
+			ImGui::Separator();
+
+			const SpheresOptimizerMetrics& metrics = p.metrics_snapshot_;
+			ImGui::Text("Total error: %f", metrics.total_error / std::max<uint32>(1, metrics.sphere_count));
+			ImGui::Text("Min error: %f", metrics.minimum_error);
+			ImGui::Text("Max error: %f", metrics.maximum_error);
+		}
+
+		// Skeleton
+		const bool skeleton_built = p.skeleton_ && !p.skeleton_invalidated_ && nb_cells<NMVertex>(*p.skeleton_) > 0;
+		if (spheres_ready && ImGui::CollapsingHeader("Skeleton", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			if (!running && ImGui::Button("Build Skeleton"))
+			{
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				const auto status = p.reconstruction_->build_skeleton();
+				p.skeleton_invalidated_ = status.code != ReconstructionStatus::success;
+				if (status.code == ReconstructionStatus::success)
+				{
+					p.last_error_.clear();
+					refresh_skeleton_topology_colors(p);
+				}
+				else
+					p.last_error_ = with_message("Failed to build skeleton", status.message);
+				update_render_data(p, RenderUpdateMode::all_current_data);
+			}
+		}
+
+		// Topology Fix. While the sphere update runs, the topology is not read (the update thread writes it), so
+		// the step stays visible with its parameters disabled, as before.
+		const bool has_tets = !running && p.reconstruction_->skeleton_topology().has_tets();
+		const bool topology_fix_step = spheres_ready && skeleton_built && (running || has_tets);
+		if (topology_fix_step && ImGui::CollapsingHeader("Topology Fix", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			ImGui::BeginDisabled(running);
+			ImGui::Checkbox("Residual prune", &options.residual_prune);
+			ImGui::SameLine();
+			int residual_mode = static_cast<int>(options.residual_prune_mode);
+			if (ImGui::Combo("##ResidualPruneMode", &residual_mode,
+							 "current\0keep_fully_non_manifold\0collapsible_only\0"))
+				options.residual_prune_mode = static_cast<cgogn::geometry::ResidualPruneOption>(residual_mode);
+			ImGui::EndDisabled();
+			if (!running && ImGui::Button("Topology fix full pipeline"))
+			{
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				if (p.skeleton_invalidated_)
+				{
+					log_error("Topology fix requires a skeleton built from the current sphere set.\n");
+				}
+				else
+				{
+					// Same order as run(): residual sheet prune after fix_topology, if enabled.
+					const auto status = p.reconstruction_->fix_topology_and_prune();
+					if (status.code == ReconstructionStatus::success)
 					{
-						int update_rate = static_cast<int>(p.update_rate_.load());
-						if (ImGui::SliderInt("Update rate", &update_rate, 1, 100))
-							p.update_rate_.store(static_cast<uint32>(update_rate));
-					}
-					bool preview = p.preview_render_during_sphere_update_.load();
-					if (ImGui::Checkbox("Preview during update", &preview))
-						p.preview_render_during_sphere_update_.store(preview);
-					ImGui::BeginDisabled(p.running_.load());
-					if (ImGui::Button("Topology colors"))
-					{
-						if (!p.running_ && skeleton_colors_ready(p))
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							refresh_skeleton_topology_colors(p);
-							emit_skeleton_colors_changed(p);
-							show_skeleton_colors(p);
-						}
-					}
-					ImGui::SameLine();
-					if (ImGui::Button("Boundary tet mask"))
-					{
-						if (!p.running_ && skeleton_colors_ready(p))
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							mark_boundary_tets_color(p);
-							emit_skeleton_colors_changed(p);
-							show_skeleton_colors(p);
-						}
-					}
-					ImGui::SameLine();
-					if (ImGui::Button("Face components (UF)"))
-					{
-						if (!p.running_ && skeleton_colors_ready(p))
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							mark_skeleton_face_components_color(p);
-							emit_skeleton_colors_changed(p);
-							show_skeleton_colors(p);
-						}
-					}
-					ImGui::SameLine();
-					if (ImGui::Button("Tet face UDF colormap (Integral)"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							if (mark_tet_face_udf_color(p, false))
-							{
-								emit_skeleton_colors_changed(p);
-								show_skeleton_colors(p);
-							}
-						}
-					}
-					ImGui::SameLine();
-					if (ImGui::Button("Tet face UDF colormap (Normalized)"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							if (mark_tet_face_udf_color(p, true))
-							{
-								emit_skeleton_colors_changed(p);
-								show_skeleton_colors(p);
-							}
-						}
-					}
-					if (ImGui::Button("Edge UDF score colormap (Gauss3)"))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							if (mark_tet_edge_gauss3_color(p))
-							{
-								emit_skeleton_colors_changed(p);
-								show_skeleton_colors(p);
-							}
-						}
-					}
-					ImGui::EndDisabled();
-					if (!p.running_)
-					{
-						if (ImGui::Button("Start spheres update"))
-							start_spheres_update(p);
+						p.last_error_.clear();
+						p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
+						apply_skeleton_topology_results(p);
 					}
 					else
 					{
-						if (ImGui::Button("Stop spheres update"))
-							stop_spheres_update(p);
+						p.last_error_ = with_message("[TopologyFull] score evaluation failed or topology data is invalid", status.message);
+						log_error(p.last_error_, '\n');
 					}
-					ImGui::Separator();
-
-					if (ImGui::Checkbox("Error as color", &p.error_as_spheres_color_))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							update_render_data(p, RenderUpdateMode::spheres_only);
-						}
-					}
-					if (ImGui::SliderFloat("Transparency", &p.spheres_transparency_, 0.0f, 1.0f))
-					{
-						if (!p.running_)
-						{
-							std::lock_guard<std::mutex> lock(p.mutex_);
-							update_render_data(p, RenderUpdateMode::all_current_data);
-						}
-					}
-
-					ImGui::Separator();
-
-					const SpheresOptimizerMetrics& metrics = p.metrics_snapshot_;
-					ImGui::Text("Total error: %f", metrics.total_error / std::max<uint32>(1, metrics.sphere_count));
-					ImGui::Text("Min error: %f", metrics.minimum_error);
-					ImGui::Text("Max error: %f", metrics.maximum_error);
-
-					ImGui::Separator();
 				}
 			}
-			else
+		}
+
+		// Skeleton Colors. The tet-based colormaps need tets, so they are hidden once topology fix removed them all.
+		if (spheres_ready && skeleton_built && !running && ImGui::CollapsingHeader("Skeleton Colors", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			bool first_in_row = true;
+			auto next_in_row = [&first_in_row]() {
+				if (!first_in_row)
+					ImGui::SameLine();
+				first_in_row = false;
+			};
+			next_in_row();
+			if (ImGui::Button("Topology colors") && skeleton_colors_ready(p))
 			{
-				ImGui::TextColored(ImVec4(1, 1, 0, 1), "Compute fitting data to enable sphere fitting.");
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				refresh_skeleton_topology_colors(p);
+				emit_skeleton_colors_changed(p);
+				show_skeleton_colors(p);
+			}
+			if (has_tets)
+			{
+				next_in_row();
+				if (ImGui::Button("Boundary tet mask") && skeleton_colors_ready(p))
+				{
+					std::lock_guard<std::mutex> lock(p.mutex_);
+					mark_boundary_tets_color(p);
+					emit_skeleton_colors_changed(p);
+					show_skeleton_colors(p);
+				}
+			}
+			next_in_row();
+			if (ImGui::Button("Face components (UF)") && skeleton_colors_ready(p))
+			{
+				std::lock_guard<std::mutex> lock(p.mutex_);
+				mark_skeleton_face_components_color(p);
+				emit_skeleton_colors_changed(p);
+				show_skeleton_colors(p);
+			}
+			if (has_tets)
+			{
+				next_in_row();
+				if (ImGui::Button("Tet face UDF colormap (Integral)"))
+				{
+					std::lock_guard<std::mutex> lock(p.mutex_);
+					if (mark_tet_face_udf_color(p, false))
+					{
+						emit_skeleton_colors_changed(p);
+						show_skeleton_colors(p);
+					}
+				}
+				next_in_row();
+				if (ImGui::Button("Tet face UDF colormap (Normalized)"))
+				{
+					std::lock_guard<std::mutex> lock(p.mutex_);
+					if (mark_tet_face_udf_color(p, true))
+					{
+						emit_skeleton_colors_changed(p);
+						show_skeleton_colors(p);
+					}
+				}
+				next_in_row();
+				if (ImGui::Button("Edge UDF score colormap (Gauss3)"))
+				{
+					std::lock_guard<std::mutex> lock(p.mutex_);
+					if (mark_tet_edge_gauss3_color(p))
+					{
+						emit_skeleton_colors_changed(p);
+						show_skeleton_colors(p);
+					}
+				}
+			}
+		}
+
+		// Export
+		const bool skeleton_export_available = !running && !p.skeleton_invalidated_ && p.skeleton_ &&
+											   p.skeleton_position_ && p.skeleton_radius_ &&
+											   nb_cells<NMVertex>(*p.skeleton_) > 0;
+		if (skeleton_export_available && ImGui::CollapsingHeader("Export", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			if (ImGui::Button("Export skeleton PLY"))
+			{
+				const std::string filename =
+					pfd::save_file("Export skeleton PLY", "skeleton.ply", {"PLY", "*.ply"}).result();
+				if (!filename.empty())
+				{
+					std::lock_guard<std::mutex> lock(p.mutex_);
+					if (!(p.reconstruction_->skeleton() &&
+						  geometry::export_skeleton_ply(
+							  *p.reconstruction_->skeleton(), p.reconstruction_->skeleton_position_attribute(),
+							  p.reconstruction_->skeleton_radius_attribute(), filename)))
+						log_error("Failed to export skeleton PLY: ", filename, '\n');
+				}
 			}
 		}
 	}
