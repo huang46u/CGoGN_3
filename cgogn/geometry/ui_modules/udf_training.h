@@ -13,6 +13,7 @@
 #include <cgogn/geometry/algos/udf/reconstruction.h>
 #include <cgogn/geometry/algos/udf/reconstruction_options.h>
 #include <cgogn/geometry/algos/udf/reconstruction_profiles.h>
+#include <cgogn/geometry/algos/udf/skeleton_face_components.h>
 #include <cgogn/geometry/algos/udf/skeleton_ply_export.h>
 #include <cgogn/geometry/types/vector_traits.h>
 #include <cgogn/ui/portable-file-dialogs.h>
@@ -578,6 +579,60 @@ private:
 		foreach_cell(*p.skeleton_, [&](NMEdge e) -> bool {
 			const bool hit = boundary_edges.count(index_of(*p.skeleton_, e)) > 0;
 			value<Vec3>(*p.skeleton_, p.skeleton_edge_color_, e) = hit ? Vec3(1.0, 0.45, 0.05) : Vec3(0.1, 0.1, 0.1);
+			return true;
+		});
+	}
+
+	// V0 palette helpers, copied from V0 (golden-ratio hue spacing).
+	static Vec3 hsv_to_rgb(Scalar h, Scalar s, Scalar v)
+	{
+		const Scalar hh = h - std::floor(h);
+		if (!(s > Scalar(0)))
+			return Vec3(v, v, v);
+		const Scalar scaled = hh * Scalar(6);
+		const int sector = static_cast<int>(std::floor(scaled));
+		const Scalar f = scaled - Scalar(sector);
+		const Scalar p = v * (Scalar(1) - s);
+		const Scalar q = v * (Scalar(1) - s * f);
+		const Scalar t = v * (Scalar(1) - s * (Scalar(1) - f));
+
+		switch (sector % 6)
+		{
+		case 0:
+			return Vec3(v, t, p);
+		case 1:
+			return Vec3(q, v, p);
+		case 2:
+			return Vec3(p, v, t);
+		case 3:
+			return Vec3(p, q, v);
+		case 4:
+			return Vec3(t, p, v);
+		default:
+			return Vec3(v, p, q);
+		}
+	}
+
+	static Vec3 component_palette_color(uint32 component_id)
+	{
+		static constexpr double golden_ratio_conjugate = 0.6180339887498949;
+		const Scalar hue = Scalar(std::fmod(0.17 + golden_ratio_conjugate * static_cast<double>(component_id), 1.0));
+		const Scalar saturation = (component_id % 3 == 0) ? Scalar(0.82) : (component_id % 3 == 1) ? Scalar(0.72)
+																									  : Scalar(0.90);
+		const Scalar value = (component_id % 4 == 0) ? Scalar(0.95) : (component_id % 4 == 1) ? Scalar(0.88)
+																							 : (component_id % 4 == 2) ? Scalar(0.80)
+																													 : Scalar(0.92);
+		return hsv_to_rgb(hue, saturation, value);
+	}
+
+	// V0 "Face components (UF)": color each skeleton face by its sheet. Faces are only recolored, not removed.
+	void mark_skeleton_face_components_color(PointsParameters& p)
+	{
+		const auto sheet_of_face = geometry::compute_skeleton_face_components(*p.skeleton_);
+		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
+			const auto it = sheet_of_face.find(index_of(*p.skeleton_, f));
+			value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) =
+				(it == sheet_of_face.end()) ? Vec3(0.0, 0.0, 0.0) : component_palette_color(it->second);
 			return true;
 		});
 	}
@@ -1155,6 +1210,16 @@ protected:
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							mark_boundary_tets_color(p);
+							emit_skeleton_colors_changed(p);
+						}
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Face components (UF)"))
+					{
+						if (!p.running_ && skeleton_colors_ready(p))
+						{
+							std::lock_guard<std::mutex> lock(p.mutex_);
+							mark_skeleton_face_components_color(p);
 							emit_skeleton_colors_changed(p);
 						}
 					}
