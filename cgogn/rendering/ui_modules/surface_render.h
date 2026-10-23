@@ -68,6 +68,7 @@ class SurfaceRender : public ViewModule
 {
 	static_assert(mesh_traits<MESH>::dimension >= 2, "SurfaceRender can only be used with meshes of dimension >= 2");
 
+public:
 	enum AttributePerCell
 	{
 		GLOBAL = 0,
@@ -80,6 +81,7 @@ class SurfaceRender : public ViewModule
 		SCALAR = 0,
 		VECTOR
 	};
+private:
 
 	template <typename T>
 	using Attribute = typename mesh_traits<MESH>::template Attribute<T>;
@@ -463,6 +465,21 @@ public:
 		p.param_flat_color_per_face_->set_vbos({p.vertex_position_vbo_, p.face_color_vbo_});
 		p.param_phong_color_per_face_->set_vbos({p.vertex_position_vbo_, p.vertex_normal_vbo_, p.face_color_vbo_});
 
+		v.request_update();
+	}
+
+	void set_face_color_mode(View& v, const MESH& m, AttributePerCell per_cell, ColorType type)
+	{
+		Parameters& p = parameters_[&v][&m];
+		p.color_per_cell_ = per_cell;
+		p.color_type_ = type;
+		v.request_update();
+	}
+
+	void set_edge_color_mode(View& v, const MESH& m, AttributePerCell per_cell)
+	{
+		Parameters& p = parameters_[&v][&m];
+		p.edge_color_per_cell_ = per_cell;
 		v.request_update();
 	}
 

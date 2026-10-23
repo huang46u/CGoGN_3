@@ -565,6 +565,21 @@ private:
 		non_manifold_provider_->emit_attribute_changed(*p.skeleton_, p.skeleton_face_color_.get());
 	}
 
+	// Shows the skeleton with the colors that a color button just wrote: per-face color vectors and per-edge colors.
+	void show_skeleton_colors(PointsParameters& p)
+	{
+		using SkeletonRender = SurfaceRender<NONMANIFOLD>;
+		if (!skeleton_render_ || !p.skeleton_ || !p.skeleton_face_color_ || !p.skeleton_edge_color_)
+			return;
+		for (View* v : linked_views_)
+		{
+			skeleton_render_->set_face_color(*v, *p.skeleton_, p.skeleton_face_color_);
+			skeleton_render_->set_edge_color(*v, *p.skeleton_, p.skeleton_edge_color_);
+			skeleton_render_->set_face_color_mode(*v, *p.skeleton_, SkeletonRender::PER_FACE, SkeletonRender::VECTOR);
+			skeleton_render_->set_edge_color_mode(*v, *p.skeleton_, SkeletonRender::PER_EDGE);
+		}
+	}
+
 	// V0 "Boundary tet mask": faces of boundary tets yellow, other faces dim gray. The longest degree-2 edge of
 	// each boundary tet is orange, other edges dim gray. The V0 K5 mask is not included.
 	void mark_boundary_tets_color(PointsParameters& p)
@@ -1275,6 +1290,7 @@ protected:
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							refresh_skeleton_topology_colors(p);
 							emit_skeleton_colors_changed(p);
+							show_skeleton_colors(p);
 						}
 					}
 					ImGui::SameLine();
@@ -1285,6 +1301,7 @@ protected:
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							mark_boundary_tets_color(p);
 							emit_skeleton_colors_changed(p);
+							show_skeleton_colors(p);
 						}
 					}
 					ImGui::SameLine();
@@ -1295,6 +1312,7 @@ protected:
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							mark_skeleton_face_components_color(p);
 							emit_skeleton_colors_changed(p);
+							show_skeleton_colors(p);
 						}
 					}
 					ImGui::SameLine();
@@ -1304,7 +1322,10 @@ protected:
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							if (mark_tet_face_udf_color(p, false))
+							{
 								emit_skeleton_colors_changed(p);
+								show_skeleton_colors(p);
+							}
 						}
 					}
 					ImGui::SameLine();
@@ -1314,7 +1335,10 @@ protected:
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							if (mark_tet_face_udf_color(p, true))
+							{
 								emit_skeleton_colors_changed(p);
+								show_skeleton_colors(p);
+							}
 						}
 					}
 					if (ImGui::Button("Edge UDF score colormap (Gauss3)"))
@@ -1323,7 +1347,10 @@ protected:
 						{
 							std::lock_guard<std::mutex> lock(p.mutex_);
 							if (mark_tet_edge_gauss3_color(p))
+							{
 								emit_skeleton_colors_changed(p);
+								show_skeleton_colors(p);
+							}
 						}
 					}
 					ImGui::EndDisabled();
