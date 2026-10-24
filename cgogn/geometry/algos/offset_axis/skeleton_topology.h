@@ -116,14 +116,6 @@ public:
 		return run_topology_fix_pipeline(p, evaluate_scores);
 	}
 
-	Status prune_fully_non_manifold_triangles()
-	{
-		if (!valid_data())
-			return Status::invalid_data;
-		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
-		return NonManifoldPrune::prune_fully_non_manifold_triangles(p) ? Status::success : Status::invalid_data;
-	}
-
 	void compute_edge_degree()
 	{
 		if (!valid_data())

@@ -1,3 +1,25 @@
+/*******************************************************************************
+ * CGoGN: Combinatorial and Geometric modeling with Generic N-dimensional Maps  *
+ * Copyright (C), IGG Group, ICube, University of Strasbourg, France            *
+ *                                                                              *
+ * This library is free software; you can redistribute it and/or modify it      *
+ * under the terms of the GNU Lesser General Public License as published by the *
+ * Free Software Foundation; either version 2.1 of the License, or (at your     *
+ * option) any later version.                                                   *
+ *                                                                              *
+ * This library is distributed in the hope that it will be useful, but WITHOUT *
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or        *
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License *
+ * for more details.                                                            *
+ *                                                                              *
+ * You should have received a copy of the GNU Lesser General Public License     *
+ * along with this library; if not, write to the Free Software Foundation,      *
+ * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA.           *
+ *                                                                              *
+ * Web site: http://cgogn.unistra.fr/                                           *
+ * Contact information: cgogn@unistra.fr                                        *
+ *                                                                              *
+ *******************************************************************************/
 #ifndef CGOGN_MODULE_OFFSET_AXIS_H_
 #define CGOGN_MODULE_OFFSET_AXIS_H_
 
@@ -37,9 +59,6 @@
 #include <string>
 #include <thread>
 #include <unordered_set>
-#if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
-#include <torch/torch.h>
-#endif
 #include <utility>
 
 namespace cgogn
@@ -360,7 +379,7 @@ protected:
 		const OutputVerbosity startup_output_verbosity =
 			selected_points_ ? points_parameters_[selected_points_].output_verbosity_.load() : OUTPUT_NORMAL;
 #if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
-		if (torch::cuda::is_available())
+		if (geometry::offset_axis::neural_cuda_available())
 		{
 			log_basic(startup_output_verbosity, "CUDA is available! Using GPU device 0.", '\n');
 		}

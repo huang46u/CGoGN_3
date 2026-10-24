@@ -58,6 +58,12 @@ namespace geometry
 namespace offset_axis
 {
 
+// true if LibTorch sees a CUDA device (neural fields then run on GPU 0)
+inline bool neural_cuda_available()
+{
+	return torch::cuda::is_available();
+}
+
 // Distance field of a neural network (TorchScript module) loaded from a file. The network predicts the UDF or the MF
 // value and its gradient; the samples are rays cast against the network, and the projections are Newton-like steps on
 // the network. See distance_field.h for the interface.

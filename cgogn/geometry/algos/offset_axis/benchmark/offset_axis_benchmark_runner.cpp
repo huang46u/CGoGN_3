@@ -1,3 +1,25 @@
+/*******************************************************************************
+ * CGoGN: Combinatorial and Geometric modeling with Generic N-dimensional Maps  *
+ * Copyright (C), IGG Group, ICube, University of Strasbourg, France            *
+ *                                                                              *
+ * This library is free software; you can redistribute it and/or modify it      *
+ * under the terms of the GNU Lesser General Public License as published by the *
+ * Free Software Foundation; either version 2.1 of the License, or (at your     *
+ * option) any later version.                                                   *
+ *                                                                              *
+ * This library is distributed in the hope that it will be useful, but WITHOUT *
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or        *
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License *
+ * for more details.                                                            *
+ *                                                                              *
+ * You should have received a copy of the GNU Lesser General Public License     *
+ * along with this library; if not, write to the Free Software Foundation,      *
+ * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA.           *
+ *                                                                              *
+ * Web site: http://cgogn.unistra.fr/                                           *
+ * Contact information: cgogn@unistra.fr                                        *
+ *                                                                              *
+ *******************************************************************************/
 #include <cgogn/geometry/algos/offset_axis/benchmark/offset_axis_benchmark_runner.h>
 
 #include <cgogn/core/types/incidence_graph/incidence_graph.h>
@@ -246,7 +268,7 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	root.add_child("repairs", repairs);
 
 	boost::property_tree::ptree timing;
-	for (const auto& field : kBenchmarkTimingFields)
+	for (const auto& field : benchmark_timing_fields)
 		timing.put(field.json_key, seconds_from_milliseconds(field.value_ms(result)));
 	root.add_child("timing_s", timing);
 
