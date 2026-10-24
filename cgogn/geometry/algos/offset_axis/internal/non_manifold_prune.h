@@ -64,7 +64,7 @@ struct NonManifoldPrune
 
 	static bool prune_fully_non_manifold_triangles(Context& p)
 	{
-		if (!p.skeleton_)
+		if (!p.data.skeleton)
 			return false;
 
 		bool removed_any_faces = false;
@@ -73,20 +73,20 @@ struct NonManifoldPrune
 		for (;;)
 		{
 			std::vector<uint32> face_ids_to_remove;
-			foreach_cell(*p.skeleton_, [&](SkeletonFace f) -> bool {
+			foreach_cell(*p.data.skeleton, [&](SkeletonFace f) -> bool {
 				if (!f.is_valid())
 					return true;
-				const uint32 face_id = index_of(*p.skeleton_, f);
+				const uint32 face_id = index_of(*p.data.skeleton, f);
 				if (face_id == INVALID_INDEX)
 					return true;
 
-				const std::vector<SkeletonEdge> face_edges = incident_edges(*p.skeleton_, f);
+				const std::vector<SkeletonEdge> face_edges = incident_edges(*p.data.skeleton, f);
 				if (face_edges.size() != 3)
 					return true;
 
 				for (const SkeletonEdge& e : face_edges)
 				{
-					if (!e.is_valid() || incident_faces(*p.skeleton_, e).size() <= 2)
+					if (!e.is_valid() || incident_faces(*p.data.skeleton, e).size() <= 2)
 						return true;
 				}
 
@@ -99,12 +99,12 @@ struct NonManifoldPrune
 
 			for (uint32 face_id : face_ids_to_remove)
 			{
-				const SkeletonFace f = of_index<SkeletonFace>(*p.skeleton_, face_id);
+				const SkeletonFace f = of_index<SkeletonFace>(*p.data.skeleton, face_id);
 				if (!f.is_valid())
 					continue;
 
-				const std::vector<SkeletonEdge> affected_edges = incident_edges(*p.skeleton_, f);
-				remove_face(*p.skeleton_, f);
+				const std::vector<SkeletonEdge> affected_edges = incident_edges(*p.data.skeleton, f);
+				remove_face(*p.data.skeleton, f);
 				removed_any_faces = true;
 				++removed_face_count;
 				MeshOps::remove_orphan_edges_from_removed_face_edges(p, affected_edges);
@@ -112,7 +112,7 @@ struct NonManifoldPrune
 		}
 
 		p.metrics.residual_fully_nm_removed_faces += removed_face_count;
-		if (p.edge_degree_ && removed_any_faces)
+		if (p.data.edge_degree && removed_any_faces)
 			MeshOps::compute_edge_degree(p);
 
 		return true;
@@ -120,14 +120,14 @@ struct NonManifoldPrune
 
 	static int32 skeleton_euler_characteristic(const Context& p)
 	{
-		return static_cast<int32>(nb_cells<SkeletonVertex>(*p.skeleton_)) -
-			   static_cast<int32>(nb_cells<SkeletonEdge>(*p.skeleton_)) +
-			   static_cast<int32>(nb_cells<SkeletonFace>(*p.skeleton_));
+		return static_cast<int32>(nb_cells<SkeletonVertex>(*p.data.skeleton)) -
+			   static_cast<int32>(nb_cells<SkeletonEdge>(*p.data.skeleton)) +
+			   static_cast<int32>(nb_cells<SkeletonFace>(*p.data.skeleton));
 	}
 
 	static void run_residual_sheet_prune(Context& p)
 	{
-		if (!p.skeleton_ || !p.incident_tets_)
+		if (!p.data.skeleton || !p.data.face_incident_tets)
 			return;
 
 		p.metrics.residual_chi_before = skeleton_euler_characteristic(p);
@@ -137,13 +137,13 @@ struct NonManifoldPrune
 			prune_fully_non_manifold_triangles(p);
 
 		std::vector<SkeletonFace> faces;
-		faces.reserve(nb_cells<SkeletonFace>(*p.skeleton_));
+		faces.reserve(nb_cells<SkeletonFace>(*p.data.skeleton));
 		std::unordered_map<uint32, uint32> face_id_to_index;
-		face_id_to_index.reserve(nb_cells<SkeletonFace>(*p.skeleton_));
-		foreach_cell(*p.skeleton_, [&](SkeletonFace f) -> bool {
+		face_id_to_index.reserve(nb_cells<SkeletonFace>(*p.data.skeleton));
+		foreach_cell(*p.data.skeleton, [&](SkeletonFace f) -> bool {
 			if (!f.is_valid())
 				return true;
-			const uint32 face_id = index_of(*p.skeleton_, f);
+			const uint32 face_id = index_of(*p.data.skeleton, f);
 			if (face_id == INVALID_INDEX)
 				return true;
 			face_id_to_index.emplace(face_id, static_cast<uint32>(faces.size()));
@@ -183,14 +183,14 @@ struct NonManifoldPrune
 			if (ranks[first_root] == ranks[second_root])
 				++ranks[first_root];
 		};
-		foreach_cell(*p.skeleton_, [&](SkeletonEdge e) -> bool {
+		foreach_cell(*p.data.skeleton, [&](SkeletonEdge e) -> bool {
 			if (!e.is_valid())
 				return true;
-			const auto incident = incident_faces(*p.skeleton_, e);
+			const auto incident = incident_faces(*p.data.skeleton, e);
 			if (incident.size() != 2)
 				return true;
-			const auto first = face_id_to_index.find(index_of(*p.skeleton_, incident[0]));
-			const auto second = face_id_to_index.find(index_of(*p.skeleton_, incident[1]));
+			const auto first = face_id_to_index.find(index_of(*p.data.skeleton, incident[0]));
+			const auto second = face_id_to_index.find(index_of(*p.data.skeleton, incident[1]));
 			if (first != face_id_to_index.end() && second != face_id_to_index.end())
 				unite(first->second, second->second);
 			return true;
@@ -206,7 +206,7 @@ struct NonManifoldPrune
 			const auto [it, inserted] =
 				root_to_sheet_label.emplace(root, static_cast<uint32>(root_to_sheet_label.size()));
 			(void)inserted;
-			const uint32 face_id = index_of(*p.skeleton_, faces[i]);
+			const uint32 face_id = index_of(*p.data.skeleton, faces[i]);
 			if (face_id != INVALID_INDEX)
 				label_to_faces[it->second].push_back(face_id);
 		}
@@ -225,22 +225,22 @@ struct NonManifoldPrune
 			{
 				if (face_id == INVALID_INDEX)
 					continue;
-				const SkeletonFace f = of_index<SkeletonFace>(*p.skeleton_, face_id);
-				if (!f.is_valid() || index_of(*p.skeleton_, f) != face_id)
+				const SkeletonFace f = of_index<SkeletonFace>(*p.data.skeleton, face_id);
+				if (!f.is_valid() || index_of(*p.data.skeleton, f) != face_id)
 					continue;
-				const std::vector<SkeletonVertex> vertices = incident_vertices(*p.skeleton_, f);
+				const std::vector<SkeletonVertex> vertices = incident_vertices(*p.data.skeleton, f);
 				for (const SkeletonVertex& v : vertices)
 				{
 					if (!v.is_valid())
 						continue;
-					const uint32 vertex_id = index_of(*p.skeleton_, v);
+					const uint32 vertex_id = index_of(*p.data.skeleton, v);
 					if (vertex_id == INVALID_INDEX || !visited_vertex_ids.insert(vertex_id).second)
 						continue;
-					for (const SkeletonEdge& e : incident_edges(*p.skeleton_, v))
+					for (const SkeletonEdge& e : incident_edges(*p.data.skeleton, v))
 					{
 						if (!e.is_valid())
 							continue;
-						if (incident_faces(*p.skeleton_, e).empty())
+						if (incident_faces(*p.data.skeleton, e).empty())
 							return true;
 					}
 				}
@@ -253,12 +253,12 @@ struct NonManifoldPrune
 			{
 				if (face_id == INVALID_INDEX)
 					continue;
-				const SkeletonFace f = of_index<SkeletonFace>(*p.skeleton_, face_id);
-				if (!f.is_valid() || index_of(*p.skeleton_, f) != face_id)
+				const SkeletonFace f = of_index<SkeletonFace>(*p.data.skeleton, face_id);
+				if (!f.is_valid() || index_of(*p.data.skeleton, f) != face_id)
 					continue;
-				for (const SkeletonEdge& e : incident_edges(*p.skeleton_, f))
+				for (const SkeletonEdge& e : incident_edges(*p.data.skeleton, f))
 				{
-					if (e.is_valid() && incident_faces(*p.skeleton_, e).size() == 1)
+					if (e.is_valid() && incident_faces(*p.data.skeleton, e).size() == 1)
 						return true;
 				}
 			}

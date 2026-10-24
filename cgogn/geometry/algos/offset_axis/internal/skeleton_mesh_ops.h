@@ -63,38 +63,38 @@ struct SkeletonMeshOps
 
 	static bool remove_skeleton_vertex_and_linked_sphere(Context& p, const SkeletonVertex& v)
 	{
-		if (!p.skeleton_ || !v.is_valid())
+		if (!p.data.skeleton || !v.is_valid())
 			return false;
-		const uint32 skeleton_vertex_id = index_of(*p.skeleton_, v);
+		const uint32 skeleton_vertex_id = index_of(*p.data.skeleton, v);
 		if (skeleton_vertex_id == INVALID_INDEX)
 			return false;
 
 		SphereVertex linked_sphere;
-		if (p.skeleton_source_sphere_)
-			linked_sphere = value<SphereVertex>(*p.skeleton_, p.skeleton_source_sphere_, v);
+		if (p.data.skeleton_source_sphere)
+			linked_sphere = value<SphereVertex>(*p.data.skeleton, p.data.skeleton_source_sphere, v);
 
-		if (linked_sphere.is_valid() && p.spheres_)
+		if (linked_sphere.is_valid() && p.optimizer_data.spheres)
 		{
-			const uint32 sphere_index = index_of(*p.spheres_, linked_sphere);
-			if (sphere_index != INVALID_INDEX && p.spheres_skeleton_vertex_)
-				(*p.spheres_skeleton_vertex_)[sphere_index] = SkeletonVertex();
-			p.spheres_optimizer_->remove_sphere(linked_sphere);
+			const uint32 sphere_index = index_of(*p.optimizer_data.spheres, linked_sphere);
+			if (sphere_index != INVALID_INDEX && p.data.sphere_skeleton_vertex)
+				(*p.data.sphere_skeleton_vertex)[sphere_index] = SkeletonVertex();
+			p.data.spheres_optimizer->remove_sphere(linked_sphere);
 		}
 
-		if (p.skeleton_source_sphere_)
-			value<SphereVertex>(*p.skeleton_, p.skeleton_source_sphere_, v) = SphereVertex();
-		remove_vertex(*p.skeleton_, v);
+		if (p.data.skeleton_source_sphere)
+			value<SphereVertex>(*p.data.skeleton, p.data.skeleton_source_sphere, v) = SphereVertex();
+		remove_vertex(*p.data.skeleton, v);
 		return true;
 	}
 	static void compute_edge_degree(Context& p)
 	{
-		parallel_foreach_cell(*p.skeleton_, [&](SkeletonEdge e) {
-			auto in_face = incident_faces(*p.skeleton_, e);
-			const uint32 ide = index_of(*p.skeleton_, e);
+		parallel_foreach_cell(*p.data.skeleton, [&](SkeletonEdge e) {
+			auto in_face = incident_faces(*p.data.skeleton, e);
+			const uint32 ide = index_of(*p.data.skeleton, e);
 			const uint32 deg = static_cast<uint32>(in_face.size());
 
-			if (ide != INVALID_INDEX && p.edge_degree_)
-				(*p.edge_degree_)[ide] = deg;
+			if (ide != INVALID_INDEX && p.data.edge_degree)
+				(*p.data.edge_degree)[ide] = deg;
 
 			return true;
 		});
@@ -108,12 +108,12 @@ struct SkeletonMeshOps
 		{
 			if (!e.is_valid())
 				continue;
-			const std::vector<SkeletonVertex> edge_vertices = incident_vertices(*p.skeleton_, e);
+			const std::vector<SkeletonVertex> edge_vertices = incident_vertices(*p.data.skeleton, e);
 			for (const SkeletonVertex& v : edge_vertices)
 				candidate_vertices.push_back(v);
-			if (incident_faces(*p.skeleton_, e).empty())
+			if (incident_faces(*p.data.skeleton, e).empty())
 			{
-				remove_edge(*p.skeleton_, e);
+				remove_edge(*p.data.skeleton, e);
 				++removed_edges;
 			}
 		}
@@ -121,10 +121,10 @@ struct SkeletonMeshOps
 		{
 			if (!v.is_valid())
 				continue;
-			const uint32 idv = index_of(*p.skeleton_, v);
+			const uint32 idv = index_of(*p.data.skeleton, v);
 			if (idv == INVALID_INDEX)
 				continue;
-			if (!incident_edges(*p.skeleton_, v).empty())
+			if (!incident_edges(*p.data.skeleton, v).empty())
 				continue;
 			remove_skeleton_vertex_and_linked_sphere(p, v);
 		}
@@ -133,16 +133,16 @@ struct SkeletonMeshOps
 	static std::unordered_set<uint32> collect_current_orphan_edge_ids(Context& p)
 	{
 		std::unordered_set<uint32> orphan_edge_ids;
-		if (!p.skeleton_)
+		if (!p.data.skeleton)
 			return orphan_edge_ids;
-		orphan_edge_ids.reserve(nb_cells<SkeletonEdge>(*p.skeleton_));
-		foreach_cell(*p.skeleton_, [&](SkeletonEdge e) -> bool {
+		orphan_edge_ids.reserve(nb_cells<SkeletonEdge>(*p.data.skeleton));
+		foreach_cell(*p.data.skeleton, [&](SkeletonEdge e) -> bool {
 			if (!e.is_valid())
 				return true;
-			const uint32 ide = index_of(*p.skeleton_, e);
+			const uint32 ide = index_of(*p.data.skeleton, e);
 			if (ide == INVALID_INDEX)
 				return true;
-			if (incident_faces(*p.skeleton_, e).empty())
+			if (incident_faces(*p.data.skeleton, e).empty())
 				orphan_edge_ids.insert(ide);
 			return true;
 		});
@@ -153,7 +153,7 @@ struct SkeletonMeshOps
 		const std::unordered_set<uint32>* preserved_orphan_edge_ids = nullptr)
 	{
 		uint32 removed_edges = 0;
-		if (!p.skeleton_)
+		if (!p.data.skeleton)
 		{
 			if (out_removed_edges)
 				*out_removed_edges = 0;
@@ -161,13 +161,13 @@ struct SkeletonMeshOps
 		}
 
 		std::vector<SkeletonEdge> orphan_edges;
-		orphan_edges.reserve(nb_cells<SkeletonEdge>(*p.skeleton_));
-		foreach_cell(*p.skeleton_, [&](SkeletonEdge e) -> bool {
+		orphan_edges.reserve(nb_cells<SkeletonEdge>(*p.data.skeleton));
+		foreach_cell(*p.data.skeleton, [&](SkeletonEdge e) -> bool {
 			if (!e.is_valid())
 				return true;
-			if (!incident_faces(*p.skeleton_, e).empty())
+			if (!incident_faces(*p.data.skeleton, e).empty())
 				return true;
-			const uint32 ide = index_of(*p.skeleton_, e);
+			const uint32 ide = index_of(*p.data.skeleton, e);
 			if (ide == INVALID_INDEX)
 				return true;
 			if (preserved_orphan_edge_ids && preserved_orphan_edge_ids->find(ide) != preserved_orphan_edge_ids->end())
@@ -182,13 +182,13 @@ struct SkeletonMeshOps
 		{
 			if (!e.is_valid())
 				continue;
-			for (const SkeletonVertex& v : incident_vertices(*p.skeleton_, e))
+			for (const SkeletonVertex& v : incident_vertices(*p.data.skeleton, e))
 				candidate_vertices.push_back(v);
-			remove_edge(*p.skeleton_, e);
+			remove_edge(*p.data.skeleton, e);
 			++removed_edges;
 		}
 
-		foreach_cell(*p.skeleton_, [&](SkeletonVertex v) -> bool {
+		foreach_cell(*p.data.skeleton, [&](SkeletonVertex v) -> bool {
 			if (!v.is_valid())
 				return true;
 			candidate_vertices.push_back(v);
@@ -202,12 +202,12 @@ struct SkeletonMeshOps
 		{
 			if (!v.is_valid())
 				continue;
-			const uint32 idv = index_of(*p.skeleton_, v);
+			const uint32 idv = index_of(*p.data.skeleton, v);
 			if (idv == INVALID_INDEX)
 				continue;
 			if (!seen_vertex_ids.insert(idv).second)
 				continue;
-			if (!incident_edges(*p.skeleton_, v).empty())
+			if (!incident_edges(*p.data.skeleton, v).empty())
 				continue;
 			remove_skeleton_vertex_and_linked_sphere(p, v);
 		}
@@ -219,7 +219,7 @@ struct SkeletonMeshOps
 											RemovalStats& out_stats, const SkeletonFaceDeletionOptions& options = {})
 	{
 		out_stats = RemovalStats{};
-		if (!p.skeleton_ || !p.incident_tets_ || face_ids_to_delete.empty())
+		if (!p.data.skeleton || !p.data.face_incident_tets || face_ids_to_delete.empty())
 			return false;
 		const std::unordered_set<uint32> preexisting_orphan_edge_ids = options.remove_global_orphan_elements_after_batch
 																		   ? collect_current_orphan_edge_ids(p)
@@ -227,19 +227,19 @@ struct SkeletonMeshOps
 
 		for (uint32 face_id : face_ids_to_delete)
 		{
-			const SkeletonFace face = of_index<SkeletonFace>(*p.skeleton_, face_id);
+			const SkeletonFace face = of_index<SkeletonFace>(*p.data.skeleton, face_id);
 			if (!face.is_valid())
 				continue;
-			const uint32 current_face_id = index_of(*p.skeleton_, face);
+			const uint32 current_face_id = index_of(*p.data.skeleton, face);
 			if (current_face_id == INVALID_INDEX || current_face_id != face_id)
 				continue;
 
 			bool face_still_attached = false;
-			for (SkeletonEdge e : incident_edges(*p.skeleton_, face))
+			for (SkeletonEdge e : incident_edges(*p.data.skeleton, face))
 			{
 				if (!e.is_valid())
 					continue;
-				for (SkeletonFace ef : incident_faces(*p.skeleton_, e))
+				for (SkeletonFace ef : incident_faces(*p.data.skeleton, e))
 				{
 					if (ef == face)
 					{
@@ -253,9 +253,9 @@ struct SkeletonMeshOps
 			if (!face_still_attached)
 				continue;
 
-			const std::set<std::size_t> in_tets = (*p.incident_tets_)[face_id];
-			std::vector<SkeletonEdge> affected_edges = incident_edges(*p.skeleton_, face);
-			remove_face(*p.skeleton_, face);
+			const std::set<std::size_t> in_tets = (*p.data.face_incident_tets)[face_id];
+			std::vector<SkeletonEdge> affected_edges = incident_edges(*p.data.skeleton, face);
+			remove_face(*p.data.skeleton, face);
 			++out_stats.removed_faces;
 
 			if (options.remove_incident_orphan_edges_immediately)
@@ -263,8 +263,8 @@ struct SkeletonMeshOps
 
 			for (std::size_t tet_id : in_tets)
 			{
-				auto it_tet = p.skeleton_tets_.find(tet_id);
-				if (it_tet == p.skeleton_tets_.end())
+				auto it_tet = p.skeleton_tets.find(tet_id);
+				if (it_tet == p.skeleton_tets.end())
 					continue;
 				const Tet old_tet = it_tet->second;
 				for (uint32 i = 0; i < 4; ++i)
@@ -272,11 +272,11 @@ struct SkeletonMeshOps
 					const SkeletonFace f = old_tet.faces[i];
 					if (!f.is_valid() || f == face)
 						continue;
-					const uint32 idf = index_of(*p.skeleton_, f);
+					const uint32 idf = index_of(*p.data.skeleton, f);
 					if (idf != INVALID_INDEX)
-						(*p.incident_tets_)[idf].erase(tet_id);
+						(*p.data.face_incident_tets)[idf].erase(tet_id);
 				}
-				p.skeleton_tets_.erase(it_tet);
+				p.skeleton_tets.erase(it_tet);
 				++out_stats.removed_tets;
 			}
 		}
@@ -296,13 +296,13 @@ struct SkeletonMeshOps
 										   SkeletonEdge& out_edge)
 	{
 		out_edge = SkeletonEdge();
-		if (!p.skeleton_ || !a.is_valid() || !b.is_valid() || a == b)
+		if (!p.data.skeleton || !a.is_valid() || !b.is_valid() || a == b)
 			return false;
-		for (SkeletonEdge edge : incident_edges(*p.skeleton_, a))
+		for (SkeletonEdge edge : incident_edges(*p.data.skeleton, a))
 		{
 			if (!edge.is_valid())
 				continue;
-			const std::vector<SkeletonVertex> edge_vertices = incident_vertices(*p.skeleton_, edge);
+			const std::vector<SkeletonVertex> edge_vertices = incident_vertices(*p.data.skeleton, edge);
 			if (edge_vertices.size() == 2 &&
 				((edge_vertices[0] == a && edge_vertices[1] == b) || (edge_vertices[0] == b && edge_vertices[1] == a)))
 			{

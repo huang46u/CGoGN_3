@@ -118,44 +118,18 @@ struct SkeletonTopologyTypes
 	};
 	using TetMap = std::unordered_map<std::size_t, Tet>;
 
+	// What the topology functions work on: the topology data, the data of the spheres optimizer (samples and spheres),
+	// the current tets, the metrics of the running step and the residual prune mode.
 	struct Context
 	{
-		TetMap& skeleton_tets_;
-		NONMANIFOLD*& skeleton_;
-		POINTS*& samples_mesh_;
-		std::shared_ptr<SphereAttribute<std::vector<SphereVertex>>>& samples_knn_;
-		std::shared_ptr<SphereAttribute<SphereVertex>>& samples_sphere_;
-		const acc::KDTree<3, uint32>*& samples_kdtree_;
-		POINTS*& spheres_;
-		std::shared_ptr<SphereAttribute<Vec3>>& spheres_position_;
-		std::shared_ptr<SphereAttribute<Scalar>>& spheres_radius_;
-		std::shared_ptr<SphereAttribute<std::vector<SphereVertex>>>& spheres_cluster_;
-		std::shared_ptr<SphereAttribute<std::vector<SphereVertex>>>& spheres_neighbor_clusters_;
-		std::shared_ptr<SphereAttribute<Scalar>>& spheres_error_;
-		std::shared_ptr<SphereAttribute<SkeletonVertex>>& spheres_skeleton_vertex_;
-		std::shared_ptr<SkeletonAttribute<Vec3>>& skeleton_position_;
-		std::shared_ptr<SkeletonAttribute<Scalar>>& skeleton_radius_;
-		std::shared_ptr<SkeletonAttribute<std::set<std::size_t>>>& incident_tets_;
-		std::shared_ptr<SkeletonAttribute<SphereVertex>>& skeleton_source_sphere_;
-		std::shared_ptr<SkeletonAttribute<uint32>>& edge_degree_;
-		SpheresOptimizerType*& spheres_optimizer_;
+		Data& data;
+		typename SpheresOptimizerType::Data& optimizer_data;
+		TetMap& skeleton_tets;
 		Metrics& metrics;
 		ResidualPruneMode residual_prune_mode;
 
 		Context(Data& d, TetMap& t, Metrics& m, ResidualPruneMode mode)
-			: skeleton_tets_(t), skeleton_(d.skeleton), samples_mesh_(d.spheres_optimizer->data().samples_mesh),
-			  samples_knn_(d.spheres_optimizer->data().sample_knn),
-			  samples_sphere_(d.spheres_optimizer->data().sample_sphere),
-			  samples_kdtree_(d.spheres_optimizer->data().sample_kdtree), spheres_(d.spheres_optimizer->data().spheres),
-			  spheres_position_(d.spheres_optimizer->data().sphere_position),
-			  spheres_radius_(d.spheres_optimizer->data().sphere_radius),
-			  spheres_cluster_(d.spheres_optimizer->data().sphere_cluster),
-			  spheres_neighbor_clusters_(d.spheres_optimizer->data().sphere_neighbors),
-			  spheres_error_(d.spheres_optimizer->data().sphere_error),
-			  spheres_skeleton_vertex_(d.sphere_skeleton_vertex), skeleton_position_(d.skeleton_position),
-			  skeleton_radius_(d.skeleton_radius), incident_tets_(d.face_incident_tets),
-			  skeleton_source_sphere_(d.skeleton_source_sphere), edge_degree_(d.edge_degree),
-			  spheres_optimizer_(d.spheres_optimizer), metrics(m), residual_prune_mode(mode)
+			: data(d), optimizer_data(d.spheres_optimizer->data()), skeleton_tets(t), metrics(m), residual_prune_mode(mode)
 		{
 		}
 	};

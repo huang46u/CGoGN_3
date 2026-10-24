@@ -513,6 +513,8 @@ bool recompute_sample_normal_pca(State& s, typename State::PVertex vertex)
 	return true;
 }
 
+// The data is copied from the state on every call on purpose: build_sample_kdtree replaces the sample k-d tree, the UI
+// changes sqem_update_lambda_line_plane while the optimizer runs, and data() may point the reconstruction at other meshes.
 template <typename State>
 typename State::SpheresOptimizerType& optimizer_for(State& s)
 {
@@ -549,6 +551,7 @@ typename State::SpheresOptimizerType& optimizer_for(State& s)
 	return *s.optimizer;
 }
 
+// Copied on every call for the same reason as optimizer_for (it also refreshes the optimizer data).
 template <typename State>
 typename State::TopologyType& topology_for(State& s)
 {
@@ -1044,8 +1047,9 @@ typename State::StatusInfo prune_residual_sheets(State& s)
 
 	// skeleton comes from build_skeleton
 	OFFSET_AXIS_PRECONDITION(s.data.skeleton && nb_cells<NMVertex>(*s.data.skeleton) > 0, Status::invalid_data);
-	topology_for(s).set_residual_prune_mode(s.options.residual_prune_mode);
-	return topology_for(s).prune_residual_sheets() == TopologyType::Status::success ? Status::success
+	auto& topology = topology_for(s);
+	topology.set_residual_prune_mode(s.options.residual_prune_mode);
+	return topology.prune_residual_sheets() == TopologyType::Status::success ? Status::success
 																					: Status::topology_fix_failed;
 }
 

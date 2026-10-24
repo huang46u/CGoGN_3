@@ -219,7 +219,7 @@ private:
 	template <typename ScoreEvaluator>
 	Status run_topology_fix_pipeline(Context& p, ScoreEvaluator& evaluator)
 	{
-		if (!p.skeleton_ || !p.incident_tets_)
+		if (!p.data.skeleton || !p.data.face_incident_tets)
 			return Status::invalid_data;
 		const DenseFiveVertexDetectionResult dense_five_vertex_detection =
 			DenseK5Repair::detect_k5_and_k5_minus_1_cells(p);
@@ -228,19 +228,19 @@ private:
 		TopologyFixScoreCache score_cache;
 		if (!QuadratureScores::initialize_topology_fix_score_cache(p, evaluator, score_cache))
 			return Status::score_evaluation_failed;
-		while (!p.skeleton_tets_.empty())
+		while (!p.skeleton_tets.empty())
 		{
-			const uint32 round_start_tets = static_cast<uint32>(p.skeleton_tets_.size());
+			const uint32 round_start_tets = static_cast<uint32>(p.skeleton_tets.size());
 			const RemovalStats boundary_stats = BoundaryTetPrune::run_boundary_tet_face_deletion(p, &score_cache);
 			RemovalStats simple_stats;
-			if (!p.skeleton_tets_.empty())
+			if (!p.skeleton_tets.empty())
 				simple_stats = GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<
 					topology_detail::SimpleTetPolicy>(p, score_cache, evaluator);
 			RemovalStats nonsimple_stats;
-			if (!p.skeleton_tets_.empty())
+			if (!p.skeleton_tets.empty())
 				nonsimple_stats = GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<
 					topology_detail::NonSimpleTetPolicy>(p, score_cache, evaluator);
-			const uint32 round_end_tets = static_cast<uint32>(p.skeleton_tets_.size());
+			const uint32 round_end_tets = static_cast<uint32>(p.skeleton_tets.size());
 			const uint32 round_removed_tets = round_start_tets - round_end_tets;
 			++p.metrics.topology_rounds;
 			p.metrics.boundary_removed_tets += boundary_stats.removed_tets;
@@ -259,7 +259,7 @@ private:
 			DenseK5Repair::repair_isolated_independent_dense_five_vertex_regions(p, independent_dense_repair_seeds);
 		p.metrics.repaired_dense_regions += repair_stats.repaired_regions;
 		p.metrics.added_faces += repair_stats.added_faces;
-		p.metrics.tet_count = static_cast<uint32>(p.skeleton_tets_.size());
+		p.metrics.tet_count = static_cast<uint32>(p.skeleton_tets.size());
 		return Status::success;
 	}
 

@@ -67,7 +67,7 @@ struct QuadratureScores
 											 const std::unordered_set<uint32>& face_ids,
 											 std::unordered_map<uint32, Scalar>& face_scores, bool normalize_by_area)
 	{
-		if (!p.skeleton_ || !p.skeleton_position_)
+		if (!p.data.skeleton || !p.data.skeleton_position)
 			return false;
 		if (face_ids.empty())
 		{
@@ -112,8 +112,8 @@ struct QuadratureScores
 		face_scores.reserve(face_ids.size());
 		std::vector<AdaptiveTriangleTask> pending_tris;
 		pending_tris.reserve(face_ids.size() * 2);
-		foreach_cell(*p.skeleton_, [&](SkeletonFace f) -> bool {
-			const uint32 idf = index_of(*p.skeleton_, f);
+		foreach_cell(*p.data.skeleton, [&](SkeletonFace f) -> bool {
+			const uint32 idf = index_of(*p.data.skeleton, f);
 			if (idf == INVALID_INDEX)
 				return true;
 			if (face_ids.find(idf) == face_ids.end())
@@ -121,14 +121,14 @@ struct QuadratureScores
 			face_scores[idf] = Scalar(0);
 			if (!f.is_valid())
 				return true;
-			const std::vector<SkeletonVertex> vertices = incident_vertices(*p.skeleton_, f);
+			const std::vector<SkeletonVertex> vertices = incident_vertices(*p.data.skeleton, f);
 			if (vertices.size() < 3)
 				return true;
-			const Vec3 p0 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[0]);
+			const Vec3 p0 = value<Vec3>(*p.data.skeleton, p.data.skeleton_position, vertices[0]);
 			for (uint32 i = 1; i + 1 < vertices.size(); ++i)
 			{
-				const Vec3 p1 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[i]);
-				const Vec3 p2 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[i + 1]);
+				const Vec3 p1 = value<Vec3>(*p.data.skeleton, p.data.skeleton_position, vertices[i]);
+				const Vec3 p2 = value<Vec3>(*p.data.skeleton, p.data.skeleton_position, vertices[i + 1]);
 				if (!(geometry::area(p0, p1, p2) > Scalar(0)))
 					continue;
 				pending_tris.push_back({idf, p0, p1, p2, 0});
@@ -214,23 +214,23 @@ struct QuadratureScores
 
 		if (normalize_by_area)
 		{
-			foreach_cell(*p.skeleton_, [&](SkeletonFace f) -> bool {
-				const uint32 face_id = index_of(*p.skeleton_, f);
+			foreach_cell(*p.data.skeleton, [&](SkeletonFace f) -> bool {
+				const uint32 face_id = index_of(*p.data.skeleton, f);
 				auto it_score = face_scores.find(face_id);
 				if (face_id == INVALID_INDEX || it_score == face_scores.end())
 					return true;
-				const std::vector<SkeletonVertex> vertices = incident_vertices(*p.skeleton_, f);
+				const std::vector<SkeletonVertex> vertices = incident_vertices(*p.data.skeleton, f);
 				if (vertices.size() < 3)
 				{
 					it_score->second = Scalar(0);
 					return true;
 				}
-				const Vec3 p0 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[0]);
+				const Vec3 p0 = value<Vec3>(*p.data.skeleton, p.data.skeleton_position, vertices[0]);
 				Scalar area = Scalar(0);
 				for (uint32 i = 1; i + 1 < vertices.size(); ++i)
 				{
-					const Vec3 p1 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[i]);
-					const Vec3 p2 = value<Vec3>(*p.skeleton_, p.skeleton_position_, vertices[i + 1]);
+					const Vec3 p1 = value<Vec3>(*p.data.skeleton, p.data.skeleton_position, vertices[i]);
+					const Vec3 p2 = value<Vec3>(*p.data.skeleton, p.data.skeleton_position, vertices[i + 1]);
 					area += geometry::area(p0, p1, p2);
 				}
 				it_score->second = (area > Scalar(0)) ? (it_score->second / area) : Scalar(0);
@@ -243,10 +243,10 @@ struct QuadratureScores
 	static std::unordered_set<uint32> collect_current_tet_edge_ids(Context& p)
 	{
 		std::unordered_set<uint32> tet_edge_ids;
-		if (!p.skeleton_)
+		if (!p.data.skeleton)
 			return tet_edge_ids;
-		tet_edge_ids.reserve(nb_cells<SkeletonEdge>(*p.skeleton_));
-		for (const auto& kv : p.skeleton_tets_)
+		tet_edge_ids.reserve(nb_cells<SkeletonEdge>(*p.data.skeleton));
+		for (const auto& kv : p.skeleton_tets)
 		{
 			const Tet& tet = kv.second;
 			for (uint32 i = 0; i < 4; ++i)
@@ -254,11 +254,11 @@ struct QuadratureScores
 				const SkeletonFace f = tet.faces[i];
 				if (!f.is_valid())
 					continue;
-				for (SkeletonEdge e : incident_edges(*p.skeleton_, f))
+				for (SkeletonEdge e : incident_edges(*p.data.skeleton, f))
 				{
 					if (!e.is_valid())
 						continue;
-					const uint32 ide = index_of(*p.skeleton_, e);
+					const uint32 ide = index_of(*p.data.skeleton, e);
 					if (ide != INVALID_INDEX)
 						tet_edge_ids.insert(ide);
 				}
@@ -272,7 +272,7 @@ struct QuadratureScores
 															   const std::unordered_set<uint32>& edge_ids,
 															   std::unordered_map<uint32, Scalar>& edge_scores)
 	{
-		if (!p.skeleton_ || !p.skeleton_position_)
+		if (!p.data.skeleton || !p.data.skeleton_position)
 			return false;
 		edge_scores.clear();
 		if (edge_ids.empty())
@@ -296,22 +296,22 @@ struct QuadratureScores
 		std::vector<Vec3> sample_points;
 		sample_points.reserve(edge_ids.size() * 3);
 
-		foreach_cell(*p.skeleton_, [&](SkeletonEdge e) -> bool {
+		foreach_cell(*p.data.skeleton, [&](SkeletonEdge e) -> bool {
 			if (!e.is_valid())
 				return true;
-			const uint32 ide = index_of(*p.skeleton_, e);
+			const uint32 ide = index_of(*p.data.skeleton, e);
 			if (ide == INVALID_INDEX)
 				return true;
 			if (edge_ids.find(ide) == edge_ids.end())
 				return true;
 			edge_scores[ide] = Scalar(0);
 
-			const std::vector<SkeletonVertex> verts = incident_vertices(*p.skeleton_, e);
+			const std::vector<SkeletonVertex> verts = incident_vertices(*p.data.skeleton, e);
 			if (verts.size() != 2)
 				return true;
 
-			const Vec3 p0 = value<Vec3>(*p.skeleton_, p.skeleton_position_, verts[0]);
-			const Vec3 p1 = value<Vec3>(*p.skeleton_, p.skeleton_position_, verts[1]);
+			const Vec3 p0 = value<Vec3>(*p.data.skeleton, p.data.skeleton_position, verts[0]);
+			const Vec3 p1 = value<Vec3>(*p.data.skeleton, p.data.skeleton_position, verts[1]);
 			const Scalar edge_len = (p1 - p0).norm();
 			if (!(edge_len > Scalar(0)))
 				return true;
@@ -373,10 +373,10 @@ struct QuadratureScores
 		{
 			if (!e.is_valid())
 				continue;
-			const uint32 ide = index_of(*p.skeleton_, e);
+			const uint32 ide = index_of(*p.data.skeleton, e);
 			if (ide == INVALID_INDEX || !seen_edge_ids.insert(ide).second)
 				continue;
-			if (incident_faces(*p.skeleton_, e).empty())
+			if (incident_faces(*p.data.skeleton, e).empty())
 				cache->edge_scores.erase(ide);
 		}
 	}
@@ -384,8 +384,8 @@ struct QuadratureScores
 	static std::unordered_set<uint32> collect_current_tet_face_id_whitelist(Context& p)
 	{
 		std::unordered_set<uint32> tet_face_ids;
-		tet_face_ids.reserve(nb_cells<SkeletonFace>(*p.skeleton_));
-		for (const auto& kv : p.skeleton_tets_)
+		tet_face_ids.reserve(nb_cells<SkeletonFace>(*p.data.skeleton));
+		for (const auto& kv : p.skeleton_tets)
 		{
 			const Tet& tet = kv.second;
 			for (uint32 i = 0; i < 4; ++i)
@@ -393,7 +393,7 @@ struct QuadratureScores
 				const SkeletonFace f = tet.faces[i];
 				if (!f.is_valid())
 					continue;
-				const uint32 idf = index_of(*p.skeleton_, f);
+				const uint32 idf = index_of(*p.data.skeleton, f);
 				if (idf != INVALID_INDEX)
 					tet_face_ids.insert(idf);
 			}
