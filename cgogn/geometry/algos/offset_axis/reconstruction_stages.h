@@ -141,6 +141,9 @@ template <typename State>
 void reset(State& s);
 
 template <typename State>
+void bind_input(State& s);
+
+template <typename State>
 typename State::StatusInfo initialize_data(State& s);
 
 template <typename State>
@@ -256,6 +259,14 @@ void reset(State& s)
 	s.initialized = false;
 }
 
+// Points the input caches at the current meshes and attributes: data() may have replaced the meshes (the UI changes
+// the surface when another one is selected), so every stage that queries the input binds again.
+template <typename State>
+void bind_input(State& s)
+{
+	s.input.bind(s.data.surface, s.data.input_points, s.input_position, s.input_normal);
+}
+
 template <typename State>
 typename State::StatusInfo initialize_data(State& s)
 {
@@ -298,7 +309,7 @@ typename State::StatusInfo initialize_data(State& s)
 	s.skeleton_edge_degree = get_or_add_attribute<uint32, NMEdge>(*s.data.skeleton, "degree");
 	s.initialized =
 		s.input_position && s.sample_position && s.sample_normal && s.sphere_position && s.skeleton_position;
-	s.input.bind(s.data.surface, s.data.input_points, s.input_position, s.input_normal);
+	bind_input(s);
 	return s.initialized ? Status::success : Status::invalid_data;
 }
 
@@ -391,7 +402,7 @@ void recompute_samples_normals_from_input(State& s)
 {
 	using PVertex = typename State::PVertex;
 
-	s.input.bind(s.data.surface, s.data.input_points, s.input_position, s.input_normal);
+	bind_input(s);
 	if (!s.input.input_kdtree() && s.data.surface)
 	{
 		s.input.build_surface_bvh();
@@ -564,7 +575,7 @@ bool evaluate_topology_scores(State& s, const std::vector<Vec3>& points, std::ve
 {
 	using NeuralModelType = typename State::NeuralModelType;
 
-	s.input.bind(s.data.surface, s.data.input_points, s.input_position, s.input_normal);
+	bind_input(s);
 	if (neural_model_is(s, NeuralModelType::mf))
 	{
 		// MF: mf - |sdf| is not a stable medial axis (its minimum is above zero and varies a lot over a shape),
@@ -612,7 +623,7 @@ typename State::StatusInfo sample_alpha_level_set(State& s)
 
 	if (const typename State::StatusInfo initialized = initialize_data(s); initialized != Status::success)
 		return initialized;
-	s.input.bind(s.data.surface, s.data.input_points, s.input_position, s.input_normal);
+	bind_input(s);
 	s.input.invalidate();
 	s.input.build_input_kdtree();
 	const PrepareInputs<typename State::Surface, typename State::Points> inputs{
@@ -690,7 +701,7 @@ typename State::StatusInfo apply_sampling_filtering(State& s)
 	OFFSET_AXIS_PRECONDITION(s.initialized, Status::invalid_data);
 	if (!s.options.apply_filtering || !s.data.samples || nb_cells<PVertex>(*s.data.samples) == 0)
 		return Status::success;
-	s.input.bind(s.data.surface, s.data.input_points, s.input_position, s.input_normal);
+	bind_input(s);
 	s.input.build_input_kdtree();
 	if (!s.input.input_kdtree())
 		s.input.build_surface_bvh();

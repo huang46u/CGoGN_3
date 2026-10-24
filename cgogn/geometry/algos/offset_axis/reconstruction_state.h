@@ -25,56 +25,22 @@
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
-#include <cgogn/core/functions/traversals/edge.h>
-#include <cgogn/core/types/cell_marker.h>
-#include <cgogn/core/utils/thread_pool.h>
-#include <cgogn/geometry/algos/area.h>
-#include <cgogn/geometry/algos/fitting.h>
-#include <cgogn/geometry/algos/medial_axis.h>
-#include <cgogn/geometry/algos/normal.h>
-#include <cgogn/geometry/algos/offset_axis/alpha_projection.h>
-#include <cgogn/geometry/algos/offset_axis/alpha_sampling.h>
-#include <cgogn/geometry/algos/offset_axis/distance_field.h>
 #include <cgogn/geometry/algos/offset_axis/input_geometry.h>
 #include <cgogn/geometry/algos/offset_axis/neural_model_type.h>
-#include <cgogn/geometry/algos/offset_axis/normal_utils.h>
-#include <cgogn/geometry/algos/offset_axis/parallel_for.h>
-#include <cgogn/geometry/algos/offset_axis/point_cloud_distance_field.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_stats.h>
-#include <cgogn/geometry/algos/offset_axis/sample_processing.h>
 #include <cgogn/geometry/algos/offset_axis/skeleton_topology.h>
-#include <cgogn/geometry/algos/offset_axis/spatial_query.h>
 #include <cgogn/geometry/algos/offset_axis/spheres_optimizer.h>
-#include <cgogn/geometry/algos/offset_axis/surface_distance_field.h>
-#include <cgogn/geometry/functions/bounding_box.h>
-#include <cgogn/geometry/functions/normal.h>
 #include <cgogn/geometry/types/line_quadric.h>
-#include <cgogn/geometry/algos/offset_axis/ray_level_set_sampler.h>
-#include <cgogn/geometry/algos/offset_axis/ray_level_set_sampler_traits.h>
-#include <cgogn/geometry/algos/offset_axis/spatial_grid.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
-#include <libacc/bvh_tree.h>
 #include <libacc/kd_tree.h>
 
-#include <Eigen/Dense>
-
-#include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <cmath>
-#include <filesystem>
 #include <functional>
-#include <future>
 #include <memory>
 #include <set>
-#include <stdexcept>
 #include <string>
-#include <tuple>
-#include <type_traits>
-#include <utility>
 #include <vector>
 
 namespace cgogn
@@ -86,8 +52,7 @@ namespace geometry
 namespace offset_axis
 {
 
-// All the state of the UDF reconstruction: the types and the data members of the former OffsetAxisReconstruction.
-// The members are public and are accessed by the OffsetAxisReconstruction facade as s_.name.
+// All the state of the OffsetAxis reconstruction: meshes, attribute handles, caches and stage results. The members are public; the OffsetAxisReconstruction facade and the stage functions access them directly.
 // Their declaration order is the initialization order: field refers to input and options, so it is declared
 // after them.
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, template <typename, typename> class FIELD>
