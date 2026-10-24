@@ -25,6 +25,7 @@
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/utils/numerics.h>
+#include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
 #include <cgogn/geometry/algos/offset_axis/spheres_optimizer.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
@@ -106,12 +107,7 @@ struct SkeletonTopologyTypes
 		invalid_data,
 		score_evaluation_failed
 	};
-	enum class ResidualPruneMode
-	{
-		current,
-		keep_fully_non_manifold,
-		collapsible_only
-	};
+	using ResidualPruneMode = offset_axis::ResidualPruneOption;
 
 	using SpheresOptimizerType = SpheresOptimizer<POINTS>;
 	using FaceKey = std::array<uint32, 3>;

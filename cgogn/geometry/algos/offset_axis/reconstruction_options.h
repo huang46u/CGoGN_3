@@ -36,7 +36,7 @@ namespace geometry
 namespace offset_axis
 {
 
-// Residual sheet prune mode (postprocess.residual_prune_mode); same order as SkeletonTopology::ResidualPruneMode.
+// Residual sheet prune mode (postprocess.residual_prune_mode); SkeletonTopology uses this enum directly.
 enum class ResidualPruneOption
 {
 	current,

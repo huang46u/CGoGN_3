@@ -102,9 +102,6 @@ inline constexpr Scalar ray_box_relative_expand = Scalar(0.05);
 inline constexpr Scalar filter_margin = Scalar(1e-2);
 // MAFlipPrune, neural UDF: a medial centre is retried when its UDF value exceeds this factor times alpha.
 inline constexpr Scalar udf_flip_threshold_factor = Scalar(1.2);
-// MAFlipPrune, MF: range the ma_flip_prune_alpha_factor option is clamped to.
-inline constexpr Scalar mf_flip_alpha_factor_min = Scalar(1);
-inline constexpr Scalar mf_flip_alpha_factor_max = Scalar(5);
 } // namespace constants
 
 } // namespace offset_axis
@@ -852,9 +849,10 @@ typename State::StatusInfo compute_initial_medial_axis(State& s)
 		std::vector<uint32> flipped_indices;
 		const Scalar udf_threshold =
 			udf_model ? constants::udf_flip_threshold_factor * fallback_radius : fallback_radius;
-		const Scalar mf_threshold = fallback_radius * std::max(constants::mf_flip_alpha_factor_min,
-															   std::min(constants::mf_flip_alpha_factor_max,
-																		Scalar(s.options.ma_flip_prune_alpha_factor)));
+		const Scalar mf_threshold =
+			fallback_radius * std::max(Scalar(option_info::ma_flip_prune_alpha_factor.min),
+									   std::min(Scalar(option_info::ma_flip_prune_alpha_factor.max),
+											    Scalar(s.options.ma_flip_prune_alpha_factor)));
 		const bool supported = mf_model || !Field::is_neural_type || neural_input;
 		auto scores = [&](const std::vector<Vec3>& points, std::vector<Scalar>& values,
 						  std::vector<Scalar>& sdf) -> bool {
@@ -1024,8 +1022,7 @@ typename State::StatusInfo prune_residual_sheets(State& s)
 
 	// skeleton comes from build_skeleton
 	OFFSET_AXIS_PRECONDITION(s.data.skeleton && nb_cells<NMVertex>(*s.data.skeleton) > 0, Status::invalid_data);
-	topology_for(s).set_residual_prune_mode(
-		static_cast<typename TopologyType::ResidualPruneMode>(static_cast<int>(s.options.residual_prune_mode)));
+	topology_for(s).set_residual_prune_mode(s.options.residual_prune_mode);
 	return topology_for(s).prune_residual_sheets() == TopologyType::Status::success ? Status::success
 																					: Status::topology_fix_failed;
 }
