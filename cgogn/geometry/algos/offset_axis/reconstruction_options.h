@@ -27,7 +27,13 @@
 
 #include <string>
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 // Residual sheet prune mode (postprocess.residual_prune_mode); same order as SkeletonTopology::ResidualPruneMode.
@@ -155,6 +161,10 @@ void for_each_option(Options& options, F&& f)
 #undef CGOGN_OFFSET_AXIS_OPTION_VISIT
 }
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_RECONSTRUCTION_OPTIONS_H_

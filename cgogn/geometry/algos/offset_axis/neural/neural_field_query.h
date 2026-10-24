@@ -16,6 +16,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 inline bool evaluate_udf_values(const NeuralFieldForward& field, const std::vector<Vec3>& points, size_t batch_size,
 								std::vector<Scalar>& out_values)
 {
@@ -112,6 +115,8 @@ inline bool evaluate_udf_values_sdf(const NeuralFieldForward& field, const std::
 	}
 	return true;
 }
+
+} // namespace offset_axis
 
 } // namespace geometry
 

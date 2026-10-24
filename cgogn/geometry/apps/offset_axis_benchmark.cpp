@@ -21,14 +21,14 @@ double seconds_from_milliseconds(double value_ms)
 
 int main(int argc, char** argv)
 {
-	using cgogn::geometry::benchmark::BenchmarkConfig;
-	using cgogn::geometry::benchmark::BenchmarkResult;
-	using cgogn::geometry::benchmark::SkeletonBenchmarkRunner;
-	using cgogn::geometry::benchmark::expand_batch_benchmark_configs;
-	using cgogn::geometry::benchmark::is_batch_case_completed;
-	using cgogn::geometry::benchmark::is_batch_benchmark_config;
-	using cgogn::geometry::benchmark::load_benchmark_config;
-	using cgogn::geometry::benchmark::write_benchmark_timing_json;
+	using cgogn::geometry::offset_axis::benchmark::BenchmarkConfig;
+	using cgogn::geometry::offset_axis::benchmark::BenchmarkResult;
+	using cgogn::geometry::offset_axis::benchmark::SkeletonBenchmarkRunner;
+	using cgogn::geometry::offset_axis::benchmark::expand_batch_benchmark_configs;
+	using cgogn::geometry::offset_axis::benchmark::is_batch_case_completed;
+	using cgogn::geometry::offset_axis::benchmark::is_batch_benchmark_config;
+	using cgogn::geometry::offset_axis::benchmark::load_benchmark_config;
+	using cgogn::geometry::offset_axis::benchmark::write_benchmark_timing_json;
 
 	auto print_usage = [&](const char* exe_name) {
 		std::cout << "Usage: " << exe_name << " <config.json>\n"
@@ -44,7 +44,7 @@ int main(int argc, char** argv)
 	};
 
 	auto print_result = [&](const BenchmarkConfig& config, const BenchmarkResult& result, bool include_config_loading) {
-		for (const auto& field : cgogn::geometry::benchmark::kBenchmarkTimingFields)
+		for (const auto& field : cgogn::geometry::offset_axis::benchmark::kBenchmarkTimingFields)
 		{
 			if (field.print_label == nullptr)
 				continue;

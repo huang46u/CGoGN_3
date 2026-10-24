@@ -31,7 +31,13 @@
 #include <memory>
 #include <vector>
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 // Distance field: the function the UDF reconstruction samples and scores. The reconstruction is written once and
@@ -104,6 +110,10 @@ struct DistanceFieldFor<RaySamplerPointCloud, SURFACE, POINTS>
 
 // the neural specialization is in neural/neural_distance_field.h; include it to reconstruct from a neural field
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_DISTANCE_FIELD_H_

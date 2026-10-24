@@ -48,6 +48,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 // sorted, duplicate-free vector used as a set: same element order and membership as std::set
 template <typename T>
 void sorted_vector_insert(std::vector<T>& v, const T& item)
@@ -731,6 +734,8 @@ private:
 	std::atomic<uint32> nonfinite_updates_{0};
 	uint32 post_convergence_iterations_ = 0;
 };
+
+} // namespace offset_axis
 
 } // namespace geometry
 } // namespace cgogn

@@ -32,7 +32,13 @@
 #include <memory>
 #include <system_error>
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 // Writes the skeleton with its per-vertex radius to a PLY file (directories are created, an existing file is replaced).
@@ -68,6 +74,10 @@ bool export_skeleton_ply(NONMANIFOLD& skeleton,
 	return !error && size > 0;
 }
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_PLY_EXPORT_H_

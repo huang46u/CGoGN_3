@@ -41,7 +41,13 @@
 #include <memory>
 #include <vector>
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 // Caches of the input geometry used by the sampling, the projections and the topology scores of the UDF
@@ -226,6 +232,10 @@ bool InputGeometry<SURFACE, POINTS>::query_point_cloud_projection_info(const Vec
 	return info.valid;
 }
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INPUT_GEOMETRY_H_

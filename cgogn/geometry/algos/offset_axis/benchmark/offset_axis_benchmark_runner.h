@@ -12,6 +12,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 namespace benchmark
 {
 
@@ -28,6 +31,8 @@ bool load_benchmark_input(const BenchmarkConfig& config, CMap2& surface, CMap0& 
 void write_benchmark_timing_json(const BenchmarkConfig& config, const BenchmarkResult& result);
 
 } // namespace benchmark
+
+} // namespace offset_axis
 
 } // namespace geometry
 

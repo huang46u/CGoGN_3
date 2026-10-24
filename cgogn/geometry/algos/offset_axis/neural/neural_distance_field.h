@@ -49,7 +49,13 @@
 #include <tuple>
 #include <vector>
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 // Distance field of a neural network (TorchScript module) loaded from a file. The network predicts the UDF or the MF
@@ -180,7 +186,7 @@ public:
 				 AlphaProjectionResult& projection)
 	{
 		const bool filter_positive = options_.neural_model_type == NeuralModelType::mf;
-		if (!geometry::project_points_to_alpha(neural_field_, points, pp, filter_positive, projection_workspace_,
+		if (!offset_axis::project_points_to_alpha(neural_field_, points, pp, filter_positive, projection_workspace_,
 											   projection))
 			return false;
 		return true;
@@ -224,6 +230,10 @@ struct DistanceFieldFor<RaySamplerNeural, SURFACE, POINTS>
 	using type = NeuralDistanceField<SURFACE, POINTS>;
 };
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_NEURAL_NEURAL_DISTANCE_FIELD_H_

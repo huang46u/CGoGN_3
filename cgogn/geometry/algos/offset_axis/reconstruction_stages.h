@@ -78,12 +78,18 @@
 #include <utility>
 #include <vector>
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 // Fixed constants of the reconstruction (not user options). Lengths are absolute, in model units (the inputs are
 // rescaled to [0,1] before the reconstruction).
-namespace udf_constants
+namespace constants
 {
 // Padding added on each side of the input bounding box. The padded box is the sampling domain and the box the
 // projected points are clamped to.
@@ -98,9 +104,13 @@ inline constexpr Scalar udf_flip_threshold_factor = Scalar(1.2);
 // MAFlipPrune, MF: range the ma_flip_prune_alpha_factor option is clamped to.
 inline constexpr Scalar mf_flip_alpha_factor_min = Scalar(1);
 inline constexpr Scalar mf_flip_alpha_factor_max = Scalar(5);
-} // namespace udf_constants
+} // namespace constants
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 // Stage precondition: when cond does not hold, the enclosing stage function (template parameter State) returns code
 // with a message naming the stage and the condition.
@@ -111,7 +121,16 @@ inline constexpr Scalar mf_flip_alpha_factor_max = Scalar(5);
 			return typename State::StatusInfo{(code), std::string(__func__) + ": precondition failed: " #cond};        \
 	} while (false)
 
-namespace cgogn::geometry::udf_stages
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
+{
+
+namespace stages
 {
 
 // Stage free functions of the UDF reconstruction. They operate on a State (ReconstructionState) and are
@@ -588,14 +607,14 @@ typename State::StatusInfo sample_alpha_level_set(State& s)
 	if (const FieldPrepareResult boxed = s.field.sampling_box(inputs, bbox_min, bbox_max);
 		boxed != FieldPrepareResult::ok)
 		return status_of(s, boxed);
-	const Scalar padding = udf_constants::sampling_padding;
+	const Scalar padding = constants::sampling_padding;
 	bbox_min -= Vec3(padding, padding, padding);
 	bbox_max += Vec3(padding, padding, padding);
 
 	RayTraits traits = s.field.ray_traits(inputs);
 	OFFSET_AXIS_PRECONDITION(traits.is_ready(), Status::invalid_data);
 	RayParams ray_params;
-	ray_params.bbox_expand = udf_constants::ray_box_relative_expand;
+	ray_params.bbox_expand = constants::ray_box_relative_expand;
 	ray_params.alpha = Scalar(s.options.alpha);
 	ray_params.tol = Scalar(s.options.tolerance);
 	ray_params.step_bound = Scalar(2.0);
@@ -627,7 +646,7 @@ typename State::StatusInfo sample_alpha_level_set(State& s)
 		return s.field.project(points, pp, projection);
 	};
 	AlphaSamplingResult result =
-		geometry::sample_alpha_level_set(traits, *s.ray_sampler, params, compute_normals, project_points);
+		offset_axis::sample_alpha_level_set(traits, *s.ray_sampler, params, compute_normals, project_points);
 	if (!result.success || result.positions.empty())
 		return Status::sampling_failed;
 	clear(*s.data.samples);
@@ -663,7 +682,7 @@ typename State::StatusInfo apply_sampling_filtering(State& s)
 	foreach_cell(*s.data.samples, [&](PVertex v) {
 		const Vec3 p = (*s.sample_position)[index_of(*s.data.samples, v)];
 		bool within_distance = false;
-		const Scalar max_distance = Scalar(s.options.alpha) + udf_constants::filter_margin;
+		const Scalar max_distance = Scalar(s.options.alpha) + constants::filter_margin;
 		if (s.input.input_kdtree())
 		{
 			std::pair<uint32, Scalar> nearest;
@@ -823,9 +842,9 @@ typename State::StatusInfo compute_initial_medial_axis(State& s)
 		uint32 flipped = 0, deleted = 0;
 		std::vector<uint32> flipped_indices;
 		const Scalar udf_threshold =
-			udf_model ? udf_constants::udf_flip_threshold_factor * fallback_radius : fallback_radius;
-		const Scalar mf_threshold = fallback_radius * std::max(udf_constants::mf_flip_alpha_factor_min,
-															   std::min(udf_constants::mf_flip_alpha_factor_max,
+			udf_model ? constants::udf_flip_threshold_factor * fallback_radius : fallback_radius;
+		const Scalar mf_threshold = fallback_radius * std::max(constants::mf_flip_alpha_factor_min,
+															   std::min(constants::mf_flip_alpha_factor_max,
 																		Scalar(s.options.ma_flip_prune_alpha_factor)));
 		const bool supported = mf_model || !Field::is_neural_type || neural_input;
 		auto scores = [&](const std::vector<Vec3>& points, std::vector<Scalar>& values,
@@ -1128,7 +1147,13 @@ typename State::Result reconstruct(State& s, const typename State::IterationCall
 	return r;
 }
 
-} // namespace cgogn::geometry::udf_stages
+} // namespace stages
+
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #undef OFFSET_AXIS_PRECONDITION
 

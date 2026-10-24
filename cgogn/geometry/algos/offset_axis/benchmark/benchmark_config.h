@@ -13,10 +13,13 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 namespace benchmark
 {
 
-using cgogn::geometry::NeuralModelType;
+using offset_axis::NeuralModelType;
 
 enum class InputMode
 {
@@ -74,7 +77,7 @@ struct BenchmarkConfig
 {
 	std::string config_path;
 	BenchmarkInputConfig input;
-	cgogn::geometry::ReconstructionOptions reconstruction;
+	offset_axis::ReconstructionOptions reconstruction;
 	std::string profile;
 	BenchmarkRuntimeConfig benchmark;
 	BenchmarkOutputConfig output;
@@ -90,6 +93,8 @@ std::string to_string(InputMode value);
 std::string to_string(InputGeometryType value);
 
 } // namespace benchmark
+
+} // namespace offset_axis
 
 } // namespace geometry
 

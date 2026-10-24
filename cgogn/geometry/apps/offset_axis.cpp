@@ -141,7 +141,7 @@ int run_offset_axis_app(const std::string& filename, const std::string& model_pa
 
 		const auto model_status = udf.load_neural_udf_model(
 			*p, model_path,
-			neural_is_mf ? cgogn::geometry::NeuralModelType::mf : cgogn::geometry::NeuralModelType::udf);
+			neural_is_mf ? cgogn::geometry::offset_axis::NeuralModelType::mf : cgogn::geometry::offset_axis::NeuralModelType::udf);
 		if (model_status.code !=
 			cgogn::ui::OffsetAxis<Surface, Points, NonManifold, RaySamplerTag>::ReconstructionStatus::success)
 			return 1;
@@ -275,7 +275,7 @@ int main(int argc, char** argv)
 
 #if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
 	if (use_neural_udf)
-		return run_offset_axis_app<cgogn::geometry::RaySamplerNeural>(filename, model_path, true, is_surface_file,
+		return run_offset_axis_app<cgogn::geometry::offset_axis::RaySamplerNeural>(filename, model_path, true, is_surface_file,
 																	   neural_is_mf);
 #else
 	if (use_neural_udf)
@@ -286,6 +286,6 @@ int main(int argc, char** argv)
 	(void)neural_is_mf;
 #endif
 	if (is_surface_file)
-		return run_offset_axis_app<cgogn::geometry::RaySamplerSurface>(filename, model_path, false, true, false);
-	return run_offset_axis_app<cgogn::geometry::RaySamplerPointCloud>(filename, model_path, false, false, false);
+		return run_offset_axis_app<cgogn::geometry::offset_axis::RaySamplerSurface>(filename, model_path, false, true, false);
+	return run_offset_axis_app<cgogn::geometry::offset_axis::RaySamplerPointCloud>(filename, model_path, false, false, false);
 }

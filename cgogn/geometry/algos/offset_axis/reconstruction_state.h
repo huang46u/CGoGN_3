@@ -77,7 +77,13 @@
 #include <utility>
 #include <vector>
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 // All the state of the UDF reconstruction: the types and the data members of the former OffsetAxisReconstruction.
@@ -112,7 +118,7 @@ struct ReconstructionState
 	template <typename T>
 	using SkeletonAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
 
-	using NeuralModelType = cgogn::geometry::NeuralModelType;
+	using NeuralModelType = offset_axis::NeuralModelType;
 	enum class Status
 	{
 		success,
@@ -215,6 +221,10 @@ struct ReconstructionState
 	std::shared_ptr<SkeletonAttribute<uint32>> skeleton_edge_degree;
 };
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_RECONSTRUCTION_STATE_H_

@@ -49,8 +49,8 @@ using GVertex = cgogn::mesh_traits<Graph>::Vertex;
 using GEdge = cgogn::mesh_traits<Graph>::Edge;
 using GFace = cgogn::mesh_traits<Graph>::Face;
 using PVertex = cgogn::mesh_traits<Points>::Vertex;
-using Topology = cgogn::geometry::SkeletonTopology<Points, Graph>;
-using Optimizer = cgogn::geometry::SpheresOptimizer<Points>;
+using Topology = cgogn::geometry::offset_axis::SkeletonTopology<Points, Graph>;
+using Optimizer = cgogn::geometry::offset_axis::SpheresOptimizer<Points>;
 using Mode = Topology::ResidualPruneMode;
 
 struct Counts

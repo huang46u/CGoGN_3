@@ -37,7 +37,16 @@
 #include <unordered_set>
 #include <vector>
 
-namespace cgogn::geometry::skeleton_topology_detail
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
+{
+
+namespace topology_detail
 {
 
 template <typename POINTS, typename NONMANIFOLD>
@@ -51,7 +60,7 @@ struct BoundaryTetPrune
 	using Tet = typename Types::Tet;
 	using RemovalStats = typename Types::RemovalStats;
 	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
-	using QuadratureScores = skeleton_topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
+	using QuadratureScores = topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
 
 	struct BoundaryEdgeChoice
 	{
@@ -226,6 +235,12 @@ struct BoundaryTetPrune
 	}
 };
 
-} // namespace cgogn::geometry::skeleton_topology_detail
+} // namespace topology_detail
+
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_BOUNDARY_TET_PRUNE_H_

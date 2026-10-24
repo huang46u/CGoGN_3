@@ -45,7 +45,16 @@
 #include <utility>
 #include <vector>
 
-namespace cgogn::geometry::skeleton_topology_detail
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
+{
+
+namespace topology_detail
 {
 
 template <typename POINTS, typename NONMANIFOLD>
@@ -60,7 +69,7 @@ struct DenseK5Repair
 	using Tet = typename Types::Tet;
 	using RemovalStats = typename Types::RemovalStats;
 	using SkeletonFaceDeletionOptions = typename Types::SkeletonFaceDeletionOptions;
-	using MeshOps = skeleton_topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
+	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
 
 	struct DenseFiveVertexDetectionResult
 	{
@@ -591,6 +600,12 @@ struct DenseK5Repair
 	}
 };
 
-} // namespace cgogn::geometry::skeleton_topology_detail
+} // namespace topology_detail
+
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_DENSE_K5_H_

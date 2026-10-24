@@ -38,6 +38,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 struct AlphaProjectionParameters
 {
 	Scalar alpha = Scalar(0);
@@ -114,6 +117,8 @@ bool project_points_to_alpha(const std::vector<Vec3>& points, const AlphaProject
 	});
 	return true;
 }
+
+} // namespace offset_axis
 
 } // namespace geometry
 

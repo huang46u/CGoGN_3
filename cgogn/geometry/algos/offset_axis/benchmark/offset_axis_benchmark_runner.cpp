@@ -30,7 +30,16 @@
 #include <type_traits>
 #include <vector>
 
-namespace cgogn::geometry::benchmark
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
+{
+
+namespace benchmark
 {
 namespace
 {
@@ -167,7 +176,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 			: 0.0;
 
 	const auto export_start = std::chrono::high_resolution_clock::now();
-	if (!(reconstruction.skeleton() && geometry::export_skeleton_ply(*reconstruction.skeleton(),
+	if (!(reconstruction.skeleton() && offset_axis::export_skeleton_ply(*reconstruction.skeleton(),
 			reconstruction.skeleton_position_attribute(), reconstruction.skeleton_radius_attribute(),
 			config.output.skeleton_ply)))
 		throw std::runtime_error("Could not export skeleton: " + config.output.skeleton_ply);
@@ -307,14 +316,14 @@ BenchmarkResult SkeletonBenchmarkRunner::run(const BenchmarkConfig& config) cons
 	switch (config.input.mode)
 	{
 	case InputMode::PointCloud:
-		result = run_impl<geometry::RaySamplerPointCloud>(config);
+		result = run_impl<offset_axis::RaySamplerPointCloud>(config);
 		break;
 	case InputMode::SurfaceMesh:
-		result = run_impl<geometry::RaySamplerSurface>(config);
+		result = run_impl<offset_axis::RaySamplerSurface>(config);
 		break;
 	case InputMode::NeuralUDF:
 #if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
-		result = run_impl<geometry::RaySamplerNeural>(config);
+		result = run_impl<offset_axis::RaySamplerNeural>(config);
 #else
 		throw std::runtime_error("offset_axis_benchmark was built without LibTorch (CGOGN_USE_TORCH=OFF): neural_udf input is not available");
 #endif
@@ -330,4 +339,10 @@ void write_benchmark_timing_json(const BenchmarkConfig& config, const BenchmarkR
 	write_timing_json_impl(config, result);
 }
 
-} // namespace cgogn::geometry::benchmark
+} // namespace benchmark
+
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn

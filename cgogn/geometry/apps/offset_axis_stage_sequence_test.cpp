@@ -21,9 +21,9 @@
 namespace
 {
 
-using cgogn::geometry::ReconstructionCounts;
+using cgogn::geometry::offset_axis::ReconstructionCounts;
 using cgogn::geometry::Scalar;
-namespace benchmark = cgogn::geometry::benchmark;
+namespace benchmark = cgogn::geometry::offset_axis::benchmark;
 using benchmark::BenchmarkConfig;
 using benchmark::InputMode;
 
@@ -75,7 +75,7 @@ bool run_test(const BenchmarkConfig& config)
 	using Surface = cgogn::CMap2;
 	using Points = cgogn::CMap0;
 	using NonManifold = cgogn::IncidenceGraph;
-	using Reconstruction = cgogn::geometry::OffsetAxisReconstruction<Surface, Points, NonManifold, RaySamplerTag>;
+	using Reconstruction = cgogn::geometry::offset_axis::OffsetAxisReconstruction<Surface, Points, NonManifold, RaySamplerTag>;
 	using Status = typename Reconstruction::Status;
 	using OptimizerStatus = typename Reconstruction::SpheresOptimizerType::Status;
 
@@ -149,7 +149,7 @@ bool run_test(const BenchmarkConfig& config)
 		const std::filesystem::path output_path(ply_path);
 		if (!output_path.parent_path().empty())
 			std::filesystem::create_directories(output_path.parent_path());
-		if (!(reconstruction.skeleton() && cgogn::geometry::export_skeleton_ply(
+		if (!(reconstruction.skeleton() && cgogn::geometry::offset_axis::export_skeleton_ply(
 											   *reconstruction.skeleton(), reconstruction.skeleton_position_attribute(),
 											   reconstruction.skeleton_radius_attribute(), ply_path)))
 		{
@@ -211,12 +211,12 @@ bool dispatch_test(const BenchmarkConfig& config)
 	switch (config.input.mode)
 	{
 	case InputMode::PointCloud:
-		return run_test<cgogn::geometry::RaySamplerPointCloud>(config);
+		return run_test<cgogn::geometry::offset_axis::RaySamplerPointCloud>(config);
 	case InputMode::SurfaceMesh:
-		return run_test<cgogn::geometry::RaySamplerSurface>(config);
+		return run_test<cgogn::geometry::offset_axis::RaySamplerSurface>(config);
 	case InputMode::NeuralUDF:
 #if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
-		return run_test<cgogn::geometry::RaySamplerNeural>(config);
+		return run_test<cgogn::geometry::offset_axis::RaySamplerNeural>(config);
 #else
 		std::cerr << "offset_axis_stage_sequence_test was built without LibTorch (CGOGN_USE_TORCH=OFF): neural_udf input is "
 					 "not available"

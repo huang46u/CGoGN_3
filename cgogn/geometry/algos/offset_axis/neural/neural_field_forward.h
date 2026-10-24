@@ -17,6 +17,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 class NeuralFieldForward
 {
 public:
@@ -265,6 +268,8 @@ private:
 	torch::Device device_;
 	mutable OutputKind output_kind_ = OutputKind::Unknown;
 };
+
+} // namespace offset_axis
 
 } // namespace geometry
 

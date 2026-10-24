@@ -14,6 +14,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 struct NeuralFieldRayTraits
 {
 	static constexpr bool kUsesTorch = true;
@@ -49,6 +52,8 @@ struct RaySamplerTraits<RaySamplerNeural, SURFACE, POINTS>
 		return traits;
 	}
 };
+
+} // namespace offset_axis
 
 } // namespace geometry
 

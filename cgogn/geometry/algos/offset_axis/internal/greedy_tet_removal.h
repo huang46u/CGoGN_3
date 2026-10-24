@@ -43,7 +43,16 @@
 #include <utility>
 #include <vector>
 
-namespace cgogn::geometry::skeleton_topology_detail
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
+{
+
+namespace topology_detail
 {
 
 // Greedy removal of tets that have a simple face (a face owned by this tet only): the first face removed must be
@@ -92,8 +101,8 @@ public:
 	using Tet = typename Types::Tet;
 	using RemovalStats = typename Types::RemovalStats;
 	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
-	using MeshOps = skeleton_topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
-	using QuadratureScores = skeleton_topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
+	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
+	using QuadratureScores = topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
 
 	LazyGreedyTetRemover(Context& p, TopologyFixScoreCache& score_cache, ScoreEvaluator& evaluator)
 		: p(p), score_cache(score_cache), evaluator(evaluator), edge_score_cache(score_cache.edge_scores),
@@ -699,8 +708,8 @@ struct GreedyTetRemoval
 	using Tet = typename Types::Tet;
 	using RemovalStats = typename Types::RemovalStats;
 	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
-	using MeshOps = skeleton_topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
-	using QuadratureScores = skeleton_topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
+	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
+	using QuadratureScores = topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
 
 	template <typename Policy, typename ScoreEvaluator>
 	static RemovalStats run_edge_score_tet_mode_topology_fix(Context& p, TopologyFixScoreCache& score_cache,
@@ -710,6 +719,12 @@ struct GreedyTetRemoval
 	}
 };
 
-} // namespace cgogn::geometry::skeleton_topology_detail
+} // namespace topology_detail
+
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_GREEDY_TET_REMOVAL_H_

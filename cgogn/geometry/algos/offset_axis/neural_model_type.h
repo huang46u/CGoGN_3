@@ -1,7 +1,13 @@
 #ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_NEURAL_MODEL_TYPE_H_
 #define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_NEURAL_MODEL_TYPE_H_
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 // output layout of a neural field: unsigned distance only, or medial field (udf + sdf)
@@ -24,6 +30,10 @@ inline bool default_recompute_normals_after_sampling(NeuralModelType type)
 	return type == NeuralModelType::mf;
 }
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_NEURAL_MODEL_TYPE_H_

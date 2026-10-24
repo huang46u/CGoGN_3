@@ -44,11 +44,14 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 template <typename POINTS, typename NONMANIFOLD>
 class SkeletonTopology
 {
 public:
-	using Types = skeleton_topology_detail::SkeletonTopologyTypes<POINTS, NONMANIFOLD>;
+	using Types = topology_detail::SkeletonTopologyTypes<POINTS, NONMANIFOLD>;
 	using SphereVertex = typename Types::SphereVertex;
 	using SkeletonVertex = typename Types::SkeletonVertex;
 	using SkeletonEdge = typename Types::SkeletonEdge;
@@ -198,13 +201,13 @@ private:
 	using Context = typename Types::Context;
 	using RemovalStats = typename Types::RemovalStats;
 	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
-	using MeshOps = skeleton_topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
-	using SkeletonBuild = skeleton_topology_detail::SkeletonBuild<POINTS, NONMANIFOLD>;
-	using QuadratureScores = skeleton_topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
-	using NonManifoldPrune = skeleton_topology_detail::NonManifoldPrune<POINTS, NONMANIFOLD>;
-	using GreedyTetRemoval = skeleton_topology_detail::GreedyTetRemoval<POINTS, NONMANIFOLD>;
-	using BoundaryTetPrune = skeleton_topology_detail::BoundaryTetPrune<POINTS, NONMANIFOLD>;
-	using DenseK5Repair = skeleton_topology_detail::DenseK5Repair<POINTS, NONMANIFOLD>;
+	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
+	using SkeletonBuild = topology_detail::SkeletonBuild<POINTS, NONMANIFOLD>;
+	using QuadratureScores = topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
+	using NonManifoldPrune = topology_detail::NonManifoldPrune<POINTS, NONMANIFOLD>;
+	using GreedyTetRemoval = topology_detail::GreedyTetRemoval<POINTS, NONMANIFOLD>;
+	using BoundaryTetPrune = topology_detail::BoundaryTetPrune<POINTS, NONMANIFOLD>;
+	using DenseK5Repair = topology_detail::DenseK5Repair<POINTS, NONMANIFOLD>;
 	using DenseFiveVertexDetectionResult = typename DenseK5Repair::DenseFiveVertexDetectionResult;
 	using IndependentDenseFiveVertexRepairSeed = typename DenseK5Repair::IndependentDenseFiveVertexRepairSeed;
 	using IndependentDenseFiveVertexRepairStats = typename DenseK5Repair::IndependentDenseFiveVertexRepairStats;
@@ -239,11 +242,11 @@ private:
 			RemovalStats simple_stats;
 			if (!p.skeleton_tets_.empty())
 				simple_stats = GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<
-					skeleton_topology_detail::SimpleTetPolicy>(p, score_cache, evaluator);
+					topology_detail::SimpleTetPolicy>(p, score_cache, evaluator);
 			RemovalStats nonsimple_stats;
 			if (!p.skeleton_tets_.empty())
 				nonsimple_stats = GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<
-					skeleton_topology_detail::NonSimpleTetPolicy>(p, score_cache, evaluator);
+					topology_detail::NonSimpleTetPolicy>(p, score_cache, evaluator);
 			const uint32 round_end_tets = static_cast<uint32>(p.skeleton_tets_.size());
 			const uint32 round_removed_tets = round_start_tets - round_end_tets;
 			++p.metrics.topology_rounds;
@@ -272,6 +275,8 @@ private:
 	Metrics metrics_;
 	ResidualPruneMode residual_prune_mode_ = ResidualPruneMode::collapsible_only;
 };
+
+} // namespace offset_axis
 
 } // namespace geometry
 } // namespace cgogn

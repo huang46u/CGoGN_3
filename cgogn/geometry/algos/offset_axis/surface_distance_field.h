@@ -46,7 +46,13 @@
 #include <tuple>
 #include <vector>
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 // Distance field of a triangle surface input: rays are cast against the BVH of the surface, and the normals and the
@@ -114,7 +120,7 @@ public:
 	bool project(const std::vector<Vec3>& points, const AlphaProjectionParameters& pp,
 				 AlphaProjectionResult& projection)
 	{
-		return geometry::project_points_to_alpha(
+		return offset_axis::project_points_to_alpha(
 			points, pp,
 			[&](const Vec3& p, AlphaProjectionInfo& info) { return input_.query_surface_projection_info(p, info); },
 			projection);
@@ -175,6 +181,10 @@ private:
 	InputGeometry<SURFACE, POINTS>& input_;
 };
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SURFACE_DISTANCE_FIELD_H_

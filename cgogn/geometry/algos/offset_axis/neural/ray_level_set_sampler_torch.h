@@ -19,6 +19,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 // GPU (LibTorch) version of RayLevelSetSampler: the rays are marched in batches on the device of the traits. The
 // public entry points below hide the CPU ones of the base class; the base members used by the GPU code are imported
 // with using-declarations.
@@ -662,6 +665,8 @@ private:
 	torch::Tensor ray_t_;
 	torch::Tensor ray_tmax_;
 };
+
+} // namespace offset_axis
 
 } // namespace geometry
 

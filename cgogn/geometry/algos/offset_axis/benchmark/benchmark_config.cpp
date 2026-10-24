@@ -21,6 +21,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 namespace benchmark
 {
 
@@ -173,7 +176,7 @@ void read_option(const ptree& root, const OptionInfo& info, T& value)
 	{
 		if (auto raw = root.get_optional<std::string>(info.json_key))
 		{
-			if (!cgogn::geometry::parse(*raw, value))
+			if (!offset_axis::parse(*raw, value))
 				fail_config(std::string("unsupported `") + info.json_key + "`: " + *raw);
 		}
 	}
@@ -283,7 +286,7 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	config.reconstruction = ReconstructionOptions{};
 	if (auto neural_type = root.get_optional<std::string>("input.neural_model_type"))
 	{
-		if (!cgogn::geometry::parse(*neural_type, config.reconstruction.neural_model_type))
+		if (!offset_axis::parse(*neural_type, config.reconstruction.neural_model_type))
 			fail_config("unsupported `input.neural_model_type`: " + *neural_type);
 	}
 	config.reconstruction.apply_filtering = default_apply_filtering(config.reconstruction.neural_model_type);
@@ -503,6 +506,8 @@ std::vector<BenchmarkConfig> expand_batch_benchmark_configs(const BenchmarkConfi
 }
 
 } // namespace benchmark
+
+} // namespace offset_axis
 
 } // namespace geometry
 

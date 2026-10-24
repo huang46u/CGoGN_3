@@ -29,7 +29,13 @@
 #include <string>
 #include <vector>
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 // Dataset presets: named sets of sampling / postprocess defaults for one dataset family.
@@ -107,6 +113,10 @@ inline std::string guess_reconstruction_profile(bool neural, NeuralModelType typ
 	return "udf";
 }
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_RECONSTRUCTION_PROFILES_H_

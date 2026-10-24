@@ -3,7 +3,13 @@
 
 #include <cgogn/core/utils/numerics.h>
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 struct ReconstructionTiming
@@ -53,6 +59,10 @@ struct ReconstructionRepairs
 	uint32 sphere_update_nonfinite = 0;
 };
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_RECONSTRUCTION_STATS_H_

@@ -36,6 +36,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 namespace detail
 {
 
@@ -70,6 +73,8 @@ void parallel_for_index(std::size_t n, const FUNC& f)
 }
 
 } // namespace detail
+
+} // namespace offset_axis
 
 } // namespace geometry
 

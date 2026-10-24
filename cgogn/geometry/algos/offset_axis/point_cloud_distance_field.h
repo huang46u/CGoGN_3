@@ -47,7 +47,13 @@
 #include <tuple>
 #include <vector>
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 // Distance field of an oriented point cloud input: the normals are estimated from the k nearest neighbours of the
@@ -116,7 +122,7 @@ public:
 	bool project(const std::vector<Vec3>& points, const AlphaProjectionParameters& pp,
 				 AlphaProjectionResult& projection)
 	{
-		return geometry::project_points_to_alpha(
+		return offset_axis::project_points_to_alpha(
 			points, pp,
 			[&](const Vec3& p, AlphaProjectionInfo& info) { return input_.query_point_cloud_projection_info(p, info); },
 			projection);
@@ -177,6 +183,10 @@ private:
 	const ReconstructionOptions& options_;
 };
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_POINT_CLOUD_DISTANCE_FIELD_H_

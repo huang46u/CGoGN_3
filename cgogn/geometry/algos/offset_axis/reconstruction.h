@@ -64,7 +64,13 @@
 #include <utility>
 #include <vector>
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
@@ -142,84 +148,84 @@ public:
 
 	void reset()
 	{
-		udf_stages::reset(s_);
+		stages::reset(s_);
 	}
 	StatusInfo initialize_data()
 	{
-		return udf_stages::initialize_data(s_);
+		return stages::initialize_data(s_);
 	}
 	StatusInfo load_neural_model(const std::filesystem::path& path, NeuralModelType type)
 	{
-		return udf_stages::load_neural_model(s_, path, type);
+		return stages::load_neural_model(s_, path, type);
 	}
 	StatusInfo sample_alpha_level_set()
 	{
-		return udf_stages::sample_alpha_level_set(s_);
+		return stages::sample_alpha_level_set(s_);
 	}
 	StatusInfo apply_sampling_filtering()
 	{
-		return udf_stages::apply_sampling_filtering(s_);
+		return stages::apply_sampling_filtering(s_);
 	}
 	StatusInfo build_kdtree_and_normals()
 	{
-		return udf_stages::build_kdtree_and_normals(s_);
+		return stages::build_kdtree_and_normals(s_);
 	}
 	StatusInfo compute_fitting_primitives()
 	{
-		return udf_stages::compute_fitting_primitives(s_);
+		return stages::compute_fitting_primitives(s_);
 	}
 	StatusInfo compute_initial_medial_axis()
 	{
-		return udf_stages::compute_initial_medial_axis(s_);
+		return stages::compute_initial_medial_axis(s_);
 	}
 	StatusInfo initialize_spheres()
 	{
-		return udf_stages::initialize_spheres(s_);
+		return stages::initialize_spheres(s_);
 	}
 	StatusInfo optimize_spheres(const IterationCallback& iteration_callback = {})
 	{
-		return udf_stages::optimize_spheres(s_, iteration_callback);
+		return stages::optimize_spheres(s_, iteration_callback);
 	}
 	StatusInfo build_skeleton()
 	{
-		return udf_stages::build_skeleton(s_);
+		return stages::build_skeleton(s_);
 	}
 	StatusInfo fix_topology()
 	{
-		return udf_stages::fix_topology(s_);
+		return stages::fix_topology(s_);
 	}
 	StatusInfo prune_residual_sheets()
 	{
-		return udf_stages::prune_residual_sheets(s_);
+		return stages::prune_residual_sheets(s_);
 	}
 	StatusInfo sample()
 	{
-		return udf_stages::sample(s_);
+		return stages::sample(s_);
 	}
 	StatusInfo compute_fitting_data()
 	{
-		return udf_stages::compute_fitting_data(s_);
+		return stages::compute_fitting_data(s_);
 	}
 	typename SpheresOptimizerType::Status update_spheres_once(Scalar sqem_update_lambda_line_plane)
 	{
-		return udf_stages::update_spheres_once(s_, sqem_update_lambda_line_plane);
+		return stages::update_spheres_once(s_, sqem_update_lambda_line_plane);
 	}
 	StatusInfo fix_topology_and_prune()
 	{
-		return udf_stages::fix_topology_and_prune(s_);
+		return stages::fix_topology_and_prune(s_);
 	}
 	Result run(const IterationCallback& iteration_callback = {})
 	{
-		return udf_stages::reconstruct(s_, iteration_callback);
+		return stages::reconstruct(s_, iteration_callback);
 	}
 
 	Counts counts() const
 	{
-		return udf_stages::counts(s_);
+		return stages::counts(s_);
 	}
 	ReconstructionRepairs repairs() const
 	{
-		return udf_stages::repairs(s_);
+		return stages::repairs(s_);
 	}
 
 	NONMANIFOLD* skeleton() const
@@ -236,11 +242,11 @@ public:
 	}
 	SpheresOptimizerType& spheres_optimizer()
 	{
-		return udf_stages::optimizer_for(s_);
+		return stages::optimizer_for(s_);
 	}
 	TopologyType& skeleton_topology()
 	{
-		return udf_stages::topology_for(s_);
+		return stages::topology_for(s_);
 	}
 
 	// Read-only display scores for the training UI, indexed by index_of(face) / index_of(edge). Cells that are not
@@ -251,7 +257,7 @@ public:
 			return std::nullopt;
 		std::unordered_map<uint32, Scalar> scores;
 		auto evaluator = [this](const std::vector<Vec3>& points, std::vector<Scalar>& values) {
-			return udf_stages::evaluate_topology_scores(s_, points, values);
+			return stages::evaluate_topology_scores(s_, points, values);
 		};
 		if (!skeleton_topology().tet_face_udf_scores(evaluator, normalize_by_area, scores))
 			return std::nullopt;
@@ -264,7 +270,7 @@ public:
 			return std::nullopt;
 		std::unordered_map<uint32, Scalar> scores;
 		auto evaluator = [this](const std::vector<Vec3>& points, std::vector<Scalar>& values) {
-			return udf_stages::evaluate_topology_scores(s_, points, values);
+			return stages::evaluate_topology_scores(s_, points, values);
 		};
 		if (!skeleton_topology().tet_edge_gauss3_scores(evaluator, scores))
 			return std::nullopt;
@@ -295,6 +301,10 @@ private:
 	State s_;
 };
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_RECONSTRUCTION_H_

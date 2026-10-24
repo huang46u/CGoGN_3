@@ -43,6 +43,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 struct AlphaSamplingParameters
 {
 	Scalar sample_radius = Scalar(0);
@@ -279,6 +282,8 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 
 	return result;
 }
+
+} // namespace offset_axis
 
 } // namespace geometry
 

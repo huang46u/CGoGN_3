@@ -39,7 +39,16 @@
 #include <unordered_set>
 #include <vector>
 
-namespace cgogn::geometry::skeleton_topology_detail
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
+{
+
+namespace topology_detail
 {
 
 template <typename POINTS, typename NONMANIFOLD>
@@ -393,6 +402,12 @@ struct QuadratureScores
 	}
 };
 
-} // namespace cgogn::geometry::skeleton_topology_detail
+} // namespace topology_detail
+
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_QUADRATURE_SCORES_H_

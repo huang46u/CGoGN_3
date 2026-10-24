@@ -45,6 +45,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 namespace detail
 {
 
@@ -211,6 +214,8 @@ void compute_quadrics(
 		return true;
 	});
 }
+
+} // namespace offset_axis
 
 } // namespace geometry
 

@@ -19,6 +19,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 struct RaySamplerNeural
 {
 };
@@ -145,6 +148,8 @@ struct RaySamplerTraits<RaySamplerPointCloud, SURFACE, POINTS>
 		return traits;
 	}
 };
+
+} // namespace offset_axis
 
 } // namespace geometry
 

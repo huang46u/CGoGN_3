@@ -15,6 +15,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 inline bool query_surface_closest_point(const acc::BVHTree<uint32, Vec3>& bvh, const Vec3& query,
 											uint32& primitive_index, Vec3& closest_point, Scalar& distance)
 {
@@ -39,6 +42,8 @@ inline bool query_point_cloud_nearest_point(const acc::KDTree<3, uint32>& kdtree
 	distance = result.second;
 	return true;
 }
+
+} // namespace offset_axis
 
 } // namespace geometry
 

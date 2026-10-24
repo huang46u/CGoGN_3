@@ -11,6 +11,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 namespace benchmark
 {
 
@@ -83,6 +86,8 @@ inline constexpr BenchmarkTimingField kBenchmarkTimingFields[] = {
 };
 
 } // namespace benchmark
+
+} // namespace offset_axis
 
 } // namespace geometry
 

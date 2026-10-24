@@ -20,6 +20,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 template <typename Traits>
 class RayLevelSetSampler
 {
@@ -629,6 +632,8 @@ protected:
 
 	Params params_;
 };
+
+} // namespace offset_axis
 
 } // namespace geometry
 

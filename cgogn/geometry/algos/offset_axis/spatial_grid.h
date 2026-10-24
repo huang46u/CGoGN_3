@@ -15,6 +15,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 struct SpatialGrid
 {
 	struct GridKey
@@ -90,6 +93,8 @@ struct SpatialGrid
 		return true;
 	}
 };
+
+} // namespace offset_axis
 
 } // namespace geometry
 

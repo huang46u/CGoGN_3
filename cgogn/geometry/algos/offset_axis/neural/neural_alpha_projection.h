@@ -40,6 +40,9 @@ namespace cgogn
 namespace geometry
 {
 
+namespace offset_axis
+{
+
 struct NeuralProjectionWorkspace
 {
 	size_t capacity_ = 0;
@@ -209,6 +212,8 @@ inline bool project_points_to_alpha(const NeuralFieldForward& udf, const std::ve
 		return false;
 	}
 }
+
+} // namespace offset_axis
 
 } // namespace geometry
 

@@ -63,10 +63,10 @@ public:
 	using PAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
 	template <typename T>
 	using NMAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
-	using SpheresOptimizerType = geometry::SpheresOptimizer<POINTS>;
+	using SpheresOptimizerType = cgogn::geometry::offset_axis::SpheresOptimizer<POINTS>;
 	using SpheresOptimizerMetrics = typename SpheresOptimizerType::Metrics;
 	using SpheresOptimizerStatus = typename SpheresOptimizerType::Status;
-	using ReconstructionType = geometry::OffsetAxisReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>;
+	using ReconstructionType = cgogn::geometry::offset_axis::OffsetAxisReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>;
 	using ReconstructionStatus = typename ReconstructionType::Status;
 	using ReconstructionStatusInfo = typename ReconstructionType::StatusInfo;
 
@@ -247,20 +247,20 @@ public:
 		if (!p.reconstruction_)
 			return;
 		auto& options = p.reconstruction_->options();
-		const cgogn::geometry::NeuralModelType model_type = options.neural_model_type;
-		options = cgogn::geometry::ReconstructionOptions{};
+		const cgogn::geometry::offset_axis::NeuralModelType model_type = options.neural_model_type;
+		options = cgogn::geometry::offset_axis::ReconstructionOptions{};
 		options.neural_model_type = model_type;
-		options.apply_filtering = cgogn::geometry::default_apply_filtering(model_type);
+		options.apply_filtering = cgogn::geometry::offset_axis::default_apply_filtering(model_type);
 		options.recompute_normals_after_sampling =
-			cgogn::geometry::default_recompute_normals_after_sampling(model_type);
-		if (!cgogn::geometry::apply_reconstruction_profile(profile, options))
+			cgogn::geometry::offset_axis::default_recompute_normals_after_sampling(model_type);
+		if (!cgogn::geometry::offset_axis::apply_reconstruction_profile(profile, options))
 			log_error("Unknown reconstruction profile: ", profile, '\n');
 		p.profile_ = profile;
 		p.sphere_update_lambda_.store(options.sqem_update_lambda_line_plane);
 	}
 
 	ReconstructionStatusInfo load_neural_udf_model(POINTS& points, const std::string& model_path,
-											   cgogn::geometry::NeuralModelType model_type)
+											   cgogn::geometry::offset_axis::NeuralModelType model_type)
 	{
 		PointsParameters& p = points_parameters_[&points];
 		init_points_data(points);
@@ -292,7 +292,7 @@ public:
 			p.neural_udf_model_path_ = model_path;
 			p.last_error_.clear();
 			// dataset profile guessed from the model type and path; the Sampling panel can change it
-			reset_options_to_profile(p, cgogn::geometry::guess_reconstruction_profile(true, model_type, model_path));
+			reset_options_to_profile(p, cgogn::geometry::offset_axis::guess_reconstruction_profile(true, model_type, model_path));
 			log_basic(p, "Reconstruction profile: ", p.profile_, '\n');
 			log_basic(p, "Loaded neural UDF model from: ", model_path, '\n');
 			return ReconstructionStatus::success;
@@ -645,7 +645,7 @@ private:
 	// V0 "Face components (UF)": color each skeleton face by its sheet. Faces are only recolored, not removed.
 	void mark_skeleton_face_components_color(PointsParameters& p)
 	{
-		const auto sheet_of_face = geometry::compute_skeleton_face_components(*p.skeleton_);
+		const auto sheet_of_face = cgogn::geometry::offset_axis::compute_skeleton_face_components(*p.skeleton_);
 		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
 			const auto it = sheet_of_face.find(index_of(*p.skeleton_, f));
 			value<Vec3>(*p.skeleton_, p.skeleton_face_color_, f) =
@@ -1052,7 +1052,7 @@ protected:
 		if (ImGui::CollapsingHeader("Sampling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
 			ImGui::BeginDisabled(running);
-			const auto& profile_names = cgogn::geometry::reconstruction_profile_names();
+			const auto& profile_names = cgogn::geometry::offset_axis::reconstruction_profile_names();
 			if (ImGui::BeginCombo("Profile", p.profile_.c_str()))
 			{
 				for (const std::string& name : profile_names)
@@ -1061,30 +1061,30 @@ protected:
 				ImGui::EndCombo();
 			}
 			if (ImGui::InputFloat("Alpha", &options.alpha, 0.001f, 0.1f, "%.4f"))
-				options.alpha = std::clamp(options.alpha, float(cgogn::geometry::option_info::alpha.min),
-										   float(cgogn::geometry::option_info::alpha.max));
+				options.alpha = std::clamp(options.alpha, float(cgogn::geometry::offset_axis::option_info::alpha.min),
+										   float(cgogn::geometry::offset_axis::option_info::alpha.max));
 			if (ImGui::InputFloat("Sample Radius", &options.sample_radius, 0.001f, 0.01f, "%.4f"))
 				options.sample_radius =
-					std::clamp(options.sample_radius, float(cgogn::geometry::option_info::sample_radius.min),
-							   float(cgogn::geometry::option_info::sample_radius.max));
+					std::clamp(options.sample_radius, float(cgogn::geometry::offset_axis::option_info::sample_radius.min),
+							   float(cgogn::geometry::offset_axis::option_info::sample_radius.max));
 			if (ImGui::InputInt("KNN K", &options.knn_k, 1, 5))
-				options.knn_k = std::clamp(options.knn_k, int(cgogn::geometry::option_info::knn_k.min),
-										   int(cgogn::geometry::option_info::knn_k.max));
+				options.knn_k = std::clamp(options.knn_k, int(cgogn::geometry::offset_axis::option_info::knn_k.min),
+										   int(cgogn::geometry::offset_axis::option_info::knn_k.max));
 			ImGui::Checkbox("Filter samples by distance to input", &options.apply_filtering);
 			ImGui::Checkbox("Recompute normals after sampling", &options.recompute_normals_after_sampling);
 			if (ImGui::InputInt("Bridson candidates per parent", &options.alpha_sampling_candidates_per_parent, 1, 10))
 				options.alpha_sampling_candidates_per_parent =
 					std::clamp(options.alpha_sampling_candidates_per_parent,
-							   int(cgogn::geometry::option_info::alpha_sampling_candidates_per_parent.min),
-							   int(cgogn::geometry::option_info::alpha_sampling_candidates_per_parent.max));
+							   int(cgogn::geometry::offset_axis::option_info::alpha_sampling_candidates_per_parent.min),
+							   int(cgogn::geometry::offset_axis::option_info::alpha_sampling_candidates_per_parent.max));
 			if (ImGui::InputInt("Bridson parent batch size", &options.alpha_sampling_parent_batch_size, 1, 64))
 				options.alpha_sampling_parent_batch_size =
 					std::clamp(options.alpha_sampling_parent_batch_size,
-							   int(cgogn::geometry::option_info::alpha_sampling_parent_batch_size.min),
-							   int(cgogn::geometry::option_info::alpha_sampling_parent_batch_size.max));
+							   int(cgogn::geometry::offset_axis::option_info::alpha_sampling_parent_batch_size.min),
+							   int(cgogn::geometry::offset_axis::option_info::alpha_sampling_parent_batch_size.max));
 			if (ImGui::InputInt("Seed", &options.seed, 1, 10))
-				options.seed = std::clamp(options.seed, int(cgogn::geometry::option_info::seed.min),
-										  int(cgogn::geometry::option_info::seed.max));
+				options.seed = std::clamp(options.seed, int(cgogn::geometry::offset_axis::option_info::seed.min),
+										  int(cgogn::geometry::offset_axis::option_info::seed.max));
 			ImGui::EndDisabled();
 			if (!running)
 			{
@@ -1123,8 +1123,8 @@ protected:
 			ImGui::Checkbox("Enable MAFlipPrune", &options.ma_flip_prune);
 			float ma_flip_prune_alpha_factor = static_cast<float>(options.ma_flip_prune_alpha_factor);
 			if (ImGui::SliderFloat("MAFlipPrune MF Alpha Factor", &ma_flip_prune_alpha_factor,
-								   float(cgogn::geometry::option_info::ma_flip_prune_alpha_factor.ui_min),
-								   float(cgogn::geometry::option_info::ma_flip_prune_alpha_factor.ui_max), "%.2f"))
+								   float(cgogn::geometry::offset_axis::option_info::ma_flip_prune_alpha_factor.ui_min),
+								   float(cgogn::geometry::offset_axis::option_info::ma_flip_prune_alpha_factor.ui_max), "%.2f"))
 				options.ma_flip_prune_alpha_factor = Scalar(ma_flip_prune_alpha_factor);
 			ImGui::EndDisabled();
 			if (!running && ImGui::Button("Compute Fitting Data"))
@@ -1146,8 +1146,8 @@ protected:
 		{
 			ImGui::BeginDisabled(running);
 			ImGui::SliderFloat("Init dilation constant", &options.init_dilation_constant,
-							   float(cgogn::geometry::option_info::init_dilation_constant.ui_min),
-							   float(cgogn::geometry::option_info::init_dilation_constant.ui_max), "%.4f");
+							   float(cgogn::geometry::offset_axis::option_info::init_dilation_constant.ui_min),
+							   float(cgogn::geometry::offset_axis::option_info::init_dilation_constant.ui_max), "%.4f");
 			ImGui::EndDisabled();
 			if (!running && ImGui::Button("Init spheres"))
 			{
@@ -1182,8 +1182,8 @@ protected:
 		{
 			float update_lambda = p.sphere_update_lambda_.load();
 			if (ImGui::SliderFloat("Update lambda", &update_lambda,
-								   float(cgogn::geometry::option_info::sqem_update_lambda_line_plane.ui_min),
-								   float(cgogn::geometry::option_info::sqem_update_lambda_line_plane.ui_max), "%.6f"))
+								   float(cgogn::geometry::offset_axis::option_info::sqem_update_lambda_line_plane.ui_min),
+								   float(cgogn::geometry::offset_axis::option_info::sqem_update_lambda_line_plane.ui_max), "%.6f"))
 			{
 				p.sphere_update_lambda_.store(update_lambda);
 				options.sqem_update_lambda_line_plane = update_lambda;
@@ -1283,7 +1283,7 @@ protected:
 			int residual_mode = static_cast<int>(options.residual_prune_mode);
 			if (ImGui::Combo("##ResidualPruneMode", &residual_mode,
 							 "current\0keep_fully_non_manifold\0collapsible_only\0"))
-				options.residual_prune_mode = static_cast<cgogn::geometry::ResidualPruneOption>(residual_mode);
+				options.residual_prune_mode = static_cast<cgogn::geometry::offset_axis::ResidualPruneOption>(residual_mode);
 			ImGui::EndDisabled();
 			if (!running && ImGui::Button("Topology fix full pipeline"))
 			{
@@ -1396,7 +1396,7 @@ protected:
 				{
 					std::lock_guard<std::mutex> lock(p.mutex_);
 					if (!(p.reconstruction_->skeleton() &&
-						  geometry::export_skeleton_ply(
+						  cgogn::geometry::offset_axis::export_skeleton_ply(
 							  *p.reconstruction_->skeleton(), p.reconstruction_->skeleton_position_attribute(),
 							  p.reconstruction_->skeleton_radius_attribute(), filename)))
 						log_error("Failed to export skeleton PLY: ", filename, '\n');

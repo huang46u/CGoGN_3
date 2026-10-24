@@ -3,7 +3,13 @@
 
 #include <cgogn/geometry/types/vector_traits.h>
 
-namespace cgogn::geometry
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace offset_axis
 {
 
 // unit vector along v, or +z when v is (numerically) zero
@@ -14,6 +20,10 @@ inline Vec3 unit_normal_or_z(const Vec3& v)
 	return v.normalized();
 }
 
-} // namespace cgogn::geometry
+} // namespace offset_axis
+
+} // namespace geometry
+
+} // namespace cgogn
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_NORMAL_UTILS_H_
