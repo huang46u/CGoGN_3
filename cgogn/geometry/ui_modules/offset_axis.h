@@ -44,8 +44,10 @@
 
 namespace cgogn
 {
+
 namespace ui
 {
+
 using geometry::Scalar;
 using geometry::Vec3;
 using geometry::Vec4;

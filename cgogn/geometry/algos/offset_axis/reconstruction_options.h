@@ -145,6 +145,7 @@ struct OptionInfo
 // option_info::alpha.ui_min etc.
 namespace option_info
 {
+
 #define CGOGN_OFFSET_AXIS_OPTION_INFO(T, name, def, key, lo, hi, ui_lo, ui_hi)                                                 \
 	inline constexpr OptionInfo name{#name, key, lo, hi, ui_lo, ui_hi};
 CGOGN_OFFSET_AXIS_OPTIONS(CGOGN_OFFSET_AXIS_OPTION_INFO)

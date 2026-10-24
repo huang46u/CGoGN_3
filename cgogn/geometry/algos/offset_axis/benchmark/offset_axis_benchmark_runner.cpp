@@ -41,6 +41,7 @@ namespace offset_axis
 
 namespace benchmark
 {
+
 namespace
 {
 

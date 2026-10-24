@@ -91,6 +91,7 @@ namespace offset_axis
 // rescaled to [0,1] before the reconstruction).
 namespace constants
 {
+
 // Padding added on each side of the input bounding box. The padded box is the sampling domain and the box the
 // projected points are clamped to.
 inline constexpr Scalar sampling_padding = Scalar(0.1);

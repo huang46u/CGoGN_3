@@ -41,6 +41,7 @@
 
 namespace cgogn
 {
+
 namespace geometry
 {
 
