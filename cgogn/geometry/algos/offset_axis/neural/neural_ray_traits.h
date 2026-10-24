@@ -24,7 +24,6 @@
 #define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_NEURAL_NEURAL_RAY_TRAITS_H_
 
 #include <cgogn/geometry/algos/offset_axis/neural/neural_field_forward.h>
-#include <cgogn/geometry/algos/offset_axis/ray_level_set_sampler_traits.h>
 
 #include <torch/torch.h>
 

@@ -26,24 +26,16 @@
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
 #include <cgogn/geometry/algos/offset_axis/alpha_projection.h>
+#include <cgogn/geometry/algos/offset_axis/cpu_distance_field.h>
 #include <cgogn/geometry/algos/offset_axis/distance_field.h>
 #include <cgogn/geometry/algos/offset_axis/input_geometry.h>
-#include <cgogn/geometry/algos/offset_axis/neural_model_type.h>
-#include <cgogn/geometry/algos/offset_axis/normal_utils.h>
-#include <cgogn/geometry/algos/offset_axis/parallel_for.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
 #include <cgogn/geometry/algos/offset_axis/sample_processing.h>
 #include <cgogn/geometry/algos/offset_axis/spatial_query.h>
 #include <cgogn/geometry/functions/bounding_box.h>
-#include <cgogn/geometry/algos/offset_axis/ray_level_set_sampler.h>
 #include <cgogn/geometry/algos/offset_axis/ray_level_set_sampler_traits.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
-#include <atomic>
-#include <cstdint>
-#include <filesystem>
-#include <memory>
-#include <string>
 #include <tuple>
 #include <vector>
 
@@ -60,13 +52,14 @@ namespace offset_axis
 // input points, and the projections are nearest-point queries on the k-d tree of the input. See distance_field.h for
 // the interface.
 template <typename SURFACE, typename POINTS>
-class PointCloudDistanceField
+class PointCloudDistanceField : public CpuDistanceField<PointCloudRayTraits<POINTS>>
 {
+	using Base = CpuDistanceField<PointCloudRayTraits<POINTS>>;
+
 public:
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
-	using RayTraits = PointCloudRayTraits<POINTS>;
-	using RaySampler = RayLevelSetSampler<RayTraits>;
-	static constexpr bool is_neural_type = false;
+	using typename Base::RayTraits;
+	using typename Base::RaySampler;
 
 	PointCloudDistanceField(InputGeometry<SURFACE, POINTS>& input, const ReconstructionOptions& options)
 		: input_(input), options_(options)
@@ -101,36 +94,19 @@ public:
 		return traits;
 	}
 
-	std::unique_ptr<RaySampler> make_ray_sampler(const typename RaySampler::Params& params) const
-	{
-		return std::make_unique<RaySampler>(params);
-	}
-
-	void configure_ray_sampler(RaySampler& sampler, const typename RaySampler::Params& params) const
-	{
-		sampler.set_params(params);
-	}
-
 	bool normals(const std::vector<Vec3>& points, std::vector<Vec3>& normals, std::vector<uint8_t>& keep)
 	{
-		detail::parallel_for_index(points.size(), [&](std::size_t i) {
-			AlphaProjectionInfo info;
-			const bool query_ok = input_.query_point_cloud_projection_info(points[i], info);
-			if (!query_ok || !info.valid || !points[i].allFinite() || !info.normal.allFinite())
-				return;
-			normals[i] = unit_normal_or_z(info.normal);
-			keep[i] = uint8_t(1);
+		return this->normals_from(points, normals, keep, [&](const Vec3& p, AlphaProjectionInfo& info) {
+			return input_.query_point_cloud_projection_info(p, info);
 		});
-		return true;
 	}
 
 	bool project(const std::vector<Vec3>& points, const AlphaProjectionParameters& pp,
 				 AlphaProjectionResult& projection)
 	{
-		return offset_axis::project_points_to_alpha(
-			points, pp,
-			[&](const Vec3& p, AlphaProjectionInfo& info) { return input_.query_point_cloud_projection_info(p, info); },
-			projection);
+		return this->project_with(points, pp, projection, [&](const Vec3& p, AlphaProjectionInfo& info) {
+			return input_.query_point_cloud_projection_info(p, info);
+		});
 	}
 
 	// topology scores: the unsigned distance from the points to the input points (nearest point on the k-d tree)
@@ -139,48 +115,10 @@ public:
 		input_.build_input_kdtree();
 		if (!input_.input_kdtree())
 			return false;
-		values.resize(points.size());
-		std::atomic<bool> all_found{true};
-		detail::parallel_for_index(points.size(), [&](std::size_t i) {
+		return this->distances_from(points, values, [&](const Vec3& p, Scalar& distance) {
 			uint32 point;
-			Scalar distance;
-			if (!query_point_cloud_nearest_point(*input_.input_kdtree(), points[i], point, distance))
-			{
-				all_found = false;
-				return;
-			}
-			values[i] = distance;
+			return query_point_cloud_nearest_point(*input_.input_kdtree(), p, point, distance);
 		});
-		if (!all_found)
-			return false;
-		return true;
-	}
-
-	// MF values are only defined for neural fields; this method is not called for the point cloud field
-	bool values_sdf(const std::vector<Vec3>& /*points*/, std::vector<Scalar>& /*values*/, std::vector<Scalar>& /*sdf*/)
-	{
-		return false;
-	}
-
-	// the normals of the samples are recomputed from the input after the sampling filter
-	static constexpr bool recompute_normals_from_input_after_filtering = true;
-
-	// the point cloud field never holds a neural model (see NeuralDistanceField)
-	bool load_model(const std::filesystem::path& /*path*/, NeuralModelType /*type*/)
-	{
-		return false;
-	}
-	const std::string& load_error() const
-	{
-		static const std::string no_model = "this distance field holds no neural model";
-		return no_model;
-	}
-	void reset()
-	{
-	}
-	bool loaded() const
-	{
-		return false;
 	}
 
 private:
