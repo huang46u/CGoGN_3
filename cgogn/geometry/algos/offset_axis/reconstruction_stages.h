@@ -168,6 +168,16 @@ typename State::SpheresOptimizerType& optimizer_for(State& s);
 template <typename State>
 typename State::TopologyType& topology_for(State& s);
 
+// true if the field is neural and holds a model of the given type (CPU fields: false)
+template <typename State>
+bool neural_model_is(const State& s, NeuralModelType type)
+{
+	if constexpr (State::Field::is_neural_type)
+		return s.field.model_type() == type;
+	else
+		return false;
+}
+
 template <typename State>
 bool evaluate_topology_scores(State& s, const std::vector<Vec3>& points, std::vector<Scalar>& values);
 
@@ -292,7 +302,6 @@ typename State::StatusInfo load_neural_model(State& s, const std::filesystem::pa
 
 	if (!s.field.load_model(path, type))
 		return typename State::StatusInfo{Status::model_load_failed, "load_neural_model: " + s.field.load_error()};
-	s.options.neural_model_type = type;
 	return Status::success;
 }
 
@@ -545,11 +554,10 @@ typename State::TopologyType& topology_for(State& s)
 template <typename State>
 bool evaluate_topology_scores(State& s, const std::vector<Vec3>& points, std::vector<Scalar>& values)
 {
-	using Field = typename State::Field;
 	using NeuralModelType = typename State::NeuralModelType;
 
 	s.input.bind(s.data.surface, s.data.input_points, s.input_position, s.input_normal);
-	if (Field::is_neural_type && s.options.neural_model_type == NeuralModelType::mf)
+	if (neural_model_is(s, NeuralModelType::mf))
 	{
 		// MF: mf - |sdf| is not a stable medial axis (its minimum is above zero and varies a lot over a shape),
 		// so the score is the distance to the medial point of the nearest sample instead of the network value
@@ -774,8 +782,8 @@ typename State::StatusInfo compute_initial_medial_axis(State& s)
 	const Scalar fallback_radius = Scalar(s.options.alpha);
 	const Scalar min_norm = Scalar(1e-12);
 	const bool neural_input = Field::is_neural_type && s.field.loaded();
-	const bool mf_model = neural_input && s.options.neural_model_type == NeuralModelType::mf;
-	const bool udf_model = neural_input && s.options.neural_model_type == NeuralModelType::udf;
+	const bool mf_model = neural_input && neural_model_is(s, NeuralModelType::mf);
+	const bool udf_model = neural_input && neural_model_is(s, NeuralModelType::udf);
 	const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(10), Scalar(0));
 	// repair counters (atomic: run_shrinking_ball_for_vertex runs in parallel); they do not affect the result
 	s.ma_repairs = {};

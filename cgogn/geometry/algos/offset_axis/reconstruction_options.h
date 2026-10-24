@@ -102,6 +102,7 @@ inline bool parse(const std::string& value, NeuralModelType& out)
 //   json key : path in the benchmark config / timing JSON (dotted)
 //   min, max : accepted range (checked by the benchmark config loader), unused for bool/enum
 //   ui_min, ui_max : slider range in the UI
+// neural_model_type: type of the neural model to load; the loaded NeuralDistanceField keeps its own copy
 // udf_min_active_rays: neural seed rays, a ray batch ends once fewer than this many rays are still marching (0 = off)
 // residual_prune_mode: 0 current, 1 keep_fully_non_manifold, 2 collapsible_only
 // clang-format off

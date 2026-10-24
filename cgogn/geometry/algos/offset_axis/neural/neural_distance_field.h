@@ -82,14 +82,15 @@ public:
 	{
 	}
 
-	// the options (neural_model_type) are written by the caller
-	bool load_model(const std::filesystem::path& path, NeuralModelType /*type*/)
+	// loads the TorchScript module; the field keeps the model type (UDF or MF) given here
+	bool load_model(const std::filesystem::path& path, NeuralModelType type)
 	{
 		try
 		{
 			neural_model_ = torch::jit::load(path.string(), device_);
 			neural_model_.eval();
 			neural_model_loaded_ = true;
+			model_type_ = type;
 			neural_field_ = NeuralFieldForward(&neural_model_, true, device_);
 			load_error_.clear();
 			return true;
@@ -120,6 +121,12 @@ public:
 		return neural_model_loaded_;
 	}
 
+	// UDF or MF, as given to the last successful load_model
+	NeuralModelType model_type() const
+	{
+		return model_type_;
+	}
+
 	const torch::Device& device() const
 	{
 		return device_;
@@ -144,7 +151,7 @@ public:
 
 	FieldPrepareResult sampling_box(const PrepareInputs<SURFACE, POINTS>& inputs, Vec3& bbox_min, Vec3& bbox_max)
 	{
-		if (options_.neural_model_type == NeuralModelType::udf)
+		if (model_type_ == NeuralModelType::udf)
 		{
 			bbox_min = Vec3(-0.5, -0.5, -0.5);
 			bbox_max = Vec3(0.5, 0.5, 0.5);
@@ -192,7 +199,7 @@ public:
 	bool project(const std::vector<Vec3>& points, const AlphaProjectionParameters& pp,
 				 AlphaProjectionResult& projection)
 	{
-		const bool filter_positive = options_.neural_model_type == NeuralModelType::mf;
+		const bool filter_positive = model_type_ == NeuralModelType::mf;
 		if (!offset_axis::project_points_to_alpha(neural_field_, points, pp, filter_positive, projection_workspace_,
 											   projection))
 			return false;
@@ -219,6 +226,7 @@ private:
 	torch::Device device_ = torch::cuda::is_available() ? torch::Device(torch::kCUDA, 0) : torch::Device(torch::kCPU);
 	torch::jit::Module neural_model_;
 	bool neural_model_loaded_ = false;
+	NeuralModelType model_type_ = NeuralModelType::udf;
 	std::string load_error_;
 	// one wrapper for the loaded model: it remembers the output layout found by its first forward, so MF models
 	// do not go through autograd again on every call

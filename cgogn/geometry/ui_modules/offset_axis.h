@@ -302,6 +302,7 @@ public:
 				return ReconstructionStatus::model_load_failed;
 			}
 			log_basic(p, "Loading Neural UDF model from: ", model_path, '\n');
+			p.reconstruction_->options().neural_model_type = model_type;
 			const auto status = p.reconstruction_->load_neural_model(model_path, model_type);
 			p.neural_udf_loaded_ = status.code == ReconstructionStatus::success;
 			if (!p.neural_udf_loaded_)
