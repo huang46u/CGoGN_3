@@ -30,6 +30,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -45,7 +46,7 @@ namespace offset_axis
 class NeuralFieldForward
 {
 public:
-	NeuralFieldForward(torch::jit::Module* module, bool loaded, const torch::Device& device)
+	NeuralFieldForward(std::shared_ptr<torch::jit::Module> module, bool loaded, const torch::Device& device)
 		: module_(module), loaded_(loaded), device_(device)
 	{
 	}
@@ -198,7 +199,8 @@ private:
 		OutputKind kind = OutputKind::Unknown;
 		if (!parse_output(output, parsed, kind))
 			return {torch::Tensor(), torch::Tensor()};
-		output_kind_ = kind;
+		if (kind != OutputKind::Unknown)
+			output_kind_ = kind;
 		if (sdf_out && parsed.has_sdf)
 			*sdf_out = parsed.sdf.detach();
 
@@ -285,7 +287,7 @@ private:
 		return grad.defined() && grad.dim() == 2 && grad.size(0) == expected_rows && grad.size(1) == 3;
 	}
 
-	torch::jit::Module* module_;
+	std::shared_ptr<torch::jit::Module> module_;
 	bool loaded_;
 	torch::Device device_;
 	mutable OutputKind output_kind_ = OutputKind::Unknown;

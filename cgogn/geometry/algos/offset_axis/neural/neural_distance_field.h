@@ -87,18 +87,18 @@ public:
 	{
 		try
 		{
-			neural_model_ = torch::jit::load(path.string(), device_);
-			neural_model_.eval();
+			neural_model_ = std::make_shared<torch::jit::Module>(torch::jit::load(path.string(), device_));
+			neural_model_->eval();
 			neural_model_loaded_ = true;
 			model_type_ = type;
-			neural_field_ = NeuralFieldForward(&neural_model_, true, device_);
+			neural_field_ = NeuralFieldForward(neural_model_, true, device_);
 			load_error_.clear();
 			return true;
 		}
 		catch (const c10::Error& e)
 		{
 			neural_model_loaded_ = false;
-			neural_field_ = NeuralFieldForward(&neural_model_, false, device_);
+			neural_field_ = NeuralFieldForward(neural_model_, false, device_);
 			load_error_ = e.what_without_backtrace();
 			return false;
 		}
@@ -113,7 +113,7 @@ public:
 	void reset()
 	{
 		neural_model_loaded_ = false;
-		neural_field_ = NeuralFieldForward(&neural_model_, false, device_);
+		neural_field_ = NeuralFieldForward(neural_model_, false, device_);
 	}
 
 	bool loaded() const
@@ -169,10 +169,9 @@ public:
 
 	RayTraits ray_traits(const PrepareInputs<SURFACE, POINTS>& /*inputs*/)
 	{
-		// NeuralFieldRayTraits stores a pointer, so the copy lives in a member and outlives the traits
-		sampling_field_ = neural_field_;
 		RayTraits traits;
-		traits.field = &sampling_field_;
+		// the traits point to the member neural_field_, which outlives the sampling
+		traits.field = &neural_field_;
 		return traits;
 	}
 
@@ -224,16 +223,14 @@ public:
 private:
 	// the neural state of the field: the device, the module, whether it is loaded and the wrapper of the module
 	torch::Device device_ = torch::cuda::is_available() ? torch::Device(torch::kCUDA, 0) : torch::Device(torch::kCPU);
-	torch::jit::Module neural_model_;
+	std::shared_ptr<torch::jit::Module> neural_model_;
 	bool neural_model_loaded_ = false;
 	NeuralModelType model_type_ = NeuralModelType::udf;
 	std::string load_error_;
 	// one wrapper for the loaded model: it remembers the output layout found by its first forward, so MF models
 	// do not go through autograd again on every call
-	NeuralFieldForward neural_field_{&neural_model_, false, device_};
+	NeuralFieldForward neural_field_{neural_model_, false, device_};
 	NeuralProjectionWorkspace projection_workspace_;
-	// copy of neural_field_ taken by ray_traits(): the ray traits keep a pointer to it during a sampling
-	NeuralFieldForward sampling_field_{&neural_model_, false, device_};
 	InputGeometry<SURFACE, POINTS>& input_;
 	const ReconstructionOptions& options_;
 };
