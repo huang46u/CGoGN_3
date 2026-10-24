@@ -71,7 +71,7 @@ using geometry::Scalar;
 using geometry::Vec3;
 using geometry::Vec4;
 
-template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
+template <typename SURFACE, typename POINTS, typename NONMANIFOLD, template <typename, typename> class FIELD>
 class OffsetAxis : public ViewModule
 {
 public:
@@ -87,7 +87,7 @@ public:
 	using SpheresOptimizerType = cgogn::geometry::offset_axis::SpheresOptimizer<POINTS>;
 	using SpheresOptimizerMetrics = typename SpheresOptimizerType::Metrics;
 	using SpheresOptimizerStatus = typename SpheresOptimizerType::Status;
-	using ReconstructionType = cgogn::geometry::offset_axis::OffsetAxisReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>;
+	using ReconstructionType = cgogn::geometry::offset_axis::OffsetAxisReconstruction<SURFACE, POINTS, NONMANIFOLD, FIELD>;
 	using ReconstructionStatus = typename ReconstructionType::Status;
 	using ReconstructionStatusInfo = typename ReconstructionType::StatusInfo;
 

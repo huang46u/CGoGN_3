@@ -90,7 +90,7 @@ namespace offset_axis
 // The members are public and are accessed by the OffsetAxisReconstruction facade as s_.name.
 // Their declaration order is the initialization order: field refers to input and options, so it is declared
 // after them.
-template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
+template <typename SURFACE, typename POINTS, typename NONMANIFOLD, template <typename, typename> class FIELD>
 struct ReconstructionState
 {
 	using Surface = SURFACE;
@@ -105,9 +105,8 @@ struct ReconstructionState
 	using SpheresOptimizerType = SpheresOptimizer<POINTS>;
 	using SpheresOptimizerMetrics = typename SpheresOptimizerType::Metrics;
 	using TopologyType = SkeletonTopology<POINTS, NONMANIFOLD>;
-	using Field = typename DistanceFieldFor<RaySamplerTag, SURFACE, POINTS>::type;
-	using RayConfig = typename Field::RayConfig;
-	using RayTraits = typename RayConfig::SamplerTraits;
+	using Field = FIELD<SURFACE, POINTS>;
+	using RayTraits = typename Field::RayTraits;
 	using RaySampler = typename Field::RaySampler;
 	using RayParams = typename RaySampler::Params;
 	using PAttribute = typename mesh_traits<POINTS>::template Attribute<Vec3>;

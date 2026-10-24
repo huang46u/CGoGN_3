@@ -73,8 +73,7 @@ class NeuralDistanceField
 public:
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
 	using SVertex = typename mesh_traits<SURFACE>::Vertex;
-	using RayConfig = RaySamplerTraits<RaySamplerNeural, SURFACE, POINTS>;
-	using RayTraits = typename RayConfig::SamplerTraits;
+	using RayTraits = NeuralFieldRayTraits;
 	using RaySampler = TorchRayLevelSetSampler<RayTraits>;
 	static constexpr bool is_neural_type = true;
 
@@ -165,7 +164,9 @@ public:
 	{
 		// NeuralFieldRayTraits stores a pointer, so the copy lives in a member and outlives the traits
 		sampling_field_ = neural_field_;
-		return RayConfig::make(sampling_field_);
+		RayTraits traits;
+		traits.field = &sampling_field_;
+		return traits;
 	}
 
 	std::unique_ptr<RaySampler> make_ray_sampler(const typename RaySampler::Params& params) const
@@ -227,13 +228,6 @@ private:
 	NeuralFieldForward sampling_field_{&neural_model_, false, device_};
 	InputGeometry<SURFACE, POINTS>& input_;
 	const ReconstructionOptions& options_;
-};
-
-// Neural specialization of the distance field selection (the primary template is in distance_field.h)
-template <typename SURFACE, typename POINTS>
-struct DistanceFieldFor<RaySamplerNeural, SURFACE, POINTS>
-{
-	using type = NeuralDistanceField<SURFACE, POINTS>;
 };
 
 } // namespace offset_axis

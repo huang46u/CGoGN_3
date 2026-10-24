@@ -64,8 +64,7 @@ class PointCloudDistanceField
 {
 public:
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
-	using RayConfig = RaySamplerTraits<RaySamplerPointCloud, SURFACE, POINTS>;
-	using RayTraits = typename RayConfig::SamplerTraits;
+	using RayTraits = PointCloudRayTraits<POINTS>;
 	using RaySampler = RayLevelSetSampler<RayTraits>;
 	static constexpr bool is_neural_type = false;
 
@@ -92,8 +91,14 @@ public:
 
 	RayTraits ray_traits(const PrepareInputs<SURFACE, POINTS>& inputs)
 	{
-		return RayConfig::make(*inputs.input_points, inputs.input_position.get(), inputs.input_normal.get(),
-							   inputs.input_knn.get(), input_.input_kdtree().get(), &input_.input_vertices());
+		RayTraits traits;
+		traits.mesh = inputs.input_points;
+		traits.position = inputs.input_position.get();
+		traits.normal = inputs.input_normal.get();
+		traits.knn = inputs.input_knn.get();
+		traits.kdtree = input_.input_kdtree().get();
+		traits.kdtree_vertices = &input_.input_vertices();
+		return traits;
 	}
 
 	std::unique_ptr<RaySampler> make_ray_sampler(const typename RaySampler::Params& params) const

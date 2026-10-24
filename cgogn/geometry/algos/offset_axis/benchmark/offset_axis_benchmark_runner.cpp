@@ -119,13 +119,13 @@ void put_option_value(boost::property_tree::ptree& tree, const char* key, const 
 		tree.put(key, value);
 }
 
-template <typename RaySamplerTag>
+template <template <typename, typename> class FIELD>
 BenchmarkResult run_impl(const BenchmarkConfig& config)
 {
 	using Surface = CMap2;
 	using Points = CMap0;
 	using NonManifold = IncidenceGraph;
-	using Reconstruction = OffsetAxisReconstruction<Surface, Points, NonManifold, RaySamplerTag>;
+	using Reconstruction = OffsetAxisReconstruction<Surface, Points, NonManifold, FIELD>;
 	using Status = typename Reconstruction::Status;
 
 	BenchmarkResult result;
@@ -339,14 +339,14 @@ BenchmarkResult SkeletonBenchmarkRunner::run(const BenchmarkConfig& config) cons
 	switch (config.input.mode)
 	{
 	case InputMode::PointCloud:
-		result = run_impl<offset_axis::RaySamplerPointCloud>(config);
+		result = run_impl<offset_axis::PointCloudDistanceField>(config);
 		break;
 	case InputMode::SurfaceMesh:
-		result = run_impl<offset_axis::RaySamplerSurface>(config);
+		result = run_impl<offset_axis::SurfaceDistanceField>(config);
 		break;
 	case InputMode::NeuralUDF:
 #if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
-		result = run_impl<offset_axis::RaySamplerNeural>(config);
+		result = run_impl<offset_axis::NeuralDistanceField>(config);
 #else
 		throw std::runtime_error("offset_axis_benchmark was built without LibTorch (CGOGN_USE_TORCH=OFF): neural_udf input is not available");
 #endif

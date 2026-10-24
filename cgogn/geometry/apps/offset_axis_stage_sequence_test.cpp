@@ -91,13 +91,13 @@ bool compare_counts(const ReconstructionCounts& staged, const ReconstructionCoun
 	return same;
 }
 
-template <typename RaySamplerTag>
+template <template <typename, typename> class FIELD>
 bool run_test(const BenchmarkConfig& config)
 {
 	using Surface = cgogn::CMap2;
 	using Points = cgogn::CMap0;
 	using NonManifold = cgogn::IncidenceGraph;
-	using Reconstruction = cgogn::geometry::offset_axis::OffsetAxisReconstruction<Surface, Points, NonManifold, RaySamplerTag>;
+	using Reconstruction = cgogn::geometry::offset_axis::OffsetAxisReconstruction<Surface, Points, NonManifold, FIELD>;
 	using Status = typename Reconstruction::Status;
 	using OptimizerStatus = typename Reconstruction::SpheresOptimizerType::Status;
 
@@ -233,12 +233,12 @@ bool dispatch_test(const BenchmarkConfig& config)
 	switch (config.input.mode)
 	{
 	case InputMode::PointCloud:
-		return run_test<cgogn::geometry::offset_axis::RaySamplerPointCloud>(config);
+		return run_test<cgogn::geometry::offset_axis::PointCloudDistanceField>(config);
 	case InputMode::SurfaceMesh:
-		return run_test<cgogn::geometry::offset_axis::RaySamplerSurface>(config);
+		return run_test<cgogn::geometry::offset_axis::SurfaceDistanceField>(config);
 	case InputMode::NeuralUDF:
 #if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
-		return run_test<cgogn::geometry::offset_axis::RaySamplerNeural>(config);
+		return run_test<cgogn::geometry::offset_axis::NeuralDistanceField>(config);
 #else
 		std::cerr << "offset_axis_stage_sequence_test was built without LibTorch (CGOGN_USE_TORCH=OFF): neural_udf input is "
 					 "not available"

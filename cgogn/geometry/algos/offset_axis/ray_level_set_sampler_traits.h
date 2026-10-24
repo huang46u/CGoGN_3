@@ -44,23 +44,6 @@ namespace geometry
 namespace offset_axis
 {
 
-struct RaySamplerNeural
-{
-};
-
-struct RaySamplerSurface
-{
-};
-
-struct RaySamplerPointCloud
-{
-};
-
-template <typename RaySamplerTag, typename SURFACE, typename POINTS>
-struct RaySamplerTraits
-{
-};
-
 template <typename SURFACE>
 struct SurfaceMeshRayTraits
 {
@@ -90,26 +73,6 @@ struct SurfaceMeshRayTraits
 		(void)primitive_index;
 		(void)closest_point;
 		return distance;
-	}
-};
-
-template <typename SURFACE, typename POINTS>
-struct RaySamplerTraits<RaySamplerSurface, SURFACE, POINTS>
-{
-	using SamplerTraits = SurfaceMeshRayTraits<SURFACE>;
-	template <typename T>
-	using Attribute = typename mesh_traits<SURFACE>::template Attribute<T>;
-	using Face = typename mesh_traits<SURFACE>::Face;
-
-	static SamplerTraits make(SURFACE& mesh, Attribute<Vec3>* position, acc::BVHTree<uint32, Vec3>* bvh,
-							  std::vector<Face>* bvh_faces)
-	{
-		SamplerTraits traits;
-		traits.mesh = &mesh;
-		traits.position = position;
-		traits.bvh = bvh;
-		traits.bvh_faces = bvh_faces;
-		return traits;
 	}
 };
 
@@ -143,29 +106,6 @@ struct PointCloudRayTraits
 		(void)point_index;
 		return distance;
 
-	}
-};
-
-template <typename SURFACE, typename POINTS>
-struct RaySamplerTraits<RaySamplerPointCloud, SURFACE, POINTS>
-{
-	using SamplerTraits = PointCloudRayTraits<POINTS>;
-	using Vertex = typename mesh_traits<POINTS>::Vertex;
-	template <typename T>
-	using Attribute = typename mesh_traits<POINTS>::template Attribute<T>;
-
-	static SamplerTraits make(POINTS& mesh, Attribute<Vec3>* position, Attribute<Vec3>* normal,
-							  Attribute<std::vector<Vertex>>* knn, acc::KDTree<3, uint32>* kdtree,
-							  const std::vector<Vertex>* kdtree_vertices)
-	{
-		SamplerTraits traits;
-		traits.mesh = &mesh;
-		traits.position = position;
-		traits.normal = normal;
-		traits.knn = knn;
-		traits.kdtree = kdtree;
-		traits.kdtree_vertices = kdtree_vertices;
-		return traits;
 	}
 };
 

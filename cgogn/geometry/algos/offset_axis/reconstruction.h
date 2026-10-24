@@ -91,11 +91,11 @@ namespace geometry
 namespace offset_axis
 {
 
-template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
+template <typename SURFACE, typename POINTS, typename NONMANIFOLD, template <typename, typename> class FIELD>
 class OffsetAxisReconstruction
 {
 public:
-	using State = ReconstructionState<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>;
+	using State = ReconstructionState<SURFACE, POINTS, NONMANIFOLD, FIELD>;
 
 	using PVertex = typename State::PVertex;
 	using SVertex = typename State::SVertex;
@@ -107,7 +107,6 @@ public:
 	using SpheresOptimizerMetrics = typename State::SpheresOptimizerMetrics;
 	using TopologyType = typename State::TopologyType;
 	using Field = typename State::Field;
-	using RayConfig = typename State::RayConfig;
 	using RayTraits = typename State::RayTraits;
 	using RaySampler = typename State::RaySampler;
 	using RayParams = typename State::RayParams;

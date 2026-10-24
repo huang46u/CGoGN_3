@@ -61,19 +61,6 @@ struct NeuralFieldRayTraits
 	}
 };
 
-template <typename SURFACE, typename POINTS>
-struct RaySamplerTraits<RaySamplerNeural, SURFACE, POINTS>
-{
-	using SamplerTraits = NeuralFieldRayTraits;
-
-	static SamplerTraits make(NeuralFieldForward& field)
-	{
-		SamplerTraits traits;
-		traits.field = &field;
-		return traits;
-	}
-};
-
 } // namespace offset_axis
 
 } // namespace geometry

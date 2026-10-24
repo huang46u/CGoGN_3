@@ -25,7 +25,6 @@
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
-#include <cgogn/geometry/algos/offset_axis/ray_level_set_sampler_traits.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <memory>
@@ -41,13 +40,13 @@ namespace offset_axis
 {
 
 // Distance field: the function the UDF reconstruction samples and scores. The reconstruction is written once and
-// the input kind selects a field class through DistanceFieldFor<RaySamplerTag, SURFACE, POINTS>::type:
+// the reconstruction takes the field class template as its FIELD template parameter:
 //   - SurfaceDistanceField: the unsigned distance to a triangle surface (exact closest point on the BVH);
 //   - PointCloudDistanceField: the unsigned distance to an oriented point cloud (k-d tree queries);
 //   - NeuralDistanceField: a TorchScript network that predicts the UDF or the MF value of the input.
 // Every field is constructed from the InputGeometry caches and the ReconstructionOptions of the reconstruction, and
 // provides the following interface (the CPU fields hold no model, see the notes on each method):
-//   RayConfig, RayTraits, RaySampler, is_neural_type  types of the ray sampler and compile-time kind of the field
+//   RayTraits, RaySampler, is_neural_type  types of the ray sampler and compile-time kind of the field
 //   prepare(inputs)                              build the caches, or report that the field is not usable yet
 //   sampling_box(inputs, min, max)               bounding box of the input, before padding
 //   ray_traits(inputs)                           traits of the ray sampler (valid until the sampling ends)
@@ -85,30 +84,6 @@ struct PrepareInputs
 	std::shared_ptr<PointAttribute<Vec3>> input_normal;
 	std::shared_ptr<PointAttribute<std::vector<PVertex>>> input_knn;
 };
-
-template <typename SURFACE, typename POINTS>
-class SurfaceDistanceField;
-
-template <typename SURFACE, typename POINTS>
-class PointCloudDistanceField;
-
-// Maps a ray sampler tag to the distance field class that implements it.
-template <typename RaySamplerTag, typename SURFACE, typename POINTS>
-struct DistanceFieldFor;
-
-template <typename SURFACE, typename POINTS>
-struct DistanceFieldFor<RaySamplerSurface, SURFACE, POINTS>
-{
-	using type = SurfaceDistanceField<SURFACE, POINTS>;
-};
-
-template <typename SURFACE, typename POINTS>
-struct DistanceFieldFor<RaySamplerPointCloud, SURFACE, POINTS>
-{
-	using type = PointCloudDistanceField<SURFACE, POINTS>;
-};
-
-// the neural specialization is in neural/neural_distance_field.h; include it to reconstruct from a neural field
 
 } // namespace offset_axis
 

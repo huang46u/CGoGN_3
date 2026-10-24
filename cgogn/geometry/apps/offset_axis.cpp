@@ -54,7 +54,7 @@ using PVertex = typename cgogn::mesh_traits<Points>::Vertex;
 
 using cgogn::geometry::Vec3;
 
-template <typename RaySamplerTag>
+template <template <typename, typename> class FIELD>
 int run_offset_axis_app(const std::string& filename, const std::string& model_path, bool use_neural_udf,
 						 bool is_surface_file, bool neural_is_mf)
 {
@@ -71,7 +71,7 @@ int run_offset_axis_app(const std::string& filename, const std::string& model_pa
 	cgogn::ui::SurfaceRender<Surface> sr(app);
 	cgogn::ui::PointCloudRender<Points> pcr(app);
 	cgogn::ui::SurfaceRender<NonManifold> srnm(app);
-	cgogn::ui::OffsetAxis<Surface, Points, NonManifold, RaySamplerTag> udf(app);
+	cgogn::ui::OffsetAxis<Surface, Points, NonManifold, FIELD> udf(app);
 
 	app.init_modules();
 
@@ -143,7 +143,7 @@ int run_offset_axis_app(const std::string& filename, const std::string& model_pa
 			*p, model_path,
 			neural_is_mf ? cgogn::geometry::offset_axis::NeuralModelType::mf : cgogn::geometry::offset_axis::NeuralModelType::udf);
 		if (model_status.code !=
-			cgogn::ui::OffsetAxis<Surface, Points, NonManifold, RaySamplerTag>::ReconstructionStatus::success)
+			cgogn::ui::OffsetAxis<Surface, Points, NonManifold, FIELD>::ReconstructionStatus::success)
 			return 1;
 		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
 		pcr.set_vertex_position(*v1, *p, p_vertex_position);
@@ -275,7 +275,7 @@ int main(int argc, char** argv)
 
 #if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
 	if (use_neural_udf)
-		return run_offset_axis_app<cgogn::geometry::offset_axis::RaySamplerNeural>(filename, model_path, true, is_surface_file,
+		return run_offset_axis_app<cgogn::geometry::offset_axis::NeuralDistanceField>(filename, model_path, true, is_surface_file,
 																	   neural_is_mf);
 #else
 	if (use_neural_udf)
@@ -286,6 +286,6 @@ int main(int argc, char** argv)
 	(void)neural_is_mf;
 #endif
 	if (is_surface_file)
-		return run_offset_axis_app<cgogn::geometry::offset_axis::RaySamplerSurface>(filename, model_path, false, true, false);
-	return run_offset_axis_app<cgogn::geometry::offset_axis::RaySamplerPointCloud>(filename, model_path, false, false, false);
+		return run_offset_axis_app<cgogn::geometry::offset_axis::SurfaceDistanceField>(filename, model_path, false, true, false);
+	return run_offset_axis_app<cgogn::geometry::offset_axis::PointCloudDistanceField>(filename, model_path, false, false, false);
 }

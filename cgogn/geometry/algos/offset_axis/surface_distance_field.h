@@ -62,8 +62,7 @@ class SurfaceDistanceField
 {
 public:
 	using SVertex = typename mesh_traits<SURFACE>::Vertex;
-	using RayConfig = RaySamplerTraits<RaySamplerSurface, SURFACE, POINTS>;
-	using RayTraits = typename RayConfig::SamplerTraits;
+	using RayTraits = SurfaceMeshRayTraits<SURFACE>;
 	using RaySampler = RayLevelSetSampler<RayTraits>;
 	static constexpr bool is_neural_type = false;
 
@@ -91,7 +90,12 @@ public:
 	RayTraits ray_traits(const PrepareInputs<SURFACE, POINTS>& inputs)
 	{
 		auto s_pos = get_attribute<Vec3, SVertex>(*inputs.surface, "position");
-		return RayConfig::make(*inputs.surface, s_pos.get(), input_.surface_bvh().get(), &input_.surface_faces());
+		RayTraits traits;
+		traits.mesh = inputs.surface;
+		traits.position = s_pos.get();
+		traits.bvh = input_.surface_bvh().get();
+		traits.bvh_faces = &input_.surface_faces();
+		return traits;
 	}
 
 	std::unique_ptr<RaySampler> make_ray_sampler(const typename RaySampler::Params& params) const
