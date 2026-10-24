@@ -101,7 +101,7 @@ void print_usage(const char* exe_name)
 			  << "  source_ply_dir        D:/Code/CGoGN_3/data/skeleton/udf/shapenetcar_200/model\n"
 			  << "  shapenet_category_dir D:/Code/Dataset/ShapeNet/02958343\n"
 			  << "  output_ply_dir        D:/Code/CGoGN_3/data/skeleton/udf/shapenetcar_200/model_ply\n"
-			  << "Normalization matches geometry::normalize_centered used by udf_training.h:\n"
+			  << "Normalization matches geometry::normalize_centered used by offset_axis.h:\n"
 			  << "  v' = (v - bbox_center) / max_bbox_extent\n";
 }
 

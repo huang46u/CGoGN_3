@@ -72,12 +72,12 @@ if (CGOGN_USE_TORCH)
   )
 endif()
 
-# Helper: UDF executables (udf_training, udf_benchmark, udf_residual_prune_test).
+# Helper: OffsetAxis executables (offset_axis, offset_axis_benchmark, offset_axis_residual_prune_test).
 # With Torch: linked against Torch, CGOGN_UDF_WITH_TORCH=1 (neural input available).
 # Without Torch: plain executable on the same cgogn libraries, CGOGN_UDF_WITH_TORCH=0.
-function(cgogn_add_udf_executable target)
+function(cgogn_add_offset_axis_executable target)
   # usage:
-  #   cgogn_add_udf_executable(name
+  #   cgogn_add_offset_axis_executable(name
   #     SOURCES file1.cpp [file2.cpp ...]
   #     EXTRA_LIBS libA libB ...
   #   )
@@ -113,65 +113,61 @@ endfunction()
 if (CGOGN_USE_CGAL)
   find_package(CGAL REQUIRED)
 
-  cgogn_add_udf_executable(udf_training
-    SOURCES udf_training.cpp
+  cgogn_add_offset_axis_executable(offset_axis
+    SOURCES offset_axis.cpp
     EXTRA_LIBS CGAL::CGAL
   )
 
-  cgogn_add_udf_executable(udf_benchmark
+  cgogn_add_offset_axis_executable(offset_axis_benchmark
     SOURCES
-      udf_benchmark.cpp
-      ../benchmark/benchmark_config.cpp
-      ../benchmark/skeleton_benchmark_runner.cpp
+      offset_axis_benchmark.cpp
+      ../algos/offset_axis/benchmark/benchmark_config.cpp
+      ../algos/offset_axis/benchmark/offset_axis_benchmark_runner.cpp
     EXTRA_LIBS CGAL::CGAL
   )
 
-  cgogn_add_udf_executable(udf_stage_sequence_test
+  cgogn_add_offset_axis_executable(offset_axis_stage_sequence_test
     SOURCES
-      udf_stage_sequence_test.cpp
-      ../benchmark/benchmark_config.cpp
-      ../benchmark/skeleton_benchmark_runner.cpp
+      offset_axis_stage_sequence_test.cpp
+      ../algos/offset_axis/benchmark/benchmark_config.cpp
+      ../algos/offset_axis/benchmark/offset_axis_benchmark_runner.cpp
     EXTRA_LIBS CGAL::CGAL
   )
 
-  cgogn_add_udf_executable(udf_residual_prune_test
-    SOURCES udf_residual_prune_test.cpp
+  cgogn_add_offset_axis_executable(offset_axis_residual_prune_test
+    SOURCES offset_axis_residual_prune_test.cpp
     EXTRA_LIBS CGAL::CGAL
   )
 
-  # Self-containment check: every UDF header is compiled alone in its own translation unit.
-  # Headers listed in UDF_HEADER_CHECK_EXCLUDE are known not to be self-contained yet.
-  set(UDF_HEADER_CHECK_EXCLUDE)
-  file(GLOB_RECURSE UDF_CHECKED_HEADERS CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/.."
-    "${CMAKE_CURRENT_SOURCE_DIR}/../algos/udf/*.h")
-  list(APPEND UDF_CHECKED_HEADERS
-    types/ray_level_set_sampler.h
-    types/ray_level_set_sampler_traits.h
-  )
+  # Self-containment check: every OffsetAxis header is compiled alone in its own translation unit.
+  # Headers listed in OFFSET_AXIS_HEADER_CHECK_EXCLUDE are known not to be self-contained yet.
+  set(OFFSET_AXIS_HEADER_CHECK_EXCLUDE)
+  file(GLOB_RECURSE OFFSET_AXIS_CHECKED_HEADERS CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/.."
+    "${CMAKE_CURRENT_SOURCE_DIR}/../algos/offset_axis/*.h")
   if (NOT CGOGN_USE_TORCH)
     # The neural headers need LibTorch; without it they are not part of the check.
-    list(FILTER UDF_CHECKED_HEADERS EXCLUDE REGEX "^algos/udf/neural/")
+    list(FILTER OFFSET_AXIS_CHECKED_HEADERS EXCLUDE REGEX "^algos/offset_axis/neural/")
   endif()
-  set(UDF_HEADER_CHECK_SOURCES)
-  foreach(header ${UDF_CHECKED_HEADERS})
-    if (NOT header IN_LIST UDF_HEADER_CHECK_EXCLUDE)
+  set(OFFSET_AXIS_HEADER_CHECK_SOURCES)
+  foreach(header ${OFFSET_AXIS_CHECKED_HEADERS})
+    if (NOT header IN_LIST OFFSET_AXIS_HEADER_CHECK_EXCLUDE)
       string(MAKE_C_IDENTIFIER "${header}" header_id)
-      set(check_source "${CMAKE_CURRENT_BINARY_DIR}/udf_header_check/${header_id}.cpp")
+      set(check_source "${CMAKE_CURRENT_BINARY_DIR}/offset_axis_header_check/${header_id}.cpp")
       file(CONFIGURE OUTPUT "${check_source}" CONTENT "#include <cgogn/geometry/${header}>
 ")
-      list(APPEND UDF_HEADER_CHECK_SOURCES "${check_source}")
+      list(APPEND OFFSET_AXIS_HEADER_CHECK_SOURCES "${check_source}")
     endif()
   endforeach()
   if (CGOGN_USE_TORCH)
-    set(UDF_HEADER_CHECK_TORCH_LIBS "${TORCH_LIBRARIES}")
+    set(OFFSET_AXIS_HEADER_CHECK_TORCH_LIBS "${TORCH_LIBRARIES}")
   else()
-    set(UDF_HEADER_CHECK_TORCH_LIBS)
+    set(OFFSET_AXIS_HEADER_CHECK_TORCH_LIBS)
   endif()
-  add_library(udf_header_check OBJECT ${UDF_HEADER_CHECK_SOURCES})
-  target_link_libraries(udf_header_check PRIVATE cgogn::geometry cgogn::core cgogn::io ${UDF_HEADER_CHECK_TORCH_LIBS} CGAL::CGAL)
-  target_compile_definitions(udf_header_check PRIVATE CGOGN_UDF_WITH_TORCH=$<BOOL:${CGOGN_USE_TORCH}>)
-  set_property(TARGET udf_header_check PROPERTY CXX_STANDARD 17)
-  set_property(TARGET udf_header_check PROPERTY CXX_STANDARD_REQUIRED ON)
+  add_library(offset_axis_header_check OBJECT ${OFFSET_AXIS_HEADER_CHECK_SOURCES})
+  target_link_libraries(offset_axis_header_check PRIVATE cgogn::geometry cgogn::core cgogn::io ${OFFSET_AXIS_HEADER_CHECK_TORCH_LIBS} CGAL::CGAL)
+  target_compile_definitions(offset_axis_header_check PRIVATE CGOGN_UDF_WITH_TORCH=$<BOOL:${CGOGN_USE_TORCH}>)
+  set_property(TARGET offset_axis_header_check PROPERTY CXX_STANDARD 17)
+  set_property(TARGET offset_axis_header_check PROPERTY CXX_STANDARD_REQUIRED ON)
 endif()
 add_executable(filtering filtering.cpp)
 target_link_libraries(filtering

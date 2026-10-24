@@ -1,0 +1,509 @@
+﻿#include <cgogn/geometry/algos/offset_axis/benchmark/benchmark_config.h>
+#include <cgogn/geometry/algos/offset_axis/reconstruction_profiles.h>
+
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
+#include <stdexcept>
+#include <string_view>
+#include <type_traits>
+#include <vector>
+
+namespace cgogn
+{
+
+namespace geometry
+{
+
+namespace benchmark
+{
+
+namespace
+{
+
+using boost::property_tree::ptree;
+namespace fs = std::filesystem;
+
+[[noreturn]] void fail_config(const std::string& message)
+{
+	throw std::runtime_error("Invalid benchmark config: " + message);
+}
+
+template <typename T>
+T require_value(const ptree& tree, const std::string& key)
+{
+	auto value = tree.get_optional<T>(key);
+	if (!value)
+		fail_config("missing required field `" + key + "`");
+	return *value;
+}
+
+template <typename T>
+T get_value(const ptree& tree, const std::string& key, const T& default_value)
+{
+	return tree.get<T>(key, default_value);
+}
+
+std::string resolve_config_relative_path(const std::filesystem::path& config_directory, const std::string& raw_path)
+{
+	if (raw_path.empty())
+		return raw_path;
+
+	const std::filesystem::path path(raw_path);
+	if (path.is_absolute())
+		return path.lexically_normal().string();
+
+	return std::filesystem::absolute(config_directory / path).lexically_normal().string();
+}
+
+std::string normalize_extension(std::string ext)
+{
+	std::transform(ext.begin(), ext.end(), ext.begin(),
+				   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	if (!ext.empty() && ext.front() != '.')
+		ext.insert(ext.begin(), '.');
+	return ext;
+}
+
+bool has_matching_extension(const fs::path& path, const std::string& extension)
+{
+	const std::string expected = normalize_extension(extension);
+	if (expected.empty())
+		return true;
+	return normalize_extension(path.extension().string()) == expected;
+}
+
+std::vector<fs::path> collect_input_files(const fs::path& directory, const std::string& extension, bool recursive)
+{
+	std::vector<fs::path> files;
+	if (!fs::exists(directory))
+		fail_config("batch input directory does not exist: " + directory.string());
+	if (!fs::is_directory(directory))
+		fail_config("batch input directory is not a directory: " + directory.string());
+
+	if (recursive)
+	{
+		for (const auto& entry : fs::recursive_directory_iterator(directory))
+		{
+			if (entry.is_regular_file() && has_matching_extension(entry.path(), extension))
+				files.push_back(entry.path().lexically_normal());
+		}
+	}
+	else
+	{
+		for (const auto& entry : fs::directory_iterator(directory))
+		{
+			if (entry.is_regular_file() && has_matching_extension(entry.path(), extension))
+				files.push_back(entry.path().lexically_normal());
+		}
+	}
+
+	std::sort(files.begin(), files.end(), [](const fs::path& lhs, const fs::path& rhs) {
+		return lhs.filename().string() < rhs.filename().string();
+	});
+	return files;
+}
+
+fs::path find_surface_file_for_case(const BenchmarkBatchConfig& batch, const std::string& stem)
+{
+	if (batch.surface_directory.empty())
+		return {};
+
+	const fs::path surface_dir(batch.surface_directory);
+	if (!fs::exists(surface_dir))
+		fail_config("batch surface directory does not exist: " + surface_dir.string());
+
+	if (!batch.surface_extension.empty())
+	{
+		const fs::path candidate = surface_dir / (stem + batch.surface_extension);
+		if (!fs::exists(candidate))
+			fail_config("missing batch surface file for case `" + stem + "`: " + candidate.string());
+		return candidate.lexically_normal();
+	}
+
+	static const char* kDefaultSurfaceExtensions[] = {".obj", ".ply", ".off", ".stl"};
+	for (const char* ext : kDefaultSurfaceExtensions)
+	{
+		const fs::path candidate = surface_dir / (stem + ext);
+		if (fs::exists(candidate))
+			return candidate.lexically_normal();
+	}
+
+	fail_config("missing batch surface file for case `" + stem + "` in directory: " + surface_dir.string());
+}
+
+InputMode parse_input_mode(const std::string& value)
+{
+	if (value == "point_cloud")
+		return InputMode::PointCloud;
+	if (value == "surface_mesh")
+		return InputMode::SurfaceMesh;
+	if (value == "neural_udf")
+		return InputMode::NeuralUDF;
+	fail_config("unsupported `input.mode`: " + value);
+}
+
+InputGeometryType parse_input_geometry_type(const std::string& value)
+{
+	if (value == "point_cloud")
+		return InputGeometryType::PointCloud;
+	if (value == "mesh")
+		return InputGeometryType::Mesh;
+	fail_config("unsupported `input.geometry_type`: " + value);
+}
+
+std::string format_number(double value)
+{
+	std::ostringstream stream;
+	stream << std::setprecision(15) << value;
+	return stream.str();
+}
+
+// Reads one table option from its dotted json key; absent keys keep the current value.
+template <typename T>
+void read_option(const ptree& root, const OptionInfo& info, T& value)
+{
+	if constexpr (std::is_same_v<T, NeuralModelType> || std::is_same_v<T, ResidualPruneOption>)
+	{
+		if (auto raw = root.get_optional<std::string>(info.json_key))
+		{
+			if (!cgogn::geometry::parse(*raw, value))
+				fail_config(std::string("unsupported `") + info.json_key + "`: " + *raw);
+		}
+	}
+	else if (auto parsed = root.get_optional<T>(info.json_key))
+	{
+		value = *parsed;
+	}
+}
+
+// Range check for int/float options only; bool and enum entries carry no range.
+template <typename T>
+void validate_option_range(const OptionInfo& info, const T& value)
+{
+	if constexpr (std::is_arithmetic_v<T> && !std::is_same_v<T, bool>)
+	{
+		const double number = static_cast<double>(value);
+		if (number < info.min || number > info.max)
+			fail_config(std::string("`") + info.json_key + "` must be in [" + format_number(info.min) + ", " +
+						format_number(info.max) + "]");
+	}
+}
+
+bool is_supported_point_cloud_extension(const std::string& ext)
+{
+	return normalize_extension(ext) == ".ply";
+}
+
+bool is_supported_mesh_extension(const std::string& ext)
+{
+	const std::string normalized = normalize_extension(ext);
+	return normalized == ".obj" || normalized == ".ply" || normalized == ".off" || normalized == ".stl";
+}
+
+void validate_geometry_extension(const std::string& field_name, const std::string& extension, InputGeometryType geometry_type)
+{
+	if (extension.empty())
+		return;
+	if (geometry_type == InputGeometryType::PointCloud)
+	{
+		if (!is_supported_point_cloud_extension(extension))
+			fail_config("`" + field_name +
+						"` must be `.ply` when `input.geometry_type` is `point_cloud`; got: " + extension);
+		return;
+	}
+	if (!is_supported_mesh_extension(extension))
+		fail_config("`" + field_name +
+					"` must use one of `.obj`, `.ply`, `.off`, `.stl` when `input.geometry_type` is `mesh`; got: " +
+					extension);
+}
+
+void validate_geometry_path(const std::string& field_name, const std::string& path, InputGeometryType geometry_type)
+{
+	if (path.empty())
+		return;
+	validate_geometry_extension(field_name, fs::path(path).extension().string(), geometry_type);
+}
+
+InputGeometryType default_geometry_type(const BenchmarkConfig& config)
+{
+	switch (config.input.mode)
+	{
+	case InputMode::PointCloud:
+		return InputGeometryType::PointCloud;
+	case InputMode::SurfaceMesh:
+		return InputGeometryType::Mesh;
+	case InputMode::NeuralUDF:
+	default:
+		return (!config.input.surface_path.empty() || !config.batch.surface_directory.empty()) ? InputGeometryType::Mesh
+																						: InputGeometryType::PointCloud;
+	}
+}
+
+} // namespace
+
+std::string to_string(InputMode value)
+{
+	switch (value)
+	{
+	case InputMode::PointCloud:
+		return "point_cloud";
+	case InputMode::SurfaceMesh:
+		return "surface_mesh";
+	case InputMode::NeuralUDF:
+	default:
+		return "neural_udf";
+	}
+}
+
+std::string to_string(InputGeometryType value)
+{
+	return value == InputGeometryType::Mesh ? "mesh" : "point_cloud";
+}
+
+BenchmarkConfig load_benchmark_config(const std::string& path)
+{
+	const fs::path config_path = fs::absolute(path).lexically_normal();
+	if (!fs::exists(config_path))
+		fail_config("config file does not exist: " + config_path.string());
+
+	ptree root;
+	boost::property_tree::read_json(config_path.string(), root);
+	const fs::path config_directory = config_path.parent_path();
+
+	BenchmarkConfig config;
+	config.config_path = config_path.string();
+
+	config.reconstruction = ReconstructionOptions{};
+	if (auto neural_type = root.get_optional<std::string>("input.neural_model_type"))
+	{
+		if (!cgogn::geometry::parse(*neural_type, config.reconstruction.neural_model_type))
+			fail_config("unsupported `input.neural_model_type`: " + *neural_type);
+	}
+	config.reconstruction.apply_filtering = default_apply_filtering(config.reconstruction.neural_model_type);
+	config.reconstruction.recompute_normals_after_sampling =
+		default_recompute_normals_after_sampling(config.reconstruction.neural_model_type);
+	// Order: table defaults -> model-type defaults -> profile -> explicit JSON keys (applied by for_each_option below).
+	if (auto profile = root.get_optional<std::string>("profile"))
+	{
+		config.profile = *profile;
+		if (!apply_reconstruction_profile(config.profile, config.reconstruction))
+			fail_config("unknown `profile`: " + config.profile + " (expected default, mf_organic, mf_abc or udf)");
+	}
+	for_each_option(config.reconstruction, [&](const OptionInfo& info, auto& value) {
+		if (std::string_view(info.json_key) == "input.neural_model_type")
+			return; // already parsed above
+		read_option(root, info, value);
+		validate_option_range(info, value);
+	});
+
+	const ptree& input = root.get_child("input");
+	const auto geometry_type_raw = input.get_optional<std::string>("geometry_type");
+	config.input.mode = parse_input_mode(require_value<std::string>(input, "mode"));
+	config.input.input_path = resolve_config_relative_path(config_directory, get_value<std::string>(input, "input_path", ""));
+	config.input.surface_path = resolve_config_relative_path(config_directory, get_value<std::string>(input, "surface_path", ""));
+	config.input.neural_udf_model_path =
+		resolve_config_relative_path(config_directory, get_value<std::string>(input, "neural_udf_model_path", ""));
+	if (const auto initial_ma_mode = input.get_optional<std::string>("initial_ma_mode_override");
+		initial_ma_mode && *initial_ma_mode != "shrinking_ball")
+		fail_config("`input.initial_ma_mode_override` is fixed to `shrinking_ball`; remove the key or update its value");
+	if (auto optimization = root.get_child_optional("optimization"))
+	{
+		if (auto distance_mode = optimization->get_optional<std::string>("distance_mode");
+			distance_mode && *distance_mode != "line_quadric_distance_free_r" &&
+			*distance_mode != "line_quadric_distance_free_radius")
+			fail_config("`optimization.distance_mode` is fixed to free radius; migrate this legacy value.");
+		if (auto use_local_clusters = optimization->get_optional<bool>("use_local_clusters");
+			use_local_clusters && !*use_local_clusters)
+			fail_config("`optimization.use_local_clusters` is fixed to true; remove the legacy field or set it to true.");
+		if (auto refresh_interval = optimization->get_optional<unsigned int>("local_cluster_connectivity_refresh_interval");
+			refresh_interval && *refresh_interval != 10)
+			fail_config("`optimization.local_cluster_connectivity_refresh_interval` is fixed to 10; remove the legacy field or set it to 10.");
+		if (auto lock_skeleton_connectivity = optimization->get_optional<bool>("lock_skeleton_connectivity");
+			lock_skeleton_connectivity && *lock_skeleton_connectivity)
+			fail_config("`optimization.lock_skeleton_connectivity` was removed; remove the legacy field or set it to false.");
+	}
+
+	if (auto postprocess = root.get_child_optional("postprocess"))
+	{
+		if (auto topology_fix = postprocess->get_optional<bool>("topology_fix"); topology_fix && !*topology_fix)
+			fail_config("`postprocess.topology_fix` is fixed to true; migrate this legacy value.");
+		if (auto deg_face_deletion = postprocess->get_optional<bool>("deg_face_deletion");
+			deg_face_deletion && *deg_face_deletion)
+			fail_config("`postprocess.deg_face_deletion` was removed; migrate this legacy value.");
+		if (auto nm_two_layer = postprocess->get_optional<bool>("nm_two_layer_prune"); nm_two_layer && *nm_two_layer)
+			fail_config("`postprocess.nm_two_layer_prune` was removed; remove the field or set it to false.");
+		if (auto face_post_processing = postprocess->get_optional<bool>("face_post_processing");
+			face_post_processing && *face_post_processing)
+			fail_config("`postprocess.face_post_processing` was removed; remove the field or set it to false.");
+	}
+
+	const ptree& benchmark_tree = root.get_child("benchmark");
+	config.benchmark.num_measure_runs = get_value<int>(benchmark_tree, "num_measure_runs", 1);
+	config.benchmark.verbose = get_value<bool>(benchmark_tree, "verbose", true);
+	config.benchmark.sequential = get_value<bool>(benchmark_tree, "sequential", false);
+
+	if (auto batch = root.get_child_optional("batch"))
+	{
+		config.batch.enabled = get_value<bool>(*batch, "enabled", false);
+		config.batch.input_directory =
+			resolve_config_relative_path(config_directory, get_value<std::string>(*batch, "input_directory", ""));
+		config.batch.surface_directory =
+			resolve_config_relative_path(config_directory, get_value<std::string>(*batch, "surface_directory", ""));
+		config.batch.neural_udf_model_directory = resolve_config_relative_path(
+			config_directory, get_value<std::string>(*batch, "neural_udf_model_directory", ""));
+		config.batch.input_extension = get_value<std::string>(*batch, "input_extension", ".ply");
+		config.batch.surface_extension = get_value<std::string>(*batch, "surface_extension", "");
+		config.batch.neural_udf_model_extension =
+			get_value<std::string>(*batch, "neural_udf_model_extension", ".pt");
+		config.batch.recursive = get_value<bool>(*batch, "recursive", false);
+		config.batch.resume_from_existing = get_value<bool>(*batch, "resume_from_existing", false);
+		config.batch.output_directory =
+			resolve_config_relative_path(config_directory, get_value<std::string>(*batch, "output_directory", ""));
+		config.batch.timing_directory =
+			resolve_config_relative_path(config_directory, get_value<std::string>(*batch, "timing_directory", ""));
+	}
+
+	config.input.geometry_type =
+		geometry_type_raw ? parse_input_geometry_type(*geometry_type_raw) : default_geometry_type(config);
+
+	const ptree& output = root.get_child("output");
+	config.output.skeleton_ply =
+		resolve_config_relative_path(config_directory, get_value<std::string>(output, "skeleton_ply", ""));
+	config.output.timing_json =
+		resolve_config_relative_path(config_directory, get_value<std::string>(output, "timing_json", ""));
+
+	if (config.benchmark.num_measure_runs != 1)
+		fail_config("`benchmark.num_measure_runs` is reserved in v1 and must be `1`");
+	if (config.input.mode == InputMode::NeuralUDF && !config.batch.enabled)
+	{
+		if (config.input.neural_udf_model_path.empty())
+			fail_config("`input.neural_udf_model_path` is required when `input.mode` is `neural_udf`");
+		if (!fs::exists(config.input.neural_udf_model_path))
+			fail_config("neural model does not exist: " + config.input.neural_udf_model_path);
+	}
+	if (config.input.mode == InputMode::PointCloud && config.input.geometry_type != InputGeometryType::PointCloud)
+		fail_config("`input.geometry_type` must be `point_cloud` when `input.mode` is `point_cloud`");
+	if (config.input.mode == InputMode::SurfaceMesh && config.input.geometry_type != InputGeometryType::Mesh)
+		fail_config("`input.geometry_type` must be `mesh` when `input.mode` is `surface_mesh`");
+	if (config.batch.enabled)
+	{
+		if (config.batch.input_directory.empty())
+			fail_config("`batch.input_directory` is required when `batch.enabled` is true");
+		if (config.batch.output_directory.empty())
+			fail_config("`batch.output_directory` is required when `batch.enabled` is true");
+		if (config.input.mode == InputMode::NeuralUDF && config.batch.neural_udf_model_directory.empty())
+			fail_config("`batch.neural_udf_model_directory` is required when `input.mode` is `neural_udf`");
+		validate_geometry_extension("batch.input_extension", config.batch.input_extension, config.input.geometry_type);
+		if (config.input.geometry_type == InputGeometryType::PointCloud && !config.batch.surface_directory.empty())
+			fail_config("`batch.surface_directory` is only valid when `input.geometry_type` is `mesh`");
+		if (!config.batch.surface_directory.empty())
+			validate_geometry_extension("batch.surface_extension", config.batch.surface_extension, InputGeometryType::Mesh);
+	}
+	else if (config.input.input_path.empty() && config.input.surface_path.empty())
+	{
+		fail_config("one of `input.input_path` or `input.surface_path` must be provided");
+	}
+	else
+	{
+		if (config.input.geometry_type == InputGeometryType::PointCloud)
+		{
+			if (config.input.input_path.empty())
+				fail_config("`input.input_path` is required when `input.geometry_type` is `point_cloud`");
+			validate_geometry_path("input.input_path", config.input.input_path, InputGeometryType::PointCloud);
+		}
+		else
+		{
+			const bool use_surface_path = !config.input.surface_path.empty();
+			const std::string& mesh_path = use_surface_path ? config.input.surface_path : config.input.input_path;
+			const char* mesh_field = use_surface_path ? "input.surface_path" : "input.input_path";
+			if (mesh_path.empty())
+				fail_config("one of `input.input_path` or `input.surface_path` must be provided when `input.geometry_type` is `mesh`");
+			validate_geometry_path(mesh_field, mesh_path, InputGeometryType::Mesh);
+		}
+	}
+	if (!config.batch.enabled && config.output.skeleton_ply.empty())
+		fail_config("`output.skeleton_ply` is required in single-run mode");
+
+	return config;
+}
+
+bool is_batch_benchmark_config(const BenchmarkConfig& config)
+{
+	return config.batch.enabled;
+}
+
+bool is_batch_case_completed(const BenchmarkConfig& config)
+{
+	if (config.output.skeleton_ply.empty())
+		return false;
+	if (!fs::exists(config.output.skeleton_ply))
+		return false;
+	if (!config.output.timing_json.empty() && !fs::exists(config.output.timing_json))
+		return false;
+	return true;
+}
+
+std::vector<BenchmarkConfig> expand_batch_benchmark_configs(const BenchmarkConfig& base_config)
+{
+	if (!base_config.batch.enabled)
+		return {base_config};
+
+	const fs::path input_directory(base_config.batch.input_directory);
+	const auto input_files =
+		collect_input_files(input_directory, base_config.batch.input_extension, base_config.batch.recursive);
+	if (input_files.empty())
+		fail_config("no batch input files found in: " + input_directory.string());
+
+	std::vector<BenchmarkConfig> expanded_configs;
+	expanded_configs.reserve(input_files.size());
+
+	for (const fs::path& input_file : input_files)
+	{
+		BenchmarkConfig config = base_config;
+		const std::string stem = input_file.stem().string();
+		config.input.input_path = input_file.string();
+		config.input.surface_path.clear();
+		config.input.neural_udf_model_path.clear();
+
+		if (config.input.geometry_type == InputGeometryType::Mesh && !config.batch.surface_directory.empty())
+			config.input.surface_path = find_surface_file_for_case(config.batch, stem).string();
+
+		if (config.input.mode == InputMode::NeuralUDF)
+		{
+			const fs::path model_path =
+				fs::path(config.batch.neural_udf_model_directory) / (stem + config.batch.neural_udf_model_extension);
+			if (!fs::exists(model_path))
+				fail_config("missing batch neural model for case `" + stem + "`: " + model_path.string());
+			config.input.neural_udf_model_path = model_path.lexically_normal().string();
+		}
+
+		config.output.skeleton_ply =
+			(fs::path(config.batch.output_directory) / (stem + ".ply")).lexically_normal().string();
+		if (!config.batch.timing_directory.empty())
+		{
+			config.output.timing_json =
+				(fs::path(config.batch.timing_directory) / (stem + "_timing.json")).lexically_normal().string();
+		}
+		else
+		{
+			config.output.timing_json.clear();
+		}
+
+		expanded_configs.push_back(std::move(config));
+	}
+
+	return expanded_configs;
+}
+
+} // namespace benchmark
+
+} // namespace geometry
+
+} // namespace cgogn
