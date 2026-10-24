@@ -11,85 +11,6 @@ find_package(cgogn_ui REQUIRED)
 find_package(cgogn_io REQUIRED)
 find_package(cgogn_rendering REQUIRED)
 
-#find_package(Torch REQUIRED)
-#if (Torch_FOUND)
-#	message(STATUS "Torch found")
-#	add_executable(ndf_skeleton ndf_skeleton.cpp)
-#	target_link_libraries(ndf_skeleton
-#		cgogn::core
-#		cgogn::ui
-#		cgogn::io
-#		cgogn::rendering
-#		${CMAKE_DL_LIBS}
-#		${TORCH_LIBRARIES}
-#	)
-#	if (WIN32)
-#	  get_filename_component(_TORCH_PREFIX "${Torch_DIR}/../../.." ABSOLUTE)
-#
-#	  if (EXISTS "${_TORCH_PREFIX}/lib")
-#		add_custom_command(TARGET ndf_skeleton POST_BUILD
-#		  COMMAND ${CMAKE_COMMAND} -E copy_directory
-#			"${_TORCH_PREFIX}/lib"
-#			"$<TARGET_FILE_DIR:ndf_skeleton>"
-#		  COMMENT "Copying Torch DLLs from lib/"
-#		)
-#	  endif()
-#
-#	  if (EXISTS "${_TORCH_PREFIX}/bin")
-#		add_custom_command(TARGET ndf_skeleton POST_BUILD
-#		  COMMAND ${CMAKE_COMMAND} -E copy_directory
-#			"${_TORCH_PREFIX}/bin"
-#			"$<TARGET_FILE_DIR:ndf_skeleton>"
-#		  COMMENT "Copying Torch DLLs from bin/"
-#		)
-#	  endif()
-#	endif()
-#
-#else()
-#	message(FATAL_ERROR "Torch not found")
-#endif()
-#
-#if (CGOGN_USE_CGAL)
-#	find_package(CGAL REQUIRED)
-#	find_package(Torch REQUIRED)
-#	if(Torch_FOUND)
-#		message(STATUS "Torch found for udf_training")
-#		add_executable(udf_training udf_training.cpp)
-#		target_link_libraries(udf_training
-#			CGAL::CGAL
-#			cgogn::core
-#			cgogn::ui
-#			cgogn::io
-#			cgogn::rendering
-#			${CMAKE_DL_LIBS}
-#			${TORCH_LIBRARIES}
-#		)
-#		if (WIN32)
-#		  get_filename_component(_TORCH_PREFIX "${Torch_DIR}/../../.." ABSOLUTE)
-#
-#		  if (EXISTS "${_TORCH_PREFIX}/lib")
-#			add_custom_command(TARGET udf_training POST_BUILD
-#			  COMMAND ${CMAKE_COMMAND} -E copy_directory
-#				"${_TORCH_PREFIX}/lib"
-#				"$<TARGET_FILE_DIR:udf_training>"
-#			  COMMENT "Copying Torch DLLs from lib/"
-#			)
-#		  endif()
-#
-#		  if (EXISTS "${_TORCH_PREFIX}/bin")
-#			add_custom_command(TARGET udf_training POST_BUILD
-#			  COMMAND ${CMAKE_COMMAND} -E copy_directory
-#				"${_TORCH_PREFIX}/bin"
-#				"$<TARGET_FILE_DIR:udf_training>"
-#			  COMMENT "Copying Torch DLLs from bin/"
-#			)
-#		  endif()
-#		endif()
-#	else()
-#	message(FATAL_ERROR "Torch not found")
-#	endif()
-#endif()
-
 # ---- Torch (optional, official-style) ---------------------------------------
 # Torch is searched for only when CGOGN_USE_TORCH is ON. Without it, every UDF
 # executable is built without Torch and with CGOGN_UDF_WITH_TORCH=0.
@@ -249,8 +170,6 @@ if (CGOGN_USE_CGAL)
   add_library(udf_header_check OBJECT ${UDF_HEADER_CHECK_SOURCES})
   target_link_libraries(udf_header_check PRIVATE cgogn::geometry cgogn::core cgogn::io ${UDF_HEADER_CHECK_TORCH_LIBS} CGAL::CGAL)
   target_compile_definitions(udf_header_check PRIVATE CGOGN_UDF_WITH_TORCH=$<BOOL:${CGOGN_USE_TORCH}>)
-  # cgogn::geometry does not export thirdparty/ (libacc) in its build interface; the apps get it through cgogn::ui
-  target_include_directories(udf_header_check PRIVATE ${CGOGN_SOURCE_DIR}/thirdparty)
   set_property(TARGET udf_header_check PROPERTY CXX_STANDARD 17)
   set_property(TARGET udf_header_check PROPERTY CXX_STANDARD_REQUIRED ON)
 endif()

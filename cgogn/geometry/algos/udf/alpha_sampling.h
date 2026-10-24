@@ -43,14 +43,6 @@ namespace cgogn
 namespace geometry
 {
 
-namespace detail
-{
-
-inline constexpr size_t alpha_sampling_candidates_per_parent = 12;
-inline constexpr size_t alpha_sampling_parent_batch_size = 1024;
-
-} // namespace detail
-
 struct AlphaSamplingParameters
 {
 	Scalar sample_radius = Scalar(0);
@@ -58,8 +50,8 @@ struct AlphaSamplingParameters
 	size_t ray_sampler_batch_size = 1;
 	Vec3 bbox_min = Vec3(0, 0, 0);
 	Vec3 bbox_max = Vec3(1, 1, 1);
-	size_t candidates_per_parent = detail::alpha_sampling_candidates_per_parent;
-	size_t parent_batch_size = detail::alpha_sampling_parent_batch_size;
+	size_t candidates_per_parent = 1;
+	size_t parent_batch_size = 1;
 };
 
 struct AlphaSamplingResult

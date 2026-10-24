@@ -70,6 +70,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 )
 
 target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC
+	$<BUILD_INTERFACE:${CGOGN_SOURCE_DIR}/thirdparty>
 	$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/cgogn/thirdparty>
 )
 
