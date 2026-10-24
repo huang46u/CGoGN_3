@@ -36,7 +36,7 @@
 #include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_profiles.h>
 #include <cgogn/geometry/algos/offset_axis/skeleton_face_components.h>
-#include <cgogn/geometry/algos/offset_axis/skeleton_ply_export.h>
+#include <cgogn/io/surface/skeleton_ply.h>
 #include <cgogn/geometry/types/vector_traits.h>
 #include <cgogn/ui/portable-file-dialogs.h>
 
@@ -1417,7 +1417,7 @@ protected:
 				{
 					std::lock_guard<std::mutex> lock(p.mutex_);
 					if (!(p.reconstruction_->skeleton() &&
-						  cgogn::geometry::offset_axis::export_skeleton_ply(
+						  cgogn::io::export_skeleton_ply(
 							  *p.reconstruction_->skeleton(), p.reconstruction_->skeleton_position_attribute(),
 							  p.reconstruction_->skeleton_radius_attribute(), filename)))
 						log_error("Failed to export skeleton PLY: ", filename, '\n');

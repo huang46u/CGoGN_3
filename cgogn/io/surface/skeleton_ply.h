@@ -20,8 +20,8 @@
  * Contact information: cgogn@unistra.fr                                        *
  *                                                                              *
  *******************************************************************************/
-#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_PLY_EXPORT_H_
-#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_PLY_EXPORT_H_
+#ifndef CGOGN_IO_SURFACE_SKELETON_PLY_H_
+#define CGOGN_IO_SURFACE_SKELETON_PLY_H_
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/geometry/types/vector_traits.h>
@@ -35,18 +35,15 @@
 namespace cgogn
 {
 
-namespace geometry
+namespace io
 {
 
-namespace offset_axis
-{
-
-// Writes the skeleton with its per-vertex radius to a PLY file (directories are created, an existing file is replaced).
+// Writes an OffsetAxis skeleton (non-manifold mesh) with its per-vertex radius to a PLY file (directories are created, an existing file is replaced).
 // Returns false if the file could not be written or is empty.
 template <typename NONMANIFOLD>
 bool export_skeleton_ply(NONMANIFOLD& skeleton,
-						 const std::shared_ptr<typename mesh_traits<NONMANIFOLD>::template Attribute<Vec3>>& position,
-						 const std::shared_ptr<typename mesh_traits<NONMANIFOLD>::template Attribute<Scalar>>& radius,
+						 const std::shared_ptr<typename mesh_traits<NONMANIFOLD>::template Attribute<geometry::Vec3>>& position,
+						 const std::shared_ptr<typename mesh_traits<NONMANIFOLD>::template Attribute<geometry::Scalar>>& radius,
 						 const std::filesystem::path& path)
 {
 	if (!position || !radius)
@@ -64,9 +61,9 @@ bool export_skeleton_ply(NONMANIFOLD& skeleton,
 		if (error)
 			return false;
 	}
-	io::SurfaceExportAttributeSelection<NONMANIFOLD> attributes;
+	SurfaceExportAttributeSelection<NONMANIFOLD> attributes;
 	attributes.vertex_attributes.push_back(radius);
-	io::export_PLY(skeleton, position.get(), path.string(), &attributes);
+	export_PLY(skeleton, position.get(), path.string(), &attributes);
 	const bool exists = std::filesystem::exists(path, error);
 	if (error || !exists)
 		return false;
@@ -74,10 +71,8 @@ bool export_skeleton_ply(NONMANIFOLD& skeleton,
 	return !error && size > 0;
 }
 
-} // namespace offset_axis
-
-} // namespace geometry
+} // namespace io
 
 } // namespace cgogn
 
-#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_PLY_EXPORT_H_
+#endif // CGOGN_IO_SURFACE_SKELETON_PLY_H_

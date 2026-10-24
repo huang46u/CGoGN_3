@@ -30,7 +30,7 @@
 #include <cgogn/geometry/algos/offset_axis/neural/neural_distance_field.h>
 #endif
 #include <cgogn/geometry/algos/offset_axis/reconstruction.h>
-#include <cgogn/geometry/algos/offset_axis/skeleton_ply_export.h>
+#include <cgogn/io/surface/skeleton_ply.h>
 #include <cgogn/geometry/functions/bounding_box.h>
 #include <cgogn/io/point/ply.h>
 #include <cgogn/io/surface/obj.h>
@@ -199,7 +199,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 			: 0.0;
 
 	const auto export_start = std::chrono::high_resolution_clock::now();
-	if (!(reconstruction.skeleton() && offset_axis::export_skeleton_ply(*reconstruction.skeleton(),
+	if (!(reconstruction.skeleton() && io::export_skeleton_ply(*reconstruction.skeleton(),
 			reconstruction.skeleton_position_attribute(), reconstruction.skeleton_radius_attribute(),
 			config.output.skeleton_ply)))
 		throw std::runtime_error("Could not export skeleton: " + config.output.skeleton_ply);

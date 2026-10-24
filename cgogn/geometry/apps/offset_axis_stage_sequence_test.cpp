@@ -28,7 +28,7 @@
 #include <cgogn/geometry/algos/offset_axis/neural/neural_distance_field.h>
 #endif
 #include <cgogn/geometry/algos/offset_axis/reconstruction.h>
-#include <cgogn/geometry/algos/offset_axis/skeleton_ply_export.h>
+#include <cgogn/io/surface/skeleton_ply.h>
 #include <cgogn/geometry/algos/offset_axis/benchmark/benchmark_config.h>
 #include <cgogn/geometry/algos/offset_axis/benchmark/offset_axis_benchmark_runner.h>
 
@@ -171,7 +171,7 @@ bool run_test(const BenchmarkConfig& config)
 		const std::filesystem::path output_path(ply_path);
 		if (!output_path.parent_path().empty())
 			std::filesystem::create_directories(output_path.parent_path());
-		if (!(reconstruction.skeleton() && cgogn::geometry::offset_axis::export_skeleton_ply(
+		if (!(reconstruction.skeleton() && cgogn::io::export_skeleton_ply(
 											   *reconstruction.skeleton(), reconstruction.skeleton_position_attribute(),
 											   reconstruction.skeleton_radius_attribute(), ply_path)))
 		{
