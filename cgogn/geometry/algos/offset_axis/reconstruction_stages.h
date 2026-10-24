@@ -135,6 +135,9 @@ namespace stages
 // called by the OffsetAxisReconstruction facade. reconstruct() is the orchestration of the whole pipeline.
 
 template <typename State>
+void clear_results(State& s);
+
+template <typename State>
 void reset(State& s);
 
 template <typename State>
@@ -227,21 +230,29 @@ typename State::StatusInfo fix_topology_and_prune(State& s);
 template <typename State>
 typename State::Result reconstruct(State& s, const typename State::IterationCallback& callback = {});
 
+// Clears the results of the stages (k-d trees, optimizer, topology, flags and counters); the meshes, the neural model
+// and the ray sampler are kept.
 template <typename State>
-void reset(State& s)
+void clear_results(State& s)
 {
 	s.input.invalidate();
 	s.sample_kdtree.reset();
 	s.sample_ma_kdtree.reset();
 	s.sample_vertices.clear();
 	s.sample_ma_vertices.clear();
-	s.ray_sampler.reset();
 	s.optimizer.reset();
 	s.topology.reset();
-	s.field.reset();
 	s.fitting_data_computed = false;
 	s.samples_before_filtering = 0;
 	s.ma_repairs = {};
+}
+
+template <typename State>
+void reset(State& s)
+{
+	clear_results(s);
+	s.ray_sampler.reset();
+	s.field.reset();
 	s.initialized = false;
 }
 
@@ -1083,22 +1094,13 @@ typename State::Result reconstruct(State& s, const typename State::IterationCall
 	using Result = typename State::Result;
 
 	Result r;
-	s.input.invalidate();
 	if (s.data.samples)
 		clear(*s.data.samples);
 	if (s.data.spheres)
 		clear(*s.data.spheres);
 	if (s.data.skeleton)
 		clear(*s.data.skeleton);
-	s.sample_kdtree.reset();
-	s.sample_ma_kdtree.reset();
-	s.sample_vertices.clear();
-	s.sample_ma_vertices.clear();
-	s.optimizer.reset();
-	s.topology.reset();
-	s.fitting_data_computed = false;
-	s.samples_before_filtering = 0;
-	s.ma_repairs = {};
+	clear_results(s);
 	auto run_stage = [&r](float64& time, auto&& stage) -> Status {
 		const auto start = std::chrono::high_resolution_clock::now();
 		const typename State::StatusInfo status = stage();
