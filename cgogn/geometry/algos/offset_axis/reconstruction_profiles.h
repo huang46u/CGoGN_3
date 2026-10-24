@@ -23,6 +23,7 @@
 #ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_RECONSTRUCTION_PROFILES_H_
 #define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_RECONSTRUCTION_PROFILES_H_
 
+#include <cgogn/geometry/algos/offset_axis/neural_model_type.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
 
 #include <algorithm>
@@ -92,6 +93,17 @@ inline bool apply_reconstruction_profile(const std::string& name, Reconstruction
 	}
 
 	return false;
+}
+
+// Options of a reconstruction: the table defaults, then the defaults of the model type, then the dataset profile.
+// Returns false if the profile is unknown; options then hold the defaults of the model type.
+inline bool make_reconstruction_options(NeuralModelType type, const std::string& profile, ReconstructionOptions& options)
+{
+	options = ReconstructionOptions{};
+	options.neural_model_type = type;
+	options.apply_filtering = default_apply_filtering(type);
+	options.recompute_normals_after_sampling = default_recompute_normals_after_sampling(type);
+	return apply_reconstruction_profile(profile, options);
 }
 
 // Profile suggested for a neural model (used by the UI to pick a preset when a model is loaded).

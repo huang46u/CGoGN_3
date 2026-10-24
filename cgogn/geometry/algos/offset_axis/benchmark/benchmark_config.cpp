@@ -305,22 +305,18 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	BenchmarkConfig config;
 	config.config_path = config_path.string();
 
-	config.reconstruction = ReconstructionOptions{};
+	NeuralModelType model_type = ReconstructionOptions{}.neural_model_type;
 	if (auto neural_type = root.get_optional<std::string>("input.neural_model_type"))
 	{
-		if (!offset_axis::parse(*neural_type, config.reconstruction.neural_model_type))
+		if (!offset_axis::parse(*neural_type, model_type))
 			fail_config("unsupported `input.neural_model_type`: " + *neural_type);
 	}
-	config.reconstruction.apply_filtering = default_apply_filtering(config.reconstruction.neural_model_type);
-	config.reconstruction.recompute_normals_after_sampling =
-		default_recompute_normals_after_sampling(config.reconstruction.neural_model_type);
-	// Order: table defaults -> model-type defaults -> profile -> explicit JSON keys (applied by for_each_option below).
 	if (auto profile = root.get_optional<std::string>("profile"))
-	{
 		config.profile = *profile;
-		if (!apply_reconstruction_profile(config.profile, config.reconstruction))
-			fail_config("unknown `profile`: " + config.profile + " (expected default, mf_organic, mf_abc or udf)");
-	}
+	// Order: table defaults -> model-type defaults -> profile -> explicit JSON keys (applied by for_each_option below).
+	if (!make_reconstruction_options(model_type, config.profile.empty() ? std::string("default") : config.profile,
+									 config.reconstruction))
+		fail_config("unknown `profile`: " + config.profile + " (expected default, mf_organic, mf_abc or udf)");
 	for_each_option(config.reconstruction, [&](const OptionInfo& info, auto& value) {
 		if (std::string_view(info.json_key) == "input.neural_model_type")
 			return; // already parsed above

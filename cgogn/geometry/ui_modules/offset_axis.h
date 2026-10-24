@@ -269,12 +269,7 @@ public:
 			return;
 		auto& options = p.reconstruction_->options();
 		const cgogn::geometry::offset_axis::NeuralModelType model_type = options.neural_model_type;
-		options = cgogn::geometry::offset_axis::ReconstructionOptions{};
-		options.neural_model_type = model_type;
-		options.apply_filtering = cgogn::geometry::offset_axis::default_apply_filtering(model_type);
-		options.recompute_normals_after_sampling =
-			cgogn::geometry::offset_axis::default_recompute_normals_after_sampling(model_type);
-		if (!cgogn::geometry::offset_axis::apply_reconstruction_profile(profile, options))
+		if (!cgogn::geometry::offset_axis::make_reconstruction_options(model_type, profile, options))
 			log_error("Unknown reconstruction profile: ", profile, '\n');
 		p.profile_ = profile;
 		p.sphere_update_lambda_.store(options.sqem_update_lambda_line_plane);
