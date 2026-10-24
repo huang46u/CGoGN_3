@@ -14,7 +14,7 @@ namespace geometry
 namespace benchmark
 {
 
-// timings measured by the benchmark around UDFReconstruction
+// timings measured by the benchmark around OffsetAxisReconstruction
 struct BenchmarkExtraTiming
 {
 	double config_loading_ms = 0.0;

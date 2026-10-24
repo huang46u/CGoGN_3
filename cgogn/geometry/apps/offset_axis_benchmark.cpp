@@ -169,7 +169,7 @@ int main(int argc, char** argv)
 	}
 	catch (const std::exception& e)
 	{
-		std::cerr << "udf_benchmark failed: " << e.what() << std::endl;
+		std::cerr << "offset_axis_benchmark failed: " << e.what() << std::endl;
 		return 1;
 	}
 }

@@ -55,13 +55,13 @@ using PVertex = typename cgogn::mesh_traits<Points>::Vertex;
 using cgogn::geometry::Vec3;
 
 template <typename RaySamplerTag>
-int run_udf_training_app(const std::string& filename, const std::string& model_path, bool use_neural_udf,
+int run_offset_axis_app(const std::string& filename, const std::string& model_path, bool use_neural_udf,
 						 bool is_surface_file, bool neural_is_mf)
 {
 	cgogn::thread_start();
 
 	cgogn::ui::App app;
-	app.set_window_title("UDF Training");
+	app.set_window_title("OffsetAxis");
 	app.set_window_size(1000, 800);
 
 	cgogn::ui::MeshProvider<Surface> mps(app);
@@ -71,7 +71,7 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 	cgogn::ui::SurfaceRender<Surface> sr(app);
 	cgogn::ui::PointCloudRender<Points> pcr(app);
 	cgogn::ui::SurfaceRender<NonManifold> srnm(app);
-	cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag> udf(app);
+	cgogn::ui::OffsetAxis<Surface, Points, NonManifold, RaySamplerTag> udf(app);
 
 	app.init_modules();
 
@@ -143,7 +143,7 @@ int run_udf_training_app(const std::string& filename, const std::string& model_p
 			*p, model_path,
 			neural_is_mf ? cgogn::geometry::NeuralModelType::mf : cgogn::geometry::NeuralModelType::udf);
 		if (model_status.code !=
-			cgogn::ui::UDFTraining<Surface, Points, NonManifold, RaySamplerTag>::ReconstructionStatus::success)
+			cgogn::ui::OffsetAxis<Surface, Points, NonManifold, RaySamplerTag>::ReconstructionStatus::success)
 			return 1;
 		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
 		pcr.set_vertex_position(*v1, *p, p_vertex_position);
@@ -273,19 +273,19 @@ int main(int argc, char** argv)
 				   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 	const bool is_surface_file = (ext != "ply");
 
-#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
+#if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
 	if (use_neural_udf)
-		return run_udf_training_app<cgogn::geometry::RaySamplerNeural>(filename, model_path, true, is_surface_file,
+		return run_offset_axis_app<cgogn::geometry::RaySamplerNeural>(filename, model_path, true, is_surface_file,
 																	   neural_is_mf);
 #else
 	if (use_neural_udf)
 	{
-		std::cerr << "udf_training was built without LibTorch (CGOGN_USE_TORCH=OFF): a .pt model cannot be loaded.\n";
+		std::cerr << "offset_axis was built without LibTorch (CGOGN_USE_TORCH=OFF): a .pt model cannot be loaded.\n";
 		return 1;
 	}
 	(void)neural_is_mf;
 #endif
 	if (is_surface_file)
-		return run_udf_training_app<cgogn::geometry::RaySamplerSurface>(filename, model_path, false, true, false);
-	return run_udf_training_app<cgogn::geometry::RaySamplerPointCloud>(filename, model_path, false, false, false);
+		return run_offset_axis_app<cgogn::geometry::RaySamplerSurface>(filename, model_path, false, true, false);
+	return run_offset_axis_app<cgogn::geometry::RaySamplerPointCloud>(filename, model_path, false, false, false);
 }

@@ -80,8 +80,8 @@
 namespace cgogn::geometry
 {
 
-// All the state of the UDF reconstruction: the types and the data members of the former UDFReconstruction.
-// The members are public and are accessed by the UDFReconstruction facade as s_.name.
+// All the state of the UDF reconstruction: the types and the data members of the former OffsetAxisReconstruction.
+// The members are public and are accessed by the OffsetAxisReconstruction facade as s_.name.
 // Their declaration order is the initialization order: field refers to input and options, so it is declared
 // after them.
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>

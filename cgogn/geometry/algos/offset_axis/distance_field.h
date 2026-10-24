@@ -65,7 +65,7 @@ enum class FieldPrepareResult
 };
 
 // Reconstruction data a field may need. The pointers are non-owning: the owner is ReconstructionState::data and the
-// attributes are the ones created by UDFReconstruction::initialize_data().
+// attributes are the ones created by OffsetAxisReconstruction::initialize_data().
 template <typename SURFACE, typename POINTS>
 struct PrepareInputs
 {

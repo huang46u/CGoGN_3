@@ -99,7 +99,7 @@ inline bool parse(const std::string& value, NeuralModelType& out)
 // udf_min_active_rays: neural seed rays, a ray batch ends once fewer than this many rays are still marching (0 = off)
 // residual_prune_mode: 0 current, 1 keep_fully_non_manifold, 2 collapsible_only
 // clang-format off
-#define CGOGN_UDF_RECONSTRUCTION_OPTIONS(X) \
+#define CGOGN_OFFSET_AXIS_OPTIONS(X) \
   X(NeuralModelType,     neural_model_type,              NeuralModelType::udf,                  "input.neural_model_type",                   0, 0, 0, 0) \
   X(bool,                ma_flip_prune,                  true,                                  "input.ma_flip_prune",                       0, 1, 0, 1) \
   X(float,               ma_flip_prune_alpha_factor,     1.5f,                                "input.ma_flip_prune_alpha_factor",          1.0, 5.0, 1.0, 5.0) \
@@ -124,9 +124,9 @@ inline bool parse(const std::string& value, NeuralModelType& out)
 
 struct ReconstructionOptions
 {
-#define CGOGN_UDF_OPTION_MEMBER(T, name, def, key, lo, hi, ui_lo, ui_hi) T name = def;
-	CGOGN_UDF_RECONSTRUCTION_OPTIONS(CGOGN_UDF_OPTION_MEMBER)
-#undef CGOGN_UDF_OPTION_MEMBER
+#define CGOGN_OFFSET_AXIS_OPTION_MEMBER(T, name, def, key, lo, hi, ui_lo, ui_hi) T name = def;
+	CGOGN_OFFSET_AXIS_OPTIONS(CGOGN_OFFSET_AXIS_OPTION_MEMBER)
+#undef CGOGN_OFFSET_AXIS_OPTION_MEMBER
 };
 
 struct OptionInfo
@@ -139,10 +139,10 @@ struct OptionInfo
 // option_info::alpha.ui_min etc.
 namespace option_info
 {
-#define CGOGN_UDF_OPTION_INFO(T, name, def, key, lo, hi, ui_lo, ui_hi)                                                 \
+#define CGOGN_OFFSET_AXIS_OPTION_INFO(T, name, def, key, lo, hi, ui_lo, ui_hi)                                                 \
 	inline constexpr OptionInfo name{#name, key, lo, hi, ui_lo, ui_hi};
-CGOGN_UDF_RECONSTRUCTION_OPTIONS(CGOGN_UDF_OPTION_INFO)
-#undef CGOGN_UDF_OPTION_INFO
+CGOGN_OFFSET_AXIS_OPTIONS(CGOGN_OFFSET_AXIS_OPTION_INFO)
+#undef CGOGN_OFFSET_AXIS_OPTION_INFO
 } // namespace option_info
 
 // f(const OptionInfo&, T& value) for every option, in table order.
@@ -150,9 +150,9 @@ CGOGN_UDF_RECONSTRUCTION_OPTIONS(CGOGN_UDF_OPTION_INFO)
 template <typename Options, typename F>
 void for_each_option(Options& options, F&& f)
 {
-#define CGOGN_UDF_OPTION_VISIT(T, name, def, key, lo, hi, ui_lo, ui_hi) f(option_info::name, options.name);
-	CGOGN_UDF_RECONSTRUCTION_OPTIONS(CGOGN_UDF_OPTION_VISIT)
-#undef CGOGN_UDF_OPTION_VISIT
+#define CGOGN_OFFSET_AXIS_OPTION_VISIT(T, name, def, key, lo, hi, ui_lo, ui_hi) f(option_info::name, options.name);
+	CGOGN_OFFSET_AXIS_OPTIONS(CGOGN_OFFSET_AXIS_OPTION_VISIT)
+#undef CGOGN_OFFSET_AXIS_OPTION_VISIT
 }
 
 } // namespace cgogn::geometry

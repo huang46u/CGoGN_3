@@ -68,7 +68,7 @@ namespace cgogn::geometry
 {
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
-class UDFReconstruction
+class OffsetAxisReconstruction
 {
 public:
 	using State = ReconstructionState<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>;
@@ -105,13 +105,13 @@ public:
 	using Result = typename State::Result;
 	using IterationCallback = typename State::IterationCallback;
 
-	explicit UDFReconstruction(Data data, Options options = {})
+	explicit OffsetAxisReconstruction(Data data, Options options = {})
 	{
 		s_.data = data;
 		s_.options = options;
 	}
-	UDFReconstruction(const UDFReconstruction&) = delete;
-	UDFReconstruction& operator=(const UDFReconstruction&) = delete;
+	OffsetAxisReconstruction(const OffsetAxisReconstruction&) = delete;
+	OffsetAxisReconstruction& operator=(const OffsetAxisReconstruction&) = delete;
 
 	State& state()
 	{

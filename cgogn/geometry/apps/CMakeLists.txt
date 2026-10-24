@@ -12,8 +12,8 @@ find_package(cgogn_io REQUIRED)
 find_package(cgogn_rendering REQUIRED)
 
 # ---- Torch (optional, official-style) ---------------------------------------
-# Torch is searched for only when CGOGN_USE_TORCH is ON. Without it, every UDF
-# executable is built without Torch and with CGOGN_UDF_WITH_TORCH=0.
+# Torch is searched for only when CGOGN_USE_TORCH is ON. Without it, every OffsetAxis
+# executable is built without Torch and with CGOGN_OFFSET_AXIS_WITH_TORCH=0.
 if (CGOGN_USE_TORCH)
   find_package(Torch REQUIRED)
   message(STATUS "Torch found: ${Torch_DIR}")
@@ -73,8 +73,8 @@ if (CGOGN_USE_TORCH)
 endif()
 
 # Helper: OffsetAxis executables (offset_axis, offset_axis_benchmark, offset_axis_residual_prune_test).
-# With Torch: linked against Torch, CGOGN_UDF_WITH_TORCH=1 (neural input available).
-# Without Torch: plain executable on the same cgogn libraries, CGOGN_UDF_WITH_TORCH=0.
+# With Torch: linked against Torch, CGOGN_OFFSET_AXIS_WITH_TORCH=1 (neural input available).
+# Without Torch: plain executable on the same cgogn libraries, CGOGN_OFFSET_AXIS_WITH_TORCH=0.
 function(cgogn_add_offset_axis_executable target)
   # usage:
   #   cgogn_add_offset_axis_executable(name
@@ -91,7 +91,7 @@ function(cgogn_add_offset_axis_executable target)
       SOURCES ${ARG_SOURCES}
       EXTRA_LIBS ${ARG_EXTRA_LIBS}
     )
-    target_compile_definitions(${target} PRIVATE CGOGN_UDF_WITH_TORCH=1)
+    target_compile_definitions(${target} PRIVATE CGOGN_OFFSET_AXIS_WITH_TORCH=1)
   else()
     add_executable(${target} ${ARG_SOURCES})
     target_link_libraries(${target}
@@ -106,7 +106,7 @@ function(cgogn_add_offset_axis_executable target)
     )
     set_property(TARGET ${target} PROPERTY CXX_STANDARD 17)
     set_property(TARGET ${target} PROPERTY CXX_STANDARD_REQUIRED ON)
-    target_compile_definitions(${target} PRIVATE CGOGN_UDF_WITH_TORCH=0)
+    target_compile_definitions(${target} PRIVATE CGOGN_OFFSET_AXIS_WITH_TORCH=0)
   endif()
 endfunction()
 
@@ -165,7 +165,7 @@ if (CGOGN_USE_CGAL)
   endif()
   add_library(offset_axis_header_check OBJECT ${OFFSET_AXIS_HEADER_CHECK_SOURCES})
   target_link_libraries(offset_axis_header_check PRIVATE cgogn::geometry cgogn::core cgogn::io ${OFFSET_AXIS_HEADER_CHECK_TORCH_LIBS} CGAL::CGAL)
-  target_compile_definitions(offset_axis_header_check PRIVATE CGOGN_UDF_WITH_TORCH=$<BOOL:${CGOGN_USE_TORCH}>)
+  target_compile_definitions(offset_axis_header_check PRIVATE CGOGN_OFFSET_AXIS_WITH_TORCH=$<BOOL:${CGOGN_USE_TORCH}>)
   set_property(TARGET offset_axis_header_check PROPERTY CXX_STANDARD 17)
   set_property(TARGET offset_axis_header_check PROPERTY CXX_STANDARD_REQUIRED ON)
 endif()

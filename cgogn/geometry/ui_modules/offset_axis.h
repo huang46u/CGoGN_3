@@ -6,7 +6,7 @@
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
 #include <cgogn/core/utils/thread.h>
-#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
+#if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
 #include <cgogn/geometry/algos/offset_axis/neural/neural_distance_field.h>
 #endif
 #include <cgogn/geometry/algos/offset_axis/neural_model_type.h>
@@ -37,7 +37,7 @@
 #include <string>
 #include <thread>
 #include <unordered_set>
-#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
+#if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
 #include <torch/torch.h>
 #endif
 #include <utility>
@@ -51,7 +51,7 @@ using geometry::Vec3;
 using geometry::Vec4;
 
 template <typename SURFACE, typename POINTS, typename NONMANIFOLD, typename RaySamplerTag>
-class UDFTraining : public ViewModule
+class OffsetAxis : public ViewModule
 {
 public:
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
@@ -66,7 +66,7 @@ public:
 	using SpheresOptimizerType = geometry::SpheresOptimizer<POINTS>;
 	using SpheresOptimizerMetrics = typename SpheresOptimizerType::Metrics;
 	using SpheresOptimizerStatus = typename SpheresOptimizerType::Status;
-	using ReconstructionType = geometry::UDFReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>;
+	using ReconstructionType = geometry::OffsetAxisReconstruction<SURFACE, POINTS, NONMANIFOLD, RaySamplerTag>;
 	using ReconstructionStatus = typename ReconstructionType::Status;
 	using ReconstructionStatusInfo = typename ReconstructionType::StatusInfo;
 
@@ -152,11 +152,11 @@ private:
 	};
 
 public:
-	UDFTraining(const App& app) : ViewModule(app, "UDFTraining")
+	OffsetAxis(const App& app) : ViewModule(app, "OffsetAxis")
 	{
 	}
 
-	~UDFTraining() override
+	~OffsetAxis() override
 	{
 		stop_and_join_spheres_update();
 	}
@@ -220,7 +220,7 @@ public:
 	void set_selected_surface(SURFACE& s)
 	{
 		if (!surface_provider_)
-			throw std::runtime_error("UDFTraining surface provider is not initialized before set_selected_surface().");
+			throw std::runtime_error("OffsetAxis surface provider is not initialized before set_selected_surface().");
 		selected_surface_ = &s;
 		if (selected_points_ && points_parameters_[selected_points_].reconstruction_)
 			points_parameters_[selected_points_].reconstruction_->data().surface = &s;
@@ -229,10 +229,10 @@ public:
 	void set_selected_points(POINTS& p)
 	{
 		if (!points_provider_)
-			throw std::runtime_error("UDFTraining points provider is not initialized before set_selected_points().");
+			throw std::runtime_error("OffsetAxis points provider is not initialized before set_selected_points().");
 		if (!non_manifold_provider_)
 			throw std::runtime_error(
-				"UDFTraining non-manifold provider is not initialized before set_selected_points().");
+				"OffsetAxis non-manifold provider is not initialized before set_selected_points().");
 		selected_points_ = &p;
 		init_points_data(p);
 		PointsParameters& params = points_parameters_[selected_points_];
@@ -357,7 +357,7 @@ protected:
 		timer_connection_ = boost::synapse::connect<App::timer_tick>(&app_, [this]() { handle_spheres_update_tick(); });
 		const OutputVerbosity startup_output_verbosity =
 			selected_points_ ? points_parameters_[selected_points_].output_verbosity_.load() : OUTPUT_NORMAL;
-#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
+#if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
 		if (torch::cuda::is_available())
 		{
 			log_basic(startup_output_verbosity, "CUDA is available! Using GPU device 0.", '\n');

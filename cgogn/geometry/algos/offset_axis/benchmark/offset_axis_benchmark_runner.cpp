@@ -4,7 +4,7 @@
 #include <cgogn/core/types/maps/cmap/cmap0.h>
 #include <cgogn/core/types/maps/cmap/cmap2.h>
 #include <cgogn/core/utils/thread_pool.h>
-#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
+#if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
 #include <cgogn/geometry/algos/offset_axis/neural/neural_distance_field.h>
 #endif
 #include <cgogn/geometry/algos/offset_axis/reconstruction.h>
@@ -93,7 +93,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	using Surface = CMap2;
 	using Points = CMap0;
 	using NonManifold = IncidenceGraph;
-	using Reconstruction = UDFReconstruction<Surface, Points, NonManifold, RaySamplerTag>;
+	using Reconstruction = OffsetAxisReconstruction<Surface, Points, NonManifold, RaySamplerTag>;
 	using Status = typename Reconstruction::Status;
 
 	BenchmarkResult result;
@@ -313,10 +313,10 @@ BenchmarkResult SkeletonBenchmarkRunner::run(const BenchmarkConfig& config) cons
 		result = run_impl<geometry::RaySamplerSurface>(config);
 		break;
 	case InputMode::NeuralUDF:
-#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
+#if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
 		result = run_impl<geometry::RaySamplerNeural>(config);
 #else
-		throw std::runtime_error("udf_benchmark was built without LibTorch (CGOGN_USE_TORCH=OFF): neural_udf input is not available");
+		throw std::runtime_error("offset_axis_benchmark was built without LibTorch (CGOGN_USE_TORCH=OFF): neural_udf input is not available");
 #endif
 		break;
 	}

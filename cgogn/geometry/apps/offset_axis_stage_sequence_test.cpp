@@ -2,7 +2,7 @@
 #include <cgogn/core/types/maps/cmap/cmap0.h>
 #include <cgogn/core/types/maps/cmap/cmap2.h>
 #include <cgogn/core/utils/thread.h>
-#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
+#if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
 #include <cgogn/geometry/algos/offset_axis/neural/neural_distance_field.h>
 #endif
 #include <cgogn/geometry/algos/offset_axis/reconstruction.h>
@@ -30,7 +30,7 @@ using benchmark::InputMode;
 std::string ply_prefix(const BenchmarkConfig& config)
 {
 	if (config.output.skeleton_ply.empty())
-		return "udf_stage_sequence";
+		return "offset_axis_stage_sequence_test";
 	std::string prefix = config.output.skeleton_ply;
 	const std::string suffix = ".ply";
 	if (prefix.size() >= suffix.size() && prefix.compare(prefix.size() - suffix.size(), suffix.size(), suffix) == 0)
@@ -75,7 +75,7 @@ bool run_test(const BenchmarkConfig& config)
 	using Surface = cgogn::CMap2;
 	using Points = cgogn::CMap0;
 	using NonManifold = cgogn::IncidenceGraph;
-	using Reconstruction = cgogn::geometry::UDFReconstruction<Surface, Points, NonManifold, RaySamplerTag>;
+	using Reconstruction = cgogn::geometry::OffsetAxisReconstruction<Surface, Points, NonManifold, RaySamplerTag>;
 	using Status = typename Reconstruction::Status;
 	using OptimizerStatus = typename Reconstruction::SpheresOptimizerType::Status;
 
@@ -215,7 +215,7 @@ bool dispatch_test(const BenchmarkConfig& config)
 	case InputMode::SurfaceMesh:
 		return run_test<cgogn::geometry::RaySamplerSurface>(config);
 	case InputMode::NeuralUDF:
-#if !defined(CGOGN_UDF_WITH_TORCH) || CGOGN_UDF_WITH_TORCH
+#if !defined(CGOGN_OFFSET_AXIS_WITH_TORCH) || CGOGN_OFFSET_AXIS_WITH_TORCH
 		return run_test<cgogn::geometry::RaySamplerNeural>(config);
 #else
 		std::cerr << "offset_axis_stage_sequence_test was built without LibTorch (CGOGN_USE_TORCH=OFF): neural_udf input is "

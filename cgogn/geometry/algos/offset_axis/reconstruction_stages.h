@@ -104,7 +104,7 @@ inline constexpr Scalar mf_flip_alpha_factor_max = Scalar(5);
 
 // Stage precondition: when cond does not hold, the enclosing stage function (template parameter State) returns code
 // with a message naming the stage and the condition.
-#define UDF_PRECONDITION(cond, code)                                                                                   \
+#define OFFSET_AXIS_PRECONDITION(cond, code)                                                                                   \
 	do                                                                                                                 \
 	{                                                                                                                  \
 		if (!(cond))                                                                                                   \
@@ -115,7 +115,7 @@ namespace cgogn::geometry::udf_stages
 {
 
 // Stage free functions of the UDF reconstruction. They operate on a State (ReconstructionState) and are
-// called by the UDFReconstruction facade. reconstruct() is the orchestration of the whole pipeline.
+// called by the OffsetAxisReconstruction facade. reconstruct() is the orchestration of the whole pipeline.
 
 template <typename State>
 void reset(State& s);
@@ -229,7 +229,7 @@ typename State::StatusInfo initialize_data(State& s)
 
 	if (s.initialized)
 		return Status::success;
-	UDF_PRECONDITION(s.data.input_points && s.data.samples && s.data.spheres && s.data.skeleton, Status::invalid_data);
+	OFFSET_AXIS_PRECONDITION(s.data.input_points && s.data.samples && s.data.spheres && s.data.skeleton, Status::invalid_data);
 	s.input_position = get_or_add_attribute<Vec3, PVertex>(*s.data.input_points, "position");
 	s.input_normal = get_or_add_attribute<Vec3, PVertex>(*s.data.input_points, "normal");
 	s.input_knn = get_or_add_attribute<std::vector<PVertex>, PVertex>(*s.data.input_points, "knn");
@@ -593,7 +593,7 @@ typename State::StatusInfo sample_alpha_level_set(State& s)
 	bbox_max += Vec3(padding, padding, padding);
 
 	RayTraits traits = s.field.ray_traits(inputs);
-	UDF_PRECONDITION(traits.is_ready(), Status::invalid_data);
+	OFFSET_AXIS_PRECONDITION(traits.is_ready(), Status::invalid_data);
 	RayParams ray_params;
 	ray_params.bbox_expand = udf_constants::ray_box_relative_expand;
 	ray_params.alpha = Scalar(s.options.alpha);
@@ -651,7 +651,7 @@ typename State::StatusInfo apply_sampling_filtering(State& s)
 	using Status = typename State::Status;
 
 	// attributes come from initialize_data
-	UDF_PRECONDITION(s.initialized, Status::invalid_data);
+	OFFSET_AXIS_PRECONDITION(s.initialized, Status::invalid_data);
 	if (!s.options.apply_filtering || !s.data.samples || nb_cells<PVertex>(*s.data.samples) == 0)
 		return Status::success;
 	s.input.bind(s.data.surface, s.data.input_points, s.input_position, s.input_normal);
@@ -713,8 +713,8 @@ typename State::StatusInfo build_kdtree_and_normals(State& s)
 	using Status = typename State::Status;
 
 	// samples and their kd-tree come from sample_alpha_level_set / apply_sampling_filtering
-	UDF_PRECONDITION(s.data.samples && nb_cells<PVertex>(*s.data.samples) > 0, Status::invalid_data);
-	UDF_PRECONDITION(s.sample_kdtree, Status::invalid_data);
+	OFFSET_AXIS_PRECONDITION(s.data.samples && nb_cells<PVertex>(*s.data.samples) > 0, Status::invalid_data);
+	OFFSET_AXIS_PRECONDITION(s.sample_kdtree, Status::invalid_data);
 	// PCA for every input: neural samples already carry the network gradient, and for MF models that gradient
 	// is not orthogonal to the medial axis.
 	if (s.options.recompute_normals_after_sampling)
@@ -732,7 +732,7 @@ typename State::StatusInfo compute_fitting_primitives(State& s)
 	using Status = typename State::Status;
 
 	// samples and their kd-tree come from sample_alpha_level_set / apply_sampling_filtering
-	UDF_PRECONDITION(s.data.samples && nb_cells<PVertex>(*s.data.samples) > 0 && s.sample_kdtree, Status::invalid_data);
+	OFFSET_AXIS_PRECONDITION(s.data.samples && nb_cells<PVertex>(*s.data.samples) > 0 && s.sample_kdtree, Status::invalid_data);
 	compute_samples_area(*s.data.samples, *s.sample_position, *s.sample_normal, *s.sample_area, *s.sample_knn,
 						 *s.sample_kdtree, s.sample_vertices, s.options.knn_k, Scalar(s.options.alpha));
 	compute_quadrics(*s.data.samples, *s.sample_position, *s.sample_normal, *s.sample_area, *s.sample_knn,
@@ -750,7 +750,7 @@ typename State::StatusInfo compute_initial_medial_axis(State& s)
 	using Status = typename State::Status;
 
 	// samples and their kd-tree come from sample_alpha_level_set / apply_sampling_filtering
-	UDF_PRECONDITION(s.data.samples && nb_cells<PVertex>(*s.data.samples) > 0 && s.sample_kdtree, Status::invalid_data);
+	OFFSET_AXIS_PRECONDITION(s.data.samples && nb_cells<PVertex>(*s.data.samples) > 0 && s.sample_kdtree, Status::invalid_data);
 	const Scalar fallback_radius = Scalar(s.options.alpha);
 	const Scalar min_norm = Scalar(1e-12);
 	const bool neural_input = Field::is_neural_type && s.field.loaded();
@@ -931,7 +931,7 @@ typename State::StatusInfo initialize_spheres(State& s)
 {
 	using Status = typename State::Status;
 
-	UDF_PRECONDITION(s.fitting_data_computed && s.data.samples && s.data.spheres, Status::invalid_data);
+	OFFSET_AXIS_PRECONDITION(s.fitting_data_computed && s.data.samples && s.data.spheres, Status::invalid_data);
 	if (!optimizer_for(s).initialize_from_samples(Scalar(s.options.init_dilation_constant)))
 		return Status::sphere_initialization_failed;
 	return Status::success;
@@ -945,7 +945,7 @@ typename State::StatusInfo optimize_spheres(State& s, const typename State::Iter
 	using Status = typename State::Status;
 
 	// spheres come from initialize_spheres
-	UDF_PRECONDITION(s.data.spheres && nb_cells<PVertex>(*s.data.spheres) > 0, Status::invalid_data);
+	OFFSET_AXIS_PRECONDITION(s.data.spheres && nb_cells<PVertex>(*s.data.spheres) > 0, Status::invalid_data);
 	auto& optimizer = optimizer_for(s);
 	optimizer.reset_optimization();
 	typename SpheresOptimizerType::Status status = SpheresOptimizerType::Status::running;
@@ -966,7 +966,7 @@ typename State::StatusInfo build_skeleton(State& s)
 	using Status = typename State::Status;
 
 	// spheres come from initialize_spheres / optimize_spheres
-	UDF_PRECONDITION(s.data.spheres && nb_cells<PVertex>(*s.data.spheres) > 0, Status::invalid_data);
+	OFFSET_AXIS_PRECONDITION(s.data.spheres && nb_cells<PVertex>(*s.data.spheres) > 0, Status::invalid_data);
 	return topology_for(s).build_from_spheres() == TopologyType::Status::success ? Status::success
 																				 : Status::skeleton_build_failed;
 }
@@ -979,7 +979,7 @@ typename State::StatusInfo fix_topology(State& s)
 	using Status = typename State::Status;
 
 	// skeleton comes from build_skeleton
-	UDF_PRECONDITION(s.data.skeleton && nb_cells<NMVertex>(*s.data.skeleton) > 0, Status::invalid_data);
+	OFFSET_AXIS_PRECONDITION(s.data.skeleton && nb_cells<NMVertex>(*s.data.skeleton) > 0, Status::invalid_data);
 	return topology_for(s).fix_topology([&](const std::vector<Vec3>& p, std::vector<Scalar>& v) {
 		return evaluate_topology_scores(s, p, v);
 	}) == TopologyType::Status::success
@@ -995,7 +995,7 @@ typename State::StatusInfo prune_residual_sheets(State& s)
 	using Status = typename State::Status;
 
 	// skeleton comes from build_skeleton
-	UDF_PRECONDITION(s.data.skeleton && nb_cells<NMVertex>(*s.data.skeleton) > 0, Status::invalid_data);
+	OFFSET_AXIS_PRECONDITION(s.data.skeleton && nb_cells<NMVertex>(*s.data.skeleton) > 0, Status::invalid_data);
 	topology_for(s).set_residual_prune_mode(
 		static_cast<typename TopologyType::ResidualPruneMode>(static_cast<int>(s.options.residual_prune_mode)));
 	return topology_for(s).prune_residual_sheets() == TopologyType::Status::success ? Status::success
@@ -1130,6 +1130,6 @@ typename State::Result reconstruct(State& s, const typename State::IterationCall
 
 } // namespace cgogn::geometry::udf_stages
 
-#undef UDF_PRECONDITION
+#undef OFFSET_AXIS_PRECONDITION
 
 #endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_RECONSTRUCTION_STAGES_H_
