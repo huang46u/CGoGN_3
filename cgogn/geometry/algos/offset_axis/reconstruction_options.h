@@ -104,6 +104,7 @@ inline bool parse(const std::string& value, NeuralModelType& out)
 //   ui_min, ui_max : slider range in the UI
 // neural_model_type: type of the neural model to load; the loaded NeuralDistanceField keeps its own copy
 // udf_min_active_rays: neural seed rays, a ray batch ends once fewer than this many rays are still marching (0 = off)
+// init_owner_euclidean: initial sphere owners from the init_owner_knn nearest sphere centers instead of all spheres
 // residual_prune_mode: 0 current, 1 keep_fully_non_manifold, 2 collapsible_only
 // clang-format off
 #define CGOGN_OFFSET_AXIS_OPTIONS(X) \
@@ -125,6 +126,8 @@ inline bool parse(const std::string& value, NeuralModelType& out)
   X(float,               sqem_update_lambda_line_plane,  0.2f,                                  "optimization.sqem_update_lambda_line_plane", 0.0, 100.0, 0.0, 4.0) \
   X(int,                 seed,                           42,                                    "initialization.seed",                       0, 2147483647, 0, 1000) \
   X(float,               init_dilation_constant,         0.01f,                                 "initialization.init_dilation_constant",     1e-6, 1.0, 0.001, 0.01) \
+  X(bool,                init_owner_euclidean,           false,                                 "initialization.init_owner_euclidean",       0, 1, 0, 1) \
+  X(int,                 init_owner_knn,                 16,                                    "initialization.init_owner_knn",             1, 100000, 1, 64) \
   X(bool,                residual_prune,                 false,                                 "postprocess.residual_prune",                0, 1, 0, 1) \
   X(ResidualPruneOption, residual_prune_mode,            ResidualPruneOption::collapsible_only, "postprocess.residual_prune_mode",           0, 0, 0, 0)
 // clang-format on

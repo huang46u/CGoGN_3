@@ -983,7 +983,8 @@ typename State::StatusInfo initialize_spheres(State& s)
 	using Status = typename State::Status;
 
 	OFFSET_AXIS_PRECONDITION(s.fitting_data_computed && s.data.samples && s.data.spheres, Status::invalid_data);
-	if (!optimizer_for(s).initialize_from_samples(Scalar(s.options.init_dilation_constant)))
+	if (!optimizer_for(s).initialize_from_samples(Scalar(s.options.init_dilation_constant),
+													   s.options.init_owner_euclidean, uint32(s.options.init_owner_knn)))
 		return Status::sphere_initialization_failed;
 	return Status::success;
 }
@@ -1144,6 +1145,12 @@ typename State::Result reconstruct(State& s, const typename State::IterationCall
 	if ((r.status = run_stage(r.timing.sphere_initialization_ms, [&] { return initialize_spheres(s); })) !=
 		Status::success)
 		return r;
+	if (s.optimizer)
+	{
+		r.timing.sphere_init_cover_ms = s.optimizer->metrics().init_cover_ms;
+		r.timing.sphere_init_owner_ms = s.optimizer->metrics().init_owner_ms;
+		r.timing.sphere_init_cluster_ms = s.optimizer->metrics().init_cluster_ms;
+	}
 	if ((r.status = run_stage(r.timing.optimization_ms, [&] { return optimize_spheres(s, callback); })) !=
 		Status::success)
 		return r;

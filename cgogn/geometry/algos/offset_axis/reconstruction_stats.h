@@ -43,6 +43,9 @@ struct ReconstructionTiming
 	float64 fitting_primitives_ms = 0.0;
 	float64 initial_medial_axis_ms = 0.0;
 	float64 sphere_initialization_ms = 0.0;
+	float64 sphere_init_cover_ms = 0.0;
+	float64 sphere_init_owner_ms = 0.0;
+	float64 sphere_init_cluster_ms = 0.0;
 	float64 optimization_ms = 0.0;
 	float64 cluster_ms = 0.0;
 	float64 sphere_update_ms = 0.0;
