@@ -194,7 +194,8 @@ std::string format_number(double value)
 template <typename T>
 void read_option(const ptree& root, const OptionInfo& info, T& value)
 {
-	if constexpr (std::is_same_v<T, NeuralModelType> || std::is_same_v<T, ResidualPruneOption>)
+	if constexpr (std::is_same_v<T, NeuralModelType> || std::is_same_v<T, ResidualPruneOption> ||
+				  std::is_same_v<T, InitOwnerQuery>)
 	{
 		if (auto raw = root.get_optional<std::string>(info.json_key))
 		{

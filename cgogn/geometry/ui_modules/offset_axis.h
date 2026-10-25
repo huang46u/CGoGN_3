@@ -1167,9 +1167,15 @@ protected:
 							   float(cgogn::geometry::offset_axis::option_info::init_dilation_constant.ui_max), "%.4f");
 			ImGui::Checkbox("Euclidean initial owners", &options.init_owner_euclidean);
 			if (options.init_owner_euclidean)
-				ImGui::SliderInt("Owner candidates (k)", &options.init_owner_knn,
-								 int(cgogn::geometry::offset_axis::option_info::init_owner_knn.ui_min),
-								 int(cgogn::geometry::offset_axis::option_info::init_owner_knn.ui_max));
+			{
+				int owner_query = static_cast<int>(options.init_owner_query);
+				if (ImGui::Combo("Owner query", &owner_query, "knn\0bvh_unsigned\0bvh_signed\0"))
+					options.init_owner_query = static_cast<cgogn::geometry::offset_axis::InitOwnerQuery>(owner_query);
+				if (options.init_owner_query == cgogn::geometry::offset_axis::InitOwnerQuery::knn)
+					ImGui::SliderInt("Owner candidates (k)", &options.init_owner_knn,
+									 int(cgogn::geometry::offset_axis::option_info::init_owner_knn.ui_min),
+									 int(cgogn::geometry::offset_axis::option_info::init_owner_knn.ui_max));
+			}
 			ImGui::EndDisabled();
 			if (!running && ImGui::Button("Init spheres"))
 			{

@@ -984,7 +984,8 @@ typename State::StatusInfo initialize_spheres(State& s)
 
 	OFFSET_AXIS_PRECONDITION(s.fitting_data_computed && s.data.samples && s.data.spheres, Status::invalid_data);
 	if (!optimizer_for(s).initialize_from_samples(Scalar(s.options.init_dilation_constant),
-													   s.options.init_owner_euclidean, uint32(s.options.init_owner_knn)))
+													   s.options.init_owner_euclidean, uint32(s.options.init_owner_knn),
+													   s.options.init_owner_query))
 		return Status::sphere_initialization_failed;
 	return Status::success;
 }

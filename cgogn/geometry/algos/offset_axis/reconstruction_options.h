@@ -98,13 +98,57 @@ inline bool parse(const std::string& value, NeuralModelType& out)
 	return false;
 }
 
+// Initial owner query (initialization.init_owner_query) when init_owner_euclidean is on: knn takes the best of the
+// init_owner_knn nearest centers; bvh_unsigned and bvh_signed search a sphere BVH exactly, for the smallest
+// ||p - c| - r| (distance to the sphere surface) or the smallest |p - c| - r.
+enum class InitOwnerQuery
+{
+	knn,
+	bvh_unsigned,
+	bvh_signed
+};
+
+inline std::string to_string(InitOwnerQuery value)
+{
+	switch (value)
+	{
+	case InitOwnerQuery::bvh_unsigned:
+		return "bvh_unsigned";
+	case InitOwnerQuery::bvh_signed:
+		return "bvh_signed";
+	case InitOwnerQuery::knn:
+	default:
+		return "knn";
+	}
+}
+
+inline bool parse(const std::string& value, InitOwnerQuery& out)
+{
+	if (value == "knn")
+	{
+		out = InitOwnerQuery::knn;
+		return true;
+	}
+	if (value == "bvh_unsigned")
+	{
+		out = InitOwnerQuery::bvh_unsigned;
+		return true;
+	}
+	if (value == "bvh_signed")
+	{
+		out = InitOwnerQuery::bvh_signed;
+		return true;
+	}
+	return false;
+}
+
 // X(type, name, default, json key, min, max, ui_min, ui_max)
 //   json key : path in the benchmark config / timing JSON (dotted)
 //   min, max : accepted range (checked by the benchmark config loader), unused for bool/enum
 //   ui_min, ui_max : slider range in the UI
 // neural_model_type: type of the neural model to load; the loaded NeuralDistanceField keeps its own copy
 // udf_min_active_rays: neural seed rays, a ray batch ends once fewer than this many rays are still marching (0 = off)
-// init_owner_euclidean: initial sphere owners from the init_owner_knn nearest sphere centers (default); false scans all spheres
+// init_owner_euclidean: Euclidean initial sphere owners (default), searched as init_owner_query says; false scans all spheres
 // residual_prune_mode: 0 current, 1 keep_fully_non_manifold, 2 collapsible_only
 // clang-format off
 #define CGOGN_OFFSET_AXIS_OPTIONS(X) \
@@ -128,6 +172,7 @@ inline bool parse(const std::string& value, NeuralModelType& out)
   X(float,               init_dilation_constant,         0.01f,                                 "initialization.init_dilation_constant",     1e-6, 1.0, 0.001, 0.01) \
   X(bool,                init_owner_euclidean,           true,                                  "initialization.init_owner_euclidean",       0, 1, 0, 1) \
   X(int,                 init_owner_knn,                 16,                                    "initialization.init_owner_knn",             1, 100000, 1, 64) \
+  X(InitOwnerQuery,      init_owner_query,               InitOwnerQuery::knn,                   "initialization.init_owner_query",           0, 0, 0, 0) \
   X(bool,                residual_prune,                 false,                                 "postprocess.residual_prune",                0, 1, 0, 1) \
   X(ResidualPruneOption, residual_prune_mode,            ResidualPruneOption::collapsible_only, "postprocess.residual_prune_mode",           0, 0, 0, 0)
 // clang-format on
