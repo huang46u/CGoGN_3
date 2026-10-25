@@ -26,7 +26,6 @@
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
 #include <cgogn/core/types/cell_marker.h>
-#include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
 #include <cgogn/geometry/types/line_quadric.h>
 #include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/vector_traits.h>
@@ -150,8 +149,7 @@ public:
 	const Data& data() const { return data_; }
 	const Metrics& metrics() const { return metrics_; }
 
-	bool initialize_from_samples(Scalar init_dilation_constant, bool owner_euclidean = false, uint32 owner_knn = 16,
-								 InitOwnerQuery owner_query = InitOwnerQuery::knn)
+	bool initialize_from_samples(Scalar init_dilation_constant, bool owner_euclidean = false)
 	{
 		const auto init_start = std::chrono::steady_clock::now();
 		if (!ready() || !data_.sample_position || !data_.sample_knn ||
@@ -272,7 +270,7 @@ public:
 		auto owner_end = cover_end;
 		if (owner_euclidean && sphere_count > 0)
 		{
-			assign_owners_euclidean(owner_knn, owner_query);
+			assign_owners_euclidean();
 			owner_end = std::chrono::steady_clock::now();
 		}
 		metrics_.init_owner_ms = std::chrono::duration<float64, std::milli>(owner_end - cover_end).count();
@@ -542,135 +540,31 @@ public:
 	}
 
 private:
-	// Initial owner of every sample: the sphere minimizing |p - c| - r among the knn nearest centers (knn), or the
-	// exact minimizer of ||p - c| - r| (bvh_unsigned) or of |p - c| - r (bvh_signed) over a BVH of the spheres.
-	void assign_owners_euclidean(uint32 owner_knn, InitOwnerQuery owner_query)
+	// Initial owner of every sample: the sphere whose surface is closest (smallest ||p - c| - r|), searched exactly over
+	// a BVH of the spheres.
+	void assign_owners_euclidean()
 	{
 		std::vector<Vec3> centers;
+		std::vector<double> radii;
 		std::vector<Vertex> center_spheres;
 		foreach_cell(*data_.spheres, [&](Vertex s) {
 			const uint32 idx = index_of(*data_.spheres, s);
 			if (is_valid_sphere_for_clustering(idx))
 			{
 				centers.push_back((*data_.sphere_position)[idx]);
+				radii.push_back(double((*data_.sphere_radius)[idx]));
 				center_spheres.push_back(s);
 			}
 			return true;
 		});
 		if (centers.empty())
 			return;
-		if (owner_query != InitOwnerQuery::knn)
-		{
-			std::vector<double> radii;
-			radii.reserve(center_spheres.size());
-			for (Vertex s : center_spheres)
-				radii.push_back(double((*data_.sphere_radius)[index_of(*data_.spheres, s)]));
-			const acc::BVHTreeSpheres<uint32, Vec3> bvh(centers, radii);
-			if (owner_query == InitOwnerQuery::bvh_unsigned)
-			{
-				parallel_foreach_cell(*data_.samples_mesh, [&](Vertex v) {
-					const uint32 v_index = index_of(*data_.samples_mesh, v);
-					std::pair<uint32, Vec3> closest;
-					(*data_.sample_sphere)[v_index] =
-						bvh.closest_point((*data_.sample_position)[v_index], &closest) ? center_spheres[closest.first]
-																					   : Vertex();
-					return true;
-				});
-			}
-			else
-			{
-				// Lower bound of |p - c| - r over a node: the distance to its box when p is outside (the box holds
-				// the balls), minus the largest radius of the node otherwise. Children come after their parent.
-				std::vector<double> node_max_radius(bvh.node_count(), 0.0);
-				for (std::size_t nid = bvh.node_count(); nid-- > 0;)
-				{
-					if (bvh.is_leaf(nid))
-					{
-						auto [first, last] = bvh.range(nid);
-						for (std::size_t i = first; i < last; ++i)
-							node_max_radius[nid] = std::max(node_max_radius[nid], bvh.get_sphere(uint32(i)).radius);
-					}
-					else
-					{
-						auto [left, right] = bvh.children(nid);
-						node_max_radius[nid] = std::max(node_max_radius[left], node_max_radius[right]);
-					}
-				}
-				parallel_foreach_cell(*data_.samples_mesh, [&](Vertex v) {
-					const uint32 v_index = index_of(*data_.samples_mesh, v);
-					const Vec3& p = (*data_.sample_position)[v_index];
-					auto lower_bound = [&](std::size_t nid) {
-						const double d = (acc::closest_point(p, bvh.node_aabb(nid)) - p).norm();
-						return d > 0.0 ? d : -node_max_radius[nid];
-					};
-					double best = std::numeric_limits<double>::max();
-					std::size_t best_index = std::numeric_limits<std::size_t>::max();
-					std::vector<std::pair<double, std::size_t>> stack{{lower_bound(0), 0}};
-					while (!stack.empty())
-					{
-						const auto [bound, nid] = stack.back();
-						stack.pop_back();
-						if (bound >= best)
-							continue;
-						if (bvh.is_leaf(nid))
-						{
-							auto [first, last] = bvh.range(nid);
-							for (std::size_t i = first; i < last; ++i)
-							{
-								const auto& sphere = bvh.get_sphere(uint32(i));
-								const double gap = (sphere.center - p).norm() - sphere.radius;
-								if (std::isfinite(gap) && gap < best)
-								{
-									best = gap;
-									best_index = bvh.get_primitive_index(i);
-								}
-							}
-							continue;
-						}
-						auto [left, right] = bvh.children(nid);
-						const double left_bound = lower_bound(left);
-						const double right_bound = lower_bound(right);
-						// the closer child is popped first
-						if (left_bound < right_bound)
-						{
-							stack.emplace_back(right_bound, right);
-							stack.emplace_back(left_bound, left);
-						}
-						else
-						{
-							stack.emplace_back(left_bound, left);
-							stack.emplace_back(right_bound, right);
-						}
-					}
-					(*data_.sample_sphere)[v_index] =
-						best_index < center_spheres.size() ? center_spheres[best_index] : Vertex();
-					return true;
-				});
-			}
-			compute_sphere_neighbors();
-			return;
-		}
-		const acc::KDTree<3, uint32> tree(centers);
-		const std::size_t k = std::min<std::size_t>(std::max<uint32>(owner_knn, 1u), centers.size());
+		const acc::BVHTreeSpheres<uint32, Vec3> bvh(centers, radii);
 		parallel_foreach_cell(*data_.samples_mesh, [&](Vertex v) {
 			const uint32 v_index = index_of(*data_.samples_mesh, v);
-			const Vec3& p = (*data_.sample_position)[v_index];
-			std::vector<std::pair<uint32, double>> nearest;
-			tree.find_nns(p, k, &nearest);
-			Scalar best = std::numeric_limits<Scalar>::max();
-			Vertex best_sphere;
-			for (const auto& item : nearest)
-			{
-				const Vertex s = center_spheres[item.first];
-				const uint32 idx = index_of(*data_.spheres, s);
-				const Scalar gap = ((*data_.sphere_position)[idx] - p).norm() - (*data_.sphere_radius)[idx];
-				if (std::isfinite(static_cast<double>(gap)) && gap < best)
-				{
-					best = gap;
-					best_sphere = s;
-				}
-			}
-			(*data_.sample_sphere)[v_index] = best_sphere;
+			std::pair<uint32, Vec3> closest;
+			(*data_.sample_sphere)[v_index] =
+				bvh.closest_point((*data_.sample_position)[v_index], &closest) ? center_spheres[closest.first] : Vertex();
 			return true;
 		});
 		compute_sphere_neighbors();
