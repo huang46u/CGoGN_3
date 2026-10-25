@@ -1165,6 +1165,11 @@ protected:
 			ImGui::SliderFloat("Init dilation constant", &options.init_dilation_constant,
 							   float(cgogn::geometry::offset_axis::option_info::init_dilation_constant.ui_min),
 							   float(cgogn::geometry::offset_axis::option_info::init_dilation_constant.ui_max), "%.4f");
+			ImGui::Checkbox("Euclidean initial owners", &options.init_owner_euclidean);
+			if (options.init_owner_euclidean)
+				ImGui::SliderInt("Owner candidates (k)", &options.init_owner_knn,
+								 int(cgogn::geometry::offset_axis::option_info::init_owner_knn.ui_min),
+								 int(cgogn::geometry::offset_axis::option_info::init_owner_knn.ui_max));
 			ImGui::EndDisabled();
 			if (!running && ImGui::Button("Init spheres"))
 			{
