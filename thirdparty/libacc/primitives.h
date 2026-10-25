@@ -249,6 +249,9 @@ inline Vec3fType closest_point(Vec3fType const& vertex, Sphere<Vec3fType> const&
 {
 	Vec3fType diff = vertex - sphere.center;
 	double n = diff.norm();
+	// at the center every surface point is closest: take one instead of dividing by zero
+	if (n == 0.0)
+		return sphere.center + Vec3fType(sphere.radius, 0, 0);
 	return sphere.center + sphere.radius * diff / n;
 }
 
