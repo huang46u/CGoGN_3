@@ -266,9 +266,12 @@ public:
 		metrics_.sphere_count = sphere_count;
 		const auto cover_end = std::chrono::steady_clock::now();
 		metrics_.init_cover_ms = std::chrono::duration<float64, std::milli>(cover_end - init_start).count();
+		auto owner_end = cover_end;
 		if (owner_euclidean && sphere_count > 0)
+		{
 			assign_owners_euclidean(owner_knn);
-		const auto owner_end = std::chrono::steady_clock::now();
+			owner_end = std::chrono::steady_clock::now();
+		}
 		metrics_.init_owner_ms = std::chrono::duration<float64, std::milli>(owner_end - cover_end).count();
 		compute_clusters_local();
 		const auto cluster_end = std::chrono::steady_clock::now();
