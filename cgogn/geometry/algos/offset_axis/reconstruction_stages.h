@@ -652,7 +652,6 @@ typename State::StatusInfo sample_alpha_level_set(State& s)
 	ray_params.batch_size = std::max(1, s.options.ray_sampler_batch_size);
 	ray_params.max_iterations = s.options.udf_max_iterations;
 	ray_params.min_active_rays = s.options.udf_min_active_rays;
-	ray_params.max_outer_iterations = 10;
 	ray_params.seed = s.options.seed;
 	if (!s.ray_sampler)
 		s.ray_sampler = s.field.make_ray_sampler(ray_params);

@@ -182,7 +182,7 @@ inline bool project_points_to_alpha(const NeuralFieldForward& udf, const std::ve
 		if (!values.defined() || !grad.defined() || values.numel() != count)
 			return false;
 		const bool has_sdf = sdf.defined() && sdf.numel() == count;
-		std::vector<torch::Tensor> columns = {X, grad.to(torch::kFloat32), values.to(torch::kFloat32).reshape({count, 1})};
+		std::vector<torch::Tensor> columns = {X, grad.to(torch::kFloat32)};
 		if (has_sdf)
 			columns.push_back(sdf.to(torch::kFloat32).reshape({count, 1}));
 		torch::Tensor packed_gpu = torch::cat(columns, 1);
@@ -190,16 +190,14 @@ inline bool project_points_to_alpha(const NeuralFieldForward& udf, const std::ve
 			workspace.packed_cpu_.narrow(0, 0, count * packed_gpu.size(1)).view({count, packed_gpu.size(1)});
 		packed_cpu.copy_(packed_gpu);
 
-		// columns: projected xyz, gradient xyz, value, sdf; residual = |udf(x) - alpha| at the projected position
+		// columns: projected xyz, gradient xyz, sdf
 		auto packed_acc = packed_cpu.accessor<float, 2>();
-		result.residuals.resize(nb_points);
 		for (size_t i = 0; i < nb_points; ++i)
 		{
 			const long k = static_cast<long>(i);
 			if (has_sdf)
-				result.keep_mask[i] = ((packed_acc[k][7] <= 0.0f) || !filter_positive) ? uint8_t(1) : uint8_t(0);
+				result.keep_mask[i] = ((packed_acc[k][6] <= 0.0f) || !filter_positive) ? uint8_t(1) : uint8_t(0);
 			result.projected_points[i] = Vec3(packed_acc[k][0], packed_acc[k][1], static_cast<Scalar>(packed_acc[k][2]));
-			result.residuals[i] = std::abs(static_cast<Scalar>(packed_acc[k][6]) - parameters.alpha);
 			Vec3 normal(static_cast<Scalar>(packed_acc[k][3]), static_cast<Scalar>(packed_acc[k][4]),
 						static_cast<Scalar>(packed_acc[k][5]));
 			result.normals[i] = unit_normal_or_z(normal);

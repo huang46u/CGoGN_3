@@ -67,14 +67,7 @@ public:
 		int max_iterations = 0;
 		// GPU marching: end a batch once fewer rays than this are still marching (0 = march until max_iterations)
 		int min_active_rays = 0;
-		int max_outer_iterations = 500;
 		int seed = 42;
-	};
-
-	struct SampleResult
-	{
-		std::vector<Vec3> surface_samples;
-		std::vector<Vec3> inside_samples;
 	};
 
 	explicit RayLevelSetSampler(const Params& params) : params_(params) {}
@@ -84,55 +77,17 @@ public:
 		params_ = params;
 	}
 
-	std::vector<Vec3> sample_alpha_level_set_rays(Traits& traits, size_t target_num_points,
-												  SpatialGrid* spatial_grid, Scalar sample_spacing,
-												  const Vec3& bbox_min, const Vec3& bbox_max,
-												  bool* used_sdf_filter = nullptr)
-	{
-		if (used_sdf_filter)
-			*used_sdf_filter = false;
-		return sample_alpha_level_set_rays_cpu(traits, target_num_points, spatial_grid, sample_spacing, bbox_min,
-											   bbox_max, params_.max_outer_iterations, nullptr);
-	}
-
 	std::vector<Vec3> sample_alpha_level_set_rays_fixed_iterations(Traits& traits, int outer_iterations,
 																   SpatialGrid* spatial_grid, Scalar sample_spacing,
 																   const Vec3& bbox_min, const Vec3& bbox_max,
-																   const std::vector<Vec3>* existing_samples = nullptr,
-																   bool* used_sdf_filter = nullptr)
+																   const std::vector<Vec3>* existing_samples = nullptr)
 	{
 		const int clamped_outer_iterations = std::max(1, outer_iterations);
-		if (used_sdf_filter)
-			*used_sdf_filter = false;
-		return sample_alpha_level_set_rays_cpu(traits, unlimited_sample_target_, spatial_grid, sample_spacing,
-											   bbox_min, bbox_max, clamped_outer_iterations, existing_samples);
-	}
-
-	SampleResult sample_alpha_level_set_rays_with_inside(Traits& traits, size_t target_surface_points,
-														 size_t target_inside_points, SpatialGrid* surface_grid,
-														 SpatialGrid* inside_grid, Scalar grid_cell_size,
-														 const Vec3& bbox_min, const Vec3& bbox_max,
-														 bool* used_sdf_filter = nullptr)
-	{
-		if (target_inside_points == 0)
-		{
-			SampleResult result;
-			result.surface_samples = sample_alpha_level_set_rays(traits, target_surface_points, surface_grid,
-																 grid_cell_size, bbox_min, bbox_max,
-																 used_sdf_filter);
-			return result;
-		}
-
-		if (used_sdf_filter)
-			*used_sdf_filter = false;
-		return sample_alpha_level_set_rays_with_inside_cpu(traits, target_surface_points, target_inside_points,
-														   surface_grid, inside_grid, grid_cell_size, bbox_min,
-														   bbox_max);
+		return sample_alpha_level_set_rays_cpu(traits, spatial_grid, sample_spacing, bbox_min, bbox_max,
+											   clamped_outer_iterations, existing_samples);
 	}
 
 protected:
-	static constexpr size_t unlimited_sample_target_ = std::numeric_limits<size_t>::max();
-
 	static Vec3 clamp_point(const Vec3& p, const Vec3& bbox_min, const Vec3& bbox_max)
 	{
 		return p.cwiseMax(bbox_min).cwiseMin(bbox_max);
@@ -143,140 +98,14 @@ protected:
 		return std::max(Scalar(0), params_.tol);
 	}
 
-	struct InsideSegment
-	{
-		Vec3 origin;
-		Vec3 direction;
-		Scalar t0;
-		Scalar t1;
-		Scalar length;
-	};
-
-	void append_segments_from_hits(const std::vector<Ray>& rays,
-								   const std::vector<std::vector<Scalar>>& ray_hits,
-								   const std::vector<uint8_t>& ray_inside0,
-								   std::vector<InsideSegment>& segments, Scalar& total_length)
-	{
-		const Scalar eps = convergence_tolerance();
-
-		for (size_t i = 0; i < rays.size(); ++i)
-		{
-			const Ray& ray = rays[i];
-			if (ray.t_max <= ray.t_min + eps)
-				continue;
-
-			std::vector<Scalar> hits = ray_hits[i];
-			if (!hits.empty())
-				std::sort(hits.begin(), hits.end());
-
-			bool inside = (i < ray_inside0.size() && ray_inside0[i] != 0);
-			Scalar prev_t = ray.t_min;
-			Scalar last_t = ray.t_min - eps * Scalar(2);
-			for (Scalar t_hit : hits)
-			{
-				Scalar t_clamped = std::max(ray.t_min, std::min(ray.t_max, t_hit));
-				if (t_clamped <= last_t + eps)
-					continue;
-				last_t = t_clamped;
-				if (t_clamped <= prev_t + eps)
-				{
-					inside = !inside;
-					prev_t = t_clamped;
-					continue;
-				}
-				if (inside)
-				{
-					InsideSegment seg{ray.origin, ray.direction, prev_t, t_clamped, t_clamped - prev_t};
-					if (seg.length > eps)
-					{
-						segments.push_back(seg);
-						total_length += seg.length;
-					}
-				}
-				inside = !inside;
-				prev_t = t_clamped;
-			}
-			if (inside && ray.t_max > prev_t + eps)
-			{
-				InsideSegment seg{ray.origin, ray.direction, prev_t, ray.t_max, ray.t_max - prev_t};
-				if (seg.length > eps)
-				{
-					segments.push_back(seg);
-					total_length += seg.length;
-				}
-			}
-		}
-	}
-
-	bool sample_inside_from_segments(const std::vector<InsideSegment>& segments, Scalar total_length,
-									 size_t target_inside_points, SpatialGrid* inside_grid, Scalar grid_cell_size,
-									 const Vec3& bbox_min, const Vec3& bbox_max,
-									 std::vector<Vec3>& inside_samples, std::mt19937& gen,
-									 size_t max_reject_attempts)
-	{
-		(void)total_length;
-		if (inside_samples.size() >= target_inside_points)
-			return false;
-		if (segments.empty())
-			return false;
-		const Scalar eps = convergence_tolerance();
-		if (total_length <= eps)
-			return false;
-
-		std::vector<Scalar> prefix;
-		prefix.reserve(segments.size());
-		Scalar acc_length = Scalar(0);
-		for (const InsideSegment& seg : segments)
-		{
-			acc_length += seg.length;
-			prefix.push_back(acc_length);
-		}
-		if (acc_length <= eps)
-			return false;
-
-		std::uniform_real_distribution<Scalar> uniform(0.0, 1.0);
-		size_t reject_count = 0;
-		while (inside_samples.size() < target_inside_points && reject_count < max_reject_attempts)
-		{
-			Scalar r = uniform(gen) * acc_length;
-			auto it = std::lower_bound(prefix.begin(), prefix.end(), r);
-			size_t idx = static_cast<size_t>(it - prefix.begin());
-			if (idx >= segments.size())
-				idx = segments.size() - 1;
-			const InsideSegment& seg = segments[idx];
-			Scalar prev = (idx == 0) ? Scalar(0) : prefix[idx - 1];
-			Scalar local = r - prev;
-			Scalar t = seg.t0 + local;
-			Vec3 pt = seg.origin + seg.direction * t;
-			pt = clamp_point(pt, bbox_min, bbox_max);
-			if (!inside_grid || inside_grid->is_valid_sample(pt, grid_cell_size, inside_samples))
-			{
-				inside_samples.push_back(pt);
-				if (inside_grid)
-					inside_grid->insert(pt, static_cast<uint32>(inside_samples.size() - 1));
-				reject_count = 0;
-			}
-			else
-			{
-				reject_count++;
-			}
-		}
-		return reject_count >= max_reject_attempts;
-	}
-
-	std::vector<Vec3> sample_alpha_level_set_rays_cpu(Traits& traits, size_t target_num_points,
-													  SpatialGrid* spatial_grid, Scalar sample_spacing,
-													  const Vec3& bbox_min, const Vec3& bbox_max,
-													  int max_outer_iterations,
+	std::vector<Vec3> sample_alpha_level_set_rays_cpu(Traits& traits, SpatialGrid* spatial_grid,
+													  Scalar sample_spacing, const Vec3& bbox_min,
+													  const Vec3& bbox_max, int max_outer_iterations,
 													  const std::vector<Vec3>* existing_samples)
 	{
-		const bool bounded_target = (target_num_points != unlimited_sample_target_);
-		const size_t reserve_hint =
-			bounded_target
-				? std::max<size_t>(target_num_points + target_num_points / 2, size_t(1024))
-				: std::max<size_t>(static_cast<size_t>(std::max(1, params_.batch_size)) *
-									   static_cast<size_t>(std::max(1, max_outer_iterations)),
-								   size_t(1024));
+		const size_t reserve_hint = std::max<size_t>(static_cast<size_t>(std::max(1, params_.batch_size)) *
+														 static_cast<size_t>(std::max(1, max_outer_iterations)),
+													 size_t(1024));
 		std::vector<Vec3> neighbor_samples;
 		if (existing_samples)
 			neighbor_samples = *existing_samples;
@@ -289,8 +118,7 @@ protected:
 		const int max_steps = std::max(1, params_.max_iterations);
 		const int check_interval = 10;
 
-		for (int iter = 0; iter < max_outer_iterations && (!bounded_target || all_samples.size() < target_num_points);
-			 ++iter)
+		for (int iter = 0; iter < max_outer_iterations; ++iter)
 		{
 			auto rays = generate_rays(bbox_min, bbox_max, params_.batch_size, gen);
 			const int R = static_cast<int>(rays.size());
@@ -371,176 +199,15 @@ protected:
 					}
 					if (t[i] >= t_max[i])
 						--active_count;
-					if (bounded_target && all_samples.size() >= target_num_points)
-						break;
 				}
-				if (bounded_target && all_samples.size() >= target_num_points)
-					break;
 			}
 
 			std::cout << std::endl;
 			std::cout << "  Collected " << iter_samples.size() << " unique samples this iteration" << std::endl;
-			if (bounded_target)
-				std::cout << "  Total: " << all_samples.size() << " / " << target_num_points << std::endl;
-			else
-				std::cout << "  Total: " << all_samples.size() << std::endl;
-		}
-
-		if (bounded_target && all_samples.size() > target_num_points)
-		{
-			std::shuffle(all_samples.begin(), all_samples.end(), gen);
-			all_samples.resize(target_num_points);
+			std::cout << "  Total: " << all_samples.size() << std::endl;
 		}
 
 		return all_samples;
-	}
-
-	SampleResult sample_alpha_level_set_rays_with_inside_cpu(Traits& traits, size_t target_surface_points,
-															 size_t target_inside_points, SpatialGrid* surface_grid,
-															 SpatialGrid* inside_grid, Scalar grid_cell_size,
-															 const Vec3& bbox_min, const Vec3& bbox_max)
-	{
-		SampleResult result;
-		result.surface_samples.reserve(target_surface_points * 1.5);
-		result.inside_samples.reserve(target_inside_points * 1.5);
-
-		std::mt19937 gen(params_.seed);
-		const Scalar eps = convergence_tolerance();
-		const int max_steps = std::max(1, params_.max_iterations);
-		const int check_interval = 10;
-		const size_t max_inside_reject = 1000;
-
-		std::vector<InsideSegment> all_segments;
-		Scalar segments_total_length = Scalar(0);
-
-		for (int iter = 0; iter < params_.max_outer_iterations; ++iter)
-		{
-			if (result.surface_samples.size() >= target_surface_points)
-				break;
-			auto rays = generate_rays(bbox_min, bbox_max, params_.batch_size, gen);
-			const int R = static_cast<int>(rays.size());
-			if (R == 0)
-				break;
-
-			std::cout << "Iteration " << iter << ": Processing " << R << " rays on CPU..." << std::endl;
-
-			std::vector<Scalar> t(static_cast<size_t>(R));
-			std::vector<Scalar> t_max(static_cast<size_t>(R));
-			std::vector<std::vector<Scalar>> ray_hits(static_cast<size_t>(R));
-			std::vector<uint8_t> ray_inside0(static_cast<size_t>(R), 0);
-			std::vector<uint8_t> inside_prev(static_cast<size_t>(R), 0);
-			std::vector<Scalar> last_hit(static_cast<size_t>(R), -std::numeric_limits<Scalar>::max());
-			for (int i = 0; i < R; ++i)
-			{
-				t[i] = rays[i].t_min;
-				t_max[i] = rays[i].t_max;
-				const Vec3 X = rays[i].origin + t[i] * rays[i].direction;
-				const Scalar udf = traits.eval_distance(X);
-				const bool inside = (udf <= params_.alpha);
-				ray_inside0[static_cast<size_t>(i)] = inside ? uint8_t(1) : uint8_t(0);
-				inside_prev[static_cast<size_t>(i)] = ray_inside0[static_cast<size_t>(i)];
-			}
-			int active_count = R;
-			std::vector<Vec3> iter_samples;
-			for (int step = 0; step < max_steps; ++step)
-			{
-				if (step % check_interval == 0)
-				{
-					if (active_count == 0)
-						break;
-					std::cout << "    Step " << step << ": " << active_count << " active\r" << std::flush;
-				}
-
-				for (int i = 0; i < R; ++i)
-				{
-					if (t[i] >= t_max[i])
-						continue;
-
-					const Ray& ray = rays[i];
-					const Vec3 X = ray.origin + t[i] * ray.direction;
-					const Scalar udf = traits.eval_distance(X);
-					if (!std::isfinite(static_cast<double>(udf)))
-					{
-						t[i] = t_max[i];
-						continue;
-					}
-
-					const bool inside = (udf <= params_.alpha);
-					if (inside != (inside_prev[static_cast<size_t>(i)] != 0))
-					{
-						Scalar& last = last_hit[static_cast<size_t>(i)];
-						if (t[i] - last > eps)
-						{
-							ray_hits[static_cast<size_t>(i)].push_back(t[i]);
-							last = t[i];
-						}
-						inside_prev[static_cast<size_t>(i)] = inside ? uint8_t(1) : uint8_t(0);
-					}
-
-					const Scalar delta = std::abs(udf - params_.alpha);
-					if (delta < eps)
-					{
-						Vec3 pt = clamp_point(X, bbox_min, bbox_max);
-						if (result.surface_samples.size() < target_surface_points)
-						{
-							if (!surface_grid || surface_grid->is_valid_sample(pt, grid_cell_size, result.surface_samples))
-							{
-								iter_samples.push_back(pt);
-								result.surface_samples.push_back(pt);
-								if (surface_grid)
-									surface_grid->insert(pt, static_cast<uint32>(result.surface_samples.size() - 1));
-							}
-						}
-
-						const Scalar step_size = std::max(delta, eps * Scalar(0.5));
-						t[i] += step_size;
-					}
-					else
-					{
-						const Scalar step_size = std::max(delta / params_.step_bound, eps * Scalar(0.5));
-						t[i] += step_size;
-					}
-					if (t[i] >= t_max[i])
-						--active_count;
-					if (result.surface_samples.size() >= target_surface_points &&
-						result.inside_samples.size() >= target_inside_points)
-						break;
-				}
-				if (result.surface_samples.size() >= target_surface_points &&
-					result.inside_samples.size() >= target_inside_points)
-					break;
-			}
-
-			std::cout << std::endl;
-			std::cout << "  Collected " << iter_samples.size() << " surface samples this iteration" << std::endl;
-			std::cout << "  Total surface: " << result.surface_samples.size() << " / " << target_surface_points
-					  << std::endl;
-
-			if (target_inside_points > 0)
-				append_segments_from_hits(rays, ray_hits, ray_inside0, all_segments, segments_total_length);
-		}
-
-		if (target_inside_points > 0 && result.inside_samples.size() < target_inside_points)
-		{
-			sample_inside_from_segments(
-				all_segments, segments_total_length, target_inside_points, inside_grid, grid_cell_size, bbox_min,
-				bbox_max, result.inside_samples, gen, max_inside_reject);
-			std::cout << "  Total inside: " << result.inside_samples.size() << " / " << target_inside_points
-					  << std::endl;
-		}
-
-		if (result.surface_samples.size() > target_surface_points)
-		{
-			std::shuffle(result.surface_samples.begin(), result.surface_samples.end(), gen);
-			result.surface_samples.resize(target_surface_points);
-		}
-		if (result.inside_samples.size() > target_inside_points)
-		{
-			std::shuffle(result.inside_samples.begin(), result.inside_samples.end(), gen);
-			result.inside_samples.resize(target_inside_points);
-		}
-
-		return result;
 	}
 
 	std::vector<Ray> generate_rays(const Vec3& bbox_min, const Vec3& bbox_max, int num_rays, std::mt19937& gen) const

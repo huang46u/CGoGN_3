@@ -100,7 +100,6 @@ public:
 		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
 		if (!SkeletonBuild::compute_skeleton(p))
 			return Status::invalid_data;
-		metrics_.tet_count = static_cast<uint32>(skeleton_tets_.size());
 		return Status::success;
 	}
 
@@ -185,14 +184,12 @@ public:
 		metrics_ = Metrics{};
 		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
 		NonManifoldPrune::run_residual_sheet_prune(p);
-		metrics_.tet_count = static_cast<uint32>(skeleton_tets_.size());
 		return Status::success;
 	}
 
 private:
 	using TetMap = typename Types::TetMap;
 	using Context = typename Types::Context;
-	using RemovalStats = typename Types::RemovalStats;
 	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
 	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
 	using SkeletonBuild = topology_detail::SkeletonBuild<POINTS, NONMANIFOLD>;
@@ -231,35 +228,19 @@ private:
 		while (!p.skeleton_tets.empty())
 		{
 			const uint32 round_start_tets = static_cast<uint32>(p.skeleton_tets.size());
-			const RemovalStats boundary_stats = BoundaryTetPrune::run_boundary_tet_face_deletion(p, &score_cache);
-			RemovalStats simple_stats;
+			BoundaryTetPrune::run_boundary_tet_face_deletion(p, &score_cache);
 			if (!p.skeleton_tets.empty())
-				simple_stats = GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<
-					topology_detail::SimpleTetPolicy>(p, score_cache, evaluator);
-			RemovalStats nonsimple_stats;
+				GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<topology_detail::SimpleTetPolicy>(
+					p, score_cache, evaluator);
 			if (!p.skeleton_tets.empty())
-				nonsimple_stats = GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<
-					topology_detail::NonSimpleTetPolicy>(p, score_cache, evaluator);
+				GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<topology_detail::NonSimpleTetPolicy>(
+					p, score_cache, evaluator);
 			const uint32 round_end_tets = static_cast<uint32>(p.skeleton_tets.size());
 			const uint32 round_removed_tets = round_start_tets - round_end_tets;
-			++p.metrics.topology_rounds;
-			p.metrics.boundary_removed_tets += boundary_stats.removed_tets;
-			p.metrics.simple_removed_tets += simple_stats.removed_tets;
-			p.metrics.nonsimple_removed_tets += nonsimple_stats.removed_tets;
-			RemovalStats round_stats = boundary_stats;
-			round_stats += simple_stats;
-			round_stats += nonsimple_stats;
-			p.metrics.removed_faces += round_stats.removed_faces;
-			p.metrics.removed_edges += round_stats.removed_edges;
-			p.metrics.removed_tets += round_removed_tets;
 			if (round_removed_tets == 0)
 				break;
 		}
-		const IndependentDenseFiveVertexRepairStats repair_stats =
-			DenseK5Repair::repair_isolated_independent_dense_five_vertex_regions(p, independent_dense_repair_seeds);
-		p.metrics.repaired_dense_regions += repair_stats.repaired_regions;
-		p.metrics.added_faces += repair_stats.added_faces;
-		p.metrics.tet_count = static_cast<uint32>(p.skeleton_tets.size());
+		DenseK5Repair::repair_isolated_independent_dense_five_vertex_regions(p, independent_dense_repair_seeds);
 		return Status::success;
 	}
 

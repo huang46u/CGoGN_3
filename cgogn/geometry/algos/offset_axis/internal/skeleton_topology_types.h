@@ -79,16 +79,6 @@ struct SkeletonTopologyTypes
 
 	struct Metrics
 	{
-		uint32 tet_count = 0;
-		uint32 topology_rounds = 0;
-		uint32 boundary_removed_tets = 0;
-		uint32 simple_removed_tets = 0;
-		uint32 nonsimple_removed_tets = 0;
-		uint32 removed_faces = 0;
-		uint32 removed_edges = 0;
-		uint32 removed_tets = 0;
-		uint32 repaired_dense_regions = 0;
-		uint32 added_faces = 0;
 		uint32 residual_removed_sheets = 0;
 		uint32 residual_removed_faces = 0;
 		int32 residual_chi_before = 0;

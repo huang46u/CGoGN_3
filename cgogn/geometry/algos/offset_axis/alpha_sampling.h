@@ -179,49 +179,45 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 		active_slot_of_sample[sample_index] = std::numeric_limits<uint32>::max();
 	};
 
-	if (result.positions.size() < max_samples)
+	// empty grid: no samples exist yet at this point, so nothing is inserted
+	SpatialGrid working_grid(grid_cell_size);
+
+	std::vector<Vec3> seed_points = ray_sampler.sample_alpha_level_set_rays_fixed_iterations(
+		traits, static_cast<int>(detail::alpha_sampling_warmup_iterations), &working_grid, parameters.sample_radius,
+		parameters.bbox_min, parameters.bbox_max, &result.positions);
+	if (!seed_points.empty())
 	{
-		// empty grid: no samples exist yet at this point, so nothing is inserted
-		SpatialGrid working_grid(grid_cell_size);
+		const size_t remaining_slots = max_samples - result.positions.size();
+		if (seed_points.size() > remaining_slots)
+			seed_points.resize(remaining_slots);
 
-		bool used_sdf_filter = false;
-		std::vector<Vec3> seed_points = ray_sampler.sample_alpha_level_set_rays_fixed_iterations(
-			traits, static_cast<int>(detail::alpha_sampling_warmup_iterations), &working_grid, parameters.sample_radius,
-			parameters.bbox_min, parameters.bbox_max, &result.positions, &used_sdf_filter);
-		if (!seed_points.empty())
+		std::vector<Vec3> seed_normals;
+		std::vector<uint8_t> seed_keep_mask;
+		if (!compute_normals(seed_points, seed_normals, seed_keep_mask))
 		{
-			const size_t remaining_slots = max_samples - result.positions.size();
-			if (seed_points.size() > remaining_slots)
-				seed_points.resize(remaining_slots);
-
-			std::vector<Vec3> seed_normals;
-			std::vector<uint8_t> seed_keep_mask;
-			if (!compute_normals(seed_points, seed_normals, seed_keep_mask))
-			{
-				result.success = false;
-				return result;
-			}
-			if (seed_normals.size() != seed_points.size() || seed_keep_mask.size() != seed_points.size())
-			{
-				result.success = false;
-				return result;
-			}
-			std::vector<Vec3> accepted_seed_points;
-			std::vector<Vec3> accepted_seed_normals;
-			accepted_seed_points.reserve(seed_points.size());
-			accepted_seed_normals.reserve(seed_points.size());
-			for (size_t i = 0; i < seed_points.size(); ++i)
-			{
-				if (!seed_points[i].allFinite() || seed_keep_mask[i] == 0 || !seed_normals[i].allFinite())
-					continue;
-				if (result.positions.size() >= max_samples)
-					break;
-				accepted_seed_points.push_back(seed_points[i]);
-				accepted_seed_normals.push_back(seed_normals[i]);
-			}
-			for (size_t i = 0; i < accepted_seed_points.size(); ++i)
-				add_sample(accepted_seed_points[i], accepted_seed_normals[i]);
+			result.success = false;
+			return result;
 		}
+		if (seed_normals.size() != seed_points.size() || seed_keep_mask.size() != seed_points.size())
+		{
+			result.success = false;
+			return result;
+		}
+		std::vector<Vec3> accepted_seed_points;
+		std::vector<Vec3> accepted_seed_normals;
+		accepted_seed_points.reserve(seed_points.size());
+		accepted_seed_normals.reserve(seed_points.size());
+		for (size_t i = 0; i < seed_points.size(); ++i)
+		{
+			if (!seed_points[i].allFinite() || seed_keep_mask[i] == 0 || !seed_normals[i].allFinite())
+				continue;
+			if (result.positions.size() >= max_samples)
+				break;
+			accepted_seed_points.push_back(seed_points[i]);
+			accepted_seed_normals.push_back(seed_normals[i]);
+		}
+		for (size_t i = 0; i < accepted_seed_points.size(); ++i)
+			add_sample(accepted_seed_points[i], accepted_seed_normals[i]);
 	}
 
 	while (result.positions.size() < max_samples && !active_indices.empty())

@@ -110,7 +110,6 @@ public:
 		uint32 sphere_count = 0;
 		uint32 iteration = 0;
 		Scalar total_error = Scalar(0);
-		Scalar total_error_not_normalized = Scalar(0);
 		Scalar last_total_error = std::numeric_limits<Scalar>::max();
 		Scalar error_difference = Scalar(0);
 		Scalar minimum_error = Scalar(0);
@@ -460,17 +459,14 @@ public:
 		metrics_.minimum_error = std::numeric_limits<Scalar>::max();
 		metrics_.maximum_error = Scalar(0);
 		metrics_.total_error = Scalar(0);
-		metrics_.total_error_not_normalized = Scalar(0);
 		foreach_cell(*data_.spheres, [&](Vertex v) {
 			const uint32 idx = index_of(*data_.spheres, v);
 			const Scalar error = (*data_.sphere_error)[idx];
-			const Scalar unnormalized = (*data_.sphere_error_not_normalized)[idx];
 			if (error < metrics_.minimum_error)
 				metrics_.minimum_error = error;
 			if (error > metrics_.maximum_error)
 				metrics_.maximum_error = error;
 			metrics_.total_error += error;
-			metrics_.total_error_not_normalized += unnormalized;
 			return true;
 		});
 		metrics_.error_difference = std::abs(metrics_.total_error - metrics_.last_total_error);

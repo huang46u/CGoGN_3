@@ -89,8 +89,6 @@ struct ReconstructionState
 		invalid_data,
 		model_load_failed,
 		sampling_failed,
-		fitting_failed,
-		medial_axis_failed,
 		sphere_initialization_failed,
 		optimization_failed,
 		skeleton_build_failed,

@@ -61,11 +61,6 @@ public:
 		return device_;
 	}
 
-	bool is_mf_model() const
-	{
-		return output_kind_ == OutputKind::MFTuple;
-	}
-
 	// Forward points in GPU tensor
 	torch::Tensor forward_values_gpu(const torch::Tensor& points_gpu) const
 	{
