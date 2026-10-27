@@ -121,20 +121,6 @@ struct SkeletonTopologyTypes
 		}
 	};
 
-	struct RemovalStats
-	{
-		uint32 removed_faces = 0;
-		uint32 removed_edges = 0;
-		uint32 removed_tets = 0;
-
-	};
-
-	struct SkeletonFaceDeletionOptions
-	{
-		bool remove_incident_orphan_edges_immediately = true;
-		bool remove_global_orphan_elements_after_batch = true;
-	};
-
 	struct TopologyFixScoreCache
 	{
 		std::unordered_map<uint32, Scalar> edge_scores;

@@ -99,7 +99,6 @@ public:
 	using SkeletonFace = typename Types::SkeletonFace;
 	using Context = typename Types::Context;
 	using Tet = typename Types::Tet;
-	using RemovalStats = typename Types::RemovalStats;
 	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
 	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
 	using QuadratureScores = topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
@@ -110,11 +109,10 @@ public:
 	{
 	}
 
-	RemovalStats run()
+	void run()
 	{
-		RemovalStats stats;
 		if (!QuadratureScores::initialize_topology_fix_score_cache(p, evaluator, score_cache))
-			return stats;
+			return;
 
 		face_owner_tets.reserve(nb_cells<SkeletonFace>(p.data.skeleton));
 		deleted_face_count_per_tet.reserve(p.skeleton_tets.size());
@@ -142,9 +140,6 @@ public:
 			deleted_face_count_per_tet[tet_id] = initial_deleted_faces;
 		}
 
-		uint32 removed_faces = 0;
-		uint32 removed_edges = 0;
-		uint32 removed_tets = 0;
 		tet_versions.reserve(p.skeleton_tets.size() * 2 + 1);
 		for (const auto& kv : p.skeleton_tets)
 		{
@@ -206,14 +201,10 @@ public:
 				if (p.skeleton_tets.contains(tet_id))
 					first_removed_tets.insert(tet_id);
 
-			uint32 step_removed_faces = 0;
-			uint32 step_removed_edges = 0;
-			uint32 step_removed_tets = 0;
 			std::unordered_set<std::size_t> step_tets_to_erase;
 			std::unordered_set<std::size_t> first_tets_to_erase;
 			std::vector<SkeletonEdge> step_affected_edges;
-			if (!remove_faces_collect_tets({best.first_face}, first_tets_to_erase, step_removed_faces,
-										   step_removed_edges, &step_affected_edges))
+			if (!remove_faces_collect_tets({best.first_face}, first_tets_to_erase, step_affected_edges))
 			{
 				queue_tet_candidate(best.tet_id, true);
 				continue;
@@ -269,15 +260,10 @@ public:
 				if (face_has_edge_with_tet_face_count_gt2(fc.face, &step_tets_to_erase))
 					continue;
 				std::unordered_set<std::size_t> second_tets_to_erase;
-				uint32 rf = 0, re = 0;
-				if (remove_faces_collect_tets({fc.face}, second_tets_to_erase, rf, re, &step_affected_edges))
-				{
-					step_removed_faces += rf;
-					step_removed_edges += re;
+				if (remove_faces_collect_tets({fc.face}, second_tets_to_erase, step_affected_edges))
 					step_tets_to_erase.insert(second_tets_to_erase.begin(), second_tets_to_erase.end());
-				}
 			}
-			finalize_erase_tets(step_tets_to_erase, step_removed_tets);
+			finalize_erase_tets(step_tets_to_erase);
 			for (std::size_t tet_id : step_tets_to_erase)
 				tet_versions.erase(tet_id);
 
@@ -285,16 +271,7 @@ public:
 			collect_dirty_tets_from_edges(step_affected_edges, dirty_tets);
 			for (std::size_t tet_id : dirty_tets)
 				queue_tet_candidate(tet_id, true);
-
-			removed_faces += step_removed_faces;
-			removed_edges += step_removed_edges;
-			removed_tets += step_removed_tets;
 		}
-
-		stats.removed_faces = removed_faces;
-		stats.removed_edges = removed_edges;
-		stats.removed_tets = removed_tets;
-		return stats;
 	}
 
 private:
@@ -535,9 +512,11 @@ private:
 		return found;
 	}
 
+	// Removes the faces if they bound a current tet and appends their edges to out_affected_edges; the tets are erased
+	// later by finalize_erase_tets.
 	bool remove_faces_collect_tets(const std::vector<SkeletonFace>& faces_to_remove,
-								   std::unordered_set<std::size_t>& out_tets_to_erase, uint32& out_removed_faces,
-								   uint32& out_removed_edges, std::vector<SkeletonEdge>* out_affected_edges = nullptr)
+								   std::unordered_set<std::size_t>& out_tets_to_erase,
+								   std::vector<SkeletonEdge>& out_affected_edges)
 	{
 		out_tets_to_erase.clear();
 		std::vector<std::pair<uint32, SkeletonFace>> unique_faces;
@@ -570,48 +549,26 @@ private:
 		if (tets_to_remove_local.empty())
 			return false;
 
-		std::vector<SkeletonEdge> affected_edges;
-		affected_edges.reserve(unique_faces.size() * 3);
+		std::vector<SkeletonFace> faces;
+		faces.reserve(unique_faces.size());
 		for (const auto& fpair : unique_faces)
 		{
-			const SkeletonFace f = fpair.second;
-			for (SkeletonEdge e : incident_edges(p.data.skeleton, f))
-				affected_edges.push_back(e);
+			account_face_deletion_budget(fpair.first);
+			faces.push_back(fpair.second);
 		}
-		if (out_affected_edges)
-			out_affected_edges->insert(out_affected_edges->end(), affected_edges.begin(), affected_edges.end());
-
-		std::unordered_set<uint32> removed_face_ids;
-		removed_face_ids.reserve(unique_faces.size() * 2 + 1);
-		for (const auto& fpair : unique_faces)
-		{
-			const SkeletonFace f = fpair.second;
-			if (!f.is_valid())
-				continue;
-			const uint32 idf_now = index_of(p.data.skeleton, f);
-			if (idf_now == INVALID_INDEX)
-				continue;
-			account_face_deletion_budget(idf_now);
-			removed_face_ids.insert(idf_now);
-			remove_face(p.data.skeleton, f);
-			++out_removed_faces;
-		}
-
-		QuadratureScores::erase_topology_fix_scores_for_removed_faces_and_orphan_edges(
-			p, &score_cache, removed_face_ids, affected_edges);
-		out_removed_edges += MeshOps::remove_orphan_edges_from_removed_face_edges(p, affected_edges);
+		const std::vector<SkeletonEdge> affected_edges = MeshOps::remove_faces(p, faces);
+		out_affected_edges.insert(out_affected_edges.end(), affected_edges.begin(), affected_edges.end());
 		out_tets_to_erase = std::move(tets_to_remove_local);
 		return true;
 	}
 
-	void finalize_erase_tets(const std::unordered_set<std::size_t>& tets_to_erase, uint32& out_removed_tets)
+	void finalize_erase_tets(const std::unordered_set<std::size_t>& tets_to_erase)
 	{
 		for (std::size_t tet_id : tets_to_erase)
 		{
 			if (!p.skeleton_tets.contains(tet_id))
 				continue;
 			p.skeleton_tets.erase(tet_id);
-			++out_removed_tets;
 		}
 	}
 
@@ -688,16 +645,15 @@ struct GreedyTetRemoval
 	using SkeletonFace = typename Types::SkeletonFace;
 	using Context = typename Types::Context;
 	using Tet = typename Types::Tet;
-	using RemovalStats = typename Types::RemovalStats;
 	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
 	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
 	using QuadratureScores = topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
 
 	template <typename Policy, typename ScoreEvaluator>
-	static RemovalStats run_edge_score_tet_mode_topology_fix(Context& p, TopologyFixScoreCache& score_cache,
+	static void run_edge_score_tet_mode_topology_fix(Context& p, TopologyFixScoreCache& score_cache,
 															 ScoreEvaluator& evaluator)
 	{
-		return LazyGreedyTetRemover<POINTS, NONMANIFOLD, Policy, ScoreEvaluator>(p, score_cache, evaluator).run();
+		LazyGreedyTetRemover<POINTS, NONMANIFOLD, Policy, ScoreEvaluator>(p, score_cache, evaluator).run();
 	}
 };
 

@@ -191,7 +191,7 @@ private:
 		while (!p.skeleton_tets.empty())
 		{
 			const uint32 round_start_tets = static_cast<uint32>(p.skeleton_tets.size());
-			BoundaryTetPrune::run_boundary_tet_face_deletion(p, &score_cache);
+			BoundaryTetPrune::run_boundary_tet_face_deletion(p);
 			if (!p.skeleton_tets.empty())
 				GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<topology_detail::SimpleTetPolicy>(
 					p, score_cache, evaluator);

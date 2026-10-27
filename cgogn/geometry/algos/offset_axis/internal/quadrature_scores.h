@@ -352,29 +352,6 @@ struct QuadratureScores
 		return true;
 	}
 
-	static void erase_topology_fix_scores_for_removed_faces_and_orphan_edges(
-		Context& p, TopologyFixScoreCache* cache, const std::unordered_set<uint32>& removed_face_ids,
-		const std::vector<SkeletonEdge>& affected_edges)
-	{
-		if (!cache)
-			return;
-		for (uint32 face_id : removed_face_ids)
-			cache->face_scores.erase(face_id);
-
-		std::unordered_set<uint32> seen_edge_ids;
-		seen_edge_ids.reserve(affected_edges.size() * 2 + 1);
-		for (SkeletonEdge e : affected_edges)
-		{
-			if (!e.is_valid())
-				continue;
-			const uint32 ide = index_of(p.data.skeleton, e);
-			if (ide == INVALID_INDEX || !seen_edge_ids.insert(ide).second)
-				continue;
-			if (incident_faces(p.data.skeleton, e).empty())
-				cache->edge_scores.erase(ide);
-		}
-	}
-
 	static std::unordered_set<uint32> collect_current_tet_face_id_whitelist(Context& p)
 	{
 		std::unordered_set<uint32> tet_face_ids;

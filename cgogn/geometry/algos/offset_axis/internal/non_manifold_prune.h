@@ -58,7 +58,6 @@ struct NonManifoldPrune
 	using SkeletonEdge = typename Types::SkeletonEdge;
 	using SkeletonFace = typename Types::SkeletonFace;
 	using Context = typename Types::Context;
-	using RemovalStats = typename Types::RemovalStats;
 	using ResidualPruneMode = typename Types::ResidualPruneMode;
 	using MeshOps = SkeletonMeshOps<POINTS, NONMANIFOLD>;
 
@@ -99,10 +98,8 @@ struct NonManifoldPrune
 				if (!f.is_valid())
 					continue;
 
-				const std::vector<SkeletonEdge> affected_edges = incident_edges(p.data.skeleton, f);
-				remove_face(p.data.skeleton, f);
+				MeshOps::remove_faces(p, {f});
 				removed_any_faces = true;
-				MeshOps::remove_orphan_edges_from_removed_face_edges(p, affected_edges);
 			}
 		}
 
@@ -277,9 +274,7 @@ struct NonManifoldPrune
 			return;
 		}
 
-		RemovalStats deletion_stats;
-		if (!MeshOps::delete_skeleton_face_id_set(p, face_ids_to_delete, deletion_stats))
-			return;
+		MeshOps::remove_faces_and_tets(p, face_ids_to_delete);
 
 		MeshOps::compute_edge_degree(p);
 		if (mode == ResidualPruneMode::current)

@@ -30,6 +30,7 @@
 #include <cgogn/core/functions/traversals/vertex.h>
 #include <cgogn/core/types/cell_marker.h>
 #include <cgogn/geometry/algos/offset_axis/internal/quadrature_scores.h>
+#include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_topology_types.h>
 
 #include <array>
@@ -58,9 +59,7 @@ struct BoundaryTetPrune
 	using SkeletonFace = typename Types::SkeletonFace;
 	using Context = typename Types::Context;
 	using Tet = typename Types::Tet;
-	using RemovalStats = typename Types::RemovalStats;
-	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
-	using QuadratureScores = topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
+	using MeshOps = SkeletonMeshOps<POINTS, NONMANIFOLD>;
 
 	struct BoundaryEdgeChoice
 	{
@@ -147,9 +146,8 @@ struct BoundaryTetPrune
 	}
 
 
-	static RemovalStats run_boundary_tet_face_deletion(Context& p, TopologyFixScoreCache* score_cache = nullptr)
+	static void run_boundary_tet_face_deletion(Context& p)
 	{
-		RemovalStats stats;
 
 		struct BoundaryTetCandidate
 		{
@@ -188,41 +186,10 @@ struct BoundaryTetPrune
 			if (!p.skeleton_tets.contains(cand.tet_id))
 				continue;
 
-			const std::array<SkeletonFace, 2> faces_to_remove = {cand.f0, cand.f1};
-			std::vector<SkeletonEdge> affected_edges;
-			affected_edges.reserve(6);
-			for (const SkeletonFace& f_del : faces_to_remove)
-			{
-				if (!f_del.is_valid())
-					continue;
-				for (SkeletonEdge e : incident_edges(p.data.skeleton, f_del))
-					affected_edges.push_back(e);
-			}
-			std::unordered_set<uint32> removed_face_ids;
-			removed_face_ids.reserve(faces_to_remove.size() * 2 + 1);
-			for (const SkeletonFace& f_del : faces_to_remove)
-			{
-				if (const uint32 idf_del = index_of(p.data.skeleton, f_del); idf_del != INVALID_INDEX)
-					removed_face_ids.insert(idf_del);
-				remove_face(p.data.skeleton, f_del);
-				++stats.removed_faces;
-			}
-			QuadratureScores::erase_topology_fix_scores_for_removed_faces_and_orphan_edges(
-				p, score_cache, removed_face_ids, affected_edges);
-			if (cand.edge.is_valid())
-			{
-				const auto edge_in_faces = incident_faces(p.data.skeleton, cand.edge);
-				if (edge_in_faces.empty())
-				{
-					remove_edge(p.data.skeleton, cand.edge);
-					++stats.removed_edges;
-				}
-			}
+			// the two faces of the boundary edge are faces of this tet only, and the other edges keep a face
+			MeshOps::remove_faces(p, {cand.f0, cand.f1});
 			p.skeleton_tets.erase(cand.tet_id);
-			++stats.removed_tets;
 		}
-
-		return stats;
 	}
 };
 

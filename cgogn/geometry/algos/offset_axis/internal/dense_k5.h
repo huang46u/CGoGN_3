@@ -67,8 +67,6 @@ struct DenseK5Repair
 	using SkeletonFace = typename Types::SkeletonFace;
 	using Context = typename Types::Context;
 	using Tet = typename Types::Tet;
-	using RemovalStats = typename Types::RemovalStats;
-	using SkeletonFaceDeletionOptions = typename Types::SkeletonFaceDeletionOptions;
 	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
 
 	struct DenseFiveVertexDetectionResult
@@ -444,12 +442,17 @@ struct DenseK5Repair
 			}
 		}
 
-		RemovalStats deletion_stats;
-		SkeletonFaceDeletionOptions deletion_options;
-		deletion_options.remove_incident_orphan_edges_immediately = false;
-		deletion_options.remove_global_orphan_elements_after_batch = false;
-		if (!MeshOps::delete_skeleton_face_id_set(p, internal_face_ids, deletion_stats, deletion_options))
+		// the faces and their tets only: the region edges are handled below
+		if (internal_face_ids.empty())
 			return false;
+		for (uint32 face_id : internal_face_ids)
+		{
+			const std::set<std::size_t> face_tets = p.skeleton_tets.tets_of(face_id);
+			remove_face(p.data.skeleton, of_index<SkeletonFace>(p.data.skeleton, face_id));
+			for (std::size_t tet_id : face_tets)
+				if (p.skeleton_tets.contains(tet_id))
+					p.skeleton_tets.erase(tet_id);
+		}
 
 		for (const auto& edge_entry : region_edges)
 		{
