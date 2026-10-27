@@ -65,14 +65,11 @@ int main(int argc, char** argv)
 			std::filesystem::create_directories(path.parent_path());
 	};
 
-	auto print_result = [&](const BenchmarkConfig& config, const BenchmarkResult& result, bool include_config_loading) {
+	auto print_result = [&](const BenchmarkConfig& config, const BenchmarkResult& result) {
 		for (const auto& field : cgogn::geometry::offset_axis::benchmark::benchmark_timing_fields)
 		{
-			if (field.print_label == nullptr)
-				continue;
-			if (field.config_loading_only && !include_config_loading)
-				continue;
-			std::cout << field.print_label << " (s): " << seconds_from_milliseconds(field.value_ms(result)) << std::endl;
+			std::cout << field.print_label << " (s): " << seconds_from_milliseconds(result.timing.*field.value_ms)
+					  << std::endl;
 		}
 		std::cout << "Skeleton saved to: " << config.output.skeleton_ply << std::endl;
 		if (!config.output.timing_json.empty())
@@ -110,10 +107,10 @@ int main(int argc, char** argv)
 				ensure_output_directory(config.output.skeleton_ply);
 				ensure_output_directory(config.output.timing_json);
 				BenchmarkResult result = runner.run(config);
-				result.extra_timing.config_loading_ms = config_loading_ms;
-				result.extra_timing.total_ms += result.extra_timing.config_loading_ms;
+				result.timing.loading_ms += config_loading_ms;
+				result.timing.total_ms += config_loading_ms;
 				write_benchmark_timing_json(config, result);
-				print_result(config, result, true);
+				print_result(config, result);
 			}
 			else
 			{
@@ -154,7 +151,7 @@ int main(int argc, char** argv)
 						ensure_output_directory(case_config.output.timing_json);
 						BenchmarkResult result = runner.run(case_config);
 						write_benchmark_timing_json(case_config, result);
-						print_result(case_config, result, false);
+						print_result(case_config, result);
 					}
 					catch (const std::exception& e)
 					{

@@ -160,14 +160,13 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	BenchmarkResult result;
 	result.input_mode = to_string(config.input.mode);
 	result.input_path = geometry_input_path_for_run(config);
-	result.seed = config.reconstruction.seed;
+	BenchmarkTiming& timing = result.timing;
 	Surface surface;
 	Points input_points, samples, spheres;
 	NonManifold skeleton;
 	const bool neural = config.input.mode == InputMode::NeuralUDF;
-	const auto input_start = Clock::now();
+	const auto loading_start = Clock::now();
 	const bool use_surface = load_benchmark_input(config, surface, input_points);
-	result.extra_timing.input_loading_ms = elapsed_ms(input_start);
 	Surface* input_surface = use_surface ? &surface : nullptr;
 
 	const ReconstructionOptions& options = config.reconstruction;
@@ -176,13 +175,9 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	std::unique_ptr<acc::KDTree<3, uint32>> sample_kdtree, sample_ma_kdtree;
 	std::vector<PVertex> sample_vertices, sample_ma_vertices;
 
-	const auto preprocessing_start = Clock::now();
 	if (neural && !field.load_model(config.input.neural_udf_model_path, options.neural_model_type))
 		throw std::runtime_error("Could not load neural model: " + config.input.neural_udf_model_path);
-	result.extra_timing.preprocess_ms = elapsed_ms(preprocessing_start);
 
-	ReconstructionTiming& timing = result.timing;
-	auto stage_start = Clock::now();
 	auto input_position = get_or_add_attribute<Vec3, PVertex>(input_points, "position");
 	auto input_normal = get_or_add_attribute<Vec3, PVertex>(input_points, "normal");
 	auto input_knn = get_or_add_attribute<std::vector<PVertex>, PVertex>(input_points, "knn");
@@ -214,14 +209,14 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	auto skeleton_face_score = get_or_add_attribute<Scalar, NMFace>(skeleton, "udf_score");
 	auto skeleton_edge_score = get_or_add_attribute<Scalar, NMEdge>(skeleton, "udf_score");
 	input.bind(input_surface, &input_points, input_position, input_normal);
-	timing.preprocessing_ms = elapsed_ms(stage_start);
+	timing.loading_ms = elapsed_ms(loading_start);
 
 	auto build_sample_kdtrees = [&]() {
 		build_point_kdtree(samples, *sample_position, sample_kdtree, sample_vertices);
 		build_medial_kdtree(samples, *sample_ma_position, *sample_ma_radius, sample_ma_kdtree, sample_ma_vertices);
 	};
 
-	stage_start = Clock::now();
+	auto stage_start = Clock::now();
 	input.build_input_kdtree();
 	const PrepareInputs<Surface, Points> inputs{input_surface, &input_points, input_position, input_normal, input_knn};
 	if (field.prepare(inputs) != FieldPrepareResult::ok)
@@ -231,9 +226,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 		throw std::runtime_error("Alpha level set sampling failed.");
 	result.counts.samples_before_filtering = static_cast<uint32>(nb_cells<PVertex>(samples));
 	build_sample_kdtrees();
-	timing.sampling_ms = elapsed_ms(stage_start);
 
-	stage_start = Clock::now();
 	if (options.apply_filtering &&
 		filter_samples<Field>(input, Scalar(options.alpha), samples, sample_position.get(), sample_normal.get()) > 0)
 	{
@@ -242,15 +235,13 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 									 "not match the input).");
 		build_sample_kdtrees();
 	}
-	timing.sample_filtering_ms = elapsed_ms(stage_start);
 
-	stage_start = Clock::now();
 	// PCA for every input: neural samples already carry the network gradient, and for MF models that gradient is not
 	// orthogonal to the medial axis.
 	if (options.recompute_normals_after_sampling)
 		recompute_normals_pca(samples, *sample_position, *sample_normal, *sample_kdtree, sample_vertices,
 							  options.knn_k);
-	timing.kdtree_and_normals_ms = elapsed_ms(stage_start);
+	timing.sampling_ms = elapsed_ms(stage_start);
 
 	// the medial flip prune changes normals and removes samples, so it runs before the primitives that use them
 	stage_start = Clock::now();
@@ -258,18 +249,14 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 								*sample_ma_position, *sample_ma_radius, *sample_ma_secondary, Scalar(options.alpha),
 								options.ma_flip_prune, Scalar(options.ma_flip_prune_alpha_factor), options.knn_k);
 	build_sample_kdtrees();
-	timing.initial_medial_axis_ms = elapsed_ms(stage_start);
 	if (nb_cells<PVertex>(samples) == 0)
 		throw std::runtime_error("The medial flip prune removed every sample.");
 
-	stage_start = Clock::now();
 	compute_samples_area(samples, *sample_position, *sample_normal, *sample_area, *sample_knn, *sample_kdtree,
 						 sample_vertices, options.knn_k, Scalar(options.alpha));
 	compute_quadrics(samples, *sample_position, *sample_normal, *sample_area, *sample_knn, *sample_quadric,
 					 *sample_line_quadric, options.knn_k);
-	timing.fitting_primitives_ms = elapsed_ms(stage_start);
 
-	stage_start = Clock::now();
 	typename Optimizer::Data optimizer_data{samples, spheres, sample_kdtree, sample_vertices};
 	optimizer_data.sample_position = sample_position.get();
 	optimizer_data.sample_area = sample_area.get();
@@ -292,7 +279,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	Optimizer optimizer(optimizer_data);
 	optimizer.initialize_from_samples(Scalar(options.init_dilation_constant), options.init_owner_euclidean,
 									  Scalar(options.sqem_update_lambda_line_plane));
-	timing.sphere_initialization_ms = elapsed_ms(stage_start);
+	timing.initialization_ms = elapsed_ms(stage_start);
 	if (nb_cells<PVertex>(spheres) == 0)
 		throw std::runtime_error("The sphere initialization created no sphere.");
 
@@ -324,11 +311,9 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	topology_data.edge_score = skeleton_edge_score.get();
 	Topology topology(topology_data);
 	topology.build_from_spheres();
-	timing.skeleton_construction_ms = elapsed_ms(stage_start);
 	if (nb_cells<NMVertex>(skeleton) == 0)
 		throw std::runtime_error("The skeleton construction created no vertex.");
 
-	stage_start = Clock::now();
 	if (!topology.fix_topology([&](const std::vector<Vec3>& points, std::vector<Scalar>& values) {
 			return evaluate_topology_scores(field, samples, *sample_ma_position, *sample_ma_kdtree, sample_ma_vertices,
 											points, values);
@@ -336,7 +321,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 		throw std::runtime_error("The topology fix failed.");
 	if (options.residual_prune)
 		topology.prune_residual_sheets();
-	timing.topology_processing_ms = elapsed_ms(stage_start);
+	timing.postprocess_ms = elapsed_ms(stage_start);
 
 	ReconstructionCounts& counts = result.counts;
 	auto count_skeleton = [&](ReconstructionCounts& c) {
@@ -351,10 +336,6 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	count_skeleton(counts);
 	counts.optimization_iterations = optimizer.metrics().iteration;
 
-	result.extra_timing.preprocess_ms += timing.preprocessing_ms;
-	result.extra_timing.average_iteration_ms =
-		counts.optimization_iterations > 0 ? timing.optimization_ms / counts.optimization_iterations : 0.0;
-
 	const auto export_start = Clock::now();
 	if (!io::export_skeleton_ply(skeleton, skeleton_position, skeleton_radius, config.output.skeleton_ply))
 		throw std::runtime_error("Could not export skeleton: " + config.output.skeleton_ply);
@@ -364,7 +345,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 		counts_after_export.skeleton_edges != counts.skeleton_edges ||
 		counts_after_export.skeleton_faces != counts.skeleton_faces)
 		throw std::runtime_error("Skeleton export changed the reconstructed topology.");
-	result.extra_timing.export_ms = elapsed_ms(export_start);
+	timing.export_ms = elapsed_ms(export_start);
 	return result;
 }
 void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult& result)
@@ -375,7 +356,6 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	boost::property_tree::ptree root;
 	root.put("input_mode", result.input_mode);
 	root.put("input_path", result.input_path);
-	root.put("seed", result.seed);
 
 	boost::property_tree::ptree benchmark_config;
 	benchmark_config.put("input.geometry_type", to_string(config.input.geometry_type));
@@ -399,7 +379,7 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 
 	boost::property_tree::ptree timing;
 	for (const auto& field : benchmark_timing_fields)
-		timing.put(field.json_key, seconds_from_milliseconds(field.value_ms(result)));
+		timing.put(field.json_key, seconds_from_milliseconds(result.timing.*field.value_ms));
 	root.add_child("timing_s", timing);
 
 	const std::filesystem::path output_path(config.output.timing_json);
@@ -483,7 +463,7 @@ BenchmarkResult SkeletonBenchmarkRunner::run(const BenchmarkConfig& config) cons
 		break;
 	}
 	const auto total_end = std::chrono::high_resolution_clock::now();
-	result.extra_timing.total_ms += std::chrono::duration<double, std::milli>(total_end - total_start).count();
+	result.timing.total_ms = std::chrono::duration<double, std::milli>(total_end - total_start).count();
 	return result;
 }
 
