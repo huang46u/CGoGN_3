@@ -197,10 +197,16 @@ public:
 	// Step 11.
 	void prune_residual_sheets(ResidualPruneMode mode)
 	{
-		// the prune can remove spheres
-		added_spheres_.clear();
 		topology_detail::prune_residual_sheets(data_.skeleton, tets_, data_.edge_degree, data_.spheres_optimizer,
 											   data_.skeleton_source_sphere, data_.sphere_skeleton_vertex, mode);
+		// the prune can remove added spheres: a removed sphere is unlinked from its skeleton vertex
+		const POINTS& spheres = data_.spheres_optimizer.data().spheres;
+		added_spheres_.erase(
+			std::remove_if(added_spheres_.begin(), added_spheres_.end(),
+						   [&](SphereVertex sphere) {
+							   return !value<SkeletonVertex>(spheres, data_.sphere_skeleton_vertex, sphere).is_valid();
+						   }),
+			added_spheres_.end());
 	}
 
 private:
