@@ -338,7 +338,7 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 		}))
 		throw std::runtime_error("The topology fix failed.");
 	if (options.residual_prune)
-		topology.prune_residual_sheets(options.residual_prune_mode);
+		topology.prune_residual_sheets();
 	timing.topology_processing_ms = elapsed_ms(stage_start);
 
 	ReconstructionCounts& counts = result.counts;
@@ -385,7 +385,6 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	for_each_option(config.reconstruction, [&](const OptionInfo& info, const auto& value) {
 		put_option_value(benchmark_config, info.json_key, value);
 	});
-	benchmark_config.put("profile", config.profile.empty() ? std::string("none") : config.profile);
 	benchmark_config.put("benchmark.sequential", config.benchmark.sequential);
 	root.add_child("benchmark_config", benchmark_config);
 
@@ -400,10 +399,6 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	counts.put("skeleton_faces", result.counts.skeleton_faces);
 	counts.put("optimization_iterations", result.counts.optimization_iterations);
 	root.add_child("counts", counts);
-
-	boost::property_tree::ptree residual_prune;
-	residual_prune.put("mode", to_string(config.reconstruction.residual_prune_mode));
-	root.add_child("residual_prune", residual_prune);
 
 	boost::property_tree::ptree timing;
 	for (const auto& field : benchmark_timing_fields)

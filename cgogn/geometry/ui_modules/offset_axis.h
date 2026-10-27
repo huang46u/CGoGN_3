@@ -38,7 +38,6 @@
 #include <cgogn/geometry/algos/offset_axis/input_geometry.h>
 #include <cgogn/geometry/algos/offset_axis/topology_scores.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
-#include <cgogn/geometry/algos/offset_axis/reconstruction_profiles.h>
 #include <cgogn/geometry/algos/offset_axis/sample_processing.h>
 #include <cgogn/geometry/algos/offset_axis/sampling_filter.h>
 #include <cgogn/geometry/algos/offset_axis/skeleton_face_components.h>
@@ -143,9 +142,6 @@ private:
 
 		// Reason of the last failed stage, shown in red in the Neural UDF panel; cleared when the stage succeeds.
 		std::string last_error_;
-
-		// Dataset profile currently applied to the options (see reconstruction_profile_names()).
-		std::string profile_ = "default";
 
 		// Sampling & Fitting Data
 		POINTS* samples_mesh_ = nullptr;
@@ -299,18 +295,6 @@ public:
 		bind_input(points_parameters_[selected_points_], selected_surface_);
 	}
 
-	// Reset every option to the table defaults, then the model-type defaults, then the dataset profile.
-	// The neural model type of the current reconstruction is kept.
-	void reset_options_to_profile(PointsParameters& p, const std::string& profile)
-	{
-		auto& options = p.options_;
-		const cgogn::geometry::offset_axis::NeuralModelType model_type = options.neural_model_type;
-		if (!cgogn::geometry::offset_axis::make_reconstruction_options(model_type, profile, options))
-			log_error("Unknown reconstruction profile: ", profile, '\n');
-		p.profile_ = profile;
-		p.sphere_update_lambda_.store(options.sqem_update_lambda_line_plane);
-	}
-
 	bool load_neural_udf_model(POINTS& points, const std::string& model_path,
 							   cgogn::geometry::offset_axis::NeuralModelType model_type)
 	{
@@ -338,9 +322,8 @@ public:
 			}
 			p.neural_udf_model_path_ = model_path;
 			p.last_error_.clear();
-			// dataset profile guessed from the model type and path; the Sampling panel can change it
-			reset_options_to_profile(p, cgogn::geometry::offset_axis::guess_reconstruction_profile(true, model_type, model_path));
-			log_basic(p, "Reconstruction profile: ", p.profile_, '\n');
+			p.options_ = cgogn::geometry::offset_axis::default_options(model_type);
+			p.sphere_update_lambda_.store(p.options_.sqem_update_lambda_line_plane);
 			log_basic(p, "Loaded neural UDF model from: ", model_path, '\n');
 			return true;
 		}
@@ -639,7 +622,7 @@ private:
 		if (nb_cells<NMVertex>(*p.skeleton_) == 0 || !p.topology_->fix_topology(topology_scores_evaluator(p)))
 			return false;
 		if (p.options_.residual_prune)
-			p.topology_->prune_residual_sheets(p.options_.residual_prune_mode);
+			p.topology_->prune_residual_sheets();
 		return true;
 	}
 
@@ -1275,14 +1258,6 @@ protected:
 		if (ImGui::CollapsingHeader("Sampling", ImGuiTreeNodeFlags_DefaultOpen))
 		{
 			ImGui::BeginDisabled(running);
-			const auto& profile_names = cgogn::geometry::offset_axis::reconstruction_profile_names();
-			if (ImGui::BeginCombo("Profile", p.profile_.c_str()))
-			{
-				for (const std::string& name : profile_names)
-					if (ImGui::Selectable(name.c_str(), name == p.profile_))
-						reset_options_to_profile(p, name);
-				ImGui::EndCombo();
-			}
 			if (ImGui::InputFloat("Alpha", &options.alpha, 0.001f, 0.1f, "%.4f"))
 				options.alpha = std::clamp(options.alpha, float(cgogn::geometry::offset_axis::option_info::alpha.min),
 										   float(cgogn::geometry::offset_axis::option_info::alpha.max));
@@ -1498,11 +1473,6 @@ protected:
 		{
 			ImGui::BeginDisabled(running);
 			ImGui::Checkbox("Residual prune", &options.residual_prune);
-			ImGui::SameLine();
-			int residual_mode = static_cast<int>(options.residual_prune_mode);
-			if (ImGui::Combo("##ResidualPruneMode", &residual_mode,
-							 "current\0keep_fully_non_manifold\0collapsible_only\0"))
-				options.residual_prune_mode = static_cast<cgogn::geometry::offset_axis::ResidualPruneOption>(residual_mode);
 			ImGui::EndDisabled();
 			if (!running && ImGui::Button("Topology fix full pipeline"))
 			{

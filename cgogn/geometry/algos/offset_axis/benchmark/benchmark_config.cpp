@@ -21,7 +21,6 @@
  *                                                                              *
  *******************************************************************************/
 #include <cgogn/geometry/algos/offset_axis/benchmark/benchmark_config.h>
-#include <cgogn/geometry/algos/offset_axis/reconstruction_profiles.h>
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -194,7 +193,7 @@ std::string format_number(double value)
 template <typename T>
 void read_option(const ptree& root, const OptionInfo& info, T& value)
 {
-	if constexpr (std::is_same_v<T, NeuralModelType> || std::is_same_v<T, ResidualPruneOption>)
+	if constexpr (std::is_same_v<T, NeuralModelType>)
 	{
 		if (auto raw = root.get_optional<std::string>(info.json_key))
 		{
@@ -311,12 +310,8 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 		if (!offset_axis::parse(*neural_type, model_type))
 			fail_config("unsupported `input.neural_model_type`: " + *neural_type);
 	}
-	if (auto profile = root.get_optional<std::string>("profile"))
-		config.profile = *profile;
-	// Order: table defaults -> model-type defaults -> profile -> explicit JSON keys (applied by for_each_option below).
-	if (!make_reconstruction_options(model_type, config.profile.empty() ? std::string("default") : config.profile,
-									 config.reconstruction))
-		fail_config("unknown `profile`: " + config.profile + " (expected default, mf_organic, mf_abc or udf)");
+	// the defaults of the model type, then the explicit JSON keys
+	config.reconstruction = default_options(model_type);
 	for_each_option(config.reconstruction, [&](const OptionInfo& info, auto& value) {
 		if (std::string_view(info.json_key) == "input.neural_model_type")
 			return; // already parsed above
@@ -331,40 +326,6 @@ BenchmarkConfig load_benchmark_config(const std::string& path)
 	config.input.surface_path = resolve_config_relative_path(config_directory, get_value<std::string>(input, "surface_path", ""));
 	config.input.neural_udf_model_path =
 		resolve_config_relative_path(config_directory, get_value<std::string>(input, "neural_udf_model_path", ""));
-	if (const auto initial_ma_mode = input.get_optional<std::string>("initial_ma_mode_override");
-		initial_ma_mode && *initial_ma_mode != "shrinking_ball")
-		fail_config("`input.initial_ma_mode_override` is fixed to `shrinking_ball`; remove the key or update its value");
-	if (auto optimization = root.get_child_optional("optimization"))
-	{
-		if (auto distance_mode = optimization->get_optional<std::string>("distance_mode");
-			distance_mode && *distance_mode != "line_quadric_distance_free_r" &&
-			*distance_mode != "line_quadric_distance_free_radius")
-			fail_config("`optimization.distance_mode` is fixed to free radius; migrate this legacy value.");
-		if (auto use_local_clusters = optimization->get_optional<bool>("use_local_clusters");
-			use_local_clusters && !*use_local_clusters)
-			fail_config("`optimization.use_local_clusters` is fixed to true; remove the legacy field or set it to true.");
-		if (auto refresh_interval = optimization->get_optional<unsigned int>("local_cluster_connectivity_refresh_interval");
-			refresh_interval && *refresh_interval != 10)
-			fail_config("`optimization.local_cluster_connectivity_refresh_interval` is fixed to 10; remove the legacy field or set it to 10.");
-		if (auto lock_skeleton_connectivity = optimization->get_optional<bool>("lock_skeleton_connectivity");
-			lock_skeleton_connectivity && *lock_skeleton_connectivity)
-			fail_config("`optimization.lock_skeleton_connectivity` was removed; remove the legacy field or set it to false.");
-	}
-
-	if (auto postprocess = root.get_child_optional("postprocess"))
-	{
-		if (auto topology_fix = postprocess->get_optional<bool>("topology_fix"); topology_fix && !*topology_fix)
-			fail_config("`postprocess.topology_fix` is fixed to true; migrate this legacy value.");
-		if (auto deg_face_deletion = postprocess->get_optional<bool>("deg_face_deletion");
-			deg_face_deletion && *deg_face_deletion)
-			fail_config("`postprocess.deg_face_deletion` was removed; migrate this legacy value.");
-		if (auto nm_two_layer = postprocess->get_optional<bool>("nm_two_layer_prune"); nm_two_layer && *nm_two_layer)
-			fail_config("`postprocess.nm_two_layer_prune` was removed; remove the field or set it to false.");
-		if (auto face_post_processing = postprocess->get_optional<bool>("face_post_processing");
-			face_post_processing && *face_post_processing)
-			fail_config("`postprocess.face_post_processing` was removed; remove the field or set it to false.");
-	}
-
 	const ptree& benchmark_tree = root.get_child("benchmark");
 	config.benchmark.num_measure_runs = get_value<int>(benchmark_tree, "num_measure_runs", 1);
 	config.benchmark.verbose = get_value<bool>(benchmark_tree, "verbose", true);

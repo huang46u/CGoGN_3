@@ -36,48 +36,6 @@ namespace geometry
 namespace offset_axis
 {
 
-// Residual sheet prune mode (postprocess.residual_prune_mode).
-enum class ResidualPruneOption
-{
-	current,
-	keep_fully_non_manifold,
-	collapsible_only
-};
-
-inline std::string to_string(ResidualPruneOption value)
-{
-	switch (value)
-	{
-	case ResidualPruneOption::current:
-		return "current";
-	case ResidualPruneOption::keep_fully_non_manifold:
-		return "keep_fully_non_manifold";
-	case ResidualPruneOption::collapsible_only:
-	default:
-		return "collapsible_only";
-	}
-}
-
-inline bool parse(const std::string& value, ResidualPruneOption& out)
-{
-	if (value == "current")
-	{
-		out = ResidualPruneOption::current;
-		return true;
-	}
-	if (value == "keep_fully_non_manifold")
-	{
-		out = ResidualPruneOption::keep_fully_non_manifold;
-		return true;
-	}
-	if (value == "collapsible_only")
-	{
-		out = ResidualPruneOption::collapsible_only;
-		return true;
-	}
-	return false;
-}
-
 inline std::string to_string(NeuralModelType value)
 {
 	return value == NeuralModelType::mf ? "mf" : "udf";
@@ -105,17 +63,16 @@ inline bool parse(const std::string& value, NeuralModelType& out)
 // neural_model_type: type of the neural model to load; the loaded NeuralDistanceField keeps its own copy
 // udf_min_active_rays: neural seed rays, a ray batch ends once fewer than this many rays are still marching (0 = off)
 // init_owner_euclidean: initial sphere owners from a sphere BVH, the closest sphere surface (default); false scans all spheres
-// residual_prune_mode: 0 current, 1 keep_fully_non_manifold, 2 collapsible_only
 // clang-format off
 #define CGOGN_OFFSET_AXIS_OPTIONS(X) \
   X(NeuralModelType,     neural_model_type,              NeuralModelType::udf,                  "input.neural_model_type",                   0, 0, 0, 0) \
   X(bool,                ma_flip_prune,                  true,                                  "input.ma_flip_prune",                       0, 1, 0, 1) \
   X(float,               ma_flip_prune_alpha_factor,     1.5f,                                "input.ma_flip_prune_alpha_factor",          1.0, 5.0, 1.0, 5.0) \
-  X(float,               alpha,                          0.005f,                                "sampling.alpha",                            1e-6, 1.0, 0.0005, 0.05) \
+  X(float,               alpha,                          0.002f,                                "sampling.alpha",                            1e-6, 1.0, 0.0005, 0.05) \
   X(int,                 knn_k,                          10,                                    "sampling.knn_k",                            3, 1000, 3, 50) \
   X(bool,                apply_filtering,                true,                                  "sampling.apply_filtering",                  0, 1, 0, 1) \
   X(bool,                recompute_normals_after_sampling, false,                               "sampling.recompute_normals_after_sampling", 0, 1, 0, 1) \
-  X(float,               sample_radius,                  0.0025f,                               "sampling.bridson.sample_radius",            1e-6, 1.0, 0.0005, 0.02) \
+  X(float,               sample_radius,                  0.002f,                                "sampling.bridson.sample_radius",            1e-6, 1.0, 0.0005, 0.02) \
   X(int,                 alpha_sampling_candidates_per_parent, 12,                              "sampling.bridson.candidates_per_parent",    1, 100000, 1, 200) \
   X(int,                 alpha_sampling_parent_batch_size, 1024,                                "sampling.bridson.parent_batch_size",        1, 1 << 24, 1, 4096) \
   X(int,                 ray_sampler_batch_size,         8192,                                  "sampling.ray.batch_size",                   1, 1 << 24, 1, 65536) \
@@ -127,8 +84,7 @@ inline bool parse(const std::string& value, NeuralModelType& out)
   X(int,                 seed,                           42,                                    "initialization.seed",                       0, 2147483647, 0, 1000) \
   X(float,               init_dilation_constant,         0.01f,                                 "initialization.init_dilation_constant",     1e-6, 1.0, 0.001, 0.01) \
   X(bool,                init_owner_euclidean,           true,                                  "initialization.init_owner_euclidean",       0, 1, 0, 1) \
-  X(bool,                residual_prune,                 false,                                 "postprocess.residual_prune",                0, 1, 0, 1) \
-  X(ResidualPruneOption, residual_prune_mode,            ResidualPruneOption::collapsible_only, "postprocess.residual_prune_mode",           0, 0, 0, 0)
+  X(bool,                residual_prune,                 true,                                  "postprocess.residual_prune",                0, 1, 0, 1)
 // clang-format on
 
 struct ReconstructionOptions
@@ -153,6 +109,26 @@ namespace option_info
 CGOGN_OFFSET_AXIS_OPTIONS(CGOGN_OFFSET_AXIS_OPTION_INFO)
 #undef CGOGN_OFFSET_AXIS_OPTION_INFO
 } // namespace option_info
+
+// Options of a reconstruction with a field of the given type: the table defaults, which are the UDF ones, and for
+// MF models the following changes. MF fields vanish on the medial axis, not on the surface: their samples lie away
+// from the input and must not be filtered by their distance to it, and their normals are re-estimated by PCA over
+// neighbouring samples (the network gradient is not orthogonal to the medial axis).
+inline ReconstructionOptions default_options(NeuralModelType type)
+{
+	ReconstructionOptions options;
+	options.neural_model_type = type;
+	if (type == NeuralModelType::mf)
+	{
+		options.alpha = 0.005f;
+		options.sample_radius = 0.0025f;
+		options.alpha_sampling_candidates_per_parent = 60;
+		options.alpha_sampling_parent_batch_size = 102;
+		options.apply_filtering = false;
+		options.recompute_normals_after_sampling = true;
+	}
+	return options;
+}
 
 // f(const OptionInfo&, T& value) for every option, in table order.
 template <typename Options, typename F>

@@ -62,7 +62,6 @@ public:
 	using SphereAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
 	template <typename T>
 	using SkeletonAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
-	using ResidualPruneMode = ResidualPruneOption;
 
 	struct Data
 	{
@@ -189,10 +188,10 @@ public:
 												tet_edge_ids(data_.skeleton, tets_), evaluate_scores, data_.edge_score);
 	}
 
-	void prune_residual_sheets(ResidualPruneMode mode)
+	void prune_residual_sheets()
 	{
 		offset_axis::prune_residual_sheets(data_.skeleton, tets_, data_.edge_degree, data_.spheres_optimizer,
-										   data_.skeleton_source_sphere, data_.sphere_skeleton_vertex, mode);
+										   data_.skeleton_source_sphere, data_.sphere_skeleton_vertex);
 		// the prune can remove added spheres: a removed sphere is unlinked from its skeleton vertex
 		const POINTS& spheres = data_.spheres_optimizer.data().spheres;
 		added_spheres_.erase(

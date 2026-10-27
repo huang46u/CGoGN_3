@@ -47,61 +47,21 @@ namespace geometry
 namespace offset_axis
 {
 
-// Removes the faces whose 3 edges have more than 2 faces, until there is none.
-template <typename POINTS, typename NONMANIFOLD>
-void remove_fully_non_manifold_triangles(
-	NONMANIFOLD& skeleton, typename mesh_traits<NONMANIFOLD>::template Attribute<uint32>* edge_degree,
-	SpheresOptimizer<POINTS>& spheres_optimizer,
-	typename mesh_traits<NONMANIFOLD>::template Attribute<typename mesh_traits<POINTS>::Vertex>* skeleton_source_sphere,
-	typename mesh_traits<POINTS>::template Attribute<typename mesh_traits<NONMANIFOLD>::Vertex>* sphere_skeleton_vertex)
-{
-	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
-	using SkeletonFace = typename mesh_traits<NONMANIFOLD>::Face;
-
-	bool removed_any_faces = false;
-	for (;;)
-	{
-		std::vector<SkeletonFace> faces_to_remove;
-		foreach_cell(skeleton, [&](SkeletonFace f) -> bool {
-			for (SkeletonEdge e : incident_edges(skeleton, f))
-				if (incident_faces(skeleton, e).size() <= 2)
-					return true;
-			faces_to_remove.push_back(f);
-			return true;
-		});
-
-		if (faces_to_remove.empty())
-			break;
-
-		for (SkeletonFace f : faces_to_remove)
-			remove_faces(skeleton, {f}, spheres_optimizer, skeleton_source_sphere, sphere_skeleton_vertex);
-		removed_any_faces = true;
-	}
-
-	if (removed_any_faces)
-		compute_edge_degree(skeleton, edge_degree);
-}
-
-// Removes the small sheets (at most 2 faces connected by degree-2 edges) that have no vertex on an isolated edge, with
-// their tets; the mode keeps some of them and removes the fully non-manifold triangles before and after.
+// Removes the small sheets (at most 2 faces connected by degree-2 edges) that have a boundary edge and no vertex on
+// an isolated edge, with their tets.
 template <typename POINTS, typename NONMANIFOLD>
 void prune_residual_sheets(
 	NONMANIFOLD& skeleton, SkeletonTets<NONMANIFOLD>& tets,
 	typename mesh_traits<NONMANIFOLD>::template Attribute<uint32>* edge_degree,
 	SpheresOptimizer<POINTS>& spheres_optimizer,
 	typename mesh_traits<NONMANIFOLD>::template Attribute<typename mesh_traits<POINTS>::Vertex>* skeleton_source_sphere,
-	typename mesh_traits<POINTS>::template Attribute<typename mesh_traits<NONMANIFOLD>::Vertex>* sphere_skeleton_vertex,
-	ResidualPruneOption mode)
+	typename mesh_traits<POINTS>::template Attribute<typename mesh_traits<NONMANIFOLD>::Vertex>* sphere_skeleton_vertex)
 {
 	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
 	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
 	using SkeletonFace = typename mesh_traits<NONMANIFOLD>::Face;
 
 	compute_edge_degree(skeleton, edge_degree);
-	if (mode == ResidualPruneOption::current)
-		remove_fully_non_manifold_triangles(skeleton, edge_degree, spheres_optimizer, skeleton_source_sphere,
-											sphere_skeleton_vertex);
-
 	std::vector<SkeletonFace> faces;
 	faces.reserve(nb_cells<SkeletonFace>(skeleton));
 	std::unordered_map<uint32, uint32> face_id_to_index;
@@ -196,17 +156,9 @@ void prune_residual_sheets(
 	for (uint32 sheet_label : sorted_sheet_labels)
 	{
 		const std::vector<uint32>& sheet_faces = label_to_faces[sheet_label];
-		const size_t face_count = sheet_faces.size();
-		const bool delete_by_small_sheet = (face_count <= forced_delete_max_face_count);
-		const bool keep_by_isolated_edge_guard =
-			delete_by_small_sheet && sheet_has_vertex_connected_to_isolated_edge(sheet_faces);
-		bool delete_sheet = delete_by_small_sheet && !keep_by_isolated_edge_guard;
-		// a single-face sheet without a boundary edge is a fully non-manifold triangle
-		if (delete_sheet && !sheet_has_boundary_edge(sheet_faces) &&
-			(mode == ResidualPruneOption::collapsible_only ||
-			 (mode == ResidualPruneOption::keep_fully_non_manifold && face_count == 1)))
-			delete_sheet = false;
-		if (!delete_sheet)
+		// a sheet without a boundary edge (e.g. a fully non-manifold triangle) cannot collapse and is kept
+		if (sheet_faces.size() > forced_delete_max_face_count ||
+			sheet_has_vertex_connected_to_isolated_edge(sheet_faces) || !sheet_has_boundary_edge(sheet_faces))
 			continue;
 
 		face_ids_to_delete.reserve(face_ids_to_delete.size() + sheet_faces.size());
@@ -219,9 +171,6 @@ void prune_residual_sheets(
 							  sphere_skeleton_vertex);
 
 	compute_edge_degree(skeleton, edge_degree);
-	if (mode == ResidualPruneOption::current)
-		remove_fully_non_manifold_triangles(skeleton, edge_degree, spheres_optimizer, skeleton_source_sphere,
-											sphere_skeleton_vertex);
 }
 
 } // namespace offset_axis

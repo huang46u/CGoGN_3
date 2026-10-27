@@ -100,7 +100,6 @@ struct BenchmarkConfig
 	std::string config_path;
 	BenchmarkInputConfig input;
 	offset_axis::ReconstructionOptions reconstruction;
-	std::string profile;
 	BenchmarkRuntimeConfig benchmark;
 	BenchmarkOutputConfig output;
 	BenchmarkBatchConfig batch;

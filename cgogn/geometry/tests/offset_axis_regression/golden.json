@@ -9,15 +9,15 @@
     },
     "sha256": "4411d5b271c5e4957ff059fcbe777544de0ffb4d8195591d426969448e906cc1"
   },
-  "mf_abc_066_profile": {
+  "mf_abc_066_defaults": {
     "counts": {
-      "final_spheres": 1677,
-      "sample_points": 157840,
-      "skeleton_edges": 4879,
-      "skeleton_faces": 3203,
-      "skeleton_vertices": 1677
+      "final_spheres": 1496,
+      "sample_points": 100869,
+      "skeleton_edges": 4366,
+      "skeleton_faces": 2871,
+      "skeleton_vertices": 1496
     },
-    "sha256": "4411d5b271c5e4957ff059fcbe777544de0ffb4d8195591d426969448e906cc1"
+    "sha256": "760084f2c1c60a14cea7be8d36e4e5a955ece4f474532a5464e8474945122375"
   },
   "mf_organic_bug": {
     "counts": {

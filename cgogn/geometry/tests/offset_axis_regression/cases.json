@@ -8,8 +8,7 @@
     "initialization": {"seed": 42, "init_dilation_constant": 0.01},
     "postprocess": {"residual_prune": true}
   },
-  "mf_abc_066_profile": {
-    "profile": "mf_abc",
+  "mf_abc_066_defaults": {
     "input": {"mode": "neural_udf", "geometry_type": "mesh", "neural_model_type": "mf",
               "input_path": "data/skeleton/QMDF/ABC/model/ABC_066.obj",
               "neural_udf_model_path": "data/skeleton/QMDF/ABC/weight/ABC_066.pt"}

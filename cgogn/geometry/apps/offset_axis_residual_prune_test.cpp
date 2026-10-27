@@ -51,7 +51,6 @@ using GFace = cgogn::mesh_traits<Graph>::Face;
 using PVertex = cgogn::mesh_traits<Points>::Vertex;
 using Topology = cgogn::geometry::offset_axis::SkeletonTopology<Points, Graph>;
 using Optimizer = cgogn::geometry::offset_axis::SpheresOptimizer<Points>;
-using Mode = Topology::ResidualPruneMode;
 
 struct Counts
 {
@@ -150,8 +149,7 @@ void build_scenario_b(Graph& g, Builder& builder)
 }
 
 // scenario C: complete 2-complex on 5 vertices (all 10 triangles). Every edge is shared by 3 triangles, so every
-// triangle is fully non-manifold and all of them are removed in the same batch; every edge then becomes an orphan
-// edge and every vertex an isolated vertex (covers the edge and vertex removal of the orphan cleanup).
+// triangle is a fully non-manifold single-face sheet.
 void build_scenario_c(Graph& g, Builder& builder)
 {
 	(void)g;
@@ -164,25 +162,26 @@ void build_scenario_c(Graph& g, Builder& builder)
 				builder.triangle(v[i], v[j], v[k]);
 }
 
-const char* mode_name(Mode mode)
+// scenario D: two-face sheet T1 = (a,b,c), T2 = (a,c,d) sharing edge ac, with the boundary edges cd and da
+void build_scenario_d(Graph& g, Builder& builder)
 {
-	switch (mode)
-	{
-	case Mode::current:
-		return "current";
-	case Mode::keep_fully_non_manifold:
-		return "keep_fully_non_manifold";
-	case Mode::collapsible_only:
-		return "collapsible_only";
-	}
-	return "unknown";
+	(void)g;
+	GVertex va = builder.vertex();
+	GVertex vb = builder.vertex();
+	GVertex vc = builder.vertex();
+	GVertex vd = builder.vertex();
+	builder.triangle(va, vb, vc);
+	builder.triangle(va, vc, vd);
+	builder.support_edge(va, vb);
+	builder.support_edge(vb, vc);
 }
 
-// returns true when every check of this (scenario, mode) pair passes
-bool run_case(char scenario, Mode mode)
+// returns true when every check of this scenario passes
+bool run_case(char scenario)
 {
 	const bool scenario_b = scenario == 'B';
 	const bool scenario_c = scenario == 'C';
+	const bool scenario_d = scenario == 'D';
 
 	Graph skeleton;
 	Points spheres;
@@ -200,6 +199,8 @@ bool run_case(char scenario, Mode mode)
 		build_scenario_b(skeleton, builder);
 	else if (scenario_c)
 		build_scenario_c(skeleton, builder);
+	else if (scenario_d)
+		build_scenario_d(skeleton, builder);
 	else
 		build_scenario_a(skeleton, builder);
 
@@ -220,7 +221,7 @@ bool run_case(char scenario, Mode mode)
 	Topology topology(data);
 
 	const Counts before = counts(skeleton);
-	topology.prune_residual_sheets(mode);
+	topology.prune_residual_sheets();
 	const Counts after = counts(skeleton);
 
 	const long long chi_before = before.chi();
@@ -228,33 +229,17 @@ bool run_case(char scenario, Mode mode)
 	const long long deleted_faces = before.faces - after.faces;
 	const long long removed_edges = before.edges - after.edges;
 	const long long removed_vertices = before.vertices - after.vertices;
-	const bool current = mode == Mode::current;
-	const bool collapsible = mode == Mode::collapsible_only;
 
-	// expectations
+	// expectations: the sheets of A, B and C have no boundary edge and are kept
 	long long expected_deleted_faces = 0;
 	long long expected_removed_edges = 0;
 	long long expected_removed_vertices = 0;
-	if (scenario_c)
+	if (scenario_d)
 	{
-		// the 10 triangles are removed by the fully non-manifold step only in current mode, together with the 10
-		// orphan edges and the 5 isolated vertices
-		expected_deleted_faces = current ? 10 : 0;
-		expected_removed_edges = current ? 10 : 0;
-		expected_removed_vertices = current ? 5 : 0;
-	}
-	else if (!scenario_b)
-	{
-		// T is removed by the fully non-manifold step only in current mode
-		expected_deleted_faces = current ? 1 : 0;
-	}
-	else
-	{
-		// T1, T2 form a 2-face sheet without boundary edge: deleted unless collapsible_only
-		const bool deleted = !collapsible;
-		expected_deleted_faces = deleted ? 2 : 0;
-		// edge ac loses both faces and is removed as an orphan edge, so chi drops by 1 not 2
-		expected_removed_edges = deleted ? 1 : 0;
+		// T1, T2 are deleted; ac, cd and da become orphan edges and d an isolated vertex
+		expected_deleted_faces = 2;
+		expected_removed_edges = 3;
+		expected_removed_vertices = 1;
 	}
 
 	std::vector<std::string> errors;
@@ -274,10 +259,9 @@ bool run_case(char scenario, Mode mode)
 						 std::to_string(chi_after));
 
 	const bool ok = errors.empty();
-	std::cout << "[scenario " << scenario << "][" << mode_name(mode) << "] chi_before=" << chi_before
-			  << " chi_after=" << chi_after << " deleted_faces=" << deleted_faces
-			  << " removed_edges=" << removed_edges << " removed_vertices=" << removed_vertices
-			  << (ok ? " PASS" : " FAIL") << '\n';
+	std::cout << "[scenario " << scenario << "] chi_before=" << chi_before << " chi_after=" << chi_after
+			  << " deleted_faces=" << deleted_faces << " removed_edges=" << removed_edges
+			  << " removed_vertices=" << removed_vertices << (ok ? " PASS" : " FAIL") << '\n';
 	for (const std::string& e : errors)
 		std::cout << "  FAIL: " << e << '\n';
 	return ok;
@@ -289,11 +273,9 @@ int main()
 {
 	cgogn::thread_start(0);
 	int failed_cases = 0;
-	const Mode modes[] = {Mode::current, Mode::keep_fully_non_manifold, Mode::collapsible_only};
-	for (char scenario : {'A', 'B', 'C'})
-		for (Mode mode : modes)
-			if (!run_case(scenario, mode))
-				++failed_cases;
+	for (char scenario : {'A', 'B', 'C', 'D'})
+		if (!run_case(scenario))
+			++failed_cases;
 	cgogn::thread_stop();
 
 	if (failed_cases == 0)
