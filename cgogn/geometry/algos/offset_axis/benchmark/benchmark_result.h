@@ -23,7 +23,7 @@
 #ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_BENCHMARK_RESULT_H_
 #define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_BENCHMARK_RESULT_H_
 
-#include <cgogn/geometry/algos/offset_axis/reconstruction_stats.h>
+#include <cgogn/core/utils/numerics.h>
 
 #include <string>
 
@@ -39,7 +39,36 @@ namespace offset_axis
 namespace benchmark
 {
 
-// timings measured by the benchmark around OffsetAxisReconstruction
+// time of each reconstruction step
+struct ReconstructionTiming
+{
+	float64 preprocessing_ms = 0.0;
+	float64 sampling_ms = 0.0;
+	float64 sample_filtering_ms = 0.0;
+	float64 kdtree_and_normals_ms = 0.0;
+	float64 initial_medial_axis_ms = 0.0;
+	float64 fitting_primitives_ms = 0.0;
+	float64 sphere_initialization_ms = 0.0;
+	float64 optimization_ms = 0.0;
+	float64 skeleton_construction_ms = 0.0;
+	float64 topology_processing_ms = 0.0;
+};
+
+// sizes of the meshes after the reconstruction
+struct ReconstructionCounts
+{
+	uint32 input_vertices = 0;
+	uint32 input_points = 0;
+	uint32 samples_before_filtering = 0;
+	uint32 samples = 0;
+	uint32 spheres = 0;
+	uint32 skeleton_vertices = 0;
+	uint32 skeleton_edges = 0;
+	uint32 skeleton_faces = 0;
+	uint32 optimization_iterations = 0;
+};
+
+// timings of the benchmark outside the reconstruction steps
 struct BenchmarkExtraTiming
 {
 	double config_loading_ms = 0.0;

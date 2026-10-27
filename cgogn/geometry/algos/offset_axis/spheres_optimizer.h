@@ -81,7 +81,7 @@ public:
 	{
 		POINTS& samples;
 		POINTS& spheres;
-		// the tree is rebuilt in place (build_sample_kdtree), so the optimizer refers to its owner
+		// the owner rebuilds the tree in place (after the filtering and the medial axis), so the optimizer refers to it
 		const std::unique_ptr<acc::KDTree<3, uint32>>& sample_kdtree;
 		const std::vector<Vertex>& sample_kdtree_vertices;
 		Attribute<Vec3>* sample_position = nullptr;

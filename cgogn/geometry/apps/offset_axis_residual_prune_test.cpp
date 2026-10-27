@@ -187,7 +187,7 @@ bool run_case(char scenario, Mode mode)
 	Graph skeleton;
 	Points spheres;
 
-	// attributes are created before the cells, as in reconstruction.h
+	// attributes are created before the cells, as in the benchmark
 	auto sphere_skeleton_vertex = cgogn::add_attribute<GVertex, PVertex>(spheres, "skeleton_vertex");
 	auto skeleton_position = cgogn::add_attribute<Eigen::Vector3d, GVertex>(skeleton, "position");
 	auto skeleton_radius = cgogn::add_attribute<double, GVertex>(skeleton, "radius");
