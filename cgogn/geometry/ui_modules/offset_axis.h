@@ -1321,8 +1321,8 @@ protected:
 			ImGui::Checkbox("Enable MAFlipPrune", &options.ma_flip_prune);
 			float ma_flip_prune_alpha_factor = static_cast<float>(options.ma_flip_prune_alpha_factor);
 			if (ImGui::SliderFloat("MAFlipPrune MF Alpha Factor", &ma_flip_prune_alpha_factor,
-								   float(cgogn::geometry::offset_axis::option_info::ma_flip_prune_alpha_factor.ui_min),
-								   float(cgogn::geometry::offset_axis::option_info::ma_flip_prune_alpha_factor.ui_max), "%.2f"))
+								   float(cgogn::geometry::offset_axis::option_info::ma_flip_prune_alpha_factor.min),
+								   float(cgogn::geometry::offset_axis::option_info::ma_flip_prune_alpha_factor.max), "%.2f"))
 				options.ma_flip_prune_alpha_factor = Scalar(ma_flip_prune_alpha_factor);
 			ImGui::EndDisabled();
 			if (!running && ImGui::Button("Compute Fitting Data"))
@@ -1344,8 +1344,8 @@ protected:
 		{
 			ImGui::BeginDisabled(running);
 			ImGui::SliderFloat("Init dilation constant", &options.init_dilation_constant,
-							   float(cgogn::geometry::offset_axis::option_info::init_dilation_constant.ui_min),
-							   float(cgogn::geometry::offset_axis::option_info::init_dilation_constant.ui_max), "%.4f");
+							   float(cgogn::geometry::offset_axis::option_info::init_dilation_constant.min),
+							   float(cgogn::geometry::offset_axis::option_info::init_dilation_constant.max), "%.4f");
 			ImGui::Checkbox("Euclidean initial owners", &options.init_owner_euclidean);
 			ImGui::EndDisabled();
 			if (!running && ImGui::Button("Init spheres"))
@@ -1378,8 +1378,8 @@ protected:
 		{
 			float update_lambda = p.sphere_update_lambda_.load();
 			if (ImGui::SliderFloat("Update lambda", &update_lambda,
-								   float(cgogn::geometry::offset_axis::option_info::sqem_update_lambda_line_plane.ui_min),
-								   float(cgogn::geometry::offset_axis::option_info::sqem_update_lambda_line_plane.ui_max), "%.6f"))
+								   float(cgogn::geometry::offset_axis::option_info::sqem_update_lambda_line_plane.min),
+								   float(cgogn::geometry::offset_axis::option_info::sqem_update_lambda_line_plane.max), "%.6f"))
 			{
 				p.sphere_update_lambda_.store(update_lambda);
 				options.sqem_update_lambda_line_plane = update_lambda;
