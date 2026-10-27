@@ -33,6 +33,8 @@
 #include <cgogn/ui/view.h>
 
 #include <cgogn/core/ui_modules/mesh_provider.h>
+#include <cgogn/geometry/algos/offset_axis/point_cloud_distance_field.h>
+#include <cgogn/geometry/algos/offset_axis/surface_distance_field.h>
 #include <cgogn/geometry/ui_modules/offset_axis.h>
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
 #include <cgogn/rendering/ui_modules/surface_render.h>
@@ -139,11 +141,10 @@ int run_offset_axis_app(const std::string& filename, const std::string& model_pa
 	{
 		auto p_vertex_position = cgogn::get_or_add_attribute<Vec3, PVertex>(*p, "position");
 
-		const auto model_status = udf.load_neural_udf_model(
-			*p, model_path,
-			neural_is_mf ? cgogn::geometry::offset_axis::NeuralModelType::mf : cgogn::geometry::offset_axis::NeuralModelType::udf);
-		if (model_status.code !=
-			cgogn::ui::OffsetAxis<Surface, Points, NonManifold, FIELD>::ReconstructionStatus::success)
+		if (!udf.load_neural_udf_model(
+				*p, model_path,
+				neural_is_mf ? cgogn::geometry::offset_axis::NeuralModelType::mf
+							 : cgogn::geometry::offset_axis::NeuralModelType::udf))
 			return 1;
 		mpp.set_mesh_bb_vertex_position(*p, p_vertex_position);
 		pcr.set_vertex_position(*v1, *p, p_vertex_position);

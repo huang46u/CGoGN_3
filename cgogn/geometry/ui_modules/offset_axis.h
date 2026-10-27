@@ -32,16 +32,28 @@
 #include <cgogn/geometry/algos/offset_axis/neural/neural_distance_field.h>
 #endif
 #include <cgogn/geometry/algos/offset_axis/neural_model_type.h>
-#include <cgogn/geometry/algos/offset_axis/reconstruction.h>
+#include <cgogn/geometry/algos/offset_axis/alpha_medial.h>
+#include <cgogn/geometry/algos/offset_axis/alpha_sampling.h>
+#include <cgogn/geometry/algos/offset_axis/distance_field.h>
+#include <cgogn/geometry/algos/offset_axis/input_geometry.h>
+#include <cgogn/geometry/algos/offset_axis/internal/topology_scores.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_profiles.h>
+#include <cgogn/geometry/algos/offset_axis/sample_processing.h>
+#include <cgogn/geometry/algos/offset_axis/sampling_filter.h>
 #include <cgogn/geometry/algos/offset_axis/skeleton_face_components.h>
+#include <cgogn/geometry/algos/offset_axis/skeleton_topology.h>
+#include <cgogn/geometry/algos/offset_axis/spheres_optimizer.h>
 #include <cgogn/io/surface/skeleton_ply.h>
+#include <cgogn/geometry/types/line_quadric.h>
+#include <cgogn/geometry/types/spherical_quadric.h>
 #include <cgogn/geometry/types/vector_traits.h>
 #include <cgogn/ui/portable-file-dialogs.h>
 
 #include <cgogn/rendering/ui_modules/point_cloud_render.h>
 #include <cgogn/rendering/ui_modules/surface_render.h>
+
+#include <libacc/kd_tree.h>
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -60,6 +72,7 @@
 #include <thread>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace cgogn
 {
@@ -87,9 +100,8 @@ public:
 	using SpheresOptimizerType = cgogn::geometry::offset_axis::SpheresOptimizer<POINTS>;
 	using SpheresOptimizerMetrics = typename SpheresOptimizerType::Metrics;
 	using SpheresOptimizerStatus = typename SpheresOptimizerType::Status;
-	using ReconstructionType = cgogn::geometry::offset_axis::OffsetAxisReconstruction<SURFACE, POINTS, NONMANIFOLD, FIELD>;
-	using ReconstructionStatus = typename ReconstructionType::Status;
-	using ReconstructionStatusInfo = typename ReconstructionType::StatusInfo;
+	using TopologyType = cgogn::geometry::offset_axis::SkeletonTopology<POINTS, NONMANIFOLD>;
+	using Field = FIELD<SURFACE, POINTS>;
 
 	enum OutputVerbosity : uint32
 	{
@@ -109,12 +121,23 @@ private:
 		bool initialized_ = false;
 		bool fitting_data_computed_ = false; // UI workflow gate for the sphere-fitting controls.
 		bool spheres_initialized_ = false; // UI workflow gate for the sphere-optimization controls; reset with the fitting data.
-		std::unique_ptr<ReconstructionType> reconstruction_;
-		// Input Points
+		// Reconstruction: the field refers to input_ and options_, so it is declared after them
+		cgogn::geometry::offset_axis::ReconstructionOptions options_;
+		cgogn::geometry::offset_axis::InputGeometry<SURFACE, POINTS> input_;
+		Field field_{input_, options_};
+		std::unique_ptr<acc::KDTree<3, uint32>> samples_kdtree_, samples_ma_kdtree_;
+		std::vector<PVertex> samples_kdtree_vertices_, samples_ma_kdtree_vertices_;
+		std::unique_ptr<SpheresOptimizerType> optimizer_;
+		std::unique_ptr<TopologyType> topology_;
+
+		// Input
+		SURFACE* surface_ = nullptr;
 		POINTS* points_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> position_ = nullptr;
+		std::shared_ptr<PAttribute<Vec3>> normal_ = nullptr;
+		std::shared_ptr<PAttribute<std::vector<PVertex>>> knn_ = nullptr;
 
-		// Neural model information shown in the UI; the model itself is owned by ReconstructionType.
+		// Neural model information shown in the UI; the model itself is owned by field_.
 		bool neural_udf_loaded_ = false;
 		std::string neural_udf_model_path_ = "";
 
@@ -128,8 +151,16 @@ private:
 		POINTS* samples_mesh_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> samples_position_ = nullptr;
 		std::shared_ptr<PAttribute<Vec3>> samples_normal_ = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> samples_area_ = nullptr;
+		std::shared_ptr<PAttribute<std::vector<PVertex>>> samples_knn_ = nullptr;
+		std::shared_ptr<PAttribute<geometry::Spherical_Quadric>> samples_quadric_ = nullptr;
+		std::shared_ptr<PAttribute<geometry::Line_Quadric>> samples_line_quadric_ = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> samples_error_ = nullptr;
 
 		// Medial Axis (on samples)
+		std::shared_ptr<PAttribute<Vec3>> samples_ma_position_ = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> samples_ma_radius_ = nullptr;
+		std::shared_ptr<PAttribute<PVertex>> samples_ma_secondary_ = nullptr;
 
 		// Clustering (on samples)
 		std::shared_ptr<PAttribute<PVertex>> samples_sphere_ = nullptr; // Cluster ID for each sample
@@ -143,6 +174,11 @@ private:
 		std::shared_ptr<PAttribute<Vec4>> spheres_color_ = nullptr;
 		std::shared_ptr<PAttribute<Vec4>> spheres_cluster_color_ = nullptr;
 		std::shared_ptr<PAttribute<Scalar>> spheres_error_ = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> spheres_error_raw_ = nullptr;
+		std::shared_ptr<PAttribute<std::vector<PVertex>>> spheres_cluster_ = nullptr;
+		std::shared_ptr<PAttribute<Scalar>> spheres_cluster_area_ = nullptr;
+		std::shared_ptr<PAttribute<std::vector<PVertex>>> spheres_neighbors_ = nullptr;
+		std::shared_ptr<PAttribute<NMVertex>> spheres_skeleton_vertex_ = nullptr;
 
 		// Skeleton
 		NONMANIFOLD* skeleton_ = nullptr;
@@ -150,6 +186,10 @@ private:
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_position_ = nullptr;
 		std::shared_ptr<NMAttribute<Scalar>> skeleton_radius_ = nullptr;
 		std::shared_ptr<NMAttribute<std::set<std::size_t>>> incident_tets_ = nullptr;
+		std::shared_ptr<NMAttribute<PVertex>> skeleton_source_sphere_ = nullptr;
+		std::shared_ptr<NMAttribute<uint32>> skeleton_edge_degree_ = nullptr;
+		std::shared_ptr<NMAttribute<Scalar>> skeleton_face_score_ = nullptr;
+		std::shared_ptr<NMAttribute<Scalar>> skeleton_edge_score_ = nullptr;
 
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_face_color_ = nullptr;
 		std::shared_ptr<NMAttribute<Vec3>> skeleton_edge_color_ = nullptr;
@@ -243,8 +283,8 @@ public:
 		if (!surface_provider_)
 			throw std::runtime_error("OffsetAxis surface provider is not initialized before set_selected_surface().");
 		selected_surface_ = &s;
-		if (selected_points_ && points_parameters_[selected_points_].reconstruction_)
-			points_parameters_[selected_points_].reconstruction_->data().surface = &s;
+		if (selected_points_ && points_parameters_[selected_points_].initialized_)
+			bind_input(points_parameters_[selected_points_], &s);
 	}
 
 	void set_selected_points(POINTS& p)
@@ -256,18 +296,14 @@ public:
 				"OffsetAxis non-manifold provider is not initialized before set_selected_points().");
 		selected_points_ = &p;
 		init_points_data(p);
-		PointsParameters& params = points_parameters_[selected_points_];
-		if (params.reconstruction_)
-			params.reconstruction_->data().surface = selected_surface_;
+		bind_input(points_parameters_[selected_points_], selected_surface_);
 	}
 
 	// Reset every option to the table defaults, then the model-type defaults, then the dataset profile.
 	// The neural model type of the current reconstruction is kept.
 	void reset_options_to_profile(PointsParameters& p, const std::string& profile)
 	{
-		if (!p.reconstruction_)
-			return;
-		auto& options = p.reconstruction_->options();
+		auto& options = p.options_;
 		const cgogn::geometry::offset_axis::NeuralModelType model_type = options.neural_model_type;
 		if (!cgogn::geometry::offset_axis::make_reconstruction_options(model_type, profile, options))
 			log_error("Unknown reconstruction profile: ", profile, '\n');
@@ -275,36 +311,30 @@ public:
 		p.sphere_update_lambda_.store(options.sqem_update_lambda_line_plane);
 	}
 
-	ReconstructionStatusInfo load_neural_udf_model(POINTS& points, const std::string& model_path,
-											   cgogn::geometry::offset_axis::NeuralModelType model_type)
+	bool load_neural_udf_model(POINTS& points, const std::string& model_path,
+							   cgogn::geometry::offset_axis::NeuralModelType model_type)
 	{
 		PointsParameters& p = points_parameters_[&points];
 		init_points_data(points);
 		p.neural_udf_loaded_ = false;
 		p.neural_udf_model_path_.clear();
-		if (!p.initialized_ || !p.reconstruction_)
-		{
-			p.last_error_ = "Failed to initialize UDF reconstruction data.";
-			log_error(p.last_error_, '\n');
-			return ReconstructionStatus::invalid_data;
-		}
 		try
 		{
 			if (!std::filesystem::exists(model_path))
 			{
 				p.last_error_ = "Neural UDF model file does not exist: " + model_path;
 				log_error(p.last_error_, '\n');
-				return ReconstructionStatus::model_load_failed;
+				return false;
 			}
 			log_basic(p, "Loading Neural UDF model from: ", model_path, '\n');
-			p.reconstruction_->options().neural_model_type = model_type;
-			const auto status = p.reconstruction_->load_neural_model(model_path, model_type);
-			p.neural_udf_loaded_ = status.code == ReconstructionStatus::success;
+			p.options_.neural_model_type = model_type;
+			p.neural_udf_loaded_ = p.field_.load_model(model_path, model_type);
 			if (!p.neural_udf_loaded_)
 			{
-				p.last_error_ = with_message("Error loading Neural UDF model: loader rejected the model", status.message);
+				p.last_error_ =
+					with_message("Error loading Neural UDF model: loader rejected the model", p.field_.load_error());
 				log_error(p.last_error_, '\n');
-				return status;
+				return false;
 			}
 			p.neural_udf_model_path_ = model_path;
 			p.last_error_.clear();
@@ -312,32 +342,30 @@ public:
 			reset_options_to_profile(p, cgogn::geometry::offset_axis::guess_reconstruction_profile(true, model_type, model_path));
 			log_basic(p, "Reconstruction profile: ", p.profile_, '\n');
 			log_basic(p, "Loaded neural UDF model from: ", model_path, '\n');
-			return ReconstructionStatus::success;
+			return true;
 		}
 		catch (const std::exception& e)
 		{
 			p.last_error_ = std::string("Error loading Neural UDF model: ") + e.what();
 			log_error(p.last_error_, '\n');
 			p.neural_udf_loaded_ = false;
-			return ReconstructionStatus::model_load_failed;
+			return false;
 		}
 		catch (...)
 		{
 			p.last_error_ = "Error loading Neural UDF model: unknown exception.";
 			log_error(p.last_error_, '\n');
 			p.neural_udf_loaded_ = false;
-			return ReconstructionStatus::model_load_failed;
+			return false;
 		}
 	}
 
 	void load_alpha_samples_to_mesh(PointsParameters& p)
 	{
-		if (!p.reconstruction_)
-			return;
-		const auto status = p.reconstruction_->sample();
-		if (status.code != ReconstructionStatus::success)
+		std::string reason;
+		if (!sample(p, reason))
 		{
-			p.last_error_ = with_message("Alpha level set sampling failed", status.message);
+			p.last_error_ = with_message("Alpha level set sampling failed", reason);
 			log_error(p.last_error_, '\n');
 			return;
 		}
@@ -396,7 +424,9 @@ private:
 			return;
 
 		p.points_ = &m;
-		p.position_ = get_attribute<Vec3, PVertex>(m, "position");
+		p.position_ = get_or_add_attribute<Vec3, PVertex>(m, "position");
+		p.normal_ = get_or_add_attribute<Vec3, PVertex>(m, "normal");
+		p.knn_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(m, "knn");
 
 		const std::string sample_name = points_provider_->mesh_name(m) + "_samples";
 		p.samples_mesh_ = points_provider_->has_mesh(sample_name) ? points_provider_->mesh(sample_name)
@@ -407,6 +437,15 @@ private:
 		p.samples_sphere_ = get_or_add_attribute<PVertex, PVertex>(*p.samples_mesh_, "sphere");
 		p.samples_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_mesh_, "color");
 		p.samples_normal_color_ = get_or_add_attribute<Vec4, PVertex>(*p.samples_mesh_, "normal_color");
+		p.samples_area_ = get_or_add_attribute<Scalar, PVertex>(*p.samples_mesh_, "area");
+		p.samples_knn_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.samples_mesh_, "knn");
+		p.samples_quadric_ = get_or_add_attribute<geometry::Spherical_Quadric, PVertex>(*p.samples_mesh_, "quadric");
+		p.samples_line_quadric_ =
+			get_or_add_attribute<geometry::Line_Quadric, PVertex>(*p.samples_mesh_, "line_quadric");
+		p.samples_ma_position_ = get_or_add_attribute<Vec3, PVertex>(*p.samples_mesh_, "ma_position");
+		p.samples_ma_radius_ = get_or_add_attribute<Scalar, PVertex>(*p.samples_mesh_, "ma_radius");
+		p.samples_ma_secondary_ = get_or_add_attribute<PVertex, PVertex>(*p.samples_mesh_, "ma_secondary_vertex");
+		p.samples_error_ = get_or_add_attribute<Scalar, PVertex>(*p.samples_mesh_, "error");
 
 		const std::string sphere_name = points_provider_->mesh_name(m) + "_spheres";
 		p.spheres_ = points_provider_->has_mesh(sphere_name) ? points_provider_->mesh(sphere_name)
@@ -416,6 +455,11 @@ private:
 		p.spheres_color_ = get_or_add_attribute<Vec4, PVertex>(*p.spheres_, "color");
 		p.spheres_cluster_color_ = get_or_add_attribute<Vec4, PVertex>(*p.spheres_, "cluster_color");
 		p.spheres_error_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "error");
+		p.spheres_error_raw_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "error_not_normalized");
+		p.spheres_cluster_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.spheres_, "cluster");
+		p.spheres_cluster_area_ = get_or_add_attribute<Scalar, PVertex>(*p.spheres_, "cluster_area");
+		p.spheres_neighbors_ = get_or_add_attribute<std::vector<PVertex>, PVertex>(*p.spheres_, "neighbor_clusters");
+		p.spheres_skeleton_vertex_ = get_or_add_attribute<NMVertex, PVertex>(*p.spheres_, "skeleton_vertex");
 
 		const std::string skeleton_name = points_provider_->mesh_name(m) + "_skeleton";
 		p.skeleton_ = non_manifold_provider_->has_mesh(skeleton_name) ? non_manifold_provider_->mesh(skeleton_name)
@@ -425,31 +469,197 @@ private:
 		p.incident_tets_ = get_or_add_attribute<std::set<std::size_t>, NMFace>(*p.skeleton_, "incident_tets");
 		p.skeleton_face_color_ = get_or_add_attribute<Vec3, NMFace>(*p.skeleton_, "color");
 		p.skeleton_edge_color_ = get_or_add_attribute<Vec3, NMEdge>(*p.skeleton_, "color");
+		p.skeleton_source_sphere_ = get_or_add_attribute<PVertex, NMVertex>(*p.skeleton_, "source_sphere");
+		p.skeleton_edge_degree_ = get_or_add_attribute<uint32, NMEdge>(*p.skeleton_, "degree");
+		p.skeleton_face_score_ = get_or_add_attribute<Scalar, NMFace>(*p.skeleton_, "udf_score");
+		p.skeleton_edge_score_ = get_or_add_attribute<Scalar, NMEdge>(*p.skeleton_, "udf_score");
 
-		typename ReconstructionType::Data data{selected_surface_, p.points_, p.samples_mesh_, p.spheres_, p.skeleton_};
-		p.reconstruction_ = std::make_unique<ReconstructionType>(data);
-		p.sphere_update_lambda_.store(p.reconstruction_->options().sqem_update_lambda_line_plane);
-		const auto status = p.reconstruction_->initialize_data();
-		p.initialized_ = status.code == ReconstructionStatus::success;
-		if (p.initialized_)
-			p.last_error_.clear();
-		else
-			p.last_error_ = with_message("Failed to initialize reconstruction data", status.message);
+		typename SpheresOptimizerType::Data optimizer_data{*p.samples_mesh_, *p.spheres_, p.samples_kdtree_,
+														   p.samples_kdtree_vertices_};
+		optimizer_data.sample_position = p.samples_position_.get();
+		optimizer_data.sample_area = p.samples_area_.get();
+		optimizer_data.sample_knn = p.samples_knn_.get();
+		optimizer_data.sample_quadric = p.samples_quadric_.get();
+		optimizer_data.sample_line_quadric = p.samples_line_quadric_.get();
+		optimizer_data.sample_ma_position = p.samples_ma_position_.get();
+		optimizer_data.sample_ma_radius = p.samples_ma_radius_.get();
+		optimizer_data.sample_ma_secondary_vertex = p.samples_ma_secondary_.get();
+		optimizer_data.sample_sphere = p.samples_sphere_.get();
+		optimizer_data.sample_error = p.samples_error_.get();
+		optimizer_data.sphere_position = p.spheres_position_.get();
+		optimizer_data.sphere_radius = p.spheres_radius_.get();
+		optimizer_data.sphere_cluster = p.spheres_cluster_.get();
+		optimizer_data.sphere_cluster_area = p.spheres_cluster_area_.get();
+		optimizer_data.sphere_cluster_color = p.spheres_cluster_color_.get();
+		optimizer_data.sphere_neighbors = p.spheres_neighbors_.get();
+		optimizer_data.sphere_error = p.spheres_error_.get();
+		optimizer_data.sphere_error_not_normalized = p.spheres_error_raw_.get();
+		p.optimizer_ = std::make_unique<SpheresOptimizerType>(optimizer_data);
+
+		typename TopologyType::Data topology_data{*p.skeleton_, *p.optimizer_};
+		topology_data.sphere_skeleton_vertex = p.spheres_skeleton_vertex_.get();
+		topology_data.skeleton_position = p.skeleton_position_.get();
+		topology_data.skeleton_radius = p.skeleton_radius_.get();
+		topology_data.skeleton_source_sphere = p.skeleton_source_sphere_.get();
+		topology_data.face_incident_tets = p.incident_tets_.get();
+		topology_data.edge_degree = p.skeleton_edge_degree_.get();
+		topology_data.face_score = p.skeleton_face_score_.get();
+		topology_data.edge_score = p.skeleton_edge_score_.get();
+		p.topology_ = std::make_unique<TopologyType>(topology_data);
+
+		p.sphere_update_lambda_.store(p.options_.sqem_update_lambda_line_plane);
+		bind_input(p, selected_surface_);
+		p.initialized_ = true;
+		p.last_error_.clear();
+	}
+
+	// Points the input caches at the surface (the selected surface may change) and clears them.
+	static void bind_input(PointsParameters& p, SURFACE* surface)
+	{
+		p.surface_ = surface;
+		p.input_.bind(surface, p.points_, p.position_, p.normal_);
+		p.input_.invalidate();
+	}
+
+	static void build_samples_kdtrees(PointsParameters& p)
+	{
+		geometry::offset_axis::build_point_kdtree(*p.samples_mesh_, *p.samples_position_, p.samples_kdtree_,
+												  p.samples_kdtree_vertices_);
+		geometry::offset_axis::build_medial_kdtree(*p.samples_mesh_, *p.samples_ma_position_, *p.samples_ma_radius_,
+												   p.samples_ma_kdtree_, p.samples_ma_kdtree_vertices_);
+	}
+
+	// Alpha level set sampling, then (apply_filtering) the removal of the samples far from the input. reason is set
+	// when the filtering removes every sample.
+	static bool sample(PointsParameters& p, std::string& reason)
+	{
+		p.input_.invalidate();
+		p.input_.build_input_kdtree();
+		const geometry::offset_axis::PrepareInputs<SURFACE, POINTS> inputs{p.surface_, p.points_, p.position_,
+																			p.normal_, p.knn_};
+		if (p.field_.prepare(inputs) != geometry::offset_axis::FieldPrepareResult::ok)
+			return false;
+		if (geometry::offset_axis::sample_alpha_level_set(p.field_, inputs,
+														   geometry::offset_axis::alpha_sampling_params(p.options_),
+														   *p.samples_mesh_, p.samples_position_.get(),
+														   p.samples_normal_.get()) != geometry::offset_axis::SamplingStatus::ok)
+			return false;
+		build_samples_kdtrees(p);
+		if (!p.options_.apply_filtering ||
+			geometry::offset_axis::filter_samples<Field>(p.input_, Scalar(p.options_.alpha), *p.samples_mesh_,
+														 p.samples_position_.get(), p.samples_normal_.get()) == 0)
+			return true;
+		if (nb_cells<PVertex>(*p.samples_mesh_) == 0)
+		{
+			reason = "every sample is farther than alpha + filter_margin from the input (the field does not match the "
+					 "input)";
+			return false;
+		}
+		build_samples_kdtrees(p);
+		return true;
 	}
 
 	void compute_fitting_data(PointsParameters& p)
 	{
-		if (!p.reconstruction_ || p.fitting_data_computed_)
+		if (p.fitting_data_computed_)
 			return;
-		const auto status = p.reconstruction_->compute_fitting_data();
-		if (status.code != ReconstructionStatus::success)
+		if (nb_cells<PVertex>(*p.samples_mesh_) == 0)
 		{
-			p.last_error_ = with_message("Failed to compute fitting data", status.message);
+			p.last_error_ = "Failed to compute fitting data: there is no sample.";
 			log_error(p.last_error_, '\n');
 			return;
 		}
+		const cgogn::geometry::offset_axis::ReconstructionOptions& options = p.options_;
+		// PCA for every input: neural samples already carry the network gradient, and for MF models that gradient
+		// is not orthogonal to the medial axis.
+		if (options.recompute_normals_after_sampling)
+			geometry::offset_axis::recompute_normals_pca(*p.samples_mesh_, *p.samples_position_, *p.samples_normal_,
+														 *p.samples_kdtree_, p.samples_kdtree_vertices_, options.knn_k);
+		// the medial flip prune changes normals and removes samples, so it runs before the primitives that use them
+		geometry::offset_axis::compute_initial_medial_axis(
+			p.field_, *p.samples_mesh_, *p.samples_position_, *p.samples_normal_, p.samples_kdtree_,
+			p.samples_kdtree_vertices_, *p.samples_ma_position_, *p.samples_ma_radius_, *p.samples_ma_secondary_,
+			Scalar(options.alpha), options.ma_flip_prune, Scalar(options.ma_flip_prune_alpha_factor), options.knn_k);
+		build_samples_kdtrees(p);
+		if (nb_cells<PVertex>(*p.samples_mesh_) == 0)
+		{
+			p.last_error_ = "Failed to compute fitting data: the medial flip prune removed every sample.";
+			log_error(p.last_error_, '\n');
+			return;
+		}
+		geometry::offset_axis::compute_samples_area(*p.samples_mesh_, *p.samples_position_, *p.samples_normal_,
+													*p.samples_area_, *p.samples_knn_, *p.samples_kdtree_,
+													p.samples_kdtree_vertices_, options.knn_k, Scalar(options.alpha));
+		geometry::offset_axis::compute_quadrics(*p.samples_mesh_, *p.samples_position_, *p.samples_normal_,
+												*p.samples_area_, *p.samples_knn_, *p.samples_quadric_,
+												*p.samples_line_quadric_, options.knn_k);
 		p.last_error_.clear();
 		p.fitting_data_computed_ = true;
+	}
+
+	static bool initialize_spheres(PointsParameters& p)
+	{
+		if (!p.fitting_data_computed_)
+			return false;
+		p.optimizer_->initialize_from_samples(Scalar(p.options_.init_dilation_constant),
+											  p.options_.init_owner_euclidean,
+											  Scalar(p.options_.sqem_update_lambda_line_plane));
+		return true;
+	}
+
+	// One optimizer iteration; the caller passes lambda so that the update thread can feed a live value.
+	static SpheresOptimizerStatus update_spheres_once(PointsParameters& p, Scalar sqem_update_lambda_line_plane)
+	{
+		if (nb_cells<PVertex>(*p.spheres_) == 0)
+			return SpheresOptimizerStatus::failed;
+		return p.optimizer_->update_once(sqem_update_lambda_line_plane);
+	}
+
+	static bool build_skeleton(PointsParameters& p)
+	{
+		if (nb_cells<PVertex>(*p.spheres_) == 0)
+			return false;
+		p.optimizer_->compute_sphere_neighbors();
+		p.topology_->build_from_spheres();
+		return true;
+	}
+
+	// Scores of the topology fix and of the display (see evaluate_topology_scores).
+	static auto topology_scores_evaluator(PointsParameters& p)
+	{
+		return [&p](const std::vector<Vec3>& points, std::vector<Scalar>& values) {
+			return geometry::offset_axis::evaluate_topology_scores(p.field_, *p.samples_mesh_, *p.samples_ma_position_,
+																   *p.samples_ma_kdtree_, p.samples_ma_kdtree_vertices_,
+																   points, values);
+		};
+	}
+
+	// Residual sheet prune after the topology fix, if enabled, as in the benchmark.
+	static bool fix_topology_and_prune(PointsParameters& p)
+	{
+		if (nb_cells<NMVertex>(*p.skeleton_) == 0 || !p.topology_->fix_topology(topology_scores_evaluator(p)))
+			return false;
+		if (p.options_.residual_prune)
+			p.topology_->prune_residual_sheets(p.options_.residual_prune_mode);
+		return true;
+	}
+
+	// The scores indexed by index_of(cell); the indices without a cell get NaN.
+	template <typename CELL>
+	static std::vector<Scalar> dense_scores(PointsParameters& p, const NMAttribute<Scalar>& scores)
+	{
+		uint32 size = 0;
+		foreach_cell(*p.skeleton_, [&](CELL c) -> bool {
+			size = std::max(size, index_of(*p.skeleton_, c) + 1);
+			return true;
+		});
+		std::vector<Scalar> values(size, std::numeric_limits<Scalar>::quiet_NaN());
+		foreach_cell(*p.skeleton_, [&](CELL c) -> bool {
+			const uint32 id = index_of(*p.skeleton_, c);
+			values[id] = scores[id];
+			return true;
+		});
+		return values;
 	}
 
 	void refresh_sample_normals_color(PointsParameters& p)
@@ -502,9 +712,7 @@ private:
 
 	void apply_skeleton_topology_results(PointsParameters& p)
 	{
-		if (!p.reconstruction_)
-			return;
-		for (PVertex sphere : p.reconstruction_->skeleton_topology().added_spheres())
+		for (PVertex sphere : p.topology_->added_spheres())
 		{
 			const uint32 id = p.spheres_ ? index_of(*p.spheres_, sphere) : INVALID_INDEX;
 			if (id == INVALID_INDEX)
@@ -542,7 +750,7 @@ private:
 	}
 	void refresh_skeleton_topology_colors(PointsParameters& p)
 	{
-		p.reconstruction_->skeleton_topology().compute_edge_degree();
+		p.topology_->compute_edge_degree();
 		// Edge colors as in V0: degree 1 blue, degree 2 green, degree > 2 red, all others dim gray.
 		foreach_cell(*p.skeleton_, [&](NMEdge e) {
 			const std::size_t degree = incident_faces(*p.skeleton_, e).size();
@@ -601,7 +809,7 @@ private:
 	// each boundary tet is orange, other edges dim gray. The V0 K5 mask is not included.
 	void mark_boundary_tets_color(PointsParameters& p)
 	{
-		const auto mask = p.reconstruction_->skeleton_topology().boundary_tet_mask();
+		const auto mask = p.topology_->boundary_tet_mask();
 		const std::unordered_set<uint32> boundary_faces(mask.face_ids.begin(), mask.face_ids.end());
 		const std::unordered_set<uint32> boundary_edges(mask.edge_ids.begin(), mask.edge_ids.end());
 		foreach_cell(*p.skeleton_, [&](NMFace f) -> bool {
@@ -710,14 +918,14 @@ private:
 			log_error(p.last_error_, '\n');
 			return false;
 		}
-		const auto scores = p.reconstruction_->skeleton_face_scores(normalize_by_area);
-		if (!scores)
+		if (!p.topology_->compute_face_scores(topology_scores_evaluator(p), normalize_by_area))
 		{
 			p.last_error_ = "Failed to evaluate the face UDF scores (is the distance field loaded?).";
 			log_error(p.last_error_, '\n');
 			return false;
 		}
-		color_cells_by_scores<NMFace>(p, *scores, p.skeleton_face_color_, Vec3(0.2, 0.2, 0.2));
+		color_cells_by_scores<NMFace>(p, dense_scores<NMFace>(p, *p.skeleton_face_score_), p.skeleton_face_color_,
+									  Vec3(0.2, 0.2, 0.2));
 		p.last_error_.clear();
 		return true;
 	}
@@ -731,14 +939,14 @@ private:
 			log_error(p.last_error_, '\n');
 			return false;
 		}
-		const auto scores = p.reconstruction_->skeleton_edge_scores_gauss3();
-		if (!scores)
+		if (!p.topology_->compute_edge_scores(topology_scores_evaluator(p)))
 		{
 			p.last_error_ = "Failed to evaluate the edge UDF scores (is the distance field loaded?).";
 			log_error(p.last_error_, '\n');
 			return false;
 		}
-		color_cells_by_scores<NMEdge>(p, *scores, p.skeleton_edge_color_, Vec3(0.08, 0.08, 0.08));
+		color_cells_by_scores<NMEdge>(p, dense_scores<NMEdge>(p, *p.skeleton_edge_score_), p.skeleton_edge_color_,
+									  Vec3(0.08, 0.08, 0.08));
 		p.last_error_.clear();
 		return true;
 	}
@@ -783,15 +991,15 @@ protected:
 
 		if (mode == RenderUpdateMode::rebuild_skeleton_and_update_all)
 		{
-			const auto status = p.reconstruction_->build_skeleton();
-			p.skeleton_invalidated_ = status.code != ReconstructionStatus::success;
-			if (status.code == ReconstructionStatus::success)
+			const bool built = build_skeleton(p);
+			p.skeleton_invalidated_ = !built;
+			if (built)
 			{
 				p.last_error_.clear();
 				refresh_skeleton_topology_colors(p);
 			}
 			else
-				p.last_error_ = with_message("Failed to build skeleton", status.message);
+				p.last_error_ = "Failed to build skeleton: there is no sphere.";
 		}
 		if (non_manifold_provider_ && p.skeleton_)
 		{
@@ -840,9 +1048,9 @@ protected:
 		p.render_refresh_requested_.store(false);
 		{
 			std::lock_guard<std::mutex> lock(p.mutex_);
-			p.reconstruction_->spheres_optimizer().reset_optimization();
-			p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
-			p.sphere_update_lambda_.store(p.reconstruction_->options().sqem_update_lambda_line_plane);
+			p.optimizer_->reset_optimization();
+			p.metrics_snapshot_ = p.optimizer_->metrics();
+			p.sphere_update_lambda_.store(p.options_.sqem_update_lambda_line_plane);
 		}
 		p.running_.store(true);
 
@@ -850,7 +1058,7 @@ protected:
 			cgogn::thread_start(cgogn::max_nb_threads() - 1);
 			auto start = std::chrono::high_resolution_clock::now();
 			auto last_preview_refresh = start;
-			SpheresOptimizerType& optimizer = active->reconstruction_->spheres_optimizer();
+			SpheresOptimizerType& optimizer = *active->optimizer_;
 			SpheresOptimizerStatus status = SpheresOptimizerStatus::running;
 			SpheresOptimizerMetrics final_metrics;
 			try
@@ -864,7 +1072,7 @@ protected:
 						if (active->stop_requested_.load())
 							break;
 						const Scalar lambda = Scalar(active->sphere_update_lambda_.load());
-						status = active->reconstruction_->update_spheres_once(lambda);
+						status = update_spheres_once(*active, lambda);
 						metrics = optimizer.metrics();
 						if (metrics.sphere_topology_changed)
 							active->skeleton_invalidated_ = true;
@@ -948,7 +1156,7 @@ protected:
 			running = active->running_.load();
 			should_render = (running && active->preview_render_during_sphere_update_.load()) ||
 							(!running && active->render_refresh_requested_.load());
-			active->metrics_snapshot_ = active->reconstruction_->spheres_optimizer().metrics();
+			active->metrics_snapshot_ = active->optimizer_->metrics();
 			active->render_refresh_requested_.store(false);
 		}
 		if (!should_render)
@@ -1044,7 +1252,7 @@ protected:
 		if (!selected_points_)
 			return;
 		PointsParameters& p = points_parameters_[selected_points_];
-		auto& options = p.reconstruction_->options();
+		auto& options = p.options_;
 		int output_verbosity = output_verbosity_index(p.output_verbosity_.load());
 		if (ImGui::Combo("Output", &output_verbosity, "Mute\0Normal\0"))
 			p.output_verbosity_.store(output_verbosity_from_index(output_verbosity));
@@ -1169,13 +1377,10 @@ protected:
 			if (!running && ImGui::Button("Init spheres"))
 			{
 				std::lock_guard<std::mutex> lock(p.mutex_);
-				ReconstructionStatusInfo status{ReconstructionStatus::invalid_data};
-				if (p.reconstruction_)
-					status = p.reconstruction_->initialize_spheres();
-				p.spheres_initialized_ = status.code == ReconstructionStatus::success;
-				if (status.code != ReconstructionStatus::success)
+				p.spheres_initialized_ = initialize_spheres(p);
+				if (!p.spheres_initialized_)
 				{
-					p.last_error_ = with_message("Failed to initialize spheres", status.message);
+					p.last_error_ = "Failed to initialize spheres: compute the fitting data first.";
 					log_error(p.last_error_, '\n');
 				}
 				else
@@ -1185,7 +1390,7 @@ protected:
 					if (p.skeleton_)
 						clear(*p.skeleton_);
 					set_post_init_sphere_render_state(p);
-					p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
+					p.metrics_snapshot_ = p.optimizer_->metrics();
 					update_render_data(p, RenderUpdateMode::rebuild_skeleton_and_update_all);
 				}
 			}
@@ -1208,8 +1413,8 @@ protected:
 			if (!running && ImGui::Button("Update spheres"))
 			{
 				std::lock_guard<std::mutex> lock(p.mutex_);
-				SpheresOptimizerType& optimizer = p.reconstruction_->spheres_optimizer();
-				p.reconstruction_->update_spheres_once(Scalar(options.sqem_update_lambda_line_plane));
+				SpheresOptimizerType& optimizer = *p.optimizer_;
+				update_spheres_once(p, Scalar(options.sqem_update_lambda_line_plane));
 				p.metrics_snapshot_ = optimizer.metrics();
 				if (optimizer.metrics().sphere_topology_changed)
 				{
@@ -1273,24 +1478,22 @@ protected:
 			if (!running && ImGui::Button("Build Skeleton"))
 			{
 				std::lock_guard<std::mutex> lock(p.mutex_);
-				const auto status = p.reconstruction_->build_skeleton();
-				p.skeleton_invalidated_ = status.code != ReconstructionStatus::success;
-				if (status.code == ReconstructionStatus::success)
+				const bool built = build_skeleton(p);
+				p.skeleton_invalidated_ = !built;
+				if (built)
 				{
 					p.last_error_.clear();
 					refresh_skeleton_topology_colors(p);
 				}
 				else
-					p.last_error_ = with_message("Failed to build skeleton", status.message);
+					p.last_error_ = "Failed to build skeleton: there is no sphere.";
 				update_render_data(p, RenderUpdateMode::all_current_data);
 			}
 		}
 
 		// Topology Fix. While the sphere update runs, the topology is not read (the update thread writes it), so
 		// the step stays visible with its parameters disabled, as before.
-		// Read the existing topology object: skeleton_topology() would rebuild its data (or create it) every frame.
-		const auto& topology = p.reconstruction_->state().topology;
-		const bool has_tets = !running && spheres_ready && skeleton_built && topology && topology->has_tets();
+		const bool has_tets = !running && spheres_ready && skeleton_built && p.topology_->has_tets();
 		const bool topology_fix_step = spheres_ready && skeleton_built && (running || has_tets);
 		if (topology_fix_step && ImGui::CollapsingHeader("Topology Fix", ImGuiTreeNodeFlags_DefaultOpen))
 		{
@@ -1311,17 +1514,15 @@ protected:
 				}
 				else
 				{
-					// Same order as run(): residual sheet prune after fix_topology, if enabled.
-					const auto status = p.reconstruction_->fix_topology_and_prune();
-					if (status.code == ReconstructionStatus::success)
+					if (fix_topology_and_prune(p))
 					{
 						p.last_error_.clear();
-						p.metrics_snapshot_ = p.reconstruction_->spheres_optimizer().metrics();
+						p.metrics_snapshot_ = p.optimizer_->metrics();
 						apply_skeleton_topology_results(p);
 					}
 					else
 					{
-						p.last_error_ = with_message("[TopologyFull] score evaluation failed or topology data is invalid", status.message);
+						p.last_error_ = "[TopologyFull] score evaluation failed or topology data is invalid";
 						log_error(p.last_error_, '\n');
 					}
 				}
@@ -1412,10 +1613,7 @@ protected:
 				if (!filename.empty())
 				{
 					std::lock_guard<std::mutex> lock(p.mutex_);
-					if (!(p.reconstruction_->skeleton() &&
-						  cgogn::io::export_skeleton_ply(
-							  *p.reconstruction_->skeleton(), p.reconstruction_->skeleton_position_attribute(),
-							  p.reconstruction_->skeleton_radius_attribute(), filename)))
+					if (!cgogn::io::export_skeleton_ply(*p.skeleton_, p.skeleton_position_, p.skeleton_radius_, filename))
 						log_error("Failed to export skeleton PLY: ", filename, '\n');
 				}
 			}
