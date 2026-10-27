@@ -37,6 +37,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <random>
 #include <unordered_map>
 #include <vector>
@@ -182,9 +183,15 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, const AlphaSamplingPa
 	// empty grid: no samples exist yet at this point, so nothing is inserted
 	SpatialGrid working_grid(grid_cell_size);
 
-	std::vector<Vec3> seed_points = sample_level_set_rays(
+	std::optional<std::vector<Vec3>> sampled_seeds = sample_level_set_rays(
 		traits, parameters.rays, static_cast<int>(detail::alpha_sampling_warmup_iterations), &working_grid,
 		parameters.sample_radius, bbox_min, bbox_max, &result.positions);
+	if (!sampled_seeds)
+	{
+		result.success = false;
+		return result;
+	}
+	std::vector<Vec3>& seed_points = *sampled_seeds;
 	if (!seed_points.empty())
 	{
 		const size_t remaining_slots = max_samples - result.positions.size();

@@ -32,6 +32,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <random>
 #include <utility>
 #include <vector>
@@ -192,9 +193,10 @@ inline std::vector<LevelSetRay> generate_rays(const RayLevelSetParams& params, c
 
 // CPU level set sampler: the rays of each outer iteration are marched in lockstep, and the points where the udf of the
 // traits reaches params.alpha are returned. With a spatial grid, a point is kept only if it is not closer than
-// sample_spacing to the other samples (the existing samples are the neighbors that count).
+// sample_spacing to the other samples (the existing samples are the neighbors that count). Returns nullopt when the
+// evaluation of the field fails.
 template <typename TRAITS>
-std::vector<Vec3> sample_level_set_rays(const TRAITS& traits, const RayLevelSetParams& params, int outer_iterations,
+std::optional<std::vector<Vec3>> sample_level_set_rays(const TRAITS& traits, const RayLevelSetParams& params, int outer_iterations,
 										SpatialGrid* spatial_grid, Scalar sample_spacing, const Vec3& bbox_min,
 										const Vec3& bbox_max, const std::vector<Vec3>* existing_samples = nullptr)
 {

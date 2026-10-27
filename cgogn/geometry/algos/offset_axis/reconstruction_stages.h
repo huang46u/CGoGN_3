@@ -679,7 +679,9 @@ typename State::StatusInfo apply_sampling_filtering(State& s)
 	if (nb_cells<PVertex>(*s.data.samples) == 0)
 	{
 		s.sample_kdtree.reset();
+		s.sample_ma_kdtree.reset();
 		s.sample_vertices.clear();
+		s.sample_ma_vertices.clear();
 		return Status::success;
 	}
 	// neural samples keep their projection normals (the network gradient); for point cloud / surface input the

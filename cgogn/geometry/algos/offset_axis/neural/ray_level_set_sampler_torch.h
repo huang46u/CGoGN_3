@@ -34,6 +34,7 @@
 #include <limits>
 #include <random>
 #include <utility>
+#include <optional>
 #include <vector>
 
 namespace cgogn
@@ -148,7 +149,7 @@ inline TorchRayBatch prepare_ray_batch(TorchRayBuffers& buffers, const std::vect
 // GPU level set sampler: the rays are marched in batches on the device of the traits (the buffers are the ones of the
 // field, traits.ray_buffers). Same contract as the CPU sample_level_set_rays; this non-template overload is preferred
 // for NeuralFieldRayTraits.
-inline std::vector<Vec3> sample_level_set_rays(const NeuralFieldRayTraits& traits, const RayLevelSetParams& params,
+inline std::optional<std::vector<Vec3>> sample_level_set_rays(const NeuralFieldRayTraits& traits, const RayLevelSetParams& params,
 											   int outer_iterations, SpatialGrid* spatial_grid, Scalar sample_spacing,
 											   const Vec3& bbox_min, const Vec3& bbox_max,
 											   const std::vector<Vec3>* existing_samples = nullptr)
@@ -187,8 +188,9 @@ inline std::vector<Vec3> sample_level_set_rays(const NeuralFieldRayTraits& trait
 		torch::Tensor d = d_sdf.first;
 		torch::Tensor sdf = d_sdf.second;
 		const bool has_sdf = sdf.defined();
+		// the forward failed (e.g. out of device memory)
 		if (!d.defined())
-			break;
+			return std::nullopt;
 
 		d = d - params.alpha;
 		torch::Tensor delta = torch::abs(d);
@@ -253,7 +255,7 @@ inline std::vector<Vec3> sample_level_set_rays(const NeuralFieldRayTraits& trait
 				torch::Tensor d_near = d_sdf_near.first;
 				torch::Tensor sdf_near = d_sdf_near.second;
 				if (!d_near.defined() || (has_sdf && !sdf_near.defined()))
-					break;
+					return std::nullopt;
 
 				d_near = d_near - params.alpha;
 				delta_near = torch::abs(d_near);
@@ -302,7 +304,7 @@ inline std::vector<Vec3> sample_level_set_rays(const NeuralFieldRayTraits& trait
 			torch::Tensor d_far = d_sdf_far.first;
 			torch::Tensor sdf_far = d_sdf_far.second;
 			if (!d_far.defined() || (has_sdf && !sdf_far.defined()))
-				break;
+				return std::nullopt;
 
 			d_far = d_far - params.alpha;
 			torch::Tensor delta_far_new = torch::abs(d_far);
