@@ -33,8 +33,6 @@
 #include <libacc/kd_tree.h>
 
 #include <algorithm>
-#include <atomic>
-#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
@@ -78,31 +76,33 @@ public:
 	template <typename T>
 	using Attribute = typename mesh_traits<POINTS>::template Attribute<T>;
 
+	// The samples, the spheres and their attributes; the optimizer does not own them (the attributes are set by the
+	// caller and must outlive the optimizer).
 	struct Data
 	{
-		POINTS* samples_mesh = nullptr;
-		POINTS* spheres = nullptr;
-		std::shared_ptr<Attribute<Vec3>> sample_position;
-		std::shared_ptr<Attribute<Scalar>> sample_area;
-		std::shared_ptr<Attribute<std::vector<Vertex>>> sample_knn;
-		std::shared_ptr<Attribute<Spherical_Quadric>> sample_quadric;
-		std::shared_ptr<Attribute<Line_Quadric>> sample_line_quadric;
-		std::shared_ptr<Attribute<Vec3>> sample_ma_position;
-		std::shared_ptr<Attribute<Scalar>> sample_ma_radius;
-		std::shared_ptr<Attribute<Vertex>> sample_ma_secondary_vertex;
-		std::shared_ptr<Attribute<Vertex>> sample_sphere;
-		std::shared_ptr<Attribute<Scalar>> sample_error;
-		std::shared_ptr<Attribute<Vec3>> sphere_position;
-		std::shared_ptr<Attribute<Scalar>> sphere_radius;
-		std::shared_ptr<Attribute<std::vector<Vertex>>> sphere_cluster;
-		std::shared_ptr<Attribute<Scalar>> sphere_cluster_area;
-		std::shared_ptr<Attribute<Vec4>> sphere_cluster_color;
-		std::shared_ptr<Attribute<std::vector<Vertex>>> sphere_neighbors;
-		std::shared_ptr<Attribute<Scalar>> sphere_error;
-		std::shared_ptr<Attribute<Scalar>> sphere_error_not_normalized;
-		const acc::KDTree<3, uint32>* sample_kdtree = nullptr;
-		const std::vector<Vertex>* sample_kdtree_vertices = nullptr;
-		Scalar sqem_update_lambda_line_plane = Scalar(0.20);
+		POINTS& samples;
+		POINTS& spheres;
+		// the tree is rebuilt in place (build_sample_kdtree), so the optimizer refers to its owner
+		const std::unique_ptr<acc::KDTree<3, uint32>>& sample_kdtree;
+		const std::vector<Vertex>& sample_kdtree_vertices;
+		Attribute<Vec3>* sample_position = nullptr;
+		Attribute<Scalar>* sample_area = nullptr;
+		Attribute<std::vector<Vertex>>* sample_knn = nullptr;
+		Attribute<Spherical_Quadric>* sample_quadric = nullptr;
+		Attribute<Line_Quadric>* sample_line_quadric = nullptr;
+		Attribute<Vec3>* sample_ma_position = nullptr;
+		Attribute<Scalar>* sample_ma_radius = nullptr;
+		Attribute<Vertex>* sample_ma_secondary_vertex = nullptr;
+		Attribute<Vertex>* sample_sphere = nullptr;
+		Attribute<Scalar>* sample_error = nullptr;
+		Attribute<Vec3>* sphere_position = nullptr;
+		Attribute<Scalar>* sphere_radius = nullptr;
+		Attribute<std::vector<Vertex>>* sphere_cluster = nullptr;
+		Attribute<Scalar>* sphere_cluster_area = nullptr;
+		Attribute<Vec4>* sphere_cluster_color = nullptr;
+		Attribute<std::vector<Vertex>>* sphere_neighbors = nullptr;
+		Attribute<Scalar>* sphere_error = nullptr;
+		Attribute<Scalar>* sphere_error_not_normalized = nullptr;
 	};
 
 	struct Metrics
@@ -114,16 +114,7 @@ public:
 		Scalar error_difference = Scalar(0);
 		Scalar minimum_error = Scalar(0);
 		Scalar maximum_error = Scalar(0);
-		float64 cluster_total_ms = 0.0;
-		float64 sphere_update_total_ms = 0.0;
-		float64 error_total_ms = 0.0;
-		// sphere initialization split: cover loop, Euclidean owner assignment, first cluster pass
-		float64 init_cover_ms = 0.0;
-		float64 init_owner_ms = 0.0;
-		float64 init_cluster_ms = 0.0;
 		bool sphere_topology_changed = false;
-		// sphere updates skipped because the solve gave non-finite values (sum over the iterations)
-		uint32 sphere_update_nonfinite = 0;
 	};
 
 	enum class Status
@@ -134,7 +125,7 @@ public:
 		failed
 	};
 
-	explicit SpheresOptimizer(Data data) : data_(std::move(data))
+	explicit SpheresOptimizer(const Data& data) : data_(data)
 	{
 		sync_sphere_count();
 	}
@@ -148,22 +139,17 @@ public:
 	const Data& data() const { return data_; }
 	const Metrics& metrics() const { return metrics_; }
 
-	bool initialize_from_samples(Scalar init_dilation_constant, bool owner_euclidean = false)
+	void initialize_from_samples(Scalar init_dilation_constant, bool owner_euclidean, Scalar sqem_update_lambda_line_plane)
 	{
-		const auto init_start = std::chrono::steady_clock::now();
-		if (!ready() || !data_.sample_position || !data_.sample_knn ||
-			!data_.sample_ma_position || !data_.sample_ma_radius || !data_.sample_ma_secondary_vertex ||
-			!data_.sphere_position || !data_.sphere_radius || !data_.sphere_cluster_color)
-			return false;
-
-		clear(*data_.spheres);
+		lambda_ = sqem_update_lambda_line_plane;
+		clear(data_.spheres);
 		constexpr uint32 min_cover_points = 10;
 		constexpr uint32 max_nb_spheres = 100000;
 		std::vector<Vertex> sorted_vertices;
 		uint32 max_sample_index = 0;
-		foreach_cell(*data_.samples_mesh, [&](Vertex v) {
+		foreach_cell(data_.samples, [&](Vertex v) {
 			sorted_vertices.push_back(v);
-			const uint32 idx = index_of(*data_.samples_mesh, v);
+			const uint32 idx = index_of(data_.samples, v);
 			if (idx != INVALID_INDEX)
 				max_sample_index = std::max(max_sample_index, idx);
 			return true;
@@ -173,7 +159,7 @@ public:
 		keyed_vertices.reserve(sorted_vertices.size());
 		for (Vertex v : sorted_vertices)
 		{
-			const uint32 idx = index_of(*data_.samples_mesh, v);
+			const uint32 idx = index_of(data_.samples, v);
 			const Scalar r = idx != INVALID_INDEX ? (*data_.sample_ma_radius)[idx] : Scalar(-1);
 			keyed_vertices.emplace_back(std::isfinite(static_cast<double>(r)) ? r : Scalar(-1), v);
 		}
@@ -181,7 +167,7 @@ public:
 				  [](const std::pair<Scalar, Vertex>& a, const std::pair<Scalar, Vertex>& b) { return a.first > b.first; });
 		for (std::size_t i = 0; i < keyed_vertices.size(); ++i)
 			sorted_vertices[i] = keyed_vertices[i].second;
-		auto covered = get_or_add_attribute<bool, Vertex>(*data_.samples_mesh, "__covered");
+		auto covered = get_or_add_attribute<bool, Vertex>(data_.samples, "__covered");
 		covered->fill(false);
 		const std::size_t marks_size = sorted_vertices.empty() ? 0 : static_cast<std::size_t>(max_sample_index) + 1;
 		std::vector<uint32> candidate_marks(marks_size, 0);
@@ -191,7 +177,7 @@ public:
 		std::vector<Vertex> stack;
 		for (Vertex v : sorted_vertices)
 		{
-			const uint32 v_index = index_of(*data_.samples_mesh, v);
+			const uint32 v_index = index_of(data_.samples, v);
 			if (v_index == INVALID_INDEX || sphere_count >= max_nb_spheres || (*covered)[v_index])
 				continue;
 			const Vec3& vp = (*data_.sample_ma_position)[v_index];
@@ -210,7 +196,7 @@ public:
 			auto flood_cover = [&](Vertex seed) {
 				if (!seed.is_valid())
 					return;
-				const uint32 seed_idx = index_of(*data_.samples_mesh, seed);
+				const uint32 seed_idx = index_of(data_.samples, seed);
 				if (seed_idx == INVALID_INDEX || seed_idx >= candidate_marks.size() || (*covered)[seed_idx] ||
 					candidate_marks[seed_idx] == current_mark)
 					return;
@@ -222,12 +208,12 @@ public:
 				{
 					const Vertex w = stack.back();
 					stack.pop_back();
-					const uint32 w_idx = index_of(*data_.samples_mesh, w);
+					const uint32 w_idx = index_of(data_.samples, w);
 					if (w_idx == INVALID_INDEX)
 						continue;
 					for (Vertex u : (*data_.sample_knn)[w_idx])
 					{
-						const uint32 u_idx = index_of(*data_.samples_mesh, u);
+						const uint32 u_idx = index_of(data_.samples, u);
 						if (u_idx == INVALID_INDEX || u_idx >= candidate_marks.size())
 							continue;
 						if (!(*covered)[u_idx] && candidate_marks[u_idx] != current_mark &&
@@ -244,14 +230,14 @@ public:
 			flood_cover((*data_.sample_ma_secondary_vertex)[v_index]);
 			for (Vertex covered_vertex : candidate_cover)
 			{
-				const uint32 covered_index = index_of(*data_.samples_mesh, covered_vertex);
+				const uint32 covered_index = index_of(data_.samples, covered_vertex);
 				if (covered_index != INVALID_INDEX)
 					(*covered)[covered_index] = true;
 			}
 			if (candidate_cover.size() < min_cover_points && (sphere_count != 0 || candidate_cover.empty()))
 				continue;
-			const Vertex sphere = add_vertex(*data_.spheres);
-			const uint32 sphere_index = index_of(*data_.spheres, sphere);
+			const Vertex sphere = add_vertex(data_.spheres);
+			const uint32 sphere_index = index_of(data_.spheres, sphere);
 			++sphere_count;
 			(*data_.sphere_position)[sphere_index] = vp;
 			(*data_.sphere_radius)[sphere_index] = vr;
@@ -259,94 +245,64 @@ public:
 				Vec4(0.5 + 0.5 * (rand() % 256) / 256.0, 0.5 + 0.5 * (rand() % 256) / 256.0,
 					 0.5 + 0.5 * (rand() % 256) / 256.0, 1.0);
 		}
-		remove_attribute<Vertex>(*data_.samples_mesh, covered);
-		if (data_.sample_sphere)
-			data_.sample_sphere->fill(Vertex());
+		remove_attribute<Vertex>(data_.samples, covered);
+		data_.sample_sphere->fill(Vertex());
 		metrics_ = Metrics{};
 		metrics_.sphere_count = sphere_count;
-		const auto cover_end = std::chrono::steady_clock::now();
-		metrics_.init_cover_ms = std::chrono::duration<float64, std::milli>(cover_end - init_start).count();
-		auto owner_end = cover_end;
 		if (owner_euclidean && sphere_count > 0)
-		{
 			assign_owners_euclidean();
-			owner_end = std::chrono::steady_clock::now();
-		}
-		metrics_.init_owner_ms = std::chrono::duration<float64, std::milli>(owner_end - cover_end).count();
 		compute_clusters_local();
-		const auto cluster_end = std::chrono::steady_clock::now();
-		metrics_.init_cluster_ms = std::chrono::duration<float64, std::milli>(cluster_end - owner_end).count();
-		return true;
 	}
 
 	void reset_optimization()
 	{
-		const Metrics previous = metrics_;
+		const uint32 sphere_count = metrics_.sphere_count;
 		metrics_ = Metrics{};
-		metrics_.sphere_count = previous.sphere_count;
-		metrics_.init_cover_ms = previous.init_cover_ms;
-		metrics_.init_owner_ms = previous.init_owner_ms;
-		metrics_.init_cluster_ms = previous.init_cluster_ms;
+		metrics_.sphere_count = sphere_count;
 		convergence_reached_ = false;
 		post_convergence_iterations_ = 0;
 	}
 
 	Status update_once(Scalar sqem_update_lambda_line_plane)
 	{
-		if (!ready())
-			return Status::failed;
-		data_.sqem_update_lambda_line_plane = sqem_update_lambda_line_plane;
+		lambda_ = sqem_update_lambda_line_plane;
 		metrics_.sphere_topology_changed = false;
 		sync_sphere_count();
-		const auto cluster_start = std::chrono::high_resolution_clock::now();
 		if (metrics_.iteration % 10 == 0)
 			compute_sphere_neighbors();
 		compute_clusters_local();
 		prune_empty_clusters();
-		const auto cluster_end = std::chrono::high_resolution_clock::now();
-		metrics_.cluster_total_ms += std::chrono::duration<float64, std::milli>(cluster_end - cluster_start).count();
-
-		const auto update_start = std::chrono::high_resolution_clock::now();
-		parallel_foreach_cell(*data_.spheres, [&](Vertex v) {
+		parallel_foreach_cell(data_.spheres, [&](Vertex v) {
 			update_sphere_line_quadric_distance_free_radius(v);
 			return true;
 		});
-		metrics_.sphere_update_nonfinite += nonfinite_updates_.exchange(0);
-		const auto update_end = std::chrono::high_resolution_clock::now();
-		metrics_.sphere_update_total_ms += std::chrono::duration<float64, std::milli>(update_end - update_start).count();
-
-		const auto error_start = std::chrono::high_resolution_clock::now();
 		compute_spheres_error();
-		const auto error_end = std::chrono::high_resolution_clock::now();
-		metrics_.error_total_ms += std::chrono::duration<float64, std::milli>(error_end - error_start).count();
 		++metrics_.iteration;
 		return update_stop_status();
 	}
 
 	void compute_sphere_neighbors()
 	{
-		if (!data_.samples_mesh || !data_.spheres || !data_.sample_knn || !data_.sample_sphere || !data_.sphere_neighbors)
-			return;
-		parallel_foreach_cell(*data_.spheres, [&](Vertex v) {
-			(*data_.sphere_neighbors)[index_of(*data_.spheres, v)].clear();
+		parallel_foreach_cell(data_.spheres, [&](Vertex v) {
+			(*data_.sphere_neighbors)[index_of(data_.spheres, v)].clear();
 			return true;
 		});
-		foreach_cell(*data_.samples_mesh, [&](Vertex v) {
-			const uint32 v_index = index_of(*data_.samples_mesh, v);
+		foreach_cell(data_.samples, [&](Vertex v) {
+			const uint32 v_index = index_of(data_.samples, v);
 			const Vertex v_sphere = (*data_.sample_sphere)[v_index];
 			for (Vertex w : (*data_.sample_knn)[v_index])
 			{
-				const Vertex w_sphere = (*data_.sample_sphere)[index_of(*data_.samples_mesh, w)];
+				const Vertex w_sphere = (*data_.sample_sphere)[index_of(data_.samples, w)];
 				if (v_sphere.is_valid() && w_sphere.is_valid() && v_sphere != w_sphere)
 				{
-					(*data_.sphere_neighbors)[index_of(*data_.spheres, v_sphere)].push_back(w_sphere);
-					(*data_.sphere_neighbors)[index_of(*data_.spheres, w_sphere)].push_back(v_sphere);
+					(*data_.sphere_neighbors)[index_of(data_.spheres, v_sphere)].push_back(w_sphere);
+					(*data_.sphere_neighbors)[index_of(data_.spheres, w_sphere)].push_back(v_sphere);
 				}
 			}
 			return true;
 		});
-		parallel_foreach_cell(*data_.spheres, [&](Vertex v) {
-			std::vector<Vertex>& neighbors = (*data_.sphere_neighbors)[index_of(*data_.spheres, v)];
+		parallel_foreach_cell(data_.spheres, [&](Vertex v) {
+			std::vector<Vertex>& neighbors = (*data_.sphere_neighbors)[index_of(data_.spheres, v)];
 			std::sort(neighbors.begin(), neighbors.end());
 			neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
 			return true;
@@ -355,28 +311,26 @@ public:
 
 	void compute_clusters_local()
 	{
-		if (!ready())
-			return;
 		if (metrics_.sphere_count == 0)
 		{
 			data_.sample_sphere->fill(Vertex());
 			return;
 		}
-		parallel_foreach_cell(*data_.spheres, [&](Vertex v) {
-			const uint32 idx = index_of(*data_.spheres, v);
+		parallel_foreach_cell(data_.spheres, [&](Vertex v) {
+			const uint32 idx = index_of(data_.spheres, v);
 			(*data_.sphere_cluster)[idx].clear();
 			(*data_.sphere_cluster_area)[idx] = Scalar(0);
 			return true;
 		});
-		parallel_foreach_cell(*data_.samples_mesh, [&](Vertex v) {
-			const uint32 v_index = index_of(*data_.samples_mesh, v);
+		parallel_foreach_cell(data_.samples, [&](Vertex v) {
+			const uint32 v_index = index_of(data_.samples, v);
 			const Vertex owner = (*data_.sample_sphere)[v_index];
-			const uint32 owner_index = owner.is_valid() ? index_of(*data_.spheres, owner) : INVALID_INDEX;
+			const uint32 owner_index = owner.is_valid() ? index_of(data_.spheres, owner) : INVALID_INDEX;
 			Scalar min_distance = std::numeric_limits<Scalar>::max();
 			Vertex closest_sphere;
 			uint32 closest_index = INVALID_INDEX;
 			auto evaluate_candidate = [&](Vertex candidate) {
-				const uint32 idx = index_of(*data_.spheres, candidate);
+				const uint32 idx = index_of(data_.spheres, candidate);
 				if (!is_valid_sphere_for_clustering(idx))
 				{
 					return;
@@ -384,7 +338,7 @@ public:
 				const Vec3& center = (*data_.sphere_position)[idx];
 				const Scalar radius = (*data_.sphere_radius)[idx];
 				const Scalar distance = (*data_.sample_quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius)) +
-					data_.sqem_update_lambda_line_plane * (*data_.sample_line_quadric)[v_index].eval(center);
+					lambda_ * (*data_.sample_line_quadric)[v_index].eval(center);
 				if (!std::isfinite(static_cast<double>(distance)))
 				{
 					return;
@@ -415,17 +369,17 @@ public:
 					evaluate_candidate(owner);
 			}
 			else
-				foreach_cell(*data_.spheres, [&](Vertex candidate) { evaluate_candidate(candidate); return true; });
+				foreach_cell(data_.spheres, [&](Vertex candidate) { evaluate_candidate(candidate); return true; });
 			(*data_.sample_sphere)[v_index] = closest_index == INVALID_INDEX ? Vertex() : closest_sphere;
 			return true;
 		});
 		// clusters are filled in sample order, so the sums over a cluster do not depend on thread scheduling
-		foreach_cell(*data_.samples_mesh, [&](Vertex v) {
-			const uint32 v_index = index_of(*data_.samples_mesh, v);
+		foreach_cell(data_.samples, [&](Vertex v) {
+			const uint32 v_index = index_of(data_.samples, v);
 			const Vertex sphere = (*data_.sample_sphere)[v_index];
 			if (!sphere.is_valid())
 				return true;
-			const uint32 sphere_index = index_of(*data_.spheres, sphere);
+			const uint32 sphere_index = index_of(data_.spheres, sphere);
 			(*data_.sphere_cluster)[sphere_index].push_back(v);
 			(*data_.sphere_cluster_area)[sphere_index] += (*data_.sample_area)[v_index];
 			return true;
@@ -434,21 +388,18 @@ public:
 
 	void compute_spheres_error()
 	{
-		if (!ready())
-			return;
-		parallel_foreach_cell(*data_.spheres, [&](Vertex v) {
-			const uint32 idx = index_of(*data_.spheres, v);
+		parallel_foreach_cell(data_.spheres, [&](Vertex v) {
+			const uint32 idx = index_of(data_.spheres, v);
 			const Vec3& center = (*data_.sphere_position)[idx];
 			const Scalar radius = (*data_.sphere_radius)[idx];
 			const std::vector<Vertex>& cluster = (*data_.sphere_cluster)[idx];
 			Scalar cluster_error = Scalar(0);
 			for (Vertex sample : cluster)
 			{
-				const uint32 sample_idx = index_of(*data_.samples_mesh, sample);
+				const uint32 sample_idx = index_of(data_.samples, sample);
 				const Scalar distance = (*data_.sample_quadric)[sample_idx].eval(Vec4(center.x(), center.y(), center.z(), radius)) +
-					data_.sqem_update_lambda_line_plane * (*data_.sample_line_quadric)[sample_idx].eval(center);
-				if (data_.sample_error)
-					(*data_.sample_error)[sample_idx] = distance;
+					lambda_ * (*data_.sample_line_quadric)[sample_idx].eval(center);
+				(*data_.sample_error)[sample_idx] = distance;
 				cluster_error += distance;
 			}
 			(*data_.sphere_error)[idx] = (*data_.sphere_cluster_area)[idx] > Scalar(0)
@@ -459,8 +410,8 @@ public:
 		metrics_.minimum_error = std::numeric_limits<Scalar>::max();
 		metrics_.maximum_error = Scalar(0);
 		metrics_.total_error = Scalar(0);
-		foreach_cell(*data_.spheres, [&](Vertex v) {
-			const uint32 idx = index_of(*data_.spheres, v);
+		foreach_cell(data_.spheres, [&](Vertex v) {
+			const uint32 idx = index_of(data_.spheres, v);
 			const Scalar error = (*data_.sphere_error)[idx];
 			if (error < metrics_.minimum_error)
 				metrics_.minimum_error = error;
@@ -476,32 +427,27 @@ public:
 
 	void remove_sphere(Vertex sphere)
 	{
-		if (!data_.samples_mesh || !data_.spheres || !data_.sample_sphere || !data_.sphere_cluster ||
-			!sphere.is_valid() || sphere.dart_.index_ >= data_.spheres->darts_.maximum_index())
+		if (!sphere.is_valid() || sphere.dart_.index_ >= data_.spheres.darts_.maximum_index())
 			return;
-		const uint32 sphere_index = index_of(*data_.spheres, sphere);
+		const uint32 sphere_index = index_of(data_.spheres, sphere);
 		if (sphere_index == INVALID_INDEX)
 			return;
 		const std::vector<Vertex> removed_cluster = (*data_.sphere_cluster)[sphere_index];
-		const std::vector<Vertex> removed_neighbors =
-			data_.sphere_neighbors ? (*data_.sphere_neighbors)[sphere_index] : std::vector<Vertex>();
+		const std::vector<Vertex> removed_neighbors = (*data_.sphere_neighbors)[sphere_index];
 		for (Vertex sample : removed_cluster)
 		{
-			const uint32 idx = index_of(*data_.samples_mesh, sample);
+			const uint32 idx = index_of(data_.samples, sample);
 			if (idx != INVALID_INDEX)
 				(*data_.sample_sphere)[idx] = Vertex();
 		}
-		if (data_.sphere_neighbors)
+		for (Vertex neighbor : (*data_.sphere_neighbors)[sphere_index])
 		{
-			for (Vertex neighbor : (*data_.sphere_neighbors)[sphere_index])
-			{
-				const uint32 idx = neighbor.is_valid() ? index_of(*data_.spheres, neighbor) : INVALID_INDEX;
-				if (idx != INVALID_INDEX)
-					sorted_vector_erase((*data_.sphere_neighbors)[idx], sphere);
-			}
-			(*data_.sphere_neighbors)[sphere_index].clear();
+			const uint32 idx = neighbor.is_valid() ? index_of(data_.spheres, neighbor) : INVALID_INDEX;
+			if (idx != INVALID_INDEX)
+				sorted_vector_erase((*data_.sphere_neighbors)[idx], sphere);
 		}
-		remove_vertex(*data_.spheres, sphere);
+		(*data_.sphere_neighbors)[sphere_index].clear();
+		remove_vertex(data_.spheres, sphere);
 		redistribute_removed_sphere_cluster(removed_cluster, removed_neighbors);
 		metrics_.sphere_topology_changed = true;
 		sync_sphere_count();
@@ -509,26 +455,18 @@ public:
 
 	Vertex add_sphere(const Vec3& position, Scalar radius)
 	{
-		if (!data_.spheres || !data_.sphere_position || !data_.sphere_radius)
-			return Vertex();
-
-		const Vertex sphere = add_vertex(*data_.spheres);
-		const uint32 sphere_id = index_of(*data_.spheres, sphere);
+		const Vertex sphere = add_vertex(data_.spheres);
+		const uint32 sphere_id = index_of(data_.spheres, sphere);
 		if (sphere_id == INVALID_INDEX)
 			return Vertex();
 
 		(*data_.sphere_position)[sphere_id] = position;
 		(*data_.sphere_radius)[sphere_id] = radius;
-		if (data_.sphere_cluster)
-			(*data_.sphere_cluster)[sphere_id].clear();
-		if (data_.sphere_cluster_area)
-			(*data_.sphere_cluster_area)[sphere_id] = Scalar(0);
-		if (data_.sphere_neighbors)
-			(*data_.sphere_neighbors)[sphere_id].clear();
-		if (data_.sphere_error)
-			(*data_.sphere_error)[sphere_id] = Scalar(0);
-		if (data_.sphere_error_not_normalized)
-			(*data_.sphere_error_not_normalized)[sphere_id] = Scalar(0);
+		(*data_.sphere_cluster)[sphere_id].clear();
+		(*data_.sphere_cluster_area)[sphere_id] = Scalar(0);
+		(*data_.sphere_neighbors)[sphere_id].clear();
+		(*data_.sphere_error)[sphere_id] = Scalar(0);
+		(*data_.sphere_error_not_normalized)[sphere_id] = Scalar(0);
 
 		metrics_.sphere_topology_changed = true;
 		sync_sphere_count();
@@ -543,8 +481,8 @@ private:
 		std::vector<Vec3> centers;
 		std::vector<double> radii;
 		std::vector<Vertex> center_spheres;
-		foreach_cell(*data_.spheres, [&](Vertex s) {
-			const uint32 idx = index_of(*data_.spheres, s);
+		foreach_cell(data_.spheres, [&](Vertex s) {
+			const uint32 idx = index_of(data_.spheres, s);
 			if (is_valid_sphere_for_clustering(idx))
 			{
 				centers.push_back((*data_.sphere_position)[idx]);
@@ -556,8 +494,8 @@ private:
 		if (centers.empty())
 			return;
 		const acc::BVHTreeSpheres<uint32, Vec3> bvh(centers, radii);
-		parallel_foreach_cell(*data_.samples_mesh, [&](Vertex v) {
-			const uint32 v_index = index_of(*data_.samples_mesh, v);
+		parallel_foreach_cell(data_.samples, [&](Vertex v) {
+			const uint32 v_index = index_of(data_.samples, v);
 			std::pair<uint32, Vec3> closest;
 			(*data_.sample_sphere)[v_index] =
 				bvh.closest_point((*data_.sample_position)[v_index], &closest) ? center_spheres[closest.first] : Vertex();
@@ -568,31 +506,23 @@ private:
 
 	bool is_valid_sphere_for_clustering(uint32 sphere_index) const
 	{
-		if (!data_.sphere_position || !data_.sphere_radius || sphere_index == INVALID_INDEX)
+		if (sphere_index == INVALID_INDEX)
 			return false;
 		const Vec3& center = (*data_.sphere_position)[sphere_index];
 		const Scalar radius = (*data_.sphere_radius)[sphere_index];
 		return center.allFinite() && std::isfinite(static_cast<double>(radius)) && radius > Scalar(0);
 	}
 
-	bool ready() const
-	{
-		return data_.samples_mesh && data_.spheres && data_.sample_position && data_.sample_area && data_.sample_quadric &&
-			data_.sample_line_quadric && data_.sample_sphere && data_.sphere_position && data_.sphere_radius &&
-			data_.sphere_cluster && data_.sphere_cluster_area && data_.sphere_neighbors && data_.sphere_error &&
-			data_.sphere_error_not_normalized;
-	}
-
 	void sync_sphere_count()
 	{
-		metrics_.sphere_count = data_.spheres ? nb_cells<Vertex>(*data_.spheres) : 0;
+		metrics_.sphere_count = nb_cells<Vertex>(data_.spheres);
 	}
 
 	void prune_empty_clusters()
 	{
 		std::vector<Vertex> to_remove;
-		foreach_cell(*data_.spheres, [&](Vertex sphere) {
-			if ((*data_.sphere_cluster)[index_of(*data_.spheres, sphere)].empty())
+		foreach_cell(data_.spheres, [&](Vertex sphere) {
+			if ((*data_.sphere_cluster)[index_of(data_.spheres, sphere)].empty())
 				to_remove.push_back(sphere);
 			return true;
 		});
@@ -602,12 +532,10 @@ private:
 
 	bool try_get_nearest_sample_ma_radius(const Vec3& query, Scalar& out_radius) const
 	{
-		if (!data_.samples_mesh || !data_.sample_ma_radius || !data_.sample_kdtree || !data_.sample_kdtree_vertices)
-			return false;
 		std::pair<uint32, Scalar> result;
-		if (!data_.sample_kdtree->find_nn(query, &result) || result.first >= data_.sample_kdtree_vertices->size())
+		if (!data_.sample_kdtree->find_nn(query, &result) || result.first >= data_.sample_kdtree_vertices.size())
 			return false;
-		const uint32 sample_index = index_of(*data_.samples_mesh, (*data_.sample_kdtree_vertices)[result.first]);
+		const uint32 sample_index = index_of(data_.samples, data_.sample_kdtree_vertices[result.first]);
 		if (sample_index == INVALID_INDEX)
 			return false;
 		const Scalar radius = (*data_.sample_ma_radius)[sample_index];
@@ -621,7 +549,7 @@ private:
 	{
 		if (!std::isfinite(fixed_radius) || fixed_radius <= Scalar(0))
 			return;
-		const uint32 sphere_index = index_of(*data_.spheres, sphere);
+		const uint32 sphere_index = index_of(data_.spheres, sphere);
 		const std::vector<Vertex>& cluster = (*data_.sphere_cluster)[sphere_index];
 		if (cluster.empty())
 			return;
@@ -630,8 +558,8 @@ private:
 		Line_Quadric lq;
 		for (Vertex sample : cluster)
 		{
-			const uint32 idx = index_of(*data_.samples_mesh, sample);
-			const Scalar weight = value<Scalar>(*data_.samples_mesh, data_.sample_area, sample);
+			const uint32 idx = index_of(data_.samples, sample);
+			const Scalar weight = (*data_.sample_area)[idx];
 			if (weight <= Scalar(0))
 				continue;
 			q += (*data_.sample_quadric)[idx] * weight;
@@ -643,21 +571,18 @@ private:
 		const Mat3 As = q._A.block<3, 3>(0, 0);
 		const Vec3 bs = q._b.head<3>();
 		const Vec3 Asr = q._A.block<3, 1>(0, 3);
-		const Mat3 A = As + data_.sqem_update_lambda_line_plane * Al;
-		const Vec3 b = (bs + data_.sqem_update_lambda_line_plane * bl) - Asr * fixed_radius;
+		const Mat3 A = As + lambda_ * Al;
+		const Vec3 b = (bs + lambda_ * bl) - Asr * fixed_radius;
 		center = A.ldlt().solve(b);
 		if (!center.allFinite())
-		{
-			nonfinite_updates_.fetch_add(1, std::memory_order_relaxed);
 			return;
-		}
 		(*data_.sphere_position)[sphere_index] = center;
 		(*data_.sphere_radius)[sphere_index] = fixed_radius;
 	}
 
 	void update_sphere_line_quadric_distance_free_radius(Vertex sphere)
 	{
-		const uint32 sphere_index = index_of(*data_.spheres, sphere);
+		const uint32 sphere_index = index_of(data_.spheres, sphere);
 		const std::vector<Vertex>& cluster = (*data_.sphere_cluster)[sphere_index];
 		const Scalar radius = (*data_.sphere_radius)[sphere_index];
 		if (cluster.empty())
@@ -667,8 +592,8 @@ private:
 		Scalar weight_sum = Scalar(0);
 		for (Vertex sample : cluster)
 		{
-			const uint32 idx = index_of(*data_.samples_mesh, sample);
-			const Scalar weight = value<Scalar>(*data_.samples_mesh, data_.sample_area, sample);
+			const uint32 idx = index_of(data_.samples, sample);
+			const Scalar weight = (*data_.sample_area)[idx];
 			if (weight <= Scalar(0))
 				continue;
 			q += (*data_.sample_quadric)[idx] * weight;
@@ -684,14 +609,11 @@ private:
 		Al_ext.block<3, 3>(0, 0) = Al;
 		Vec4 bl_ext = Vec4::Zero();
 		bl_ext.head<3>() = bl;
-		const Mat4 A = q._A + data_.sqem_update_lambda_line_plane * Al_ext;
-		const Vec4 b = q._b + data_.sqem_update_lambda_line_plane * bl_ext;
+		const Mat4 A = q._A + lambda_ * Al_ext;
+		const Vec4 b = q._b + lambda_ * bl_ext;
 		const Vec4 s = A.completeOrthogonalDecomposition().solve(b);
 		if (!s.allFinite())
-		{
-			nonfinite_updates_.fetch_add(1, std::memory_order_relaxed);
 			return;
-		}
 		Scalar nearest_ma_radius = Scalar(0);
 		const bool too_large = try_get_nearest_sample_ma_radius(s.head<3>(), nearest_ma_radius) &&
 			(s[3] > nearest_ma_radius * Scalar(1.5));
@@ -714,17 +636,17 @@ private:
 		auto add_candidate = [&](Vertex sphere) {
 			if (!sphere.is_valid())
 				return;
-			const uint32 idx = index_of(*data_.spheres, sphere);
+			const uint32 idx = index_of(data_.spheres, sphere);
 			if (idx != INVALID_INDEX && candidate_indices.insert(idx).second)
 				candidates.push_back(sphere);
 		};
 		for (Vertex neighbor : removed_neighbors)
 			add_candidate(neighbor);
 		if (candidates.empty())
-			foreach_cell(*data_.spheres, [&](Vertex sphere) { add_candidate(sphere); return true; });
+			foreach_cell(data_.spheres, [&](Vertex sphere) { add_candidate(sphere); return true; });
 		for (Vertex sample : removed_cluster)
 		{
-			const uint32 sample_index = index_of(*data_.samples_mesh, sample);
+			const uint32 sample_index = index_of(data_.samples, sample);
 			if (sample_index == INVALID_INDEX)
 				continue;
 			Scalar min_distance = std::numeric_limits<Scalar>::max();
@@ -732,12 +654,12 @@ private:
 			uint32 closest_index = INVALID_INDEX;
 			for (Vertex candidate : candidates)
 			{
-				const uint32 idx = index_of(*data_.spheres, candidate);
+				const uint32 idx = index_of(data_.spheres, candidate);
 				const Vec3& center = (*data_.sphere_position)[idx];
 				const Scalar radius = (*data_.sphere_radius)[idx];
 				const Scalar distance =
 					(*data_.sample_quadric)[sample_index].eval(Vec4(center.x(), center.y(), center.z(), radius)) +
-					data_.sqem_update_lambda_line_plane * (*data_.sample_line_quadric)[sample_index].eval(center);
+					lambda_ * (*data_.sample_line_quadric)[sample_index].eval(center);
 				if (distance < min_distance)
 				{
 					min_distance = distance;
@@ -780,9 +702,9 @@ private:
 
 	Data data_;
 	Metrics metrics_;
+	// lambda of the last initialization or update, also used to redistribute the samples of a removed sphere
+	Scalar lambda_ = Scalar(0);
 	bool convergence_reached_ = false;
-	// non-finite solves of the current update pass (sphere updates run in parallel)
-	std::atomic<uint32> nonfinite_updates_{0};
 	uint32 post_convergence_iterations_ = 0;
 };
 

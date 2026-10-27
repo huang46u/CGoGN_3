@@ -71,8 +71,6 @@ struct SkeletonBuild
 	static bool compute_skeleton(Context& p)
 	{
 		p.data.spheres_optimizer->compute_sphere_neighbors();
-		if (!p.optimizer_data.samples_mesh || !p.optimizer_data.sample_sphere || !p.optimizer_data.sample_knn)
-			return false;
 		clear(*p.data.skeleton);
 		std::map<FaceKey, SkeletonFace> skeleton_faces_map;
 		auto get_face_key = [](uint32 i1, uint32 i2, uint32 i3) -> FaceKey {
@@ -83,15 +81,15 @@ struct SkeletonBuild
 		std::vector<std::array<uint32, 4>> raw_tets;
 		if (p.data.sphere_skeleton_vertex)
 		{
-			foreach_cell(*p.optimizer_data.spheres, [&](SphereVertex pv) -> bool {
-				const uint32 sphere_index = index_of(*p.optimizer_data.spheres, pv);
+			foreach_cell(p.optimizer_data.spheres, [&](SphereVertex pv) -> bool {
+				const uint32 sphere_index = index_of(p.optimizer_data.spheres, pv);
 				if (sphere_index != INVALID_INDEX)
 					(*p.data.sphere_skeleton_vertex)[sphere_index] = SkeletonVertex();
 				return true;
 			});
 		}
-		foreach_cell(*p.optimizer_data.spheres, [&](SphereVertex pv) -> bool {
-			uint32 pv_index = index_of(*p.optimizer_data.spheres, pv);
+		foreach_cell(p.optimizer_data.spheres, [&](SphereVertex pv) -> bool {
+			uint32 pv_index = index_of(p.optimizer_data.spheres, pv);
 			SkeletonVertex nmv = add_vertex(*p.data.skeleton);
 			const uint32 skeleton_index = index_of(*p.data.skeleton, nmv);
 			(*p.data.skeleton_position)[skeleton_index] = (*p.optimizer_data.sphere_position)[pv_index];
@@ -105,14 +103,14 @@ struct SkeletonBuild
 
 		std::unordered_map<std::pair<uint32, uint32>, SkeletonEdge, edge_hash, edge_equal> edge_indices;
 
-		foreach_cell(*p.optimizer_data.spheres, [&](SphereVertex pv) -> bool {
-			uint32 pv_index = index_of(*p.optimizer_data.spheres, pv);
+		foreach_cell(p.optimizer_data.spheres, [&](SphereVertex pv) -> bool {
+			uint32 pv_index = index_of(p.optimizer_data.spheres, pv);
 			SkeletonVertex nmv1 =
 				p.data.sphere_skeleton_vertex ? (*p.data.sphere_skeleton_vertex)[pv_index] : SkeletonVertex();
 			const std::vector<SphereVertex>& neighbors = (*p.optimizer_data.sphere_neighbors)[pv_index];
 			for (SphereVertex neighbor : neighbors)
 			{
-				uint32 n_index = index_of(*p.optimizer_data.spheres, neighbor);
+				uint32 n_index = index_of(p.optimizer_data.spheres, neighbor);
 				SkeletonVertex nmv2 =
 					p.data.sphere_skeleton_vertex ? (*p.data.sphere_skeleton_vertex)[n_index] : SkeletonVertex();
 				std::vector<SkeletonVertex> av = adjacent_vertices_through_edge(*p.data.skeleton, nmv1);
@@ -125,13 +123,13 @@ struct SkeletonBuild
 			return true;
 		});
 
-		foreach_cell(*p.optimizer_data.spheres, [&](SphereVertex pv) -> bool {
-			uint32 idx1 = index_of(*p.optimizer_data.spheres, pv);
+		foreach_cell(p.optimizer_data.spheres, [&](SphereVertex pv) -> bool {
+			uint32 idx1 = index_of(p.optimizer_data.spheres, pv);
 			SkeletonVertex nmv1 = p.data.sphere_skeleton_vertex ? (*p.data.sphere_skeleton_vertex)[idx1] : SkeletonVertex();
 			const std::vector<SphereVertex>& n_pv = (*p.optimizer_data.sphere_neighbors)[idx1];
 			for (const SphereVertex& ne1 : n_pv)
 			{
-				uint32 idx2 = index_of(*p.optimizer_data.spheres, ne1);
+				uint32 idx2 = index_of(p.optimizer_data.spheres, ne1);
 				if (idx1 >= idx2)
 					continue;
 				SkeletonVertex nmv2 =
@@ -141,7 +139,7 @@ struct SkeletonBuild
 				{
 					if (!std::binary_search(n_pv.begin(), n_pv.end(), ne2))
 						continue;
-					uint32 idx3 = index_of(*p.optimizer_data.spheres, ne2);
+					uint32 idx3 = index_of(p.optimizer_data.spheres, ne2);
 					if (idx2 >= idx3)
 						continue;
 
@@ -166,7 +164,7 @@ struct SkeletonBuild
 
 					for (const SphereVertex& ne3 : ne_ne2)
 					{
-						uint32 idx4 = index_of(*p.optimizer_data.spheres, ne3);
+						uint32 idx4 = index_of(p.optimizer_data.spheres, ne3);
 						if (idx3 >= idx4)
 							continue;
 						bool connected_v1 = std::binary_search(n_pv.begin(), n_pv.end(), ne3);

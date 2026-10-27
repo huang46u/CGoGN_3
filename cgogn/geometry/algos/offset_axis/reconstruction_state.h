@@ -87,7 +87,6 @@ struct ReconstructionState
 		invalid_data,
 		model_load_failed,
 		sampling_failed,
-		sphere_initialization_failed,
 		optimization_failed,
 		skeleton_build_failed,
 		topology_fix_failed
@@ -122,14 +121,12 @@ struct ReconstructionState
 
 	using Timing = ReconstructionTiming;
 	using Counts = ReconstructionCounts;
-	using Repairs = ReconstructionRepairs;
 
 	struct Result
 	{
 		Status status = Status::invalid_data;
 		Timing timing;
 		Counts counts;
-		Repairs repairs;
 		// reason of the failure when status is not success (may be empty)
 		std::string message;
 	};

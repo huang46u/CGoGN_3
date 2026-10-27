@@ -73,9 +73,9 @@ struct SkeletonMeshOps
 		if (p.data.skeleton_source_sphere)
 			linked_sphere = value<SphereVertex>(*p.data.skeleton, p.data.skeleton_source_sphere, v);
 
-		if (linked_sphere.is_valid() && p.optimizer_data.spheres)
+		if (linked_sphere.is_valid())
 		{
-			const uint32 sphere_index = index_of(*p.optimizer_data.spheres, linked_sphere);
+			const uint32 sphere_index = index_of(p.optimizer_data.spheres, linked_sphere);
 			if (sphere_index != INVALID_INDEX && p.data.sphere_skeleton_vertex)
 				(*p.data.sphere_skeleton_vertex)[sphere_index] = SkeletonVertex();
 			p.data.spheres_optimizer->remove_sphere(linked_sphere);

@@ -228,9 +228,9 @@ struct DenseK5Repair
 	static bool is_live_sphere_vertex(Context& p, const SphereVertex& sphere, uint32& sphere_index)
 	{
 		sphere_index = INVALID_INDEX;
-		if (!p.optimizer_data.spheres || !sphere.is_valid() || sphere.dart_.index_ >= p.optimizer_data.spheres->darts_.maximum_index())
+		if (!sphere.is_valid() || sphere.dart_.index_ >= p.optimizer_data.spheres.darts_.maximum_index())
 			return false;
-		sphere_index = index_of(*p.optimizer_data.spheres, sphere);
+		sphere_index = index_of(p.optimizer_data.spheres, sphere);
 		return sphere_index != INVALID_INDEX;
 	}
 
@@ -248,7 +248,7 @@ struct DenseK5Repair
 	{
 		std::vector<IndependentDenseFiveVertexRepairSeed> seeds;
 		seeds.reserve(detection.independent_exact_k5_regions.size() + detection.independent_k5_minus_1_regions.size());
-		if (!p.data.skeleton || !p.optimizer_data.spheres || !p.data.skeleton_source_sphere)
+		if (!p.data.skeleton || !p.data.skeleton_source_sphere)
 			return seeds;
 
 		auto append_regions = [&](const std::vector<std::array<uint32, 5>>& regions) {
@@ -314,8 +314,7 @@ struct DenseK5Repair
 		Context& p, const IndependentDenseFiveVertexRepairSeed& seed, uint32& out_added_faces)
 	{
 		out_added_faces = 0;
-		if (!p.optimizer_data.spheres || !p.optimizer_data.sphere_position || !p.optimizer_data.sphere_radius || !p.optimizer_data.sphere_neighbors ||
-			!p.data.sphere_skeleton_vertex || !p.data.skeleton || !p.data.skeleton_position || !p.data.skeleton_radius ||
+		if (!p.data.sphere_skeleton_vertex || !p.data.skeleton || !p.data.skeleton_position || !p.data.skeleton_radius ||
 			!p.data.skeleton_source_sphere || !p.data.face_incident_tets)
 			return IndependentDenseFiveVertexRepairResult::MissingVertices;
 
@@ -508,7 +507,7 @@ struct DenseK5Repair
 		const SphereVertex center_sphere = p.data.spheres_optimizer->add_sphere(centroid, average_radius);
 		if (!center_sphere.is_valid())
 			return IndependentDenseFiveVertexRepairResult::MissingVertices;
-		const uint32 center_sphere_id = index_of(*p.optimizer_data.spheres, center_sphere);
+		const uint32 center_sphere_id = index_of(p.optimizer_data.spheres, center_sphere);
 		p.metrics.added_spheres.push_back(center_sphere);
 
 		const SkeletonVertex center_vertex = add_vertex(*p.data.skeleton);

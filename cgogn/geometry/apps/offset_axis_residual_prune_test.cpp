@@ -203,7 +203,11 @@ bool run_case(char scenario, Mode mode)
 	else
 		build_scenario_a(skeleton, builder);
 
-	Optimizer optimizer{Optimizer::Data{}};
+	// the skeleton has no source spheres, so the optimizer attributes are never read
+	Points samples;
+	std::unique_ptr<acc::KDTree<3, std::uint32_t>> sample_kdtree;
+	std::vector<PVertex> sample_kdtree_vertices;
+	Optimizer optimizer{Optimizer::Data{samples, spheres, sample_kdtree, sample_kdtree_vertices}};
 
 	Topology::Data data;
 	data.skeleton = &skeleton;

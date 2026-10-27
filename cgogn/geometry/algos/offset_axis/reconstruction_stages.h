@@ -153,9 +153,6 @@ template <typename State>
 typename State::Counts counts(State& s);
 
 template <typename State>
-typename State::Repairs repairs(State& s);
-
-template <typename State>
 void build_sample_kdtree(State& s);
 
 template <typename State>
@@ -274,6 +271,9 @@ typename State::StatusInfo initialize_data(State& s)
 	if (s.initialized)
 		return Status::success;
 	OFFSET_AXIS_PRECONDITION(s.data.input_points && s.data.samples && s.data.spheres && s.data.skeleton, Status::invalid_data);
+	// the optimizer and the topology refer to the attributes below
+	s.optimizer.reset();
+	s.topology.reset();
 	s.input_position = get_or_add_attribute<Vec3, PVertex>(*s.data.input_points, "position");
 	s.input_normal = get_or_add_attribute<Vec3, PVertex>(*s.data.input_points, "normal");
 	s.input_knn = get_or_add_attribute<std::vector<PVertex>, PVertex>(*s.data.input_points, "knn");
@@ -353,15 +353,6 @@ typename State::Counts counts(State& s)
 }
 
 template <typename State>
-typename State::Repairs repairs(State& s)
-{
-	typename State::Repairs r;
-	if (s.optimizer)
-		r.sphere_update_nonfinite = s.optimizer->metrics().sphere_update_nonfinite;
-	return r;
-}
-
-template <typename State>
 void build_sample_kdtree(State& s)
 {
 	build_point_kdtree(*s.data.samples, *s.sample_position, s.sample_kdtree, s.sample_vertices);
@@ -424,45 +415,38 @@ void recompute_samples_normals_from_input(State& s)
 	});
 }
 
-// The data is copied from the state on every call on purpose: build_sample_kdtree replaces the sample k-d tree, the UI
-// changes sqem_update_lambda_line_plane while the optimizer runs, and data() may point the reconstruction at other meshes.
+// Created on the first call after initialize_data: the optimizer refers to the meshes and attributes of the state.
 template <typename State>
 typename State::SpheresOptimizerType& optimizer_for(State& s)
 {
 	using SpheresOptimizerType = typename State::SpheresOptimizerType;
 
-	typename SpheresOptimizerType::Data d;
-	d.samples_mesh = s.data.samples;
-	d.spheres = s.data.spheres;
-	d.sample_position = s.sample_position;
-	d.sample_area = s.sample_area;
-	d.sample_knn = s.sample_knn;
-	d.sample_quadric = s.sample_quadric;
-	d.sample_line_quadric = s.sample_line_quadric;
-	d.sample_ma_position = s.sample_ma_position;
-	d.sample_ma_radius = s.sample_ma_radius;
-	d.sample_ma_secondary_vertex = s.sample_ma_secondary;
-	d.sample_sphere = s.sample_sphere;
-	d.sample_error = s.sample_error;
-	d.sphere_position = s.sphere_position;
-	d.sphere_radius = s.sphere_radius;
-	d.sphere_cluster = s.sphere_cluster;
-	d.sphere_cluster_area = s.sphere_cluster_area;
-	d.sphere_cluster_color = s.sphere_cluster_color;
-	d.sphere_neighbors = s.sphere_neighbors;
-	d.sphere_error = s.sphere_error;
-	d.sphere_error_not_normalized = s.sphere_error_raw;
-	d.sample_kdtree = s.sample_kdtree.get();
-	d.sample_kdtree_vertices = &s.sample_vertices;
-	d.sqem_update_lambda_line_plane = Scalar(s.options.sqem_update_lambda_line_plane);
-	if (!s.optimizer)
-		s.optimizer = std::make_unique<SpheresOptimizerType>(std::move(d));
-	else
-		s.optimizer->data() = std::move(d);
+	if (s.optimizer)
+		return *s.optimizer;
+	typename SpheresOptimizerType::Data d{*s.data.samples, *s.data.spheres, s.sample_kdtree, s.sample_vertices};
+	d.sample_position = s.sample_position.get();
+	d.sample_area = s.sample_area.get();
+	d.sample_knn = s.sample_knn.get();
+	d.sample_quadric = s.sample_quadric.get();
+	d.sample_line_quadric = s.sample_line_quadric.get();
+	d.sample_ma_position = s.sample_ma_position.get();
+	d.sample_ma_radius = s.sample_ma_radius.get();
+	d.sample_ma_secondary_vertex = s.sample_ma_secondary.get();
+	d.sample_sphere = s.sample_sphere.get();
+	d.sample_error = s.sample_error.get();
+	d.sphere_position = s.sphere_position.get();
+	d.sphere_radius = s.sphere_radius.get();
+	d.sphere_cluster = s.sphere_cluster.get();
+	d.sphere_cluster_area = s.sphere_cluster_area.get();
+	d.sphere_cluster_color = s.sphere_cluster_color.get();
+	d.sphere_neighbors = s.sphere_neighbors.get();
+	d.sphere_error = s.sphere_error.get();
+	d.sphere_error_not_normalized = s.sphere_error_raw.get();
+	s.optimizer = std::make_unique<SpheresOptimizerType>(d);
 	return *s.optimizer;
 }
 
-// Copied on every call for the same reason as optimizer_for (it also refreshes the optimizer data).
+// The topology data is copied from the state on every call.
 template <typename State>
 typename State::TopologyType& topology_for(State& s)
 {
@@ -686,9 +670,8 @@ typename State::StatusInfo initialize_spheres(State& s)
 	using Status = typename State::Status;
 
 	OFFSET_AXIS_PRECONDITION(s.fitting_data_computed && s.data.samples && s.data.spheres, Status::invalid_data);
-	if (!optimizer_for(s).initialize_from_samples(Scalar(s.options.init_dilation_constant),
-													   s.options.init_owner_euclidean))
-		return Status::sphere_initialization_failed;
+	optimizer_for(s).initialize_from_samples(Scalar(s.options.init_dilation_constant), s.options.init_owner_euclidean,
+											 Scalar(s.options.sqem_update_lambda_line_plane));
 	return Status::success;
 }
 
@@ -849,21 +832,9 @@ typename State::Result reconstruct(State& s, const typename State::IterationCall
 	if ((r.status = run_stage(r.timing.sphere_initialization_ms, [&] { return initialize_spheres(s); })) !=
 		Status::success)
 		return r;
-	if (s.optimizer)
-	{
-		r.timing.sphere_init_cover_ms = s.optimizer->metrics().init_cover_ms;
-		r.timing.sphere_init_owner_ms = s.optimizer->metrics().init_owner_ms;
-		r.timing.sphere_init_cluster_ms = s.optimizer->metrics().init_cluster_ms;
-	}
 	if ((r.status = run_stage(r.timing.optimization_ms, [&] { return optimize_spheres(s, callback); })) !=
 		Status::success)
 		return r;
-	if (s.optimizer)
-	{
-		r.timing.cluster_ms = s.optimizer->metrics().cluster_total_ms;
-		r.timing.sphere_update_ms = s.optimizer->metrics().sphere_update_total_ms;
-		r.timing.error_ms = s.optimizer->metrics().error_total_ms;
-	}
 	if ((r.status = run_stage(r.timing.skeleton_construction_ms, [&] { return build_skeleton(s); })) != Status::success)
 		return r;
 	if ((r.status = run_stage(r.timing.topology_processing_ms, [&] { return fix_topology(s); })) != Status::success)
@@ -877,7 +848,6 @@ typename State::Result reconstruct(State& s, const typename State::IterationCall
 	}
 	r.status = Status::success;
 	r.counts = counts(s);
-	r.repairs = repairs(s);
 	return r;
 }
 

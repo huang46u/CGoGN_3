@@ -73,7 +73,6 @@ struct BenchmarkResult
 	ReconstructionTiming timing;
 	BenchmarkExtraTiming extra_timing;
 	BenchmarkResidualPruneStats residual_prune;
-	ReconstructionRepairs repairs;
 };
 
 // single table shared by the console summary and the timing JSON export; order here is the JSON key order
@@ -95,13 +94,7 @@ inline constexpr BenchmarkTimingField benchmark_timing_fields[] = {
 	{"initial_medial_axis", nullptr, [](const BenchmarkResult& r) { return r.timing.initial_medial_axis_ms; }},
 	{"fitting_data", nullptr, [](const BenchmarkResult& r) { return r.timing.fitting_primitives_ms; }},
 	{"sphere_initialization", nullptr, [](const BenchmarkResult& r) { return r.timing.sphere_initialization_ms; }},
-	{"sphere_init_cover", nullptr, [](const BenchmarkResult& r) { return r.timing.sphere_init_cover_ms; }},
-	{"sphere_init_owner", nullptr, [](const BenchmarkResult& r) { return r.timing.sphere_init_owner_ms; }},
-	{"sphere_init_cluster", nullptr, [](const BenchmarkResult& r) { return r.timing.sphere_init_cluster_ms; }},
 	{"optimization_total", "Optimization total", [](const BenchmarkResult& r) { return r.timing.optimization_ms; }},
-	{"cluster_total", nullptr, [](const BenchmarkResult& r) { return r.timing.cluster_ms; }},
-	{"sphere_update_total", nullptr, [](const BenchmarkResult& r) { return r.timing.sphere_update_ms; }},
-	{"error_total", nullptr, [](const BenchmarkResult& r) { return r.timing.error_ms; }},
 	{"skeleton_construction", "Skeleton construction",
 	 [](const BenchmarkResult& r) { return r.timing.skeleton_construction_ms; }},
 	{"postprocess", "Postprocess", [](const BenchmarkResult& r) { return r.timing.topology_processing_ms; }},

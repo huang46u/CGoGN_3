@@ -43,13 +43,7 @@ struct ReconstructionTiming
 	float64 initial_medial_axis_ms = 0.0;
 	float64 fitting_primitives_ms = 0.0;
 	float64 sphere_initialization_ms = 0.0;
-	float64 sphere_init_cover_ms = 0.0;
-	float64 sphere_init_owner_ms = 0.0;
-	float64 sphere_init_cluster_ms = 0.0;
 	float64 optimization_ms = 0.0;
-	float64 cluster_ms = 0.0;
-	float64 sphere_update_ms = 0.0;
-	float64 error_ms = 0.0;
 	float64 skeleton_construction_ms = 0.0;
 	float64 topology_processing_ms = 0.0;
 };
@@ -65,13 +59,6 @@ struct ReconstructionCounts
 	uint32 skeleton_edges = 0;
 	uint32 skeleton_faces = 0;
 	uint32 optimization_iterations = 0;
-};
-
-// Silent repairs: places where the pipeline replaces an invalid value by a fallback instead of failing.
-struct ReconstructionRepairs
-{
-	// sphere updates skipped because the solve gave non-finite values (sum over all optimizer iterations)
-	uint32 sphere_update_nonfinite = 0;
 };
 
 } // namespace offset_axis

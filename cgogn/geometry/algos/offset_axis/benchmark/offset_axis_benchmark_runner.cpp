@@ -181,7 +181,6 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	result.counts = reconstruction_result.counts;
 	result.timing = reconstruction_result.timing;
 	const auto& topology_metrics = reconstruction.skeleton_topology().metrics();
-	result.repairs = reconstruction_result.repairs;
 	result.residual_prune.residual_removed_sheets = topology_metrics.residual_removed_sheets;
 	result.residual_prune.residual_removed_faces = topology_metrics.residual_removed_faces;
 	result.residual_prune.residual_chi_before = topology_metrics.residual_chi_before;
@@ -257,10 +256,6 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	residual_prune.put("residual_small_sheets_without_boundary_edge",
 					   result.residual_prune.residual_small_sheets_without_boundary_edge);
 	root.add_child("residual_prune", residual_prune);
-
-	boost::property_tree::ptree repairs;
-	repairs.put("sphere_update_nonfinite", result.repairs.sphere_update_nonfinite);
-	root.add_child("repairs", repairs);
 
 	boost::property_tree::ptree timing;
 	for (const auto& field : benchmark_timing_fields)

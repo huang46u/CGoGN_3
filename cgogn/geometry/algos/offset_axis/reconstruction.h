@@ -194,10 +194,6 @@ public:
 	{
 		return stages::counts(s_);
 	}
-	ReconstructionRepairs repairs() const
-	{
-		return stages::repairs(s_);
-	}
 
 	NONMANIFOLD* skeleton() const
 	{
