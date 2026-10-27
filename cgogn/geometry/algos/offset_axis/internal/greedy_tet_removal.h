@@ -422,9 +422,9 @@ private:
 		const std::set<std::size_t>& face_tets = tets.tets_of(idf);
 		tets_to_erase.insert(face_tets.begin(), face_tets.end());
 		account_face_deletion_budget(idf);
-		const std::vector<SkeletonEdge> face_edges =
-			remove_faces(skeleton, {f}, spheres_optimizer, skeleton_source_sphere, sphere_skeleton_vertex);
-		affected_edges.insert(affected_edges.end(), face_edges.begin(), face_edges.end());
+		for (SkeletonEdge e : incident_edges(skeleton, f))
+			affected_edges.push_back(e);
+		remove_faces(skeleton, {f}, spheres_optimizer, skeleton_source_sphere, sphere_skeleton_vertex);
 	}
 
 	bool build_step_candidate(std::size_t tet_id, StepCandidate& out_candidate)

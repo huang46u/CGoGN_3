@@ -28,6 +28,7 @@
 #include <cgogn/core/functions/traversals/edge.h>
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
+#include <cgogn/core/types/cell_marker.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_tets.h>
 #include <cgogn/geometry/algos/offset_axis/spheres_optimizer.h>
 
@@ -71,7 +72,7 @@ void remove_skeleton_vertex_and_sphere(
 	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
 
 	SphereVertex& linked_sphere = value<SphereVertex>(skeleton, skeleton_source_sphere, v);
-	// invalid when the vertex was already removed: a vertex listed twice in the candidates is removed twice
+	// invalid for a skeleton built without spheres (residual prune test)
 	if (linked_sphere.is_valid())
 	{
 		value<SkeletonVertex>(spheres_optimizer.data().spheres, sphere_skeleton_vertex, linked_sphere) =
@@ -93,12 +94,24 @@ void remove_orphan_edges_and_vertices(
 	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
 	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
 
+	// an edge shared by several removed faces and a vertex of several edges are visited once: removing a cell twice
+	// releases its index twice
+	CellMarkerStore<NONMANIFOLD, SkeletonEdge> visited_edges(skeleton);
+	CellMarkerStore<NONMANIFOLD, SkeletonVertex> visited_vertices(skeleton);
 	std::vector<SkeletonVertex> candidate_vertices;
 	candidate_vertices.reserve(face_edges.size() * 2);
 	for (SkeletonEdge e : face_edges)
 	{
+		if (visited_edges.is_marked(e))
+			continue;
+		visited_edges.mark(e);
 		for (SkeletonVertex v : incident_vertices(skeleton, e))
+		{
+			if (visited_vertices.is_marked(v))
+				continue;
+			visited_vertices.mark(v);
 			candidate_vertices.push_back(v);
+		}
 		if (incident_faces(skeleton, e).empty())
 			remove_edge(skeleton, e);
 	}
@@ -109,9 +122,9 @@ void remove_orphan_edges_and_vertices(
 }
 
 // Removes the faces, then the edges and vertices left isolated (orphan edges and vertices). The tets are not
-// changed. Returns the edges of the removed faces.
+// changed.
 template <typename POINTS, typename NONMANIFOLD>
-std::vector<typename mesh_traits<NONMANIFOLD>::Edge> remove_faces(
+void remove_faces(
 	NONMANIFOLD& skeleton, const std::vector<typename mesh_traits<NONMANIFOLD>::Face>& faces,
 	SpheresOptimizer<POINTS>& spheres_optimizer,
 	typename mesh_traits<NONMANIFOLD>::template Attribute<typename mesh_traits<POINTS>::Vertex>* skeleton_source_sphere,
@@ -129,7 +142,6 @@ std::vector<typename mesh_traits<NONMANIFOLD>::Edge> remove_faces(
 		remove_face(skeleton, f);
 	remove_orphan_edges_and_vertices(skeleton, face_edges, spheres_optimizer, skeleton_source_sphere,
 									 sphere_skeleton_vertex);
-	return face_edges;
 }
 
 // Removes every vertex without edge (with its sphere).
@@ -177,8 +189,8 @@ void remove_faces_and_tets(
 // The edge between a and b, or an invalid edge if there is none.
 template <typename NONMANIFOLD>
 typename mesh_traits<NONMANIFOLD>::Edge find_edge(const NONMANIFOLD& skeleton,
-												   typename mesh_traits<NONMANIFOLD>::Vertex a,
-												   typename mesh_traits<NONMANIFOLD>::Vertex b)
+												  typename mesh_traits<NONMANIFOLD>::Vertex a,
+												  typename mesh_traits<NONMANIFOLD>::Vertex b)
 {
 	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
 	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
