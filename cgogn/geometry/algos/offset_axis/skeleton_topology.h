@@ -64,7 +64,8 @@ public:
 	using Data = typename Types::Data;
 	using ResidualPruneMode = typename Types::ResidualPruneMode;
 
-	explicit SkeletonTopology(Data data) : data_(std::move(data))
+	explicit SkeletonTopology(Data data)
+		: data_(std::move(data)), skeleton_tets_(data_.skeleton, data_.face_incident_tets)
 	{
 	}
 	SkeletonTopology(const SkeletonTopology&) = delete;
@@ -85,7 +86,7 @@ public:
 		build_skeleton_from_spheres(spheres.spheres, spheres.sphere_position, spheres.sphere_radius,
 									spheres.sphere_neighbors, data_.skeleton, data_.skeleton_position,
 									data_.skeleton_radius, data_.skeleton_source_sphere, data_.sphere_skeleton_vertex,
-									data_.face_incident_tets, data_.edge_degree, skeleton_tets_);
+									data_.edge_degree, skeleton_tets_);
 	}
 
 	// Returns false if the scores cannot be evaluated.
@@ -161,7 +162,7 @@ public:
 	}
 
 private:
-	using TetMap = typename Types::TetMap;
+	using Tets = typename Types::Tets;
 	using Context = typename Types::Context;
 	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
 	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
@@ -207,7 +208,7 @@ private:
 	}
 
 	Data data_;
-	TetMap skeleton_tets_;
+	Tets skeleton_tets_;
 	std::vector<SphereVertex> added_spheres_;
 };
 

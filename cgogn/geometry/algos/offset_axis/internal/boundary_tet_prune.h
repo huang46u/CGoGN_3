@@ -170,10 +170,9 @@ struct BoundaryTetPrune
 		// Phase 1: scan all current tets once and collect boundary-tet deletion candidates.
 		for (std::size_t tet_id : tet_ids)
 		{
-			auto it_tet = p.skeleton_tets.find(tet_id);
-			if (it_tet == p.skeleton_tets.end())
+			if (!p.skeleton_tets.contains(tet_id))
 				continue;
-			const Tet tet = it_tet->second;
+			const Tet tet = p.skeleton_tets.tet(tet_id);
 
 			if (!is_boundary_tet(p, tet))
 				continue;
@@ -186,10 +185,8 @@ struct BoundaryTetPrune
 		// Phase 2: delete using precomputed candidates only (no boundary re-check during deletion).
 		for (const BoundaryTetCandidate& cand : candidates)
 		{
-			auto it_remove_tet = p.skeleton_tets.find(cand.tet_id);
-			if (it_remove_tet == p.skeleton_tets.end())
+			if (!p.skeleton_tets.contains(cand.tet_id))
 				continue;
-			const Tet old_tet = it_remove_tet->second;
 
 			const std::array<SkeletonFace, 2> faces_to_remove = {cand.f0, cand.f1};
 			std::vector<SkeletonEdge> affected_edges;
@@ -221,14 +218,8 @@ struct BoundaryTetPrune
 					++stats.removed_edges;
 				}
 			}
-			p.skeleton_tets.erase(it_remove_tet);
+			p.skeleton_tets.erase(cand.tet_id);
 			++stats.removed_tets;
-			for (uint32 i = 0; i < 4; ++i)
-			{
-				const SkeletonFace f = old_tet.faces[i];
-				const uint32 idf = index_of(p.data.skeleton, f);
-				(*p.data.face_incident_tets)[idf].erase(cand.tet_id);
-			}
 		}
 
 		return stats;

@@ -507,7 +507,7 @@ struct DenseK5Repair
 		{
 			std::vector<SkeletonEdge> face_edges = {cycle_edges[i], spoke_edges[i], spoke_edges[(i + 1) % 5]};
 			const SkeletonFace new_face = add_face(p.data.skeleton, face_edges);
-			value<std::set<std::size_t>>(p.data.skeleton, p.data.face_incident_tets, new_face).clear();
+			p.skeleton_tets.reset_face(new_face);
 		}
 
 		return true;

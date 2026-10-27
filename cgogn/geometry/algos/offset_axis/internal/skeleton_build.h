@@ -62,9 +62,8 @@ void build_skeleton_from_spheres(
 	typename mesh_traits<NONMANIFOLD>::template Attribute<Scalar>* skeleton_radius,
 	typename mesh_traits<NONMANIFOLD>::template Attribute<typename mesh_traits<POINTS>::Vertex>* skeleton_source_sphere,
 	typename mesh_traits<POINTS>::template Attribute<typename mesh_traits<NONMANIFOLD>::Vertex>* sphere_skeleton_vertex,
-	typename mesh_traits<NONMANIFOLD>::template Attribute<std::set<std::size_t>>* face_incident_tets,
 	typename mesh_traits<NONMANIFOLD>::template Attribute<uint32>* edge_degree,
-	typename topology_detail::SkeletonTopologyTypes<POINTS, NONMANIFOLD>::TetMap& tets)
+	SkeletonTets<NONMANIFOLD>& tets)
 {
 	using Types = topology_detail::SkeletonTopologyTypes<POINTS, NONMANIFOLD>;
 	using SphereVertex = typename Types::SphereVertex;
@@ -166,7 +165,7 @@ void build_skeleton_from_spheres(
 	tets.clear();
 	tets.reserve(raw_tets.size());
 	foreach_cell(skeleton, [&](SkeletonFace f) -> bool {
-		value<std::set<std::size_t>>(skeleton, face_incident_tets, f).clear();
+		tets.reset_face(f);
 		return true;
 	});
 	std::size_t tet_index = 0;
@@ -183,9 +182,8 @@ void build_skeleton_from_spheres(
 		{
 			const SkeletonFace f = skeleton_faces_map.at(keys[i]);
 			new_tet.faces[i] = f;
-			value<std::set<size_t>>(skeleton, face_incident_tets, f).insert(tet_index);
 		}
-		tets.insert({tet_index, new_tet});
+		tets.add(tet_index, new_tet);
 		tet_index++;
 	}
 	compute_edge_degree(skeleton, edge_degree);

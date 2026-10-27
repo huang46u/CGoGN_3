@@ -248,7 +248,7 @@ struct SkeletonMeshOps
 			if (!face_still_attached)
 				continue;
 
-			const std::set<std::size_t> in_tets = (*p.data.face_incident_tets)[face_id];
+			const std::set<std::size_t> in_tets = p.skeleton_tets.tets_of(face_id);
 			std::vector<SkeletonEdge> affected_edges = incident_edges(p.data.skeleton, face);
 			remove_face(p.data.skeleton, face);
 			++out_stats.removed_faces;
@@ -258,20 +258,9 @@ struct SkeletonMeshOps
 
 			for (std::size_t tet_id : in_tets)
 			{
-				auto it_tet = p.skeleton_tets.find(tet_id);
-				if (it_tet == p.skeleton_tets.end())
+				if (!p.skeleton_tets.contains(tet_id))
 					continue;
-				const Tet old_tet = it_tet->second;
-				for (uint32 i = 0; i < 4; ++i)
-				{
-					const SkeletonFace f = old_tet.faces[i];
-					if (!f.is_valid() || f == face)
-						continue;
-					const uint32 idf = index_of(p.data.skeleton, f);
-					if (idf != INVALID_INDEX)
-						(*p.data.face_incident_tets)[idf].erase(tet_id);
-				}
-				p.skeleton_tets.erase(it_tet);
+				p.skeleton_tets.erase(tet_id);
 				++out_stats.removed_tets;
 			}
 		}

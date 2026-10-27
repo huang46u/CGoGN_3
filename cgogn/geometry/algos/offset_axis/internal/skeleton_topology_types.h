@@ -25,6 +25,7 @@
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/utils/numerics.h>
+#include <cgogn/geometry/algos/offset_axis/internal/skeleton_tets.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
 #include <cgogn/geometry/algos/offset_axis/spheres_optimizer.h>
 #include <cgogn/geometry/types/vector_traits.h>
@@ -83,11 +84,8 @@ struct SkeletonTopologyTypes
 	using SpheresOptimizerType = SpheresOptimizer<POINTS>;
 	using FaceKey = std::array<uint32, 3>;
 
-	struct Tet
-	{
-		SkeletonFace faces[4];
-	};
-	using TetMap = std::unordered_map<std::size_t, Tet>;
+	using Tets = SkeletonTets<NONMANIFOLD>;
+	using Tet = typename Tets::Tet;
 
 	// What the topology functions work on: the topology data, the data of the spheres optimizer (samples and spheres),
 	// the current tets and the spheres added by the dense K5 repair.
@@ -95,10 +93,10 @@ struct SkeletonTopologyTypes
 	{
 		Data& data;
 		typename SpheresOptimizerType::Data& optimizer_data;
-		TetMap& skeleton_tets;
+		Tets& skeleton_tets;
 		std::vector<SphereVertex>& added_spheres;
 
-		Context(Data& d, TetMap& t, std::vector<SphereVertex>& added)
+		Context(Data& d, Tets& t, std::vector<SphereVertex>& added)
 			: data(d), optimizer_data(d.spheres_optimizer.data()), skeleton_tets(t), added_spheres(added)
 		{
 		}
