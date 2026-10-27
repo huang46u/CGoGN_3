@@ -75,11 +75,7 @@ struct TorchRayBatch
 
 inline void init_ray_buffers(TorchRayBuffers& buffers, int R)
 {
-	if (R <= 0)
-		return;
-
-	const bool need_realloc =
-		(buffers.ray_capacity < R) || (!buffers.ray_origins.defined()) || (buffers.ray_device != buffers.device);
+	const bool need_realloc = buffers.ray_capacity < R || buffers.ray_device != buffers.device;
 	if (!need_realloc)
 		return;
 
@@ -157,12 +153,10 @@ inline std::vector<Vec3> sample_level_set_rays(const NeuralFieldRayTraits& trait
 											   const Vec3& bbox_min, const Vec3& bbox_max,
 											   const std::vector<Vec3>* existing_samples = nullptr)
 {
-	const int max_outer_iterations = std::max(1, outer_iterations);
 	TorchRayBuffers& ray_buffers = *traits.ray_buffers;
 
-	const size_t reserve_hint = std::max<size_t>(static_cast<size_t>(std::max(1, params.batch_size)) *
-													 static_cast<size_t>(std::max(1, max_outer_iterations)),
-												 size_t(1024));
+	const size_t reserve_hint =
+		std::max(static_cast<size_t>(params.batch_size) * static_cast<size_t>(outer_iterations), size_t(1024));
 	std::vector<Vec3> neighbor_samples;
 	if (existing_samples)
 		neighbor_samples = *existing_samples;
@@ -171,18 +165,13 @@ inline std::vector<Vec3> sample_level_set_rays(const NeuralFieldRayTraits& trait
 	all_samples.reserve(reserve_hint);
 
 	std::mt19937 gen(params.seed);
-	const Scalar eps = detail::convergence_tolerance(params);
-	const int max_steps = std::max(1, params.max_iterations);
+	const Scalar eps = params.tol;
 	const int check_interval = 500;
-	int total_rays = 0;
 
-	for (int iter = 0; iter < max_outer_iterations; ++iter)
+	for (int iter = 0; iter < outer_iterations; ++iter)
 	{
 		auto rays = detail::generate_rays(params, bbox_min, bbox_max, params.batch_size, gen);
-		total_rays += static_cast<int>(rays.size());
 		const int R = static_cast<int>(rays.size());
-		if (R == 0)
-			break;
 
 		std::cout << "Iteration " << iter << ": Processing " << R << " rays on GPU..." << std::endl;
 
@@ -207,7 +196,7 @@ inline std::vector<Vec3> sample_level_set_rays(const NeuralFieldRayTraits& trait
 		torch::Tensor not_converged = t < t_max;
 
 		std::vector<Vec3> iter_samples;
-		for (int step = 0; step < max_steps; ++step)
+		for (int step = 0; step < params.max_iterations; ++step)
 		{
 			if (step % check_interval == 0)
 			{

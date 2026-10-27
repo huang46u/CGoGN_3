@@ -631,13 +631,13 @@ typename State::StatusInfo sample_alpha_level_set(State& s)
 
 	AlphaSamplingParams params;
 	params.sample_radius = Scalar(s.options.sample_radius);
-	params.candidates_per_parent = static_cast<size_t>(std::max(1, s.options.alpha_sampling_candidates_per_parent));
-	params.parent_batch_size = static_cast<size_t>(std::max(1, s.options.alpha_sampling_parent_batch_size));
+	params.candidates_per_parent = static_cast<size_t>(s.options.alpha_sampling_candidates_per_parent);
+	params.parent_batch_size = static_cast<size_t>(s.options.alpha_sampling_parent_batch_size);
 	params.rays.bbox_expand = constants::ray_box_relative_expand;
 	params.rays.alpha = Scalar(s.options.alpha);
 	params.rays.tol = Scalar(s.options.tolerance);
 	params.rays.step_bound = Scalar(2.0);
-	params.rays.batch_size = std::max(1, s.options.ray_sampler_batch_size);
+	params.rays.batch_size = s.options.ray_sampler_batch_size;
 	params.rays.max_iterations = s.options.udf_max_iterations;
 	params.rays.min_active_rays = s.options.udf_min_active_rays;
 	params.rays.seed = s.options.seed;

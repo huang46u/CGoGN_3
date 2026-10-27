@@ -73,11 +73,6 @@ namespace detail
 
 // CPU and GPU samplers share these helpers
 
-inline Scalar convergence_tolerance(const RayLevelSetParams& params)
-{
-	return std::max(Scalar(0), params.tol);
-}
-
 inline Vec3 clamp_point(const Vec3& p, const Vec3& bbox_min, const Vec3& bbox_max)
 {
 	return p.cwiseMax(bbox_min).cwiseMin(bbox_max);
@@ -203,10 +198,8 @@ std::vector<Vec3> sample_level_set_rays(const TRAITS& traits, const RayLevelSetP
 										SpatialGrid* spatial_grid, Scalar sample_spacing, const Vec3& bbox_min,
 										const Vec3& bbox_max, const std::vector<Vec3>* existing_samples = nullptr)
 {
-	const int max_outer_iterations = std::max(1, outer_iterations);
-	const size_t reserve_hint = std::max<size_t>(static_cast<size_t>(std::max(1, params.batch_size)) *
-													 static_cast<size_t>(std::max(1, max_outer_iterations)),
-												 size_t(1024));
+	const size_t reserve_hint =
+		std::max(static_cast<size_t>(params.batch_size) * static_cast<size_t>(outer_iterations), size_t(1024));
 	std::vector<Vec3> neighbor_samples;
 	if (existing_samples)
 		neighbor_samples = *existing_samples;
@@ -215,16 +208,13 @@ std::vector<Vec3> sample_level_set_rays(const TRAITS& traits, const RayLevelSetP
 	all_samples.reserve(reserve_hint);
 
 	std::mt19937 gen(params.seed);
-	const Scalar eps = detail::convergence_tolerance(params);
-	const int max_steps = std::max(1, params.max_iterations);
+	const Scalar eps = params.tol;
 	const int check_interval = 10;
 
-	for (int iter = 0; iter < max_outer_iterations; ++iter)
+	for (int iter = 0; iter < outer_iterations; ++iter)
 	{
 		auto rays = detail::generate_rays(params, bbox_min, bbox_max, params.batch_size, gen);
 		const int R = static_cast<int>(rays.size());
-		if (R == 0)
-			break;
 
 		std::cout << "Iteration " << iter << ": Processing " << R << " rays on CPU..." << std::endl;
 
@@ -238,7 +228,7 @@ std::vector<Vec3> sample_level_set_rays(const TRAITS& traits, const RayLevelSetP
 		}
 		int active_count = R;
 		std::vector<Vec3> iter_samples;
-		for (int step = 0; step < max_steps; ++step)
+		for (int step = 0; step < params.max_iterations; ++step)
 		{
 			if (step % check_interval == 0)
 			{
@@ -271,11 +261,6 @@ std::vector<Vec3> sample_level_set_rays(const TRAITS& traits, const RayLevelSetP
 				const LevelSetRay& ray = rays[i];
 				const Vec3 X = ray.origin + t[i] * ray.direction;
 				const Scalar udf = step_udf[i];
-				if (!std::isfinite(static_cast<double>(udf)))
-				{
-					t[i] = t_max[i];
-					continue;
-				}
 
 				const Scalar delta = std::abs(udf - params.alpha);
 				if (delta < eps)

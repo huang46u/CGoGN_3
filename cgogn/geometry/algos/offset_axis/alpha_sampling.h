@@ -24,6 +24,7 @@
 #define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_ALPHA_SAMPLING_H_
 
 #include <cgogn/core/types/mesh_traits.h>
+#include <cgogn/core/utils/assert.h>
 #include <cgogn/geometry/algos/offset_axis/alpha_projection.h>
 #include <cgogn/geometry/algos/offset_axis/distance_field.h>
 #include <cgogn/geometry/algos/offset_axis/normal_utils.h>
@@ -91,15 +92,9 @@ inline void build_stable_tangent_basis(const Vec3& normal_in, Vec3& tangent_u, V
 {
 	Vec3 n = unit_normal_or_z(normal_in);
 	Vec3 ref = (std::abs(n.z()) < Scalar(0.9)) ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
-	tangent_u = n.cross(ref);
-	if (tangent_u.squaredNorm() < Scalar(1e-12))
-		tangent_u = n.cross(Vec3(1, 0, 0));
-	tangent_u.normalize();
-	tangent_v = n.cross(tangent_u);
-	if (tangent_v.squaredNorm() < Scalar(1e-12))
-		tangent_v = Vec3(0, 1, 0);
-	else
-		tangent_v.normalize();
+	// |n x ref| >= sqrt(1 - 0.9^2) since ref is not the axis n is closest to
+	tangent_u = n.cross(ref).normalized();
+	tangent_v = n.cross(tangent_u).normalized();
 }
 
 inline Vec3 sample_tangent_annulus_candidate(const Vec3& center, const Vec3& normal, Scalar radius,
@@ -119,8 +114,6 @@ inline void sample_active_parent_indices(const std::vector<uint32>& active_indic
 {
 	selected_samples.clear();
 	const size_t active_count = active_indices.size();
-	if (active_count == 0)
-		return;
 
 	const size_t pick_count = std::min(batch_size, active_count);
 	selected_samples.reserve(pick_count);
@@ -144,18 +137,13 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, const AlphaSamplingPa
 										   ProjectionFn&& project_points)
 {
 	AlphaSamplingResult result;
-	if (parameters.sample_radius <= Scalar(0) || !traits.is_ready())
-	{
-		result.success = false;
-		return result;
-	}
 
 	// cell = radius, so every neighbor closer than radius lies in the 27 surrounding cells
-	const Scalar grid_cell_size = std::max(parameters.sample_radius, Scalar(1e-8));
+	const Scalar grid_cell_size = parameters.sample_radius;
 	const size_t parent_batch_size = parameters.parent_batch_size;
 	const size_t max_samples = detail::alpha_sampling_max_samples;
 	const size_t seed_rays_per_round =
-		std::max<size_t>(1, static_cast<size_t>(parameters.rays.batch_size)) * detail::alpha_sampling_warmup_iterations;
+		static_cast<size_t>(parameters.rays.batch_size) * detail::alpha_sampling_warmup_iterations;
 	const size_t initial_reserve = std::max(seed_rays_per_round, parent_batch_size) * size_t(4);
 
 	std::mt19937 generator(static_cast<uint32>(parameters.rays.seed));
@@ -180,12 +168,10 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, const AlphaSamplingPa
 		spatial_grid.insert(position, sample_index);
 	};
 
+	// the parents of a batch are distinct active samples
 	auto remove_active_sample = [&](uint32 sample_index) {
-		if (sample_index >= active_slot_of_sample.size())
-			return;
 		const uint32 slot = active_slot_of_sample[sample_index];
-		if (slot == std::numeric_limits<uint32>::max() || slot >= active_indices.size())
-			return;
+		cgogn_message_assert(slot < active_indices.size(), "removed sample is not active");
 		const uint32 last_sample = active_indices.back();
 		active_indices[slot] = last_sample;
 		active_slot_of_sample[last_sample] = slot;
@@ -207,31 +193,18 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, const AlphaSamplingPa
 
 		std::vector<Vec3> seed_normals;
 		std::vector<uint8_t> seed_keep_mask;
+		// the field fails when its evaluation fails (e.g. a neural forward error)
 		if (!compute_normals(seed_points, seed_normals, seed_keep_mask))
 		{
 			result.success = false;
 			return result;
 		}
-		if (seed_normals.size() != seed_points.size() || seed_keep_mask.size() != seed_points.size())
-		{
-			result.success = false;
-			return result;
-		}
-		std::vector<Vec3> accepted_seed_points;
-		std::vector<Vec3> accepted_seed_normals;
-		accepted_seed_points.reserve(seed_points.size());
-		accepted_seed_normals.reserve(seed_points.size());
+		cgogn_message_assert(seed_normals.size() == seed_points.size() && seed_keep_mask.size() == seed_points.size(),
+							 "compute_normals output size mismatch");
+		// a neural gradient can be non finite
 		for (size_t i = 0; i < seed_points.size(); ++i)
-		{
-			if (!seed_points[i].allFinite() || seed_keep_mask[i] == 0 || !seed_normals[i].allFinite())
-				continue;
-			if (result.positions.size() >= max_samples)
-				break;
-			accepted_seed_points.push_back(seed_points[i]);
-			accepted_seed_normals.push_back(seed_normals[i]);
-		}
-		for (size_t i = 0; i < accepted_seed_points.size(); ++i)
-			add_sample(accepted_seed_points[i], accepted_seed_normals[i]);
+			if (seed_keep_mask[i] != 0 && seed_normals[i].allFinite())
+				add_sample(seed_points[i], seed_normals[i]);
 	}
 
 	while (result.positions.size() < max_samples && !active_indices.empty())
@@ -250,12 +223,10 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, const AlphaSamplingPa
 			result.success = false;
 			break;
 		}
-		if (projection.projected_points.size() != raw_candidates.size() ||
-			projection.normals.size() != raw_candidates.size() || projection.keep_mask.size() != raw_candidates.size())
-		{
-			result.success = false;
-			break;
-		}
+		cgogn_message_assert(projection.projected_points.size() == raw_candidates.size() &&
+								 projection.normals.size() == raw_candidates.size() &&
+								 projection.keep_mask.size() == raw_candidates.size(),
+							 "project_points output size mismatch");
 
 		for (size_t parent_batch_index = 0; parent_batch_index < selected_parents.size(); ++parent_batch_index)
 		{
@@ -313,8 +284,7 @@ SamplingStatus sample_alpha_level_set(FIELD& field, const INPUTS& inputs, const 
 	bbox_max += Vec3(padding, padding, padding);
 
 	auto traits = field.ray_traits(inputs);
-	if (!traits.is_ready())
-		return SamplingStatus::invalid_data;
+	cgogn_message_assert(traits.is_ready(), "field.prepare must succeed before sampling");
 	auto compute_normals = [&](const std::vector<Vec3>& points, std::vector<Vec3>& normals,
 							   std::vector<uint8_t>& keep) {
 		keep.assign(points.size(), uint8_t(0));

@@ -42,7 +42,7 @@ namespace offset_axis
 {
 
 // Removes the samples farther than max_distance from the input: the input point cloud if its kd-tree is built,
-// otherwise the input surface through its BVH. Returns the number of removed samples.
+// otherwise the input surface through its BVH (one of them must be built). Returns the number of removed samples.
 template <typename SURFACE, typename POINTS>
 uint32 filter_samples_far_from_input(const InputGeometry<SURFACE, POINTS>& input, Scalar max_distance,
 									 POINTS& samples,
@@ -61,7 +61,7 @@ uint32 filter_samples_far_from_input(const InputGeometry<SURFACE, POINTS>& input
 			std::pair<uint32, Scalar> nearest;
 			within_distance = input.input_kdtree()->find_nn(p, &nearest, max_distance);
 		}
-		else if (input.surface_bvh())
+		else
 		{
 			std::pair<uint32, Vec3> closest;
 			within_distance = input.surface_bvh()->closest_point(p, &closest, max_distance);

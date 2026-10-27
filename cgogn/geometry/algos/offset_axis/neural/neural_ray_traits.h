@@ -58,8 +58,6 @@ struct NeuralFieldRayTraits
 
 	std::pair<torch::Tensor, torch::Tensor> eval_values_sdf(const torch::Tensor& points) const
 	{
-		if (!field)
-			return {torch::Tensor(), torch::Tensor()};
 		return field->forward_values_sdf_gpu(points);
 	}
 };

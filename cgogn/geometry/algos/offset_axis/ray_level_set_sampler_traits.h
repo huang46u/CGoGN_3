@@ -63,15 +63,10 @@ struct SurfaceMeshRayTraits
 
 	Scalar eval_distance(const Vec3& pos) const
 	{
-		if (!bvh)
-			return std::numeric_limits<Scalar>::max();
 		uint32 primitive_index;
 		Vec3 closest_point;
 		Scalar distance;
-		if (!query_surface_closest_point(*bvh, pos, primitive_index, closest_point, distance))
-			return std::numeric_limits<Scalar>::max();
-		(void)primitive_index;
-		(void)closest_point;
+		query_surface_closest_point(*bvh, pos, primitive_index, closest_point, distance);
 		return distance;
 	}
 };
@@ -97,15 +92,10 @@ struct PointCloudRayTraits
 
 	Scalar eval_distance(const Vec3& pos) const
 	{
-		if (!kdtree)
-			return std::numeric_limits<Scalar>::max();
 		uint32 point_index;
 		Scalar distance;
-		if (!query_point_cloud_nearest_point(*kdtree, pos, point_index, distance))
-			return std::numeric_limits<Scalar>::max();
-		(void)point_index;
+		query_point_cloud_nearest_point(*kdtree, pos, point_index, distance);
 		return distance;
-
 	}
 };
 
