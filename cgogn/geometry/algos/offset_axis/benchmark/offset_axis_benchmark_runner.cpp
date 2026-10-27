@@ -259,11 +259,6 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 	root.add_child("residual_prune", residual_prune);
 
 	boost::property_tree::ptree repairs;
-	repairs.put("ma_degenerate_normals", result.repairs.ma_degenerate_normals);
-	repairs.put("ma_shrink_fallbacks", result.repairs.ma_shrink_fallbacks);
-	repairs.put("ma_secondary_from_nn", result.repairs.ma_secondary_from_nn);
-	repairs.put("ma_flip_flipped", result.repairs.ma_flip_flipped);
-	repairs.put("ma_flip_deleted", result.repairs.ma_flip_deleted);
 	repairs.put("sphere_update_nonfinite", result.repairs.sphere_update_nonfinite);
 	root.add_child("repairs", repairs);
 

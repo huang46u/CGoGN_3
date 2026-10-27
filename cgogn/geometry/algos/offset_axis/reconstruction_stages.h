@@ -36,6 +36,7 @@
 #include <cgogn/geometry/algos/offset_axis/alpha_sampling.h>
 #include <cgogn/geometry/algos/offset_axis/distance_field.h>
 #include <cgogn/geometry/algos/offset_axis/input_geometry.h>
+#include <cgogn/geometry/algos/offset_axis/medial_flip_prune.h>
 #include <cgogn/geometry/algos/offset_axis/neural_model_type.h>
 #include <cgogn/geometry/algos/offset_axis/normal_utils.h>
 #include <cgogn/geometry/algos/offset_axis/parallel_for.h>
@@ -160,8 +161,6 @@ void build_sample_kdtree(State& s);
 template <typename State>
 void recompute_samples_normals_from_input(State& s);
 
-template <typename State>
-bool recompute_sample_normal_pca(State& s, typename State::PVertex vertex);
 
 template <typename State>
 typename State::SpheresOptimizerType& optimizer_for(State& s);
@@ -245,7 +244,6 @@ void clear_results(State& s)
 	s.topology.reset();
 	s.fitting_data_computed = false;
 	s.samples_before_filtering = 0;
-	s.ma_repairs = {};
 }
 
 template <typename State>
@@ -357,7 +355,7 @@ typename State::Counts counts(State& s)
 template <typename State>
 typename State::Repairs repairs(State& s)
 {
-	typename State::Repairs r = s.ma_repairs;
+	typename State::Repairs r;
 	if (s.optimizer)
 		r.sphere_update_nonfinite = s.optimizer->metrics().sphere_update_nonfinite;
 	return r;
@@ -366,32 +364,9 @@ typename State::Repairs repairs(State& s)
 template <typename State>
 void build_sample_kdtree(State& s)
 {
-	using PVertex = typename State::PVertex;
-
-	s.sample_kdtree.reset();
-	s.sample_ma_kdtree.reset();
-	s.sample_vertices.clear();
-	s.sample_ma_vertices.clear();
-	if (!s.data.samples || !s.sample_position)
-		return;
-	std::vector<Vec3> positions;
-	std::vector<Vec3> ma_positions;
-	foreach_cell(*s.data.samples, [&](PVertex v) {
-		const uint32 idx = index_of(*s.data.samples, v);
-		positions.push_back((*s.sample_position)[idx]);
-		s.sample_vertices.push_back(v);
-		const Vec3 ma = (*s.sample_ma_position)[idx];
-		if (ma.allFinite() && (*s.sample_ma_radius)[idx] > Scalar(0))
-		{
-			ma_positions.push_back(ma);
-			s.sample_ma_vertices.push_back(v);
-		}
-		return true;
-	});
-	if (!positions.empty())
-		s.sample_kdtree = std::make_unique<acc::KDTree<3, uint32>>(positions);
-	if (!ma_positions.empty())
-		s.sample_ma_kdtree = std::make_unique<acc::KDTree<3, uint32>>(ma_positions);
+	build_point_kdtree(*s.data.samples, *s.sample_position, s.sample_kdtree, s.sample_vertices);
+	build_medial_kdtree(*s.data.samples, *s.sample_ma_position, *s.sample_ma_radius, s.sample_ma_kdtree,
+						s.sample_ma_vertices);
 }
 
 template <typename State>
@@ -447,67 +422,6 @@ void recompute_samples_normals_from_input(State& s)
 		(*s.sample_normal)[index_of(*s.data.samples, v)] = Vec3(0, 0, 1);
 		return true;
 	});
-}
-
-template <typename State>
-bool recompute_sample_normal_pca(State& s, typename State::PVertex vertex)
-{
-	using PVertex = typename State::PVertex;
-
-	if (!s.data.samples || !s.sample_kdtree || !vertex.is_valid())
-		return false;
-	const int k = std::max(3, s.options.knn_k);
-	const uint32 vertex_index = index_of(*s.data.samples, vertex);
-	if (vertex_index == INVALID_INDEX)
-		return false;
-	const Vec3& center = (*s.sample_position)[vertex_index];
-	std::vector<std::pair<uint32, Scalar>> neighbors_index;
-	s.sample_kdtree->find_nns(center, k + 1, &neighbors_index);
-	std::vector<Vec3> neighbors;
-	neighbors.reserve(k);
-	for (const auto& item : neighbors_index)
-	{
-		const PVertex neighbor = s.sample_vertices[item.first];
-		if (neighbor == vertex)
-			continue;
-		const uint32 neighbor_index = index_of(*s.data.samples, neighbor);
-		neighbors.push_back((*s.sample_position)[neighbor_index]);
-		if (static_cast<int>(neighbors.size()) >= k)
-			break;
-	}
-	if (neighbors.size() < 3)
-		return false;
-	Vec3 mean(0, 0, 0);
-	for (const Vec3& p : neighbors)
-		mean += p;
-	mean /= Scalar(neighbors.size());
-	Eigen::Matrix<Scalar, 3, 3> covariance = Eigen::Matrix<Scalar, 3, 3>::Zero();
-	for (const Vec3& p : neighbors)
-	{
-		const Vec3 d = p - mean;
-		covariance(0, 0) += d.x() * d.x();
-		covariance(0, 1) += d.x() * d.y();
-		covariance(0, 2) += d.x() * d.z();
-		covariance(1, 1) += d.y() * d.y();
-		covariance(1, 2) += d.y() * d.z();
-		covariance(2, 2) += d.z() * d.z();
-	}
-	covariance(1, 0) = covariance(0, 1);
-	covariance(2, 0) = covariance(0, 2);
-	covariance(2, 1) = covariance(1, 2);
-	Eigen::SelfAdjointEigenSolver<Eigen::Matrix<Scalar, 3, 3>> solver(covariance);
-	if (solver.info() != Eigen::Success)
-		return false;
-	const auto eigenvector = solver.eigenvectors().col(0);
-	Vec3 normal(eigenvector(0), eigenvector(1), eigenvector(2));
-	if (normal.squaredNorm() < Scalar(1e-12))
-		return false;
-	const Vec3 current = (*s.sample_normal)[vertex_index];
-	if (current.squaredNorm() > Scalar(1e-12) && normal.dot(current) < Scalar(0))
-		normal = -normal;
-	normal.normalize();
-	(*s.sample_normal)[vertex_index] = normal;
-	return true;
 }
 
 // The data is copied from the state on every call on purpose: build_sample_kdtree replaces the sample k-d tree, the UI
@@ -682,7 +596,9 @@ typename State::StatusInfo apply_sampling_filtering(State& s)
 		s.sample_ma_kdtree.reset();
 		s.sample_vertices.clear();
 		s.sample_ma_vertices.clear();
-		return Status::success;
+		return {Status::sampling_failed,
+				"apply_sampling_filtering: every sample is farther than alpha + filter_margin from the input "
+				"(the field does not match the input)"};
 	}
 	// neural samples keep their projection normals (the network gradient); for point cloud / surface input the
 	// normal is recomputed at the projected position from the input
@@ -704,10 +620,8 @@ typename State::StatusInfo build_kdtree_and_normals(State& s)
 	// PCA for every input: neural samples already carry the network gradient, and for MF models that gradient
 	// is not orthogonal to the medial axis.
 	if (s.options.recompute_normals_after_sampling)
-		parallel_foreach_cell(*s.data.samples, [&](PVertex v) {
-			recompute_sample_normal_pca(s, v);
-			return true;
-		});
+		recompute_normals_pca(*s.data.samples, *s.sample_position, *s.sample_normal, *s.sample_kdtree, s.sample_vertices,
+							  s.options.knn_k);
 	return Status::success;
 }
 
@@ -738,83 +652,18 @@ typename State::StatusInfo compute_initial_medial_axis(State& s)
 	// samples and their kd-tree come from sample_alpha_level_set / apply_sampling_filtering
 	OFFSET_AXIS_PRECONDITION(s.data.samples && nb_cells<PVertex>(*s.data.samples) > 0 && s.sample_kdtree, Status::invalid_data);
 	const Scalar fallback_radius = Scalar(s.options.alpha);
-	const Scalar min_norm = Scalar(1e-12);
-	const bool neural_input = Field::is_neural_type && s.field.loaded();
-	const bool mf_model = neural_input && neural_model_is(s, NeuralModelType::mf);
-	const bool udf_model = neural_input && neural_model_is(s, NeuralModelType::udf);
-	const Scalar initial_radius = std::max<Scalar>(fallback_radius * Scalar(10), Scalar(0));
-	// repair counters (atomic: run_shrinking_ball_for_vertex runs in parallel); they do not affect the result
-	s.ma_repairs = {};
-	std::atomic<uint32> degenerate_normals{0}, shrink_fallbacks{0}, secondary_from_nn{0};
-	auto run_shrinking_ball_for_vertex = [&](PVertex v) -> bool {
-		if (!v.is_valid())
-			return false;
-		const uint32 idx = index_of(*s.data.samples, v);
-		if (idx == INVALID_INDEX)
-			return false;
-		const Vec3& pt = (*s.sample_position)[idx];
-		Vec3 n = (*s.sample_normal)[idx];
-		const bool normal_finite = n.allFinite();
-		const bool can_shrink = normal_finite && n.squaredNorm() > min_norm;
-		if (can_shrink)
-			n.normalize();
-		else
-		{
-			n = Vec3(0, 0, 1);
-			degenerate_normals.fetch_add(1, std::memory_order_relaxed);
-		}
-		Vec3 center = pt - n * fallback_radius;
-		Scalar radius = fallback_radius;
-		PVertex secondary;
-		if (can_shrink)
-		{
-			auto [c1, r1, q1] = geometry::shrinking_ball_center<PVertex>(pt, n, s.sample_kdtree.get(),
-																		 s.sample_vertices, initial_radius);
-			if (c1.allFinite() && std::isfinite(static_cast<double>(r1)) && r1 > Scalar(0))
-			{
-				center = c1;
-				radius = r1;
-				secondary = q1;
-			}
-			else
-				shrink_fallbacks.fetch_add(1, std::memory_order_relaxed);
-		}
-		if (!center.allFinite())
-			center = pt - n * fallback_radius;
-		if (!std::isfinite(static_cast<double>(radius)) || radius <= Scalar(0))
-			radius = fallback_radius;
-		if (!secondary.is_valid() && s.sample_kdtree && !s.sample_vertices.empty())
-		{
-			std::pair<uint32, Scalar> nn;
-			if (s.sample_kdtree->find_nn(center - n * radius, &nn) && nn.first < s.sample_vertices.size())
-			{
-				secondary = s.sample_vertices[nn.first];
-				secondary_from_nn.fetch_add(1, std::memory_order_relaxed);
-			}
-		}
-		(*s.sample_ma_position)[idx] = center;
-		(*s.sample_ma_radius)[idx] = std::max(radius, fallback_radius);
-		(*s.sample_ma_secondary)[idx] = secondary;
-		return true;
-	};
-	auto run_all = [&] {
-		parallel_foreach_cell(*s.data.samples, [&](PVertex v) {
-			run_shrinking_ball_for_vertex(v);
-			return true;
-		});
-	};
-	run_all();
+	// field.prepare succeeded, so a neural field is loaded
+	const bool mf_model = Field::is_neural_type && neural_model_is(s, NeuralModelType::mf);
+	const bool udf_model = Field::is_neural_type && neural_model_is(s, NeuralModelType::udf);
+	const Scalar initial_radius = fallback_radius * Scalar(10);
+	shrinking_ball_centers(*s.data.samples, *s.sample_position, *s.sample_normal, *s.sample_kdtree, s.sample_vertices,
+						   initial_radius, fallback_radius, *s.sample_ma_position, *s.sample_ma_radius,
+						   *s.sample_ma_secondary);
 	if (s.options.ma_flip_prune)
 	{
-		uint32 flipped = 0, deleted = 0;
-		std::vector<uint32> flipped_indices;
 		const Scalar udf_threshold =
 			udf_model ? constants::udf_flip_threshold_factor * fallback_radius : fallback_radius;
-		const Scalar mf_threshold =
-			fallback_radius * std::max(Scalar(option_info::ma_flip_prune_alpha_factor.min),
-									   std::min(Scalar(option_info::ma_flip_prune_alpha_factor.max),
-											    Scalar(s.options.ma_flip_prune_alpha_factor)));
-		const bool supported = mf_model || !Field::is_neural_type || neural_input;
+		const Scalar mf_threshold = fallback_radius * Scalar(s.options.ma_flip_prune_alpha_factor);
 		auto scores = [&](const std::vector<Vec3>& points, std::vector<Scalar>& values,
 						  std::vector<Scalar>& sdf) -> bool {
 			sdf.clear();
@@ -822,93 +671,11 @@ typename State::StatusInfo compute_initial_medial_axis(State& s)
 				return evaluate_topology_scores(s, points, values);
 			return s.field.values_sdf(points, values, sdf);
 		};
-		if (supported)
-		{
-			std::vector<PVertex> vertices;
-			std::vector<Vec3> centers;
-			vertices.reserve(nb_cells<PVertex>(*s.data.samples));
-			centers.reserve(vertices.capacity());
-			foreach_cell(*s.data.samples, [&](PVertex v) {
-				const uint32 i = index_of(*s.data.samples, v);
-				vertices.push_back(v);
-				centers.push_back((*s.sample_ma_position)[i]);
-				return true;
-			});
-			std::vector<Scalar> values, sdf;
-			if (scores(centers, values, sdf) && values.size() == centers.size())
-			{
-				std::vector<PVertex> retry;
-				for (size_t i = 0; i < vertices.size(); ++i)
-					if ((mf_model && i < sdf.size() && sdf[i] > Scalar(0)) ||
-						values[i] > (mf_model ? mf_threshold : udf_threshold))
-						retry.push_back(vertices[i]);
-				flipped_indices.reserve(retry.size());
-				for (PVertex v : retry)
-				{
-					const uint32 i = index_of(*s.data.samples, v);
-					if (i == INVALID_INDEX)
-						continue;
-					Vec3 n = (*s.sample_normal)[i];
-					if (n.squaredNorm() > min_norm)
-					{
-						n.normalize();
-						(*s.sample_normal)[i] = -n;
-						flipped_indices.push_back(i);
-						++flipped;
-					}
-					run_shrinking_ball_for_vertex(v);
-				}
-				auto prune = [&](const std::vector<PVertex>& candidates) {
-					std::vector<Vec3> p;
-					std::vector<PVertex> active;
-					for (PVertex v : candidates)
-					{
-						uint32 i = index_of(*s.data.samples, v);
-						if (i != INVALID_INDEX)
-						{
-							active.push_back(v);
-							p.push_back((*s.sample_ma_position)[i]);
-						}
-					}
-					std::vector<Scalar> val, sd;
-					if (!scores(p, val, sd) || val.size() != p.size())
-						return uint32(0);
-					uint32 removed = 0;
-					for (size_t i = 0; i < active.size(); ++i)
-						if ((mf_model && i < sd.size() && sd[i] > Scalar(0)) ||
-							val[i] > (mf_model ? mf_threshold : udf_threshold))
-						{
-							remove_vertex(*s.data.samples, active[i]);
-							++removed;
-						}
-					return removed;
-				};
-				deleted += prune(retry);
-				if (deleted > 0 && !flipped_indices.empty() && nb_cells<PVertex>(*s.data.samples) > 0)
-				{
-					build_sample_kdtree(s);
-					std::vector<PVertex> survivors;
-					survivors.reserve(flipped_indices.size());
-					for (uint32 i : flipped_indices)
-					{
-						PVertex v = of_index<PVertex>(*s.data.samples, i);
-						if (v.is_valid())
-							survivors.push_back(v);
-					}
-					for (PVertex v : survivors)
-						recompute_sample_normal_pca(s, v);
-					for (PVertex v : survivors)
-						run_shrinking_ball_for_vertex(v);
-					deleted += prune(survivors);
-				}
-			}
-		}
-		s.ma_repairs.ma_flip_flipped = flipped;
-		s.ma_repairs.ma_flip_deleted = deleted;
+		flip_prune_medial_axis(*s.data.samples, *s.sample_position, *s.sample_normal, s.sample_kdtree,
+							   s.sample_vertices, s.sample_ma_kdtree, s.sample_ma_vertices, *s.sample_ma_position,
+							   *s.sample_ma_radius, *s.sample_ma_secondary, mf_model,
+							   mf_model ? mf_threshold : udf_threshold, fallback_radius, s.options.knn_k, scores);
 	}
-	s.ma_repairs.ma_degenerate_normals = degenerate_normals.load();
-	s.ma_repairs.ma_shrink_fallbacks = shrink_fallbacks.load();
-	s.ma_repairs.ma_secondary_from_nn = secondary_from_nn.load();
 	build_sample_kdtree(s);
 	return Status::success;
 }
