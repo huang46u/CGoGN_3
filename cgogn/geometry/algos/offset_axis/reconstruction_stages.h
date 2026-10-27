@@ -631,8 +631,6 @@ typename State::StatusInfo sample_alpha_level_set(State& s)
 
 	AlphaSamplingParams params;
 	params.sample_radius = Scalar(s.options.sample_radius);
-	params.seed = static_cast<uint32>(s.options.seed);
-	params.ray_sampler_batch_size = static_cast<size_t>(std::max(1, s.options.ray_sampler_batch_size));
 	params.candidates_per_parent = static_cast<size_t>(std::max(1, s.options.alpha_sampling_candidates_per_parent));
 	params.parent_batch_size = static_cast<size_t>(std::max(1, s.options.alpha_sampling_parent_batch_size));
 	params.rays.bbox_expand = constants::ray_box_relative_expand;

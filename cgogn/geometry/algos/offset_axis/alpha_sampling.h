@@ -61,10 +61,6 @@ inline constexpr Scalar sampling_padding = Scalar(0.1);
 struct AlphaSamplingParams
 {
 	Scalar sample_radius = Scalar(0);
-	uint32 seed = 0;
-	size_t ray_sampler_batch_size = 1;
-	Vec3 bbox_min = Vec3(0, 0, 0);
-	Vec3 bbox_max = Vec3(1, 1, 1);
 	size_t candidates_per_parent = 1;
 	size_t parent_batch_size = 1;
 	RayLevelSetParams rays;
@@ -143,8 +139,9 @@ inline void sample_active_parent_indices(const std::vector<uint32>& active_indic
 }
 
 template <typename Traits, typename NormalFn, typename ProjectionFn>
-AlphaSamplingResult sample_alpha_level_set(Traits& traits, const AlphaSamplingParams& parameters,
-										   NormalFn&& compute_normals, ProjectionFn&& project_points)
+AlphaSamplingResult sample_alpha_level_set(Traits& traits, const AlphaSamplingParams& parameters, const Vec3& bbox_min,
+										   const Vec3& bbox_max, NormalFn&& compute_normals,
+										   ProjectionFn&& project_points)
 {
 	AlphaSamplingResult result;
 	if (parameters.sample_radius <= Scalar(0) || !traits.is_ready())
@@ -158,10 +155,10 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, const AlphaSamplingPa
 	const size_t parent_batch_size = parameters.parent_batch_size;
 	const size_t max_samples = detail::alpha_sampling_max_samples;
 	const size_t seed_rays_per_round =
-		std::max<size_t>(1, parameters.ray_sampler_batch_size) * detail::alpha_sampling_warmup_iterations;
+		std::max<size_t>(1, static_cast<size_t>(parameters.rays.batch_size)) * detail::alpha_sampling_warmup_iterations;
 	const size_t initial_reserve = std::max(seed_rays_per_round, parent_batch_size) * size_t(4);
 
-	std::mt19937 generator(parameters.seed);
+	std::mt19937 generator(static_cast<uint32>(parameters.rays.seed));
 	SpatialGrid spatial_grid(grid_cell_size);
 	std::vector<uint32> active_indices;
 	std::vector<uint32> active_slot_of_sample;
@@ -201,7 +198,7 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, const AlphaSamplingPa
 
 	std::vector<Vec3> seed_points = sample_level_set_rays(
 		traits, parameters.rays, static_cast<int>(detail::alpha_sampling_warmup_iterations), &working_grid,
-		parameters.sample_radius, parameters.bbox_min, parameters.bbox_max, &result.positions);
+		parameters.sample_radius, bbox_min, bbox_max, &result.positions);
 	if (!seed_points.empty())
 	{
 		const size_t remaining_slots = max_samples - result.positions.size();
@@ -318,9 +315,6 @@ SamplingStatus sample_alpha_level_set(FIELD& field, const INPUTS& inputs, const 
 	auto traits = field.ray_traits(inputs);
 	if (!traits.is_ready())
 		return SamplingStatus::invalid_data;
-	AlphaSamplingParams box_params = params;
-	box_params.bbox_min = bbox_min;
-	box_params.bbox_max = bbox_max;
 	auto compute_normals = [&](const std::vector<Vec3>& points, std::vector<Vec3>& normals,
 							   std::vector<uint8_t>& keep) {
 		keep.assign(points.size(), uint8_t(0));
@@ -331,7 +325,7 @@ SamplingStatus sample_alpha_level_set(FIELD& field, const INPUTS& inputs, const 
 	auto project_points = [&](const std::vector<Vec3>& points, AlphaProjectionResult& projection) {
 		return field.project(points, pp, projection);
 	};
-	AlphaSamplingResult result = detail::sample_alpha_level_set(traits, box_params, compute_normals, project_points);
+	AlphaSamplingResult result = detail::sample_alpha_level_set(traits, params, bbox_min, bbox_max, compute_normals, project_points);
 	if (!result.success || result.positions.empty())
 		return SamplingStatus::failed;
 	clear(samples);
