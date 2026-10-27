@@ -302,6 +302,8 @@ typename State::StatusInfo initialize_data(State& s)
 	s.skeleton_source_sphere = get_or_add_attribute<PVertex, NMVertex>(*s.data.skeleton, "source_sphere");
 	s.skeleton_incident_tets = get_or_add_attribute<std::set<std::size_t>, NMFace>(*s.data.skeleton, "incident_tets");
 	s.skeleton_edge_degree = get_or_add_attribute<uint32, NMEdge>(*s.data.skeleton, "degree");
+	s.skeleton_face_score = get_or_add_attribute<Scalar, NMFace>(*s.data.skeleton, "udf_score");
+	s.skeleton_edge_score = get_or_add_attribute<Scalar, NMEdge>(*s.data.skeleton, "udf_score");
 	s.initialized =
 		s.input_position && s.sample_position && s.sample_normal && s.sphere_position && s.skeleton_position;
 	bind_input(s);
@@ -461,6 +463,8 @@ typename State::TopologyType& topology_for(State& s)
 	d.skeleton_source_sphere = s.skeleton_source_sphere.get();
 	d.face_incident_tets = s.skeleton_incident_tets.get();
 	d.edge_degree = s.skeleton_edge_degree.get();
+	d.face_score = s.skeleton_face_score.get();
+	d.edge_score = s.skeleton_edge_score.get();
 	s.topology = std::make_unique<TopologyType>(d);
 	return *s.topology;
 }

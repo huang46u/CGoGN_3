@@ -29,7 +29,6 @@
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
 #include <cgogn/core/types/cell_marker.h>
-#include <cgogn/geometry/algos/offset_axis/internal/quadrature_scores.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_topology_types.h>
 

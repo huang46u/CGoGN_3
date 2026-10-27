@@ -20,8 +20,8 @@
  * Contact information: cgogn@unistra.fr                                        *
  *                                                                              *
  *******************************************************************************/
-#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_QUADRATURE_SCORES_H_
-#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_QUADRATURE_SCORES_H_
+#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_TOPOLOGY_SCORES_H_
+#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_TOPOLOGY_SCORES_H_
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
@@ -35,7 +35,6 @@
 #include <algorithm>
 #include <array>
 #include <limits>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -52,7 +51,7 @@ namespace topology_detail
 {
 
 template <typename POINTS, typename NONMANIFOLD>
-struct QuadratureScores
+struct TopologyScores
 {
 	using Types = SkeletonTopologyTypes<POINTS, NONMANIFOLD>;
 	using SkeletonVertex = typename Types::SkeletonVertex;
@@ -60,18 +59,17 @@ struct QuadratureScores
 	using SkeletonFace = typename Types::SkeletonFace;
 	using Context = typename Types::Context;
 	using Tet = typename Types::Tet;
-	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
 
+	// Sets the face_score of each face of a current tet to the UDF integral over the face (adaptive Dunavant-7
+	// quadrature), divided by the face area if normalize_by_area. The other faces keep their score.
+	// Returns false if the scores cannot be evaluated.
 	template <typename ScoreEvaluator>
-	static bool compute_skeleton_face_scores(Context& p, ScoreEvaluator& evaluator,
-											 const std::unordered_set<uint32>& face_ids,
-											 std::unordered_map<uint32, Scalar>& face_scores, bool normalize_by_area)
+	static bool compute_face_scores(Context& p, ScoreEvaluator& evaluator, bool normalize_by_area)
 	{
+		const std::unordered_set<uint32> face_ids = collect_current_tet_face_ids(p);
 		if (face_ids.empty())
-		{
-			face_scores.clear();
 			return true;
-		}
+		auto& face_scores = *p.data.face_score;
 
 		struct AdaptiveTriangleTask
 		{
@@ -106,8 +104,6 @@ struct QuadratureScores
 			out.push_back({tri.face_id, ab, bc, ca, next_depth});
 		};
 
-		face_scores.clear();
-		face_scores.reserve(face_ids.size());
 		std::vector<AdaptiveTriangleTask> pending_tris;
 		pending_tris.reserve(face_ids.size() * 2);
 		foreach_cell(p.data.skeleton, [&](SkeletonFace f) -> bool {
@@ -214,13 +210,12 @@ struct QuadratureScores
 		{
 			foreach_cell(p.data.skeleton, [&](SkeletonFace f) -> bool {
 				const uint32 face_id = index_of(p.data.skeleton, f);
-				auto it_score = face_scores.find(face_id);
-				if (face_id == INVALID_INDEX || it_score == face_scores.end())
+				if (face_id == INVALID_INDEX || face_ids.find(face_id) == face_ids.end())
 					return true;
 				const std::vector<SkeletonVertex> vertices = incident_vertices(p.data.skeleton, f);
 				if (vertices.size() < 3)
 				{
-					it_score->second = Scalar(0);
+					face_scores[face_id] = Scalar(0);
 					return true;
 				}
 				const Vec3 p0 = value<Vec3>(p.data.skeleton, p.data.skeleton_position, vertices[0]);
@@ -231,7 +226,7 @@ struct QuadratureScores
 					const Vec3 p2 = value<Vec3>(p.data.skeleton, p.data.skeleton_position, vertices[i + 1]);
 					area += geometry::area(p0, p1, p2);
 				}
-				it_score->second = (area > Scalar(0)) ? (it_score->second / area) : Scalar(0);
+				face_scores[face_id] = (area > Scalar(0)) ? (face_scores[face_id] / area) : Scalar(0);
 				return true;
 			});
 		}
@@ -263,14 +258,15 @@ struct QuadratureScores
 		return tet_edge_ids;
 	}
 
+	// Sets the edge_score of each edge of a current tet to the mean UDF along the edge (3-point Gauss quadrature).
+	// The other edges keep their score. Returns false if the scores cannot be evaluated.
 	template <typename ScoreEvaluator>
-	static bool compute_skeleton_edge_scores_gauss3_normalized(Context& p, ScoreEvaluator& evaluator,
-															   const std::unordered_set<uint32>& edge_ids,
-															   std::unordered_map<uint32, Scalar>& edge_scores)
+	static bool compute_edge_scores(Context& p, ScoreEvaluator& evaluator)
 	{
-		edge_scores.clear();
+		const std::unordered_set<uint32> edge_ids = collect_current_tet_edge_ids(p);
 		if (edge_ids.empty())
 			return true;
+		auto& edge_scores = *p.data.edge_score;
 
 		static const Scalar gauss3_xi[3] = {Scalar(-0.7745966692414834), Scalar(0.0), Scalar(0.7745966692414834)};
 		static const Scalar gauss3_w_ref[3] = {Scalar(0.5555555555555556), Scalar(0.8888888888888888),
@@ -284,7 +280,6 @@ struct QuadratureScores
 			size_t sample_offset = 0;
 		};
 
-		edge_scores.reserve(edge_ids.size());
 		std::vector<EdgeBatchMeta> edge_batch;
 		edge_batch.reserve(edge_ids.size());
 		std::vector<Vec3> sample_points;
@@ -337,22 +332,7 @@ struct QuadratureScores
 		return true;
 	}
 
-	template <typename ScoreEvaluator>
-	static bool initialize_topology_fix_score_cache(Context& p, ScoreEvaluator& evaluator, TopologyFixScoreCache& cache)
-	{
-		if (cache.initialized)
-			return true;
-		const std::unordered_set<uint32> tet_face_ids = collect_current_tet_face_id_whitelist(p);
-		const std::unordered_set<uint32> tet_edge_ids = collect_current_tet_edge_ids(p);
-		if (!compute_skeleton_edge_scores_gauss3_normalized(p, evaluator, tet_edge_ids, cache.edge_scores))
-			return false;
-		if (!compute_skeleton_face_scores(p, evaluator, tet_face_ids, cache.face_scores, false))
-			return false;
-		cache.initialized = true;
-		return true;
-	}
-
-	static std::unordered_set<uint32> collect_current_tet_face_id_whitelist(Context& p)
+	static std::unordered_set<uint32> collect_current_tet_face_ids(Context& p)
 	{
 		std::unordered_set<uint32> tet_face_ids;
 		tet_face_ids.reserve(nb_cells<SkeletonFace>(p.data.skeleton));
@@ -381,4 +361,4 @@ struct QuadratureScores
 
 } // namespace cgogn
 
-#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_QUADRATURE_SCORES_H_
+#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_TOPOLOGY_SCORES_H_

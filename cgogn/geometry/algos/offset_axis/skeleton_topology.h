@@ -28,13 +28,13 @@
 #include <cgogn/geometry/algos/offset_axis/internal/dense_k5.h>
 #include <cgogn/geometry/algos/offset_axis/internal/greedy_tet_removal.h>
 #include <cgogn/geometry/algos/offset_axis/internal/non_manifold_prune.h>
-#include <cgogn/geometry/algos/offset_axis/internal/quadrature_scores.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_build.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_topology_types.h>
+#include <cgogn/geometry/algos/offset_axis/internal/topology_scores.h>
 
 #include <algorithm>
-#include <unordered_map>
+#include <limits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -127,30 +127,24 @@ public:
 		return mask;
 	}
 
-	// Read-only: UDF score of each face adjacent to a current tet, keyed by index_of(face). Same integral as the
-	// topology-fix cache (QuadratureScores::compute_skeleton_face_scores), optionally divided by the face area.
-	// The skeleton and the tet set are not modified. Returns false if the scores cannot be evaluated.
+	// For display: sets face_score to the UDF score of the topology fix (optionally divided by the face area) on
+	// the faces of the current tets and to NaN on the other faces. Returns false if the scores cannot be evaluated.
 	template <typename ScoreEvaluator>
-	bool tet_face_udf_scores(ScoreEvaluator& evaluate_scores, bool normalize_by_area,
-							 std::unordered_map<uint32, Scalar>& face_scores)
+	bool compute_face_scores(ScoreEvaluator& evaluate_scores, bool normalize_by_area)
 	{
-		face_scores.clear();
+		data_.face_score->fill(std::numeric_limits<Scalar>::quiet_NaN());
 		Context p(data_, skeleton_tets_, added_spheres_);
-		const std::unordered_set<uint32> face_ids = QuadratureScores::collect_current_tet_face_id_whitelist(p);
-		return QuadratureScores::compute_skeleton_face_scores(p, evaluate_scores, face_ids, face_scores,
-															  normalize_by_area);
+		return TopologyScores::compute_face_scores(p, evaluate_scores, normalize_by_area);
 	}
 
-	// Read-only: 3-point Gauss UDF average along each edge adjacent to a current tet, keyed by index_of(edge). Same
-	// values as the topology-fix cache (QuadratureScores::compute_skeleton_edge_scores_gauss3_normalized).
+	// For display: sets edge_score to the UDF score of the topology fix on the edges of the current tets and to NaN
+	// on the other edges. Returns false if the scores cannot be evaluated.
 	template <typename ScoreEvaluator>
-	bool tet_edge_gauss3_scores(ScoreEvaluator& evaluate_scores, std::unordered_map<uint32, Scalar>& edge_scores)
+	bool compute_edge_scores(ScoreEvaluator& evaluate_scores)
 	{
-		edge_scores.clear();
+		data_.edge_score->fill(std::numeric_limits<Scalar>::quiet_NaN());
 		Context p(data_, skeleton_tets_, added_spheres_);
-		const std::unordered_set<uint32> edge_ids = QuadratureScores::collect_current_tet_edge_ids(p);
-		return QuadratureScores::compute_skeleton_edge_scores_gauss3_normalized(p, evaluate_scores, edge_ids,
-																				edge_scores);
+		return TopologyScores::compute_edge_scores(p, evaluate_scores);
 	}
 
 	void prune_residual_sheets(ResidualPruneMode mode)
@@ -164,9 +158,8 @@ public:
 private:
 	using Tets = typename Types::Tets;
 	using Context = typename Types::Context;
-	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
 	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
-	using QuadratureScores = topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
+	using TopologyScores = topology_detail::TopologyScores<POINTS, NONMANIFOLD>;
 	using NonManifoldPrune = topology_detail::NonManifoldPrune<POINTS, NONMANIFOLD>;
 	using GreedyTetRemoval = topology_detail::GreedyTetRemoval<POINTS, NONMANIFOLD>;
 	using BoundaryTetPrune = topology_detail::BoundaryTetPrune<POINTS, NONMANIFOLD>;
@@ -185,19 +178,19 @@ private:
 			DenseK5Repair::detect_k5_and_k5_minus_1_cells(p);
 		const std::vector<IndependentDenseFiveVertexRepairSeed> independent_dense_repair_seeds =
 			DenseK5Repair::collect_independent_dense_five_vertex_repair_seeds(p, dense_five_vertex_detection);
-		TopologyFixScoreCache score_cache;
-		if (!QuadratureScores::initialize_topology_fix_score_cache(p, evaluator, score_cache))
+		// the cells that are not in a tet keep a zero score
+		data_.edge_score->fill(Scalar(0));
+		data_.face_score->fill(Scalar(0));
+		if (!TopologyScores::compute_edge_scores(p, evaluator) || !TopologyScores::compute_face_scores(p, evaluator, false))
 			return false;
 		while (!p.skeleton_tets.empty())
 		{
 			const uint32 round_start_tets = static_cast<uint32>(p.skeleton_tets.size());
 			BoundaryTetPrune::run_boundary_tet_face_deletion(p);
 			if (!p.skeleton_tets.empty())
-				GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<topology_detail::SimpleTetPolicy>(
-					p, score_cache, evaluator);
+				GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<topology_detail::SimpleTetPolicy>(p);
 			if (!p.skeleton_tets.empty())
-				GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<topology_detail::NonSimpleTetPolicy>(
-					p, score_cache, evaluator);
+				GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<topology_detail::NonSimpleTetPolicy>(p);
 			const uint32 round_end_tets = static_cast<uint32>(p.skeleton_tets.size());
 			const uint32 round_removed_tets = round_start_tets - round_end_tets;
 			if (round_removed_tets == 0)

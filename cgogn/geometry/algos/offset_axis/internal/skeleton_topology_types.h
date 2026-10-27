@@ -77,6 +77,8 @@ struct SkeletonTopologyTypes
 		SkeletonAttribute<SphereVertex>* skeleton_source_sphere = nullptr;
 		SkeletonAttribute<std::set<std::size_t>>* face_incident_tets = nullptr;
 		SkeletonAttribute<uint32>* edge_degree = nullptr;
+		SkeletonAttribute<Scalar>* face_score = nullptr;
+		SkeletonAttribute<Scalar>* edge_score = nullptr;
 	};
 
 	using ResidualPruneMode = offset_axis::ResidualPruneOption;
@@ -119,13 +121,6 @@ struct SkeletonTopologyTypes
 			return ((edge1.first == edge2.first && edge1.second == edge2.second) ||
 					(edge1.first == edge2.second && edge1.second == edge2.first));
 		}
-	};
-
-	struct TopologyFixScoreCache
-	{
-		std::unordered_map<uint32, Scalar> edge_scores;
-		std::unordered_map<uint32, Scalar> face_scores;
-		bool initialized = false;
 	};
 };
 

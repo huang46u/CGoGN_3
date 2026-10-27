@@ -29,7 +29,6 @@
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
 #include <cgogn/core/types/cell_marker.h>
-#include <cgogn/geometry/algos/offset_axis/internal/quadrature_scores.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_topology_types.h>
 
@@ -90,7 +89,7 @@ struct NonSimpleTetPolicy
 // bumping it invalidates the older queue entries, which are re-validated when popped. Each tet may lose at most two
 // faces (face budget). A step removes one first face, then the faces that became dangling (how many is set by
 // Policy::max_second_step_faces). The tets touched by the removed edges are re-queued.
-template <typename POINTS, typename NONMANIFOLD, typename Policy, typename ScoreEvaluator>
+template <typename POINTS, typename NONMANIFOLD, typename Policy>
 class LazyGreedyTetRemover
 {
 public:
@@ -99,21 +98,14 @@ public:
 	using SkeletonFace = typename Types::SkeletonFace;
 	using Context = typename Types::Context;
 	using Tet = typename Types::Tet;
-	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
 	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
-	using QuadratureScores = topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
 
-	LazyGreedyTetRemover(Context& p, TopologyFixScoreCache& score_cache, ScoreEvaluator& evaluator)
-		: p(p), score_cache(score_cache), evaluator(evaluator), edge_score_cache(score_cache.edge_scores),
-		  face_score_cache(score_cache.face_scores)
+	explicit LazyGreedyTetRemover(Context& p) : p(p)
 	{
 	}
 
 	void run()
 	{
-		if (!QuadratureScores::initialize_topology_fix_score_cache(p, evaluator, score_cache))
-			return;
-
 		face_owner_tets.reserve(nb_cells<SkeletonFace>(p.data.skeleton));
 		deleted_face_count_per_tet.reserve(p.skeleton_tets.size());
 		for (const auto& kv : p.skeleton_tets)
@@ -313,10 +305,6 @@ private:
 		std::priority_queue<TetCandidateQueueEntry, std::vector<TetCandidateQueueEntry>, TetCandidateQueueCompare>;
 
 	Context& p;
-	TopologyFixScoreCache& score_cache;
-	ScoreEvaluator& evaluator;
-	std::unordered_map<uint32, Scalar>& edge_score_cache;
-	std::unordered_map<uint32, Scalar>& face_score_cache;
 	std::unordered_map<uint32, std::vector<std::size_t>> face_owner_tets;
 	std::unordered_map<std::size_t, uint32> deleted_face_count_per_tet;
 	std::unordered_map<std::size_t, uint32> tet_versions;
@@ -324,8 +312,7 @@ private:
 
 	Scalar get_face_score(uint32 idf)
 	{
-		auto it = face_score_cache.find(idf);
-		return (it != face_score_cache.end()) ? it->second : Scalar(0);
+		return (*p.data.face_score)[idf];
 	}
 
 	bool has_face_budget(uint32 face_id)
@@ -492,8 +479,7 @@ private:
 				}
 				if (!edge_has_candidate)
 					continue;
-				const auto it_score = edge_score_cache.find(ide);
-				const Scalar score = (it_score != edge_score_cache.end()) ? it_score->second : Scalar(0);
+				const Scalar score = (*p.data.edge_score)[ide];
 				const bool better_edge = (!found) || (score > out_edge_score + edge_eps);
 				const bool tie_edge = found && (std::abs(score - out_edge_score) <= edge_eps);
 				const bool better_face_on_tie = tie_edge && (best_face_on_edge_score > out_face_score + face_eps);
@@ -645,15 +631,12 @@ struct GreedyTetRemoval
 	using SkeletonFace = typename Types::SkeletonFace;
 	using Context = typename Types::Context;
 	using Tet = typename Types::Tet;
-	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
 	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
-	using QuadratureScores = topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
 
-	template <typename Policy, typename ScoreEvaluator>
-	static void run_edge_score_tet_mode_topology_fix(Context& p, TopologyFixScoreCache& score_cache,
-															 ScoreEvaluator& evaluator)
+	template <typename Policy>
+	static void run_edge_score_tet_mode_topology_fix(Context& p)
 	{
-		LazyGreedyTetRemover<POINTS, NONMANIFOLD, Policy, ScoreEvaluator>(p, score_cache, evaluator).run();
+		LazyGreedyTetRemover<POINTS, NONMANIFOLD, Policy>(p).run();
 	}
 };
 

@@ -172,6 +172,7 @@ struct ReconstructionState
 	std::shared_ptr<SkeletonAttribute<PVertex>> skeleton_source_sphere;
 	std::shared_ptr<SkeletonAttribute<std::set<std::size_t>>> skeleton_incident_tets;
 	std::shared_ptr<SkeletonAttribute<uint32>> skeleton_edge_degree;
+	std::shared_ptr<SkeletonAttribute<Scalar>> skeleton_face_score, skeleton_edge_score;
 };
 
 } // namespace offset_axis

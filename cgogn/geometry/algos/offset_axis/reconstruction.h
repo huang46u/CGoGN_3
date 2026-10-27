@@ -222,31 +222,29 @@ public:
 	{
 		if (!s_.data.skeleton)
 			return std::nullopt;
-		std::unordered_map<uint32, Scalar> scores;
 		auto evaluator = [this](const std::vector<Vec3>& points, std::vector<Scalar>& values) {
 			return stages::evaluate_topology_scores(s_, points, values);
 		};
-		if (!skeleton_topology().tet_face_udf_scores(evaluator, normalize_by_area, scores))
+		if (!skeleton_topology().compute_face_scores(evaluator, normalize_by_area))
 			return std::nullopt;
-		return dense_scores<NMFace>(scores);
+		return dense_scores<NMFace>(*s_.skeleton_face_score);
 	}
 
 	std::optional<std::vector<Scalar>> skeleton_edge_scores_gauss3()
 	{
 		if (!s_.data.skeleton)
 			return std::nullopt;
-		std::unordered_map<uint32, Scalar> scores;
 		auto evaluator = [this](const std::vector<Vec3>& points, std::vector<Scalar>& values) {
 			return stages::evaluate_topology_scores(s_, points, values);
 		};
-		if (!skeleton_topology().tet_edge_gauss3_scores(evaluator, scores))
+		if (!skeleton_topology().compute_edge_scores(evaluator))
 			return std::nullopt;
-		return dense_scores<NMEdge>(scores);
+		return dense_scores<NMEdge>(*s_.skeleton_edge_score);
 	}
 
 private:
 	template <typename CELL>
-	std::vector<Scalar> dense_scores(const std::unordered_map<uint32, Scalar>& scores)
+	std::vector<Scalar> dense_scores(const SkeletonAttribute<Scalar>& scores)
 	{
 		NONMANIFOLD& skeleton = *s_.data.skeleton;
 		uint32 size = 0;
@@ -257,11 +255,12 @@ private:
 			return true;
 		});
 		std::vector<Scalar> values(size, std::numeric_limits<Scalar>::quiet_NaN());
-		for (const auto& kv : scores)
-		{
-			if (kv.first < size)
-				values[kv.first] = kv.second;
-		}
+		foreach_cell(skeleton, [&](CELL c) -> bool {
+			const uint32 id = index_of(skeleton, c);
+			if (id != INVALID_INDEX)
+				values[id] = scores[id];
+			return true;
+		});
 		return values;
 	}
 
