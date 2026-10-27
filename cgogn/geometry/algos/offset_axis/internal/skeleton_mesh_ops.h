@@ -45,6 +45,24 @@ namespace geometry
 namespace offset_axis
 {
 
+// Number of faces incident to each edge of the skeleton.
+template <typename NONMANIFOLD>
+void compute_edge_degree(const NONMANIFOLD& skeleton,
+						 typename mesh_traits<NONMANIFOLD>::template Attribute<uint32>* edge_degree)
+{
+	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
+	parallel_foreach_cell(skeleton, [&](SkeletonEdge e) {
+		auto in_face = incident_faces(skeleton, e);
+		const uint32 ide = index_of(skeleton, e);
+		const uint32 deg = static_cast<uint32>(in_face.size());
+
+		if (ide != INVALID_INDEX && edge_degree)
+			(*edge_degree)[ide] = deg;
+
+		return true;
+	});
+}
+
 namespace topology_detail
 {
 
@@ -88,16 +106,7 @@ struct SkeletonMeshOps
 	}
 	static void compute_edge_degree(Context& p)
 	{
-		parallel_foreach_cell(*p.data.skeleton, [&](SkeletonEdge e) {
-			auto in_face = incident_faces(*p.data.skeleton, e);
-			const uint32 ide = index_of(*p.data.skeleton, e);
-			const uint32 deg = static_cast<uint32>(in_face.size());
-
-			if (ide != INVALID_INDEX && p.data.edge_degree)
-				(*p.data.edge_degree)[ide] = deg;
-
-			return true;
-		});
+		offset_axis::compute_edge_degree(*p.data.skeleton, p.data.edge_degree.get());
 	}
 	static uint32 remove_orphan_edges_from_removed_face_edges(Context& p, const std::vector<SkeletonEdge>& face_edges)
 	{

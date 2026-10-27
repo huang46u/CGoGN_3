@@ -97,9 +97,12 @@ public:
 		if (!valid_data())
 			return Status::invalid_data;
 		metrics_ = Metrics{};
-		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
-		if (!SkeletonBuild::compute_skeleton(p))
-			return Status::invalid_data;
+		const auto& spheres = data_.spheres_optimizer->data();
+		build_skeleton_from_spheres(spheres.spheres, spheres.sphere_position, spheres.sphere_radius,
+									spheres.sphere_neighbors, *data_.skeleton, data_.skeleton_position.get(),
+									data_.skeleton_radius.get(), data_.skeleton_source_sphere.get(),
+									data_.sphere_skeleton_vertex.get(), data_.face_incident_tets.get(),
+									data_.edge_degree.get(), skeleton_tets_);
 		return Status::success;
 	}
 
@@ -192,7 +195,6 @@ private:
 	using Context = typename Types::Context;
 	using TopologyFixScoreCache = typename Types::TopologyFixScoreCache;
 	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
-	using SkeletonBuild = topology_detail::SkeletonBuild<POINTS, NONMANIFOLD>;
 	using QuadratureScores = topology_detail::QuadratureScores<POINTS, NONMANIFOLD>;
 	using NonManifoldPrune = topology_detail::NonManifoldPrune<POINTS, NONMANIFOLD>;
 	using GreedyTetRemoval = topology_detail::GreedyTetRemoval<POINTS, NONMANIFOLD>;
