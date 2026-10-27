@@ -7,7 +7,7 @@
       "skeleton_faces": 3203,
       "skeleton_vertices": 1677
     },
-    "sha256": "a351266aa53858c5a8db8c15eac9040c0fb36a65e1e28f49066f412b0ecc9eab"
+    "sha256": "4411d5b271c5e4957ff059fcbe777544de0ffb4d8195591d426969448e906cc1"
   },
   "mf_abc_066_profile": {
     "counts": {
@@ -17,7 +17,7 @@
       "skeleton_faces": 3203,
       "skeleton_vertices": 1677
     },
-    "sha256": "a351266aa53858c5a8db8c15eac9040c0fb36a65e1e28f49066f412b0ecc9eab"
+    "sha256": "4411d5b271c5e4957ff059fcbe777544de0ffb4d8195591d426969448e906cc1"
   },
   "mf_organic_bug": {
     "counts": {
@@ -31,23 +31,23 @@
   },
   "neural_udf_df_48_2": {
     "counts": {
-      "final_spheres": 5227,
+      "final_spheres": 5226,
       "sample_points": 421528,
-      "skeleton_edges": 15462,
-      "skeleton_faces": 10226,
-      "skeleton_vertices": 5227
+      "skeleton_edges": 15458,
+      "skeleton_faces": 10223,
+      "skeleton_vertices": 5226
     },
-    "sha256": "d3b21df208d8ac4eb7b0601345c258491c78899e43fbb42a78f317379c72d947"
+    "sha256": "ea6a25a5308f810cc120ae0a2d54918b48fd5f7ebeb8d3e8e3330526f0d5056a"
   },
   "point_cloud_df_48_2": {
     "counts": {
-      "final_spheres": 7860,
+      "final_spheres": 7859,
       "sample_points": 567238,
-      "skeleton_edges": 22679,
-      "skeleton_faces": 14541,
-      "skeleton_vertices": 7860
+      "skeleton_edges": 22677,
+      "skeleton_faces": 14542,
+      "skeleton_vertices": 7859
     },
-    "sha256": "aeb92dcbbead323bcb0f8ee750aceb6a6c7aa1abc3200a8749fdf0512ae596b9"
+    "sha256": "be7330be740c82a6aac1ec9abec9636ca6b15648511d502ef16315bb2afea03a"
   },
   "surface_horse": {
     "counts": {

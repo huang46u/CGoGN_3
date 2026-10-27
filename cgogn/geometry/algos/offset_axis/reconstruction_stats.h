@@ -40,8 +40,8 @@ struct ReconstructionTiming
 	float64 sampling_ms = 0.0;
 	float64 sample_filtering_ms = 0.0;
 	float64 kdtree_and_normals_ms = 0.0;
-	float64 fitting_primitives_ms = 0.0;
 	float64 initial_medial_axis_ms = 0.0;
+	float64 fitting_primitives_ms = 0.0;
 	float64 sphere_initialization_ms = 0.0;
 	float64 sphere_init_cover_ms = 0.0;
 	float64 sphere_init_owner_ms = 0.0;

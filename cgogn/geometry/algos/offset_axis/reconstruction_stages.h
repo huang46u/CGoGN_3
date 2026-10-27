@@ -631,7 +631,7 @@ typename State::StatusInfo compute_fitting_primitives(State& s)
 	using PVertex = typename State::PVertex;
 	using Status = typename State::Status;
 
-	// samples and their kd-tree come from sample_alpha_level_set / apply_sampling_filtering
+	// samples, normals and kd-tree are final after compute_initial_medial_axis (medial flip prune)
 	OFFSET_AXIS_PRECONDITION(s.data.samples && nb_cells<PVertex>(*s.data.samples) > 0 && s.sample_kdtree, Status::invalid_data);
 	compute_samples_area(*s.data.samples, *s.sample_position, *s.sample_normal, *s.sample_area, *s.sample_knn,
 						 *s.sample_kdtree, s.sample_vertices, s.options.knn_k, Scalar(s.options.alpha));
@@ -776,10 +776,11 @@ typename State::StatusInfo compute_fitting_data(State& s)
 	typename State::StatusInfo status = build_kdtree_and_normals(s);
 	if (status != Status::success)
 		return status;
-	status = compute_fitting_primitives(s);
+	// the medial flip prune changes normals and removes samples, so it runs before the primitives that use them
+	status = compute_initial_medial_axis(s);
 	if (status != Status::success)
 		return status;
-	return compute_initial_medial_axis(s);
+	return compute_fitting_primitives(s);
 }
 
 // One optimizer iteration; the caller passes lambda explicitly so that a UI thread can feed a live value.
@@ -839,10 +840,10 @@ typename State::Result reconstruct(State& s, const typename State::IterationCall
 	if ((r.status = run_stage(r.timing.kdtree_and_normals_ms, [&] { return build_kdtree_and_normals(s); })) !=
 		Status::success)
 		return r;
-	if ((r.status = run_stage(r.timing.fitting_primitives_ms, [&] { return compute_fitting_primitives(s); })) !=
+	if ((r.status = run_stage(r.timing.initial_medial_axis_ms, [&] { return compute_initial_medial_axis(s); })) !=
 		Status::success)
 		return r;
-	if ((r.status = run_stage(r.timing.initial_medial_axis_ms, [&] { return compute_initial_medial_axis(s); })) !=
+	if ((r.status = run_stage(r.timing.fitting_primitives_ms, [&] { return compute_fitting_primitives(s); })) !=
 		Status::success)
 		return r;
 	if ((r.status = run_stage(r.timing.sphere_initialization_ms, [&] { return initialize_spheres(s); })) !=
