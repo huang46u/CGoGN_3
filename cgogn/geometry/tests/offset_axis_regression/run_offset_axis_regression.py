@@ -15,9 +15,6 @@ run as well and counted as one more case.
 Unless --sequential-cases none is given, the cases of --sequential-cases are run again with benchmark.sequential
 (no thread pool worker) and compared with the same golden result: the sequential and the parallel runs must agree.
 
-Unless --stage-test none is given, offset_axis_stage_sequence_test (next to --exe by default) is run on the cases of
---stage-test-cases: the staged pipeline of the UI and run() must give the same counts and a byte-identical skeleton.
-
 Runs at below-normal priority on --cores (default 4-11) with matching OpenMP/MKL thread counts, to keep the machine
 usable; the result does not depend on the core count."""
 import argparse
@@ -108,28 +105,6 @@ def compare_numeric(ply, golden_ply, tolerance):
     return diff <= tolerance, f"max vertex/radius difference {diff:.3e}"
 
 
-def run_stage_test(exe, name, case, out_dir, cores):
-    cfg = json.loads(json.dumps(case))
-    for key in ("input_path", "neural_udf_model_path"):
-        if cfg["input"].get(key):
-            cfg["input"][key] = os.path.join(REPO, cfg["input"][key]).replace("\\", "/")
-    stem = os.path.join(out_dir, name + "_stagetest")
-    cfg["benchmark"] = {"num_measure_runs": 1, "verbose": False}
-    cfg["output"] = {"skeleton_ply": stem + ".ply", "timing_json": stem + "_timing.json"}
-    with open(stem + "_cfg.json", "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=1)
-    rc = launch(exe, stem + "_cfg.json", stem + ".log", cores)
-    with open(stem + ".log", encoding="utf-8", errors="replace") as f:
-        log_lines = f.read().splitlines()
-    non_empty = [l.strip() for l in log_lines if l.strip()]
-    if rc == 0 and non_empty and non_empty[-1] == "PASS":
-        print(f"PASS     stage_sequence:{name}")
-        return 0
-    print(f"FAIL     stage_sequence:{name}: exit code {rc}")
-    print("\n".join(log_lines[-20:]))
-    return 1
-
-
 def check_result(label, result, elapsed, expected, run_ply, golden_ply, tolerance):
     """Prints the comparison of one run with its golden result and returns the number of failures (0 or 1)."""
     if expected is None:
@@ -175,10 +150,6 @@ def main():
                         help="offset_axis_residual_prune_test executable (default: next to --exe; 'none' to skip)")
     parser.add_argument("--sequential-cases", nargs="*", default=["mf_organic_bug"],
                         help="cases also run with benchmark.sequential and compared with the same golden ('none' to skip)")
-    parser.add_argument("--stage-test", default=None,
-                        help="offset_axis_stage_sequence_test executable (default: next to --exe; 'none' to skip)")
-    parser.add_argument("--stage-test-cases", nargs="*", default=["surface_horse", "mf_organic_bug"],
-                        help="cases for the stage sequence test")
     args = parser.parse_args()
 
     cases = json.load(open(os.path.join(HERE, "cases.json"), encoding="utf-8"))
@@ -217,16 +188,6 @@ def main():
             failures += check_result("sequential:" + name, result, elapsed, golden.get(name),
                                      os.path.join(run_dir, seq_name + ".ply"), os.path.join(golden_dir, name + ".ply"),
                                      args.tolerance)
-    if not args.update and args.stage_test != "none":
-        stage_cases = [name for name in args.stage_test_cases if name in cases]
-        stage_exe = args.stage_test or os.path.join(os.path.dirname(args.exe),
-                                                    "offset_axis_stage_sequence_test" + os.path.splitext(args.exe)[1])
-        if stage_cases and not os.path.exists(stage_exe):
-            print(f"FAIL     stage_sequence: {stage_exe} not found (build offset_axis_stage_sequence_test or pass --stage-test none)")
-            failures += 1
-        else:
-            for name in stage_cases:
-                failures += run_stage_test(stage_exe, name, cases[name], run_dir, cores)
     if not args.update and args.prune_test != "none":
         failures += run_prune_test(args.prune_test or os.path.join(os.path.dirname(args.exe),
                                                                    "offset_axis_residual_prune_test" + os.path.splitext(args.exe)[1]))

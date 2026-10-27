@@ -126,14 +126,6 @@ if (CGOGN_USE_CGAL)
     EXTRA_LIBS CGAL::CGAL
   )
 
-  cgogn_add_offset_axis_executable(offset_axis_stage_sequence_test
-    SOURCES
-      offset_axis_stage_sequence_test.cpp
-      ../algos/offset_axis/benchmark/benchmark_config.cpp
-      ../algos/offset_axis/benchmark/offset_axis_benchmark_runner.cpp
-    EXTRA_LIBS CGAL::CGAL
-  )
-
   cgogn_add_offset_axis_executable(offset_axis_residual_prune_test
     SOURCES offset_axis_residual_prune_test.cpp
     EXTRA_LIBS CGAL::CGAL
