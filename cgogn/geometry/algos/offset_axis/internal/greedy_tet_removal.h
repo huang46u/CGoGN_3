@@ -28,6 +28,7 @@
 #include <cgogn/core/functions/traversals/edge.h>
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
+#include <cgogn/core/types/cell_marker.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
 
 #include <algorithm>
@@ -184,8 +185,7 @@ public:
 
 			std::vector<FaceChoice> created_deg1_faces;
 			created_deg1_faces.reserve(16);
-			std::unordered_set<uint32> seen_created_ids;
-			seen_created_ids.reserve(32);
+			CellMarkerStore<NONMANIFOLD, SkeletonFace> seen_created_faces(skeleton);
 			for (std::size_t tet_id : first_removed_tets)
 			{
 				for (SkeletonFace f : tets.tet(tet_id).faces)
@@ -193,8 +193,9 @@ public:
 					const uint32 idf = index_of(skeleton, f);
 					if (idf == best.first_face_id)
 						continue;
-					if (!seen_created_ids.insert(idf).second)
+					if (seen_created_faces.is_marked(f))
 						continue;
+					seen_created_faces.mark(f);
 					if (!has_face_budget(idf))
 						continue;
 					if (!face_has_degree1_edge(f))
@@ -359,8 +360,7 @@ private:
 	bool pick_tet_best_edge_and_face(std::size_t tet_id, uint32& out_edge_id, Scalar& out_edge_score,
 									 SkeletonFace& out_face, uint32& out_face_id, Scalar& out_face_score)
 	{
-		std::unordered_set<uint32> seen_edges;
-		seen_edges.reserve(8);
+		CellMarkerStore<NONMANIFOLD, SkeletonEdge> seen_edges(skeleton);
 		bool found = false;
 		const Scalar edge_eps = Scalar(1e-12);
 		const Scalar face_eps = Scalar(1e-12);
@@ -368,9 +368,10 @@ private:
 		{
 			for (SkeletonEdge e : incident_edges(skeleton, f))
 			{
-				const uint32 ide = index_of(skeleton, e);
-				if (!seen_edges.insert(ide).second)
+				if (seen_edges.is_marked(e))
 					continue;
+				seen_edges.mark(e);
+				const uint32 ide = index_of(skeleton, e);
 				SkeletonFace best_face_on_edge;
 				uint32 best_face_on_edge_id = INVALID_INDEX;
 				Scalar best_face_on_edge_score = Scalar(0);

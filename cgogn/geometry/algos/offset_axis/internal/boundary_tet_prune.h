@@ -28,6 +28,7 @@
 #include <cgogn/core/functions/traversals/edge.h>
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
+#include <cgogn/core/types/cell_marker.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
 
 #include <array>
@@ -88,15 +89,15 @@ bool choose_longest_boundary_edge(const NONMANIFOLD& skeleton,
 	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
 	using SkeletonFace = typename mesh_traits<NONMANIFOLD>::Face;
 
-	std::unordered_set<uint32> seen_edges;
-	seen_edges.reserve(8);
+	CellMarkerStore<NONMANIFOLD, SkeletonEdge> seen_edges(skeleton);
 
 	for (SkeletonFace f : tet.faces)
 	{
 		for (SkeletonEdge e : incident_edges(skeleton, f))
 		{
-			if (!seen_edges.insert(index_of(skeleton, e)).second)
+			if (seen_edges.is_marked(e))
 				continue;
+			seen_edges.mark(e);
 
 			const std::vector<SkeletonFace> in_faces = incident_faces(skeleton, e);
 			if (in_faces.size() != 2)

@@ -30,6 +30,7 @@
 #include <cgogn/core/functions/traversals/edge.h>
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
+#include <cgogn/core/types/cell_marker.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_tets.h>
 #include <cgogn/geometry/algos/offset_axis/spheres_optimizer.h>
@@ -269,12 +270,12 @@ std::vector<K5Region<POINTS>> find_k5_regions(
 
 template <typename NONMANIFOLD>
 bool face_is_inside_vertex_set(const NONMANIFOLD& skeleton, typename mesh_traits<NONMANIFOLD>::Face face,
-							   const std::unordered_set<uint32>& vertex_ids)
+							   const CellMarkerStore<NONMANIFOLD, typename mesh_traits<NONMANIFOLD>::Vertex>& vertices)
 {
 	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
 
 	for (SkeletonVertex vertex : incident_vertices(skeleton, face))
-		if (vertex_ids.find(index_of(skeleton, vertex)) == vertex_ids.end())
+		if (!vertices.is_marked(vertex))
 			return false;
 	return true;
 }
@@ -302,8 +303,7 @@ bool repair_k5_region(
 	std::array<Vec3, 5> positions;
 	Scalar average_radius = Scalar(0);
 	Vec3 centroid = Vec3::Zero();
-	std::unordered_set<uint32> region_vertex_ids;
-	region_vertex_ids.reserve(8);
+	CellMarkerStore<NONMANIFOLD, SkeletonVertex> region_vertices(skeleton);
 	for (uint32 i = 0; i < 5; ++i)
 	{
 		if (!is_live_sphere_vertex(optimizer_data.spheres, seed.spheres[i], sphere_ids[i]))
@@ -316,10 +316,11 @@ bool repair_k5_region(
 		positions[i] = (*optimizer_data.sphere_position)[sphere_ids[i]];
 		centroid += positions[i];
 		average_radius += (*optimizer_data.sphere_radius)[sphere_ids[i]];
-		region_vertex_ids.insert(vertex_ids[i]);
+		// the 5 vertices are distinct
+		if (region_vertices.is_marked(vertices[i]))
+			return false;
+		region_vertices.mark(vertices[i]);
 	}
-	if (region_vertex_ids.size() != 5)
-		return false;
 	centroid /= Scalar(5);
 	average_radius /= Scalar(5);
 	if (!centroid.allFinite() || !std::isfinite(static_cast<double>(average_radius)) || average_radius <= Scalar(0))
@@ -409,7 +410,7 @@ bool repair_k5_region(
 	std::unordered_set<uint32> internal_face_ids;
 	internal_face_ids.reserve(16);
 	foreach_cell(skeleton, [&](SkeletonFace face) -> bool {
-		if (face_is_inside_vertex_set(skeleton, face, region_vertex_ids))
+		if (face_is_inside_vertex_set(skeleton, face, region_vertices))
 			internal_face_ids.insert(index_of(skeleton, face));
 		return true;
 	});
@@ -527,8 +528,7 @@ void repair_k5_regions(
 	for (const auto& seed : seeds)
 	{
 		bool all_vertices_live = true;
-		std::unordered_set<uint32> unique_skeleton_vertex_ids;
-		unique_skeleton_vertex_ids.reserve(8);
+		CellMarkerStore<NONMANIFOLD, SkeletonVertex> seed_vertices(skeleton);
 		for (const SphereVertex& sphere : seed.spheres)
 		{
 			uint32 sphere_id = INVALID_INDEX;
@@ -540,14 +540,15 @@ void repair_k5_regions(
 			const SkeletonVertex vertex = (*sphere_skeleton_vertex)[sphere_id];
 			uint32 vertex_id = INVALID_INDEX;
 			if (!is_live_skeleton_vertex(skeleton, vertex, vertex_id) ||
-				value<SphereVertex>(skeleton, skeleton_source_sphere, vertex) != sphere)
+				value<SphereVertex>(skeleton, skeleton_source_sphere, vertex) != sphere ||
+				seed_vertices.is_marked(vertex))
 			{
 				all_vertices_live = false;
 				break;
 			}
-			unique_skeleton_vertex_ids.insert(vertex_id);
+			seed_vertices.mark(vertex);
 		}
-		if (all_vertices_live && unique_skeleton_vertex_ids.size() == 5)
+		if (all_vertices_live)
 			live_seeds.push_back(seed);
 	}
 

@@ -28,6 +28,7 @@
 #include <cgogn/core/functions/traversals/edge.h>
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
+#include <cgogn/core/types/cell_marker.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
 
@@ -170,14 +171,14 @@ void prune_residual_sheets(
 
 	const size_t forced_delete_max_face_count = 2;
 	auto sheet_has_vertex_connected_to_isolated_edge = [&](const std::vector<uint32>& face_ids) -> bool {
-		std::unordered_set<uint32> visited_vertex_ids;
-		visited_vertex_ids.reserve(face_ids.size() * 3);
+		CellMarkerStore<NONMANIFOLD, SkeletonVertex> visited_vertices(skeleton);
 		for (uint32 face_id : face_ids)
 		{
 			for (SkeletonVertex v : incident_vertices(skeleton, of_index<SkeletonFace>(skeleton, face_id)))
 			{
-				if (!visited_vertex_ids.insert(index_of(skeleton, v)).second)
+				if (visited_vertices.is_marked(v))
 					continue;
+				visited_vertices.mark(v);
 				for (SkeletonEdge e : incident_edges(skeleton, v))
 					if (incident_faces(skeleton, e).empty())
 						return true;
