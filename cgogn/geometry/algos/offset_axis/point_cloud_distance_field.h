@@ -76,8 +76,8 @@ public:
 
 	FieldPrepareResult sampling_box(const PrepareInputs<SURFACE, POINTS>& inputs, Vec3& bbox_min, Vec3& bbox_max)
 	{
-		if (inputs.input_points && nb_cells<PVertex>(*inputs.input_points) > 0)
-			std::tie(bbox_min, bbox_max) = geometry::bounding_box(*inputs.input_position);
+		// prepare succeeded: the point cloud is not empty
+		std::tie(bbox_min, bbox_max) = geometry::bounding_box(*inputs.input_position);
 		return FieldPrepareResult::ok;
 	}
 

@@ -91,8 +91,7 @@ protected:
 	{
 		detail::parallel_for_index(points.size(), [&](std::size_t i) {
 			AlphaProjectionInfo info;
-			const bool query_ok = query(points[i], info);
-			if (!query_ok || !info.valid || !points[i].allFinite() || !info.normal.allFinite())
+			if (!query(points[i], info))
 				return;
 			normals[i] = unit_normal_or_z(info.normal);
 			keep[i] = uint8_t(1);

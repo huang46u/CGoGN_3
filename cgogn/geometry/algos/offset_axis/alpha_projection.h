@@ -73,8 +73,6 @@ bool project_points_to_alpha(const std::vector<Vec3>& points, const AlphaProject
 	result.projected_points.assign(nb_points, Vec3(0, 0, 0));
 	result.normals.assign(nb_points, Vec3(0, 0, 1));
 	result.keep_mask.assign(nb_points, uint8_t(0));
-	if (nb_points == 0)
-		return true;
 
 	detail::parallel_for_index(nb_points, [&](std::size_t i) {
 		Vec3 x = points[i].cwiseMax(parameters.bbox_min).cwiseMin(parameters.bbox_max);
@@ -82,7 +80,8 @@ bool project_points_to_alpha(const std::vector<Vec3>& points, const AlphaProject
 		bool valid = false;
 		for (int iter = 0; iter < parameters.max_iterations; ++iter)
 		{
-			if (!query(x, info) || !info.valid)
+			// a successful query has a finite unit normal
+			if (!query(x, info))
 			{
 				valid = false;
 				break;
@@ -91,16 +90,11 @@ bool project_points_to_alpha(const std::vector<Vec3>& points, const AlphaProject
 			const Scalar residual = info.distance - parameters.alpha;
 			if (std::abs(residual) <= parameters.tolerance)
 				break;
-			if (info.normal.squaredNorm() < Scalar(1e-12) || !info.normal.allFinite())
-			{
-				valid = false;
-				break;
-			}
 			x -= residual * info.normal;
 			x = x.cwiseMax(parameters.bbox_min).cwiseMin(parameters.bbox_max);
 		}
 
-		if (!valid || !query(x, info) || !info.valid)
+		if (!valid || !query(x, info))
 			return;
 
 		const Scalar residual = std::abs(info.distance - parameters.alpha);

@@ -138,8 +138,6 @@ void InputGeometry<SURFACE, POINTS>::build_input_kdtree()
 {
 	if (input_kdtree_)
 		return;
-	input_kdtree_.reset();
-	input_vertices_.clear();
 	if (!data_.input_points || !input_position_)
 		return;
 	std::vector<Vec3> positions;
@@ -158,10 +156,6 @@ void InputGeometry<SURFACE, POINTS>::build_surface_bvh()
 {
 	if (surface_bvh_)
 		return;
-	surface_bvh_.reset();
-	surface_faces_.clear();
-	surface_vertices_.clear();
-	surface_positions_.clear();
 	if (!data_.surface)
 		return;
 	auto position = get_attribute<Vec3, SVertex>(*data_.surface, "position");
@@ -194,14 +188,12 @@ void InputGeometry<SURFACE, POINTS>::build_surface_bvh()
 template <typename SURFACE, typename POINTS>
 bool InputGeometry<SURFACE, POINTS>::query_surface_projection_info(const Vec3& query, AlphaProjectionInfo& info)
 {
+	// the bvh is built (field.sampling_box succeeded)
 	info = AlphaProjectionInfo{};
-	if (!data_.surface || !surface_bvh_ || !surface_vertex_normal_)
-		return false;
 	uint32 primitive;
-	if (!query_surface_closest_point(*surface_bvh_, query, primitive, info.closest_point, info.distance))
-		return false;
+	query_surface_closest_point(*surface_bvh_, query, primitive, info.closest_point, info.distance);
 	info.normal = query - info.closest_point;
-	if (info.normal.squaredNorm() < Scalar(1e-12) && primitive < surface_faces_.size())
+	if (info.normal.squaredNorm() < Scalar(1e-12))
 		info.normal = geometry::normal(*data_.surface, surface_faces_[primitive], surface_vertex_normal_.get());
 	info.normal = unit_normal_or_z(info.normal);
 	info.valid =
@@ -212,16 +204,11 @@ bool InputGeometry<SURFACE, POINTS>::query_surface_projection_info(const Vec3& q
 template <typename SURFACE, typename POINTS>
 bool InputGeometry<SURFACE, POINTS>::query_point_cloud_projection_info(const Vec3& query, AlphaProjectionInfo& info)
 {
+	// the kd-tree is built (field.sampling_box succeeded)
 	info = AlphaProjectionInfo{};
-	if (!input_kdtree_ || !data_.input_points || input_vertices_.empty())
-		return false;
 	uint32 point_index;
-	if (!query_point_cloud_nearest_point(*input_kdtree_, query, point_index, info.distance) ||
-		point_index >= input_vertices_.size())
-		return false;
+	query_point_cloud_nearest_point(*input_kdtree_, query, point_index, info.distance);
 	const uint32 vertex_index = index_of(*data_.input_points, input_vertices_[point_index]);
-	if (vertex_index == INVALID_INDEX)
-		return false;
 	info.closest_point = (*input_position_)[vertex_index];
 	info.normal = query - info.closest_point;
 	if (info.normal.squaredNorm() < Scalar(1e-12))
