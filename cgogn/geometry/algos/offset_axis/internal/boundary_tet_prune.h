@@ -28,9 +28,7 @@
 #include <cgogn/core/functions/traversals/edge.h>
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
-#include <cgogn/core/types/cell_marker.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_topology_types.h>
 
 #include <array>
 #include <cstddef>
@@ -49,148 +47,132 @@ namespace offset_axis
 namespace topology_detail
 {
 
-template <typename POINTS, typename NONMANIFOLD>
-struct BoundaryTetPrune
+template <typename NONMANIFOLD>
+struct BoundaryEdgeChoice
 {
-	using Types = SkeletonTopologyTypes<POINTS, NONMANIFOLD>;
-	using SkeletonVertex = typename Types::SkeletonVertex;
-	using SkeletonEdge = typename Types::SkeletonEdge;
-	using SkeletonFace = typename Types::SkeletonFace;
-	using Context = typename Types::Context;
-	using Tet = typename Types::Tet;
-	using MeshOps = SkeletonMeshOps<POINTS, NONMANIFOLD>;
+	typename mesh_traits<NONMANIFOLD>::Edge edge;
+	typename mesh_traits<NONMANIFOLD>::Face f0;
+	typename mesh_traits<NONMANIFOLD>::Face f1;
+	Scalar length = Scalar(-1);
+};
 
-	struct BoundaryEdgeChoice
+// A tet is a boundary tet when one of its faces has at least two degree-2 edges.
+template <typename NONMANIFOLD>
+bool is_boundary_tet(const NONMANIFOLD& skeleton, const typename SkeletonTets<NONMANIFOLD>::Tet& tet)
+{
+	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
+	using SkeletonFace = typename mesh_traits<NONMANIFOLD>::Face;
+
+	for (SkeletonFace f : tet.faces)
 	{
-		SkeletonEdge edge;
+		uint32 deg2_edge_count = 0;
+		for (SkeletonEdge e : incident_edges(skeleton, f))
+		{
+			if (incident_faces(skeleton, e).size() == 2)
+				++deg2_edge_count;
+		}
+		if (deg2_edge_count >= 2)
+			return true;
+	}
+	return false;
+}
+
+// Longest degree-2 edge among the faces of the tet. Returns false when there is none.
+template <typename NONMANIFOLD>
+bool choose_longest_boundary_edge(const NONMANIFOLD& skeleton,
+								  const typename mesh_traits<NONMANIFOLD>::template Attribute<Vec3>* skeleton_position,
+								  const typename SkeletonTets<NONMANIFOLD>::Tet& tet,
+								  BoundaryEdgeChoice<NONMANIFOLD>& best_choice)
+{
+	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
+	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
+	using SkeletonFace = typename mesh_traits<NONMANIFOLD>::Face;
+
+	std::unordered_set<uint32> seen_edges;
+	seen_edges.reserve(8);
+
+	for (SkeletonFace f : tet.faces)
+	{
+		for (SkeletonEdge e : incident_edges(skeleton, f))
+		{
+			if (!seen_edges.insert(index_of(skeleton, e)).second)
+				continue;
+
+			const std::vector<SkeletonFace> in_faces = incident_faces(skeleton, e);
+			if (in_faces.size() != 2)
+				continue;
+			const std::vector<SkeletonVertex> edge_vertices = incident_vertices(skeleton, e);
+			const Vec3 p0 = value<Vec3>(skeleton, skeleton_position, edge_vertices[0]);
+			const Vec3 p1 = value<Vec3>(skeleton, skeleton_position, edge_vertices[1]);
+			const Scalar edge_len = (p1 - p0).norm();
+			if (edge_len > best_choice.length)
+			{
+				best_choice.edge = e;
+				best_choice.f0 = in_faces[0];
+				best_choice.f1 = in_faces[1];
+				best_choice.length = edge_len;
+			}
+		}
+	}
+
+	return best_choice.length >= Scalar(0);
+}
+
+// Read-only: collects the faces of every current boundary tet and the longest degree-2 edge of each such tet.
+template <typename NONMANIFOLD>
+void boundary_tet_mask(const NONMANIFOLD& skeleton, const SkeletonTets<NONMANIFOLD>& tets,
+					   const typename mesh_traits<NONMANIFOLD>::template Attribute<Vec3>* skeleton_position,
+					   std::unordered_set<uint32>& face_ids, std::unordered_set<uint32>& edge_ids)
+{
+	for (const auto& [tet_id, tet] : tets)
+	{
+		if (!is_boundary_tet(skeleton, tet))
+			continue;
+		for (uint32 i = 0; i < 4; ++i)
+			face_ids.insert(index_of(skeleton, tet.faces[i]));
+		BoundaryEdgeChoice<NONMANIFOLD> best_choice;
+		if (choose_longest_boundary_edge(skeleton, skeleton_position, tet, best_choice))
+			edge_ids.insert(index_of(skeleton, best_choice.edge));
+	}
+}
+
+// Step a of the topology fix loop: removes the two faces of the longest degree-2 edge of each boundary tet, and the
+// tet. The boundary tets are found before any removal.
+template <typename POINTS, typename NONMANIFOLD>
+void remove_boundary_tets(
+	NONMANIFOLD& skeleton, SkeletonTets<NONMANIFOLD>& tets,
+	const typename mesh_traits<NONMANIFOLD>::template Attribute<Vec3>* skeleton_position,
+	SpheresOptimizer<POINTS>& spheres_optimizer,
+	typename mesh_traits<NONMANIFOLD>::template Attribute<typename mesh_traits<POINTS>::Vertex>* skeleton_source_sphere,
+	typename mesh_traits<POINTS>::template Attribute<typename mesh_traits<NONMANIFOLD>::Vertex>* sphere_skeleton_vertex)
+{
+	using SkeletonFace = typename mesh_traits<NONMANIFOLD>::Face;
+
+	struct BoundaryTetCandidate
+	{
+		std::size_t tet_id;
 		SkeletonFace f0;
 		SkeletonFace f1;
-		Scalar length = Scalar(-1);
 	};
 
-	// A tet is a boundary tet when one of its faces has at least two degree-2 edges.
-	static bool is_boundary_tet(Context& p, const Tet& tet)
+	std::vector<BoundaryTetCandidate> candidates;
+	candidates.reserve(tets.size());
+	for (const auto& [tet_id, tet] : tets)
 	{
-		for (uint32 i = 0; i < 4; ++i)
-		{
-			const SkeletonFace f = tet.faces[i];
-			uint32 deg2_edge_count = 0;
-			for (SkeletonEdge e : incident_edges(p.data.skeleton, f))
-			{
-				if (incident_faces(p.data.skeleton, e).size() == 2)
-					++deg2_edge_count;
-			}
-			if (deg2_edge_count >= 2)
-				return true;
-		}
-		return false;
+		if (!is_boundary_tet(skeleton, tet))
+			continue;
+		BoundaryEdgeChoice<NONMANIFOLD> best_choice;
+		if (choose_longest_boundary_edge(skeleton, skeleton_position, tet, best_choice))
+			candidates.push_back({tet_id, best_choice.f0, best_choice.f1});
 	}
 
-	// Longest degree-2 edge among the faces of the tet. Returns false when there is none.
-	static bool choose_longest_boundary_edge(Context& p, const Tet& tet, BoundaryEdgeChoice& best_choice)
+	for (const BoundaryTetCandidate& cand : candidates)
 	{
-		std::unordered_set<uint32> seen_edges;
-		seen_edges.reserve(8);
-
-		for (uint32 i = 0; i < 4; ++i)
-		{
-			const SkeletonFace f = tet.faces[i];
-			for (SkeletonEdge e : incident_edges(p.data.skeleton, f))
-			{
-				const uint32 ide = index_of(p.data.skeleton, e);
-				if (!seen_edges.insert(ide).second)
-					continue;
-
-				const auto in_faces = incident_faces(p.data.skeleton, e);
-				if (in_faces.size() != 2)
-					continue;
-				const SkeletonFace f0 = in_faces[0];
-				const SkeletonFace f1 = in_faces[1];
-				const uint32 idf0 = index_of(p.data.skeleton, f0);
-				const uint32 idf1 = index_of(p.data.skeleton, f1);
-				const std::vector<SkeletonVertex> edge_vertices = incident_vertices(p.data.skeleton, e);
-				if (edge_vertices.size() != 2)
-					continue;
-				const Vec3 p0 = value<Vec3>(p.data.skeleton, p.data.skeleton_position, edge_vertices[0]);
-				const Vec3 p1 = value<Vec3>(p.data.skeleton, p.data.skeleton_position, edge_vertices[1]);
-				const Scalar edge_len = (p1 - p0).norm();
-				if (edge_len > best_choice.length)
-				{
-					best_choice.edge = e;
-					best_choice.f0 = f0;
-					best_choice.f1 = f1;
-					best_choice.length = edge_len;
-				}
-			}
-		}
-
-		return best_choice.length >= Scalar(0);
+		// the two faces of the boundary edge are faces of this tet only, and the other edges keep a face
+		remove_faces(skeleton, {cand.f0, cand.f1}, spheres_optimizer, skeleton_source_sphere, sphere_skeleton_vertex);
+		tets.erase(cand.tet_id);
 	}
-
-	// Read-only: collects the faces of every current boundary tet and the longest degree-2 edge of each such tet.
-	static void collect_boundary_tet_mask(Context& p, std::unordered_set<uint32>& face_ids,
-										  std::unordered_set<uint32>& edge_ids)
-	{
-		for (const auto& kv : p.skeleton_tets)
-		{
-			const Tet& tet = kv.second;
-			if (!is_boundary_tet(p, tet))
-				continue;
-			for (uint32 i = 0; i < 4; ++i)
-				face_ids.insert(index_of(p.data.skeleton, tet.faces[i]));
-			BoundaryEdgeChoice best_choice;
-			if (choose_longest_boundary_edge(p, tet, best_choice))
-				edge_ids.insert(index_of(p.data.skeleton, best_choice.edge));
-		}
-	}
-
-
-	static void run_boundary_tet_face_deletion(Context& p)
-	{
-
-		struct BoundaryTetCandidate
-		{
-			std::size_t tet_id = std::size_t(-1);
-			SkeletonEdge edge;
-			SkeletonFace f0;
-			SkeletonFace f1;
-		};
-
-		std::vector<std::size_t> tet_ids;
-		tet_ids.reserve(p.skeleton_tets.size());
-		for (const auto& kv : p.skeleton_tets)
-			tet_ids.push_back(kv.first);
-
-		std::vector<BoundaryTetCandidate> candidates;
-		candidates.reserve(tet_ids.size());
-
-		// Phase 1: scan all current tets once and collect boundary-tet deletion candidates.
-		for (std::size_t tet_id : tet_ids)
-		{
-			if (!p.skeleton_tets.contains(tet_id))
-				continue;
-			const Tet tet = p.skeleton_tets.tet(tet_id);
-
-			if (!is_boundary_tet(p, tet))
-				continue;
-
-			BoundaryEdgeChoice best_choice;
-			if (choose_longest_boundary_edge(p, tet, best_choice))
-				candidates.push_back({tet_id, best_choice.edge, best_choice.f0, best_choice.f1});
-		}
-
-		// Phase 2: delete using precomputed candidates only (no boundary re-check during deletion).
-		for (const BoundaryTetCandidate& cand : candidates)
-		{
-			if (!p.skeleton_tets.contains(cand.tet_id))
-				continue;
-
-			// the two faces of the boundary edge are faces of this tet only, and the other edges keep a face
-			MeshOps::remove_faces(p, {cand.f0, cand.f1});
-			p.skeleton_tets.erase(cand.tet_id);
-		}
-	}
-};
+}
 
 } // namespace topology_detail
 

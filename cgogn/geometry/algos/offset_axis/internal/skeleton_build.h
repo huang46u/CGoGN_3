@@ -28,13 +28,14 @@
 #include <cgogn/core/functions/traversals/edge.h>
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
-#include <cgogn/core/types/cell_marker.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_topology_types.h>
+#include <cgogn/geometry/algos/offset_axis/internal/skeleton_tets.h>
+#include <cgogn/geometry/types/vector_traits.h>
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -49,6 +50,31 @@ namespace geometry
 
 namespace offset_axis
 {
+
+namespace topology_detail
+{
+
+// Hash and equality of an unordered pair of vertex indices.
+struct edge_hash
+{
+	std::size_t operator()(const std::pair<uint32, uint32>& edge) const
+	{
+		const uint32 a = std::min(edge.first, edge.second);
+		const uint32 b = std::max(edge.first, edge.second);
+		return std::hash<uint64>()((uint64(a) << 32) | uint64(b));
+	}
+};
+
+struct edge_equal
+{
+	bool operator()(const std::pair<uint32, uint32>& edge1, const std::pair<uint32, uint32>& edge2) const
+	{
+		return ((edge1.first == edge2.first && edge1.second == edge2.second) ||
+				(edge1.first == edge2.second && edge1.second == edge2.first));
+	}
+};
+
+} // namespace topology_detail
 
 // Builds the skeleton of the spheres: one vertex per sphere, one edge per pair of neighbor spheres, one face per triple
 // of pairwise neighbors, and one tet (4 faces, not a mesh cell) per 4 pairwise neighbors. The neighbor lists are sorted.
@@ -65,15 +91,14 @@ void build_skeleton_from_spheres(
 	typename mesh_traits<NONMANIFOLD>::template Attribute<uint32>* edge_degree,
 	SkeletonTets<NONMANIFOLD>& tets)
 {
-	using Types = topology_detail::SkeletonTopologyTypes<POINTS, NONMANIFOLD>;
-	using SphereVertex = typename Types::SphereVertex;
-	using SkeletonVertex = typename Types::SkeletonVertex;
-	using SkeletonEdge = typename Types::SkeletonEdge;
-	using SkeletonFace = typename Types::SkeletonFace;
-	using Tet = typename Types::Tet;
-	using FaceKey = typename Types::FaceKey;
-	using edge_hash = typename Types::edge_hash;
-	using edge_equal = typename Types::edge_equal;
+	using SphereVertex = typename mesh_traits<POINTS>::Vertex;
+	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
+	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
+	using SkeletonFace = typename mesh_traits<NONMANIFOLD>::Face;
+	using Tet = typename SkeletonTets<NONMANIFOLD>::Tet;
+	using FaceKey = std::array<uint32, 3>;
+	using edge_hash = topology_detail::edge_hash;
+	using edge_equal = topology_detail::edge_equal;
 
 	clear(skeleton);
 	std::map<FaceKey, SkeletonFace> skeleton_faces_map;

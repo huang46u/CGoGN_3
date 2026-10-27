@@ -28,15 +28,14 @@
 #include <cgogn/core/functions/traversals/edge.h>
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
-#include <cgogn/core/types/cell_marker.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_topology_types.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <limits>
 #include <queue>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -93,50 +92,42 @@ template <typename POINTS, typename NONMANIFOLD, typename Policy>
 class LazyGreedyTetRemover
 {
 public:
-	using Types = SkeletonTopologyTypes<POINTS, NONMANIFOLD>;
-	using SkeletonEdge = typename Types::SkeletonEdge;
-	using SkeletonFace = typename Types::SkeletonFace;
-	using Context = typename Types::Context;
-	using Tet = typename Types::Tet;
-	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
+	using SphereVertex = typename mesh_traits<POINTS>::Vertex;
+	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
+	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
+	using SkeletonFace = typename mesh_traits<NONMANIFOLD>::Face;
+	template <typename T>
+	using SkeletonAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
+	template <typename T>
+	using SphereAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
 
-	explicit LazyGreedyTetRemover(Context& p) : p(p)
+	LazyGreedyTetRemover(NONMANIFOLD& skeleton, SkeletonTets<NONMANIFOLD>& tets,
+						 const SkeletonAttribute<Scalar>* face_score, const SkeletonAttribute<Scalar>* edge_score,
+						 SpheresOptimizer<POINTS>& spheres_optimizer,
+						 SkeletonAttribute<SphereVertex>* skeleton_source_sphere,
+						 SphereAttribute<SkeletonVertex>* sphere_skeleton_vertex)
+		: skeleton(skeleton), tets(tets), face_score(face_score), edge_score(edge_score),
+		  spheres_optimizer(spheres_optimizer), skeleton_source_sphere(skeleton_source_sphere),
+		  sphere_skeleton_vertex(sphere_skeleton_vertex)
 	{
 	}
 
 	void run()
 	{
-		face_owner_tets.reserve(nb_cells<SkeletonFace>(p.data.skeleton));
-		deleted_face_count_per_tet.reserve(p.skeleton_tets.size());
-		for (const auto& kv : p.skeleton_tets)
+		face_owner_tets.reserve(nb_cells<SkeletonFace>(skeleton));
+		deleted_face_count_per_tet.reserve(tets.size());
+		for (const auto& [tet_id, tet] : tets)
 		{
-			const std::size_t tet_id = kv.first;
-			const Tet& tet = kv.second;
-			uint32 initial_deleted_faces = 0;
-			for (uint32 i = 0; i < 4; ++i)
-			{
-				const SkeletonFace f = tet.faces[i];
-				if (!f.is_valid())
-				{
-					++initial_deleted_faces;
-					continue;
-				}
-				const uint32 idf = index_of(p.data.skeleton, f);
-				if (idf == INVALID_INDEX)
-				{
-					++initial_deleted_faces;
-					continue;
-				}
-				face_owner_tets[idf].push_back(tet_id);
-			}
-			deleted_face_count_per_tet[tet_id] = initial_deleted_faces;
+			for (SkeletonFace f : tet.faces)
+				face_owner_tets[index_of(skeleton, f)].push_back(tet_id);
+			deleted_face_count_per_tet[tet_id] = 0;
 		}
 
-		tet_versions.reserve(p.skeleton_tets.size() * 2 + 1);
-		for (const auto& kv : p.skeleton_tets)
+		tet_versions.reserve(tets.size() * 2 + 1);
+		for (const auto& [tet_id, tet] : tets)
 		{
-			tet_versions[kv.first] = 0;
-			queue_tet_candidate(kv.first, false);
+			tet_versions[tet_id] = 0;
+			queue_tet_candidate(tet_id, false);
 		}
 
 		while (true)
@@ -150,14 +141,10 @@ public:
 				const TetCandidateQueueEntry entry = candidate_queue.top();
 				candidate_queue.pop();
 
+				// the version of a removed tet is erased
 				auto it_version = tet_versions.find(entry.tet_id);
 				if (it_version == tet_versions.end() || it_version->second != entry.version)
 					continue;
-				if (!p.skeleton_tets.contains(entry.tet_id))
-				{
-					tet_versions.erase(entry.tet_id);
-					continue;
-				}
 
 				StepCandidate refreshed;
 				if (!build_step_candidate(entry.tet_id, refreshed))
@@ -184,24 +171,16 @@ public:
 			}
 
 			if (!has_best)
-			{
 				break;
-			}
 
+			// its order is the order of the second step faces before their sort, which is not stable
 			std::unordered_set<std::size_t> first_removed_tets;
-			for (std::size_t tet_id : p.skeleton_tets.tets_of(best.first_face_id))
-				if (p.skeleton_tets.contains(tet_id))
-					first_removed_tets.insert(tet_id);
+			for (std::size_t tet_id : tets.tets_of(best.first_face_id))
+				first_removed_tets.insert(tet_id);
 
 			std::unordered_set<std::size_t> step_tets_to_erase;
-			std::unordered_set<std::size_t> first_tets_to_erase;
 			std::vector<SkeletonEdge> step_affected_edges;
-			if (!remove_faces_collect_tets({best.first_face}, first_tets_to_erase, step_affected_edges))
-			{
-				queue_tet_candidate(best.tet_id, true);
-				continue;
-			}
-			step_tets_to_erase.insert(first_tets_to_erase.begin(), first_tets_to_erase.end());
+			remove_face_collect_tets(best.first_face, step_tets_to_erase, step_affected_edges);
 
 			std::vector<FaceChoice> created_deg1_faces;
 			created_deg1_faces.reserve(16);
@@ -209,17 +188,9 @@ public:
 			seen_created_ids.reserve(32);
 			for (std::size_t tet_id : first_removed_tets)
 			{
-				if (!p.skeleton_tets.contains(tet_id))
-					continue;
-				const Tet& tet = p.skeleton_tets.tet(tet_id);
-				for (uint32 i = 0; i < 4; ++i)
+				for (SkeletonFace f : tets.tet(tet_id).faces)
 				{
-					const SkeletonFace f = tet.faces[i];
-					const uint32 idf = index_of(p.data.skeleton, f);
-					if (idf == INVALID_INDEX)
-					{
-						continue;
-					}
+					const uint32 idf = index_of(skeleton, f);
 					if (idf == best.first_face_id)
 						continue;
 					if (!seen_created_ids.insert(idf).second)
@@ -228,9 +199,9 @@ public:
 						continue;
 					if (!face_has_degree1_edge(f))
 						continue;
-					if (face_has_edge_with_tet_face_count_gt2(f, &step_tets_to_erase))
+					if (face_has_edge_with_tet_face_count_gt2(f, step_tets_to_erase))
 						continue;
-					created_deg1_faces.push_back({f, get_face_score(idf)});
+					created_deg1_faces.push_back({f, (*face_score)[idf]});
 				}
 			}
 			std::sort(created_deg1_faces.begin(), created_deg1_faces.end(),
@@ -240,28 +211,21 @@ public:
 
 			for (const FaceChoice& fc : created_deg1_faces)
 			{
-				if (!fc.face.is_valid())
-					continue;
-				const uint32 idf_now = index_of(p.data.skeleton, fc.face);
-				if (idf_now == INVALID_INDEX)
-					continue;
-				if (!has_face_budget(idf_now))
+				if (!has_face_budget(index_of(skeleton, fc.face)))
 					continue;
 				if (!face_has_degree1_edge(fc.face))
 					continue;
-				if (face_has_edge_with_tet_face_count_gt2(fc.face, &step_tets_to_erase))
+				if (face_has_edge_with_tet_face_count_gt2(fc.face, step_tets_to_erase))
 					continue;
-				std::unordered_set<std::size_t> second_tets_to_erase;
-				if (remove_faces_collect_tets({fc.face}, second_tets_to_erase, step_affected_edges))
-					step_tets_to_erase.insert(second_tets_to_erase.begin(), second_tets_to_erase.end());
+				remove_face_collect_tets(fc.face, step_tets_to_erase, step_affected_edges);
 			}
-			finalize_erase_tets(step_tets_to_erase);
 			for (std::size_t tet_id : step_tets_to_erase)
+			{
+				tets.erase(tet_id);
 				tet_versions.erase(tet_id);
+			}
 
-			std::unordered_set<std::size_t> dirty_tets;
-			collect_dirty_tets_from_edges(step_affected_edges, dirty_tets);
-			for (std::size_t tet_id : dirty_tets)
+			for (std::size_t tet_id : dirty_tets(step_affected_edges))
 				queue_tet_candidate(tet_id, true);
 		}
 	}
@@ -304,16 +268,17 @@ private:
 	using TetCandidateQueue =
 		std::priority_queue<TetCandidateQueueEntry, std::vector<TetCandidateQueueEntry>, TetCandidateQueueCompare>;
 
-	Context& p;
+	NONMANIFOLD& skeleton;
+	SkeletonTets<NONMANIFOLD>& tets;
+	const SkeletonAttribute<Scalar>* face_score;
+	const SkeletonAttribute<Scalar>* edge_score;
+	SpheresOptimizer<POINTS>& spheres_optimizer;
+	SkeletonAttribute<SphereVertex>* skeleton_source_sphere;
+	SphereAttribute<SkeletonVertex>* sphere_skeleton_vertex;
 	std::unordered_map<uint32, std::vector<std::size_t>> face_owner_tets;
 	std::unordered_map<std::size_t, uint32> deleted_face_count_per_tet;
 	std::unordered_map<std::size_t, uint32> tet_versions;
 	TetCandidateQueue candidate_queue;
-
-	Scalar get_face_score(uint32 idf)
-	{
-		return (*p.data.face_score)[idf];
-	}
 
 	bool has_face_budget(uint32 face_id)
 	{
@@ -322,7 +287,7 @@ private:
 			return false;
 		for (std::size_t tet_id : it_owner->second)
 		{
-			if (!p.skeleton_tets.contains(tet_id))
+			if (!tets.contains(tet_id))
 				continue;
 			auto it_count = deleted_face_count_per_tet.find(tet_id);
 			if (it_count != deleted_face_count_per_tet.end() && it_count->second >= 2)
@@ -338,7 +303,7 @@ private:
 			return;
 		for (std::size_t tet_id : it_owner->second)
 		{
-			if (!p.skeleton_tets.contains(tet_id))
+			if (!tets.contains(tet_id))
 				continue;
 			auto it_count = deleted_face_count_per_tet.find(tet_id);
 			if (it_count != deleted_face_count_per_tet.end())
@@ -346,60 +311,36 @@ private:
 		}
 	}
 
-	bool face_belongs_to_tet(const SkeletonFace& f, std::size_t tet_id)
+	bool face_belongs_to_tet(SkeletonFace f, std::size_t tet_id)
 	{
-		if (!f.is_valid())
-			return false;
-		const uint32 idf = index_of(p.data.skeleton, f);
-		if (idf == INVALID_INDEX)
-			return false;
-		const auto& in_tets = p.skeleton_tets.tets_of(idf);
+		const std::set<std::size_t>& in_tets = tets.tets_of(index_of(skeleton, f));
 		return in_tets.find(tet_id) != in_tets.end();
 	}
 
-	bool face_has_degree1_edge(const SkeletonFace& f)
+	bool face_has_degree1_edge(SkeletonFace f)
 	{
-		if (!f.is_valid())
-			return false;
-		for (SkeletonEdge e : incident_edges(p.data.skeleton, f))
-		{
-			if (!e.is_valid())
-				continue;
-			if (incident_faces(p.data.skeleton, e).size() == 1)
+		for (SkeletonEdge e : incident_edges(skeleton, f))
+			if (incident_faces(skeleton, e).size() == 1)
 				return true;
-		}
 		return false;
 	}
 
-	bool face_has_edge_with_tet_face_count_gt2(const SkeletonFace& f,
-											   const std::unordered_set<std::size_t>* ignored_tets)
+	// True if an edge of the face has more than 2 faces that bound a current tet not in ignored_tets.
+	bool face_has_edge_with_tet_face_count_gt2(SkeletonFace f, const std::unordered_set<std::size_t>& ignored_tets)
 	{
-		if (!f.is_valid())
-			return false;
-		for (SkeletonEdge e : incident_edges(p.data.skeleton, f))
+		for (SkeletonEdge e : incident_edges(skeleton, f))
 		{
-			if (!e.is_valid())
-				continue;
 			size_t tet_face_count = 0;
-			for (SkeletonFace ef : incident_faces(p.data.skeleton, e))
+			for (SkeletonFace ef : incident_faces(skeleton, e))
 			{
-				if (!ef.is_valid())
-					continue;
-				const uint32 idef = index_of(p.data.skeleton, ef);
-				if (idef == INVALID_INDEX)
-					continue;
-				bool has_alive_owner = false;
-				for (std::size_t tet_id : p.skeleton_tets.tets_of(idef))
+				for (std::size_t tet_id : tets.tets_of(index_of(skeleton, ef)))
 				{
-					if (!p.skeleton_tets.contains(tet_id))
-						continue;
-					if (ignored_tets && ignored_tets->find(tet_id) != ignored_tets->end())
-						continue;
-					has_alive_owner = true;
-					break;
+					if (ignored_tets.find(tet_id) == ignored_tets.end())
+					{
+						++tet_face_count;
+						break;
+					}
 				}
-				if (has_alive_owner)
-					++tet_face_count;
 			}
 			if (tet_face_count > 2)
 				return true;
@@ -409,84 +350,58 @@ private:
 
 	bool tet_has_simple_face(std::size_t tet_id)
 	{
-		if (!p.skeleton_tets.contains(tet_id))
-			return false;
-		const Tet& tet = p.skeleton_tets.tet(tet_id);
-		for (uint32 i = 0; i < 4; ++i)
-		{
-			const SkeletonFace f = tet.faces[i];
-			if (!f.is_valid())
-				continue;
-			const uint32 idf = index_of(p.data.skeleton, f);
-			if (idf == INVALID_INDEX)
-				continue;
-			const auto& in_tets = p.skeleton_tets.tets_of(idf);
-			if (in_tets.find(tet_id) == in_tets.end())
-				continue;
-			if (in_tets.size() == 1)
+		for (SkeletonFace f : tets.tet(tet_id).faces)
+			if (tets.tets_of(index_of(skeleton, f)).size() == 1)
 				return true;
-		}
 		return false;
 	}
 
-	bool pick_tet_best_edge_and_face(std::size_t tet_id, SkeletonEdge& out_edge, uint32& out_edge_id,
-									 Scalar& out_edge_score, SkeletonFace& out_face, uint32& out_face_id,
-									 Scalar& out_face_score)
+	bool pick_tet_best_edge_and_face(std::size_t tet_id, uint32& out_edge_id, Scalar& out_edge_score,
+									 SkeletonFace& out_face, uint32& out_face_id, Scalar& out_face_score)
 	{
-		if (!p.skeleton_tets.contains(tet_id))
-			return false;
-		const Tet& tet = p.skeleton_tets.tet(tet_id);
 		std::unordered_set<uint32> seen_edges;
 		seen_edges.reserve(8);
 		bool found = false;
 		const Scalar edge_eps = Scalar(1e-12);
 		const Scalar face_eps = Scalar(1e-12);
-		for (uint32 i = 0; i < 4; ++i)
+		for (SkeletonFace f : tets.tet(tet_id).faces)
 		{
-			const SkeletonFace f = tet.faces[i];
-			if (!face_belongs_to_tet(f, tet_id))
-				continue;
-			for (SkeletonEdge e : incident_edges(p.data.skeleton, f))
+			for (SkeletonEdge e : incident_edges(skeleton, f))
 			{
-				if (!e.is_valid())
-					continue;
-				const uint32 ide = index_of(p.data.skeleton, e);
-				if (ide == INVALID_INDEX)
-					continue;
+				const uint32 ide = index_of(skeleton, e);
 				if (!seen_edges.insert(ide).second)
 					continue;
 				SkeletonFace best_face_on_edge;
 				uint32 best_face_on_edge_id = INVALID_INDEX;
 				Scalar best_face_on_edge_score = Scalar(0);
 				bool edge_has_candidate = false;
-				for (const SkeletonFace& ef : incident_faces(p.data.skeleton, e))
+				for (SkeletonFace ef : incident_faces(skeleton, e))
 				{
 					if (!face_belongs_to_tet(ef, tet_id))
 						continue;
-					const uint32 idf = index_of(p.data.skeleton, ef);
-					if (idf == INVALID_INDEX || !has_face_budget(idf))
+					const uint32 idf = index_of(skeleton, ef);
+					if (!has_face_budget(idf))
 						continue;
-					if (!Policy::accepts_first_face(p.skeleton_tets.tets_of(idf).size()))
+					if (!Policy::accepts_first_face(tets.tets_of(idf).size()))
 						continue;
-					const Scalar face_score = get_face_score(idf);
-					if (!edge_has_candidate || face_score > best_face_on_edge_score + face_eps)
+					const Scalar score = (*face_score)[idf];
+					if (!edge_has_candidate || score > best_face_on_edge_score + face_eps)
 					{
 						edge_has_candidate = true;
 						best_face_on_edge = ef;
 						best_face_on_edge_id = idf;
-						best_face_on_edge_score = face_score;
+						best_face_on_edge_score = score;
 					}
 				}
 				if (!edge_has_candidate)
 					continue;
-				const Scalar score = (*p.data.edge_score)[ide];
+				const Scalar score = (*edge_score)[ide];
 				const bool better_edge = (!found) || (score > out_edge_score + edge_eps);
 				const bool tie_edge = found && (std::abs(score - out_edge_score) <= edge_eps);
 				const bool better_face_on_tie = tie_edge && (best_face_on_edge_score > out_face_score + face_eps);
 				if (better_edge || better_face_on_tie)
 				{
 					found = true;
-					out_edge = e;
 					out_edge_id = ide;
 					out_edge_score = score;
 					out_face = best_face_on_edge;
@@ -498,98 +413,32 @@ private:
 		return found;
 	}
 
-	// Removes the faces if they bound a current tet and appends their edges to out_affected_edges; the tets are erased
-	// later by finalize_erase_tets.
-	bool remove_faces_collect_tets(const std::vector<SkeletonFace>& faces_to_remove,
-								   std::unordered_set<std::size_t>& out_tets_to_erase,
-								   std::vector<SkeletonEdge>& out_affected_edges)
+	// Removes the face, a face of a current tet, and appends its edges to affected_edges. Its tets are added to
+	// tets_to_erase: they are erased at the end of the step.
+	void remove_face_collect_tets(SkeletonFace f, std::unordered_set<std::size_t>& tets_to_erase,
+								  std::vector<SkeletonEdge>& affected_edges)
 	{
-		out_tets_to_erase.clear();
-		std::vector<std::pair<uint32, SkeletonFace>> unique_faces;
-		unique_faces.reserve(faces_to_remove.size());
-		std::unordered_set<uint32> seen_face_ids;
-		seen_face_ids.reserve(faces_to_remove.size() * 2 + 1);
-		for (const SkeletonFace& f : faces_to_remove)
-		{
-			if (!f.is_valid())
-				continue;
-			const uint32 idf = index_of(p.data.skeleton, f);
-			if (idf == INVALID_INDEX)
-				continue;
-			if (!seen_face_ids.insert(idf).second)
-				continue;
-			unique_faces.push_back({idf, f});
-		}
-		if (unique_faces.empty())
-			return false;
-
-		std::unordered_set<std::size_t> tets_to_remove_local;
-		tets_to_remove_local.reserve(16);
-		for (const auto& fpair : unique_faces)
-		{
-			const uint32 idf = fpair.first;
-			for (std::size_t tet_id : p.skeleton_tets.tets_of(idf))
-				if (p.skeleton_tets.contains(tet_id))
-					tets_to_remove_local.insert(tet_id);
-		}
-		if (tets_to_remove_local.empty())
-			return false;
-
-		std::vector<SkeletonFace> faces;
-		faces.reserve(unique_faces.size());
-		for (const auto& fpair : unique_faces)
-		{
-			account_face_deletion_budget(fpair.first);
-			faces.push_back(fpair.second);
-		}
-		const std::vector<SkeletonEdge> affected_edges = MeshOps::remove_faces(p, faces);
-		out_affected_edges.insert(out_affected_edges.end(), affected_edges.begin(), affected_edges.end());
-		out_tets_to_erase = std::move(tets_to_remove_local);
-		return true;
-	}
-
-	void finalize_erase_tets(const std::unordered_set<std::size_t>& tets_to_erase)
-	{
-		for (std::size_t tet_id : tets_to_erase)
-		{
-			if (!p.skeleton_tets.contains(tet_id))
-				continue;
-			p.skeleton_tets.erase(tet_id);
-		}
+		const uint32 idf = index_of(skeleton, f);
+		const std::set<std::size_t>& face_tets = tets.tets_of(idf);
+		tets_to_erase.insert(face_tets.begin(), face_tets.end());
+		account_face_deletion_budget(idf);
+		const std::vector<SkeletonEdge> face_edges =
+			remove_faces(skeleton, {f}, spheres_optimizer, skeleton_source_sphere, sphere_skeleton_vertex);
+		affected_edges.insert(affected_edges.end(), face_edges.begin(), face_edges.end());
 	}
 
 	bool build_step_candidate(std::size_t tet_id, StepCandidate& out_candidate)
 	{
-		const bool is_simple_tet = tet_has_simple_face(tet_id);
-		if (!Policy::accepts_tet(is_simple_tet))
+		if (!Policy::accepts_tet(tet_has_simple_face(tet_id)))
 			return false;
-
-		SkeletonEdge best_edge_local;
-		uint32 best_edge_local_id = INVALID_INDEX;
-		Scalar best_edge_local_score = Scalar(0);
-		SkeletonFace first_face_local;
-		uint32 first_face_local_id = INVALID_INDEX;
-		Scalar first_face_local_score = Scalar(0);
-		if (!pick_tet_best_edge_and_face(tet_id, best_edge_local, best_edge_local_id, best_edge_local_score,
-										 first_face_local, first_face_local_id, first_face_local_score))
-			return false;
-
 		out_candidate.tet_id = tet_id;
-		out_candidate.edge_id = best_edge_local_id;
-		out_candidate.edge_score = best_edge_local_score;
-		out_candidate.first_face = first_face_local;
-		out_candidate.first_face_id = first_face_local_id;
-		out_candidate.first_face_score = first_face_local_score;
-		return true;
+		return pick_tet_best_edge_and_face(tet_id, out_candidate.edge_id, out_candidate.edge_score,
+										   out_candidate.first_face, out_candidate.first_face_id,
+										   out_candidate.first_face_score);
 	}
 
 	void queue_tet_candidate(std::size_t tet_id, bool bump_version)
 	{
-		if (!p.skeleton_tets.contains(tet_id))
-		{
-			tet_versions.erase(tet_id);
-			return;
-		}
 		uint32& version = tet_versions[tet_id];
 		if (bump_version)
 			++version;
@@ -600,45 +449,33 @@ private:
 							  candidate.first_face_score, version});
 	}
 
-	void collect_dirty_tets_from_edges(const std::vector<SkeletonEdge>& affected_edges,
-									   std::unordered_set<std::size_t>& dirty_tets)
+	// The current tets of the faces of the edges.
+	std::unordered_set<std::size_t> dirty_tets(const std::vector<SkeletonEdge>& affected_edges)
 	{
-		dirty_tets.clear();
+		std::unordered_set<std::size_t> result;
 		for (SkeletonEdge e : affected_edges)
-		{
-			if (!e.is_valid())
-				continue;
-			for (SkeletonFace f : incident_faces(p.data.skeleton, e))
-			{
-				if (!f.is_valid())
-					continue;
-				const uint32 idf = index_of(p.data.skeleton, f);
-				if (idf == INVALID_INDEX)
-					continue;
-				for (std::size_t tet_id : p.skeleton_tets.tets_of(idf))
-					if (p.skeleton_tets.contains(tet_id))
-						dirty_tets.insert(tet_id);
-			}
-		}
+			for (SkeletonFace f : incident_faces(skeleton, e))
+				for (std::size_t tet_id : tets.tets_of(index_of(skeleton, f)))
+					result.insert(tet_id);
+		return result;
 	}
 };
 
-template <typename POINTS, typename NONMANIFOLD>
-struct GreedyTetRemoval
+// Steps b and c of the topology fix loop: greedy removal of the tets accepted by Policy (SimpleTetPolicy or
+// NonSimpleTetPolicy), the best edge and face first by score.
+template <typename Policy, typename POINTS, typename NONMANIFOLD>
+void remove_tets_greedy(
+	NONMANIFOLD& skeleton, SkeletonTets<NONMANIFOLD>& tets,
+	const typename mesh_traits<NONMANIFOLD>::template Attribute<Scalar>* face_score,
+	const typename mesh_traits<NONMANIFOLD>::template Attribute<Scalar>* edge_score,
+	SpheresOptimizer<POINTS>& spheres_optimizer,
+	typename mesh_traits<NONMANIFOLD>::template Attribute<typename mesh_traits<POINTS>::Vertex>* skeleton_source_sphere,
+	typename mesh_traits<POINTS>::template Attribute<typename mesh_traits<NONMANIFOLD>::Vertex>* sphere_skeleton_vertex)
 {
-	using Types = SkeletonTopologyTypes<POINTS, NONMANIFOLD>;
-	using SkeletonEdge = typename Types::SkeletonEdge;
-	using SkeletonFace = typename Types::SkeletonFace;
-	using Context = typename Types::Context;
-	using Tet = typename Types::Tet;
-	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
-
-	template <typename Policy>
-	static void run_edge_score_tet_mode_topology_fix(Context& p)
-	{
-		LazyGreedyTetRemover<POINTS, NONMANIFOLD, Policy>(p).run();
-	}
-};
+	LazyGreedyTetRemover<POINTS, NONMANIFOLD, Policy>(skeleton, tets, face_score, edge_score, spheres_optimizer,
+													  skeleton_source_sphere, sphere_skeleton_vertex)
+		.run();
+}
 
 } // namespace topology_detail
 

@@ -30,11 +30,13 @@
 #include <cgogn/geometry/algos/offset_axis/internal/non_manifold_prune.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_build.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_topology_types.h>
 #include <cgogn/geometry/algos/offset_axis/internal/topology_scores.h>
+#include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
+#include <cgogn/geometry/algos/offset_axis/spheres_optimizer.h>
 
 #include <algorithm>
 #include <limits>
+#include <set>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -52,20 +54,32 @@ template <typename POINTS, typename NONMANIFOLD>
 class SkeletonTopology
 {
 public:
-	using Types = topology_detail::SkeletonTopologyTypes<POINTS, NONMANIFOLD>;
-	using SphereVertex = typename Types::SphereVertex;
-	using SkeletonVertex = typename Types::SkeletonVertex;
-	using SkeletonEdge = typename Types::SkeletonEdge;
-	using SkeletonFace = typename Types::SkeletonFace;
+	using SphereVertex = typename mesh_traits<POINTS>::Vertex;
+	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
+	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
+	using SkeletonFace = typename mesh_traits<NONMANIFOLD>::Face;
 	template <typename T>
-	using SphereAttribute = typename Types::template SphereAttribute<T>;
+	using SphereAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
 	template <typename T>
-	using SkeletonAttribute = typename Types::template SkeletonAttribute<T>;
-	using Data = typename Types::Data;
-	using ResidualPruneMode = typename Types::ResidualPruneMode;
+	using SkeletonAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
+	using ResidualPruneMode = ResidualPruneOption;
 
-	explicit SkeletonTopology(Data data)
-		: data_(std::move(data)), skeleton_tets_(data_.skeleton, data_.face_incident_tets)
+	// Borrowed: the meshes and the attributes belong to the caller.
+	struct Data
+	{
+		NONMANIFOLD& skeleton;
+		SpheresOptimizer<POINTS>& spheres_optimizer;
+		SphereAttribute<SkeletonVertex>* sphere_skeleton_vertex = nullptr;
+		SkeletonAttribute<Vec3>* skeleton_position = nullptr;
+		SkeletonAttribute<Scalar>* skeleton_radius = nullptr;
+		SkeletonAttribute<SphereVertex>* skeleton_source_sphere = nullptr;
+		SkeletonAttribute<std::set<std::size_t>>* face_incident_tets = nullptr;
+		SkeletonAttribute<uint32>* edge_degree = nullptr;
+		SkeletonAttribute<Scalar>* face_score = nullptr;
+		SkeletonAttribute<Scalar>* edge_score = nullptr;
+	};
+
+	explicit SkeletonTopology(Data data) : data_(std::move(data)), tets_(data_.skeleton, data_.face_incident_tets)
 	{
 	}
 	SkeletonTopology(const SkeletonTopology&) = delete;
@@ -77,7 +91,7 @@ public:
 	}
 	bool has_tets() const
 	{
-		return !skeleton_tets_.empty();
+		return !tets_.empty();
 	}
 	void build_from_spheres()
 	{
@@ -86,18 +100,50 @@ public:
 		build_skeleton_from_spheres(spheres.spheres, spheres.sphere_position, spheres.sphere_radius,
 									spheres.sphere_neighbors, data_.skeleton, data_.skeleton_position,
 									data_.skeleton_radius, data_.skeleton_source_sphere, data_.sphere_skeleton_vertex,
-									data_.edge_degree, skeleton_tets_);
+									data_.edge_degree, tets_);
 	}
 
-	// Returns false if the scores cannot be evaluated.
+	// Step 10: removes the tets of the skeleton (boundary tets, then greedy by score, until no tet is removed) and
+	// repairs the dense K5 regions found at the start. Returns false if the scores cannot be evaluated.
 	template <typename ScoreEvaluator>
 	bool fix_topology(ScoreEvaluator&& evaluate_scores)
 	{
+		using namespace topology_detail;
+
 		added_spheres_.clear();
-		if (skeleton_tets_.empty())
+		if (tets_.empty())
 			return true;
-		Context p(data_, skeleton_tets_, added_spheres_);
-		return run_topology_fix_pipeline(p, evaluate_scores);
+		NONMANIFOLD& skeleton = data_.skeleton;
+		const std::vector<K5Region<POINTS>> k5_regions =
+			find_k5_regions(skeleton, tets_, data_.spheres_optimizer.data().spheres, data_.skeleton_source_sphere);
+		// the cells that are not in a tet keep a zero score
+		data_.edge_score->fill(Scalar(0));
+		data_.face_score->fill(Scalar(0));
+		if (!topology_detail::compute_edge_scores(skeleton, data_.skeleton_position, tet_edge_ids(skeleton, tets_),
+												  evaluate_scores, data_.edge_score) ||
+			!topology_detail::compute_face_scores(skeleton, data_.skeleton_position, tet_face_ids(skeleton, tets_),
+												  evaluate_scores, false, data_.face_score))
+			return false;
+		while (!tets_.empty())
+		{
+			const std::size_t nb_tets = tets_.size();
+			remove_boundary_tets(skeleton, tets_, data_.skeleton_position, data_.spheres_optimizer,
+								 data_.skeleton_source_sphere, data_.sphere_skeleton_vertex);
+			if (!tets_.empty())
+				remove_tets_greedy<SimpleTetPolicy>(skeleton, tets_, data_.face_score, data_.edge_score,
+													data_.spheres_optimizer, data_.skeleton_source_sphere,
+													data_.sphere_skeleton_vertex);
+			if (!tets_.empty())
+				remove_tets_greedy<NonSimpleTetPolicy>(skeleton, tets_, data_.face_score, data_.edge_score,
+													   data_.spheres_optimizer, data_.skeleton_source_sphere,
+													   data_.sphere_skeleton_vertex);
+			if (tets_.size() == nb_tets)
+				break;
+		}
+		repair_k5_regions(skeleton, tets_, data_.spheres_optimizer, data_.skeleton_position, data_.skeleton_radius,
+						  data_.skeleton_source_sphere, data_.sphere_skeleton_vertex, data_.edge_degree, k5_regions,
+						  added_spheres_);
+		return true;
 	}
 
 	void compute_edge_degree()
@@ -116,10 +162,9 @@ public:
 	BoundaryTetMask boundary_tet_mask()
 	{
 		BoundaryTetMask mask;
-		Context p(data_, skeleton_tets_, added_spheres_);
 		std::unordered_set<uint32> face_ids;
 		std::unordered_set<uint32> edge_ids;
-		BoundaryTetPrune::collect_boundary_tet_mask(p, face_ids, edge_ids);
+		topology_detail::boundary_tet_mask(data_.skeleton, tets_, data_.skeleton_position, face_ids, edge_ids);
 		mask.face_ids.assign(face_ids.begin(), face_ids.end());
 		mask.edge_ids.assign(edge_ids.begin(), edge_ids.end());
 		std::sort(mask.face_ids.begin(), mask.face_ids.end());
@@ -133,8 +178,9 @@ public:
 	bool compute_face_scores(ScoreEvaluator& evaluate_scores, bool normalize_by_area)
 	{
 		data_.face_score->fill(std::numeric_limits<Scalar>::quiet_NaN());
-		Context p(data_, skeleton_tets_, added_spheres_);
-		return TopologyScores::compute_face_scores(p, evaluate_scores, normalize_by_area);
+		return topology_detail::compute_face_scores(data_.skeleton, data_.skeleton_position,
+													topology_detail::tet_face_ids(data_.skeleton, tets_),
+													evaluate_scores, normalize_by_area, data_.face_score);
 	}
 
 	// For display: sets edge_score to the UDF score of the topology fix on the edges of the current tets and to NaN
@@ -143,65 +189,23 @@ public:
 	bool compute_edge_scores(ScoreEvaluator& evaluate_scores)
 	{
 		data_.edge_score->fill(std::numeric_limits<Scalar>::quiet_NaN());
-		Context p(data_, skeleton_tets_, added_spheres_);
-		return TopologyScores::compute_edge_scores(p, evaluate_scores);
+		return topology_detail::compute_edge_scores(data_.skeleton, data_.skeleton_position,
+													topology_detail::tet_edge_ids(data_.skeleton, tets_),
+													evaluate_scores, data_.edge_score);
 	}
 
+	// Step 11.
 	void prune_residual_sheets(ResidualPruneMode mode)
 	{
 		// the prune can remove spheres
 		added_spheres_.clear();
-		Context p(data_, skeleton_tets_, added_spheres_);
-		NonManifoldPrune::run_residual_sheet_prune(p, mode);
+		topology_detail::prune_residual_sheets(data_.skeleton, tets_, data_.edge_degree, data_.spheres_optimizer,
+											   data_.skeleton_source_sphere, data_.sphere_skeleton_vertex, mode);
 	}
 
 private:
-	using Tets = typename Types::Tets;
-	using Context = typename Types::Context;
-	using MeshOps = topology_detail::SkeletonMeshOps<POINTS, NONMANIFOLD>;
-	using TopologyScores = topology_detail::TopologyScores<POINTS, NONMANIFOLD>;
-	using NonManifoldPrune = topology_detail::NonManifoldPrune<POINTS, NONMANIFOLD>;
-	using GreedyTetRemoval = topology_detail::GreedyTetRemoval<POINTS, NONMANIFOLD>;
-	using BoundaryTetPrune = topology_detail::BoundaryTetPrune<POINTS, NONMANIFOLD>;
-	using DenseK5Repair = topology_detail::DenseK5Repair<POINTS, NONMANIFOLD>;
-	using DenseFiveVertexDetectionResult = typename DenseK5Repair::DenseFiveVertexDetectionResult;
-	using IndependentDenseFiveVertexRepairSeed = typename DenseK5Repair::IndependentDenseFiveVertexRepairSeed;
-
-	//------------------------------//
-	//-----Topology correction------//
-	//------------------------------//
-
-	template <typename ScoreEvaluator>
-	bool run_topology_fix_pipeline(Context& p, ScoreEvaluator& evaluator)
-	{
-		const DenseFiveVertexDetectionResult dense_five_vertex_detection =
-			DenseK5Repair::detect_k5_and_k5_minus_1_cells(p);
-		const std::vector<IndependentDenseFiveVertexRepairSeed> independent_dense_repair_seeds =
-			DenseK5Repair::collect_independent_dense_five_vertex_repair_seeds(p, dense_five_vertex_detection);
-		// the cells that are not in a tet keep a zero score
-		data_.edge_score->fill(Scalar(0));
-		data_.face_score->fill(Scalar(0));
-		if (!TopologyScores::compute_edge_scores(p, evaluator) || !TopologyScores::compute_face_scores(p, evaluator, false))
-			return false;
-		while (!p.skeleton_tets.empty())
-		{
-			const uint32 round_start_tets = static_cast<uint32>(p.skeleton_tets.size());
-			BoundaryTetPrune::run_boundary_tet_face_deletion(p);
-			if (!p.skeleton_tets.empty())
-				GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<topology_detail::SimpleTetPolicy>(p);
-			if (!p.skeleton_tets.empty())
-				GreedyTetRemoval::template run_edge_score_tet_mode_topology_fix<topology_detail::NonSimpleTetPolicy>(p);
-			const uint32 round_end_tets = static_cast<uint32>(p.skeleton_tets.size());
-			const uint32 round_removed_tets = round_start_tets - round_end_tets;
-			if (round_removed_tets == 0)
-				break;
-		}
-		DenseK5Repair::repair_isolated_independent_dense_five_vertex_regions(p, independent_dense_repair_seeds);
-		return true;
-	}
-
 	Data data_;
-	Tets skeleton_tets_;
+	SkeletonTets<NONMANIFOLD> tets_;
 	std::vector<SphereVertex> added_spheres_;
 };
 

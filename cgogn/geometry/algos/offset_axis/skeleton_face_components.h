@@ -27,7 +27,8 @@
 #include <cgogn/core/functions/mesh_info.h>
 #include <cgogn/core/functions/traversals/edge.h>
 #include <cgogn/core/functions/traversals/face.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_topology_types.h>
+#include <cgogn/core/functions/attributes.h>
+#include <cgogn/geometry/types/vector_traits.h>
 
 #include <cstddef>
 #include <numeric>

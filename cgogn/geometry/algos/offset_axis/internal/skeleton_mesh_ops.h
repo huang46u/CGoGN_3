@@ -28,8 +28,8 @@
 #include <cgogn/core/functions/traversals/edge.h>
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
-#include <cgogn/core/types/cell_marker.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_topology_types.h>
+#include <cgogn/geometry/algos/offset_axis/internal/skeleton_tets.h>
+#include <cgogn/geometry/algos/offset_axis/spheres_optimizer.h>
 
 #include <cstddef>
 #include <set>
@@ -60,136 +60,137 @@ void compute_edge_degree(const NONMANIFOLD& skeleton,
 namespace topology_detail
 {
 
+// Removes the skeleton vertex and the sphere it comes from.
 template <typename POINTS, typename NONMANIFOLD>
-struct SkeletonMeshOps
+void remove_skeleton_vertex_and_sphere(
+	NONMANIFOLD& skeleton, typename mesh_traits<NONMANIFOLD>::Vertex v, SpheresOptimizer<POINTS>& spheres_optimizer,
+	typename mesh_traits<NONMANIFOLD>::template Attribute<typename mesh_traits<POINTS>::Vertex>* skeleton_source_sphere,
+	typename mesh_traits<POINTS>::template Attribute<typename mesh_traits<NONMANIFOLD>::Vertex>* sphere_skeleton_vertex)
 {
-	using Types = SkeletonTopologyTypes<POINTS, NONMANIFOLD>;
-	using SphereVertex = typename Types::SphereVertex;
-	using SkeletonVertex = typename Types::SkeletonVertex;
-	using SkeletonEdge = typename Types::SkeletonEdge;
-	using SkeletonFace = typename Types::SkeletonFace;
-	using Context = typename Types::Context;
-	using Tet = typename Types::Tet;
+	using SphereVertex = typename mesh_traits<POINTS>::Vertex;
+	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
 
-	static bool remove_skeleton_vertex_and_linked_sphere(Context& p, const SkeletonVertex& v)
+	SphereVertex& linked_sphere = value<SphereVertex>(skeleton, skeleton_source_sphere, v);
+	// invalid when the vertex was already removed: a vertex listed twice in the candidates is removed twice
+	if (linked_sphere.is_valid())
 	{
-		if (!v.is_valid())
-			return false;
-		const uint32 skeleton_vertex_id = index_of(p.data.skeleton, v);
-		if (skeleton_vertex_id == INVALID_INDEX)
-			return false;
+		value<SkeletonVertex>(spheres_optimizer.data().spheres, sphere_skeleton_vertex, linked_sphere) =
+			SkeletonVertex();
+		spheres_optimizer.remove_sphere(linked_sphere);
+	}
+	linked_sphere = SphereVertex();
+	remove_vertex(skeleton, v);
+}
 
-		SphereVertex linked_sphere;
-		if (p.data.skeleton_source_sphere)
-			linked_sphere = value<SphereVertex>(p.data.skeleton, p.data.skeleton_source_sphere, v);
+// Removes the edges left without face and then their vertices left without edge (with their spheres).
+template <typename POINTS, typename NONMANIFOLD>
+void remove_orphan_edges_and_vertices(
+	NONMANIFOLD& skeleton, const std::vector<typename mesh_traits<NONMANIFOLD>::Edge>& face_edges,
+	SpheresOptimizer<POINTS>& spheres_optimizer,
+	typename mesh_traits<NONMANIFOLD>::template Attribute<typename mesh_traits<POINTS>::Vertex>* skeleton_source_sphere,
+	typename mesh_traits<POINTS>::template Attribute<typename mesh_traits<NONMANIFOLD>::Vertex>* sphere_skeleton_vertex)
+{
+	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
+	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
 
-		if (linked_sphere.is_valid())
-		{
-			const uint32 sphere_index = index_of(p.optimizer_data.spheres, linked_sphere);
-			if (sphere_index != INVALID_INDEX && p.data.sphere_skeleton_vertex)
-				(*p.data.sphere_skeleton_vertex)[sphere_index] = SkeletonVertex();
-			p.data.spheres_optimizer.remove_sphere(linked_sphere);
-		}
+	std::vector<SkeletonVertex> candidate_vertices;
+	candidate_vertices.reserve(face_edges.size() * 2);
+	for (SkeletonEdge e : face_edges)
+	{
+		for (SkeletonVertex v : incident_vertices(skeleton, e))
+			candidate_vertices.push_back(v);
+		if (incident_faces(skeleton, e).empty())
+			remove_edge(skeleton, e);
+	}
+	for (SkeletonVertex v : candidate_vertices)
+		if (incident_edges(skeleton, v).empty())
+			remove_skeleton_vertex_and_sphere(skeleton, v, spheres_optimizer, skeleton_source_sphere,
+											  sphere_skeleton_vertex);
+}
 
-		if (p.data.skeleton_source_sphere)
-			value<SphereVertex>(p.data.skeleton, p.data.skeleton_source_sphere, v) = SphereVertex();
-		remove_vertex(p.data.skeleton, v);
+// Removes the faces, then the edges and vertices left isolated (orphan edges and vertices). The tets are not
+// changed. Returns the edges of the removed faces.
+template <typename POINTS, typename NONMANIFOLD>
+std::vector<typename mesh_traits<NONMANIFOLD>::Edge> remove_faces(
+	NONMANIFOLD& skeleton, const std::vector<typename mesh_traits<NONMANIFOLD>::Face>& faces,
+	SpheresOptimizer<POINTS>& spheres_optimizer,
+	typename mesh_traits<NONMANIFOLD>::template Attribute<typename mesh_traits<POINTS>::Vertex>* skeleton_source_sphere,
+	typename mesh_traits<POINTS>::template Attribute<typename mesh_traits<NONMANIFOLD>::Vertex>* sphere_skeleton_vertex)
+{
+	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
+	using SkeletonFace = typename mesh_traits<NONMANIFOLD>::Face;
+
+	std::vector<SkeletonEdge> face_edges;
+	face_edges.reserve(faces.size() * 3);
+	for (SkeletonFace f : faces)
+		for (SkeletonEdge e : incident_edges(skeleton, f))
+			face_edges.push_back(e);
+	for (SkeletonFace f : faces)
+		remove_face(skeleton, f);
+	remove_orphan_edges_and_vertices(skeleton, face_edges, spheres_optimizer, skeleton_source_sphere,
+									 sphere_skeleton_vertex);
+	return face_edges;
+}
+
+// Removes every vertex without edge (with its sphere).
+template <typename POINTS, typename NONMANIFOLD>
+void remove_isolated_vertices(
+	NONMANIFOLD& skeleton, SpheresOptimizer<POINTS>& spheres_optimizer,
+	typename mesh_traits<NONMANIFOLD>::template Attribute<typename mesh_traits<POINTS>::Vertex>* skeleton_source_sphere,
+	typename mesh_traits<POINTS>::template Attribute<typename mesh_traits<NONMANIFOLD>::Vertex>* sphere_skeleton_vertex)
+{
+	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
+
+	std::vector<SkeletonVertex> isolated_vertices;
+	foreach_cell(skeleton, [&](SkeletonVertex v) -> bool {
+		if (incident_edges(skeleton, v).empty())
+			isolated_vertices.push_back(v);
 		return true;
-	}
-	static void compute_edge_degree(Context& p)
-	{
-		offset_axis::compute_edge_degree(p.data.skeleton, p.data.edge_degree);
-	}
-	// Removes the edges left without face and then their vertices left without edge (with their spheres).
-	static void remove_orphan_edges_and_vertices(Context& p, const std::vector<SkeletonEdge>& face_edges)
-	{
-		std::vector<SkeletonVertex> candidate_vertices;
-		candidate_vertices.reserve(face_edges.size() * 2);
-		for (SkeletonEdge e : face_edges)
-		{
-			if (!e.is_valid())
-				continue;
-			const std::vector<SkeletonVertex> edge_vertices = incident_vertices(p.data.skeleton, e);
-			for (const SkeletonVertex& v : edge_vertices)
-				candidate_vertices.push_back(v);
-			if (incident_faces(p.data.skeleton, e).empty())
-				remove_edge(p.data.skeleton, e);
-		}
-		for (const SkeletonVertex& v : candidate_vertices)
-		{
-			if (!v.is_valid())
-				continue;
-			const uint32 idv = index_of(p.data.skeleton, v);
-			if (idv == INVALID_INDEX)
-				continue;
-			if (!incident_edges(p.data.skeleton, v).empty())
-				continue;
-			remove_skeleton_vertex_and_linked_sphere(p, v);
-		}
-	}
+	});
+	for (SkeletonVertex v : isolated_vertices)
+		remove_skeleton_vertex_and_sphere(skeleton, v, spheres_optimizer, skeleton_source_sphere,
+										  sphere_skeleton_vertex);
+}
 
-	// Removes the faces, then the edges and vertices left isolated (orphan edges and vertices). The tets are not
-	// changed. Returns the edges of the removed faces.
-	static std::vector<SkeletonEdge> remove_faces(Context& p, const std::vector<SkeletonFace>& faces)
-	{
-		std::vector<SkeletonEdge> face_edges;
-		face_edges.reserve(faces.size() * 3);
-		for (SkeletonFace f : faces)
-			for (SkeletonEdge e : incident_edges(p.data.skeleton, f))
-				face_edges.push_back(e);
-		for (SkeletonFace f : faces)
-			remove_face(p.data.skeleton, f);
-		remove_orphan_edges_and_vertices(p, face_edges);
-		return face_edges;
-	}
+// Removes the faces one by one with their tets, then every vertex without edge (with its sphere).
+template <typename POINTS, typename NONMANIFOLD>
+void remove_faces_and_tets(
+	NONMANIFOLD& skeleton, SkeletonTets<NONMANIFOLD>& tets, const std::unordered_set<uint32>& face_ids,
+	SpheresOptimizer<POINTS>& spheres_optimizer,
+	typename mesh_traits<NONMANIFOLD>::template Attribute<typename mesh_traits<POINTS>::Vertex>* skeleton_source_sphere,
+	typename mesh_traits<POINTS>::template Attribute<typename mesh_traits<NONMANIFOLD>::Vertex>* sphere_skeleton_vertex)
+{
+	using SkeletonFace = typename mesh_traits<NONMANIFOLD>::Face;
 
-	// Removes the faces one by one with their tets, then every vertex without edge (with its sphere).
-	static void remove_faces_and_tets(Context& p, const std::unordered_set<uint32>& face_ids)
+	for (uint32 face_id : face_ids)
 	{
-		for (uint32 face_id : face_ids)
-		{
-			const std::set<std::size_t> face_tets = p.skeleton_tets.tets_of(face_id);
-			remove_faces(p, {of_index<SkeletonFace>(p.data.skeleton, face_id)});
-			for (std::size_t tet_id : face_tets)
-				if (p.skeleton_tets.contains(tet_id))
-					p.skeleton_tets.erase(tet_id);
-		}
-		remove_isolated_vertices(p);
+		const std::set<std::size_t> face_tets = tets.tets_of(face_id);
+		remove_faces(skeleton, {of_index<SkeletonFace>(skeleton, face_id)}, spheres_optimizer, skeleton_source_sphere,
+					 sphere_skeleton_vertex);
+		for (std::size_t tet_id : face_tets)
+			if (tets.contains(tet_id))
+				tets.erase(tet_id);
 	}
+	remove_isolated_vertices(skeleton, spheres_optimizer, skeleton_source_sphere, sphere_skeleton_vertex);
+}
 
-	static void remove_isolated_vertices(Context& p)
-	{
-		std::vector<SkeletonVertex> isolated_vertices;
-		foreach_cell(p.data.skeleton, [&](SkeletonVertex v) -> bool {
-			if (incident_edges(p.data.skeleton, v).empty())
-				isolated_vertices.push_back(v);
-			return true;
-		});
-		for (SkeletonVertex v : isolated_vertices)
-			remove_skeleton_vertex_and_linked_sphere(p, v);
-	}
+// The edge between a and b, or an invalid edge if there is none.
+template <typename NONMANIFOLD>
+typename mesh_traits<NONMANIFOLD>::Edge find_edge(const NONMANIFOLD& skeleton,
+												   typename mesh_traits<NONMANIFOLD>::Vertex a,
+												   typename mesh_traits<NONMANIFOLD>::Vertex b)
+{
+	using SkeletonVertex = typename mesh_traits<NONMANIFOLD>::Vertex;
+	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
 
-	static bool find_skeleton_edge_between(Context& p, const SkeletonVertex& a, const SkeletonVertex& b,
-										   SkeletonEdge& out_edge)
+	for (SkeletonEdge e : incident_edges(skeleton, a))
 	{
-		out_edge = SkeletonEdge();
-		if (!a.is_valid() || !b.is_valid() || a == b)
-			return false;
-		for (SkeletonEdge edge : incident_edges(p.data.skeleton, a))
-		{
-			if (!edge.is_valid())
-				continue;
-			const std::vector<SkeletonVertex> edge_vertices = incident_vertices(p.data.skeleton, edge);
-			if (edge_vertices.size() == 2 &&
-				((edge_vertices[0] == a && edge_vertices[1] == b) || (edge_vertices[0] == b && edge_vertices[1] == a)))
-			{
-				out_edge = edge;
-				return true;
-			}
-		}
-		return false;
+		const std::vector<SkeletonVertex> edge_vertices = incident_vertices(skeleton, e);
+		if (edge_vertices[0] == b || edge_vertices[1] == b)
+			return e;
 	}
-};
+	return SkeletonEdge();
+}
 
 } // namespace topology_detail
 
