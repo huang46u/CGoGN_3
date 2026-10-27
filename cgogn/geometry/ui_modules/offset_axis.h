@@ -504,8 +504,7 @@ private:
 	{
 		if (!p.reconstruction_)
 			return;
-		const auto& metrics = p.reconstruction_->skeleton_topology().metrics();
-		for (PVertex sphere : metrics.added_spheres)
+		for (PVertex sphere : p.reconstruction_->skeleton_topology().added_spheres())
 		{
 			const uint32 id = p.spheres_ ? index_of(*p.spheres_, sphere) : INVALID_INDEX;
 			if (id == INVALID_INDEX)

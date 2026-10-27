@@ -209,23 +209,19 @@ bool run_case(char scenario, Mode mode)
 	std::vector<PVertex> sample_kdtree_vertices;
 	Optimizer optimizer{Optimizer::Data{samples, spheres, sample_kdtree, sample_kdtree_vertices}};
 
-	Topology::Data data;
-	data.skeleton = &skeleton;
-	data.spheres_optimizer = &optimizer;
-	data.sphere_skeleton_vertex = sphere_skeleton_vertex;
-	data.skeleton_position = skeleton_position;
-	data.skeleton_radius = skeleton_radius;
-	data.skeleton_source_sphere = skeleton_source_sphere;
-	data.face_incident_tets = face_incident_tets;
-	data.edge_degree = edge_degree;
+	Topology::Data data{skeleton, optimizer};
+	data.sphere_skeleton_vertex = sphere_skeleton_vertex.get();
+	data.skeleton_position = skeleton_position.get();
+	data.skeleton_radius = skeleton_radius.get();
+	data.skeleton_source_sphere = skeleton_source_sphere.get();
+	data.face_incident_tets = face_incident_tets.get();
+	data.edge_degree = edge_degree.get();
 
 	Topology topology(data);
-	topology.set_residual_prune_mode(mode);
 
 	const Counts before = counts(skeleton);
-	const Topology::Status status = topology.prune_residual_sheets();
+	topology.prune_residual_sheets(mode);
 	const Counts after = counts(skeleton);
-	const Topology::Metrics& m = topology.metrics();
 
 	const long long chi_before = before.chi();
 	const long long chi_after = after.chi();
@@ -238,15 +234,12 @@ bool run_case(char scenario, Mode mode)
 	// expectations
 	long long expected_deleted_faces = 0;
 	long long expected_removed_edges = 0;
-	long long expected_fully_nm = 0;
-	long long expected_residual_removed = 0;
 	long long expected_removed_vertices = 0;
 	if (scenario_c)
 	{
 		// the 10 triangles are removed by the fully non-manifold step only in current mode, together with the 10
 		// orphan edges and the 5 isolated vertices
 		expected_deleted_faces = current ? 10 : 0;
-		expected_fully_nm = current ? 10 : 0;
 		expected_removed_edges = current ? 10 : 0;
 		expected_removed_vertices = current ? 5 : 0;
 	}
@@ -254,21 +247,17 @@ bool run_case(char scenario, Mode mode)
 	{
 		// T is removed by the fully non-manifold step only in current mode
 		expected_deleted_faces = current ? 1 : 0;
-		expected_fully_nm = current ? 1 : 0;
 	}
 	else
 	{
 		// T1, T2 form a 2-face sheet without boundary edge: deleted unless collapsible_only
 		const bool deleted = !collapsible;
 		expected_deleted_faces = deleted ? 2 : 0;
-		expected_residual_removed = deleted ? 2 : 0;
 		// edge ac loses both faces and is removed as an orphan edge, so chi drops by 1 not 2
 		expected_removed_edges = deleted ? 1 : 0;
 	}
 
 	std::vector<std::string> errors;
-	if (status != Topology::Status::success)
-		errors.push_back("prune_residual_sheets did not return success");
 	if (removed_vertices != expected_removed_vertices)
 		errors.push_back("removed vertices: expected " + std::to_string(expected_removed_vertices) + ", got " +
 						 std::to_string(removed_vertices));
@@ -283,16 +272,6 @@ bool run_case(char scenario, Mode mode)
 	if (chi_after != expected_chi_after)
 		errors.push_back("chi_after: expected " + std::to_string(expected_chi_after) + ", got " +
 						 std::to_string(chi_after));
-	if (m.residual_chi_before != chi_before || m.residual_chi_after != chi_after)
-		errors.push_back("metrics chi values do not match the skeleton");
-	if (static_cast<long long>(m.residual_fully_nm_removed_faces) != expected_fully_nm)
-		errors.push_back("residual_fully_nm_removed_faces: expected " + std::to_string(expected_fully_nm) + ", got " +
-						 std::to_string(m.residual_fully_nm_removed_faces));
-	if (scenario_b && static_cast<long long>(m.residual_removed_faces) != expected_residual_removed)
-		errors.push_back("residual_removed_faces: expected " + std::to_string(expected_residual_removed) + ", got " +
-						 std::to_string(m.residual_removed_faces));
-	if (scenario_b && m.residual_small_sheets_without_boundary_edge < 1)
-		errors.push_back("residual_small_sheets_without_boundary_edge is 0, expected >= 1");
 
 	const bool ok = errors.empty();
 	std::cout << "[scenario " << scenario << "][" << mode_name(mode) << "] chi_before=" << chi_before

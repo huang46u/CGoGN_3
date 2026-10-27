@@ -77,9 +77,9 @@ struct BoundaryTetPrune
 		{
 			const SkeletonFace f = tet.faces[i];
 			uint32 deg2_edge_count = 0;
-			for (SkeletonEdge e : incident_edges(*p.data.skeleton, f))
+			for (SkeletonEdge e : incident_edges(p.data.skeleton, f))
 			{
-				if (incident_faces(*p.data.skeleton, e).size() == 2)
+				if (incident_faces(p.data.skeleton, e).size() == 2)
 					++deg2_edge_count;
 			}
 			if (deg2_edge_count >= 2)
@@ -97,24 +97,24 @@ struct BoundaryTetPrune
 		for (uint32 i = 0; i < 4; ++i)
 		{
 			const SkeletonFace f = tet.faces[i];
-			for (SkeletonEdge e : incident_edges(*p.data.skeleton, f))
+			for (SkeletonEdge e : incident_edges(p.data.skeleton, f))
 			{
-				const uint32 ide = index_of(*p.data.skeleton, e);
+				const uint32 ide = index_of(p.data.skeleton, e);
 				if (!seen_edges.insert(ide).second)
 					continue;
 
-				const auto in_faces = incident_faces(*p.data.skeleton, e);
+				const auto in_faces = incident_faces(p.data.skeleton, e);
 				if (in_faces.size() != 2)
 					continue;
 				const SkeletonFace f0 = in_faces[0];
 				const SkeletonFace f1 = in_faces[1];
-				const uint32 idf0 = index_of(*p.data.skeleton, f0);
-				const uint32 idf1 = index_of(*p.data.skeleton, f1);
-				const std::vector<SkeletonVertex> edge_vertices = incident_vertices(*p.data.skeleton, e);
+				const uint32 idf0 = index_of(p.data.skeleton, f0);
+				const uint32 idf1 = index_of(p.data.skeleton, f1);
+				const std::vector<SkeletonVertex> edge_vertices = incident_vertices(p.data.skeleton, e);
 				if (edge_vertices.size() != 2)
 					continue;
-				const Vec3 p0 = value<Vec3>(*p.data.skeleton, p.data.skeleton_position, edge_vertices[0]);
-				const Vec3 p1 = value<Vec3>(*p.data.skeleton, p.data.skeleton_position, edge_vertices[1]);
+				const Vec3 p0 = value<Vec3>(p.data.skeleton, p.data.skeleton_position, edge_vertices[0]);
+				const Vec3 p1 = value<Vec3>(p.data.skeleton, p.data.skeleton_position, edge_vertices[1]);
 				const Scalar edge_len = (p1 - p0).norm();
 				if (edge_len > best_choice.length)
 				{
@@ -139,10 +139,10 @@ struct BoundaryTetPrune
 			if (!is_boundary_tet(p, tet))
 				continue;
 			for (uint32 i = 0; i < 4; ++i)
-				face_ids.insert(index_of(*p.data.skeleton, tet.faces[i]));
+				face_ids.insert(index_of(p.data.skeleton, tet.faces[i]));
 			BoundaryEdgeChoice best_choice;
 			if (choose_longest_boundary_edge(p, tet, best_choice))
-				edge_ids.insert(index_of(*p.data.skeleton, best_choice.edge));
+				edge_ids.insert(index_of(p.data.skeleton, best_choice.edge));
 		}
 	}
 
@@ -198,26 +198,26 @@ struct BoundaryTetPrune
 			{
 				if (!f_del.is_valid())
 					continue;
-				for (SkeletonEdge e : incident_edges(*p.data.skeleton, f_del))
+				for (SkeletonEdge e : incident_edges(p.data.skeleton, f_del))
 					affected_edges.push_back(e);
 			}
 			std::unordered_set<uint32> removed_face_ids;
 			removed_face_ids.reserve(faces_to_remove.size() * 2 + 1);
 			for (const SkeletonFace& f_del : faces_to_remove)
 			{
-				if (const uint32 idf_del = index_of(*p.data.skeleton, f_del); idf_del != INVALID_INDEX)
+				if (const uint32 idf_del = index_of(p.data.skeleton, f_del); idf_del != INVALID_INDEX)
 					removed_face_ids.insert(idf_del);
-				remove_face(*p.data.skeleton, f_del);
+				remove_face(p.data.skeleton, f_del);
 				++stats.removed_faces;
 			}
 			QuadratureScores::erase_topology_fix_scores_for_removed_faces_and_orphan_edges(
 				p, score_cache, removed_face_ids, affected_edges);
 			if (cand.edge.is_valid())
 			{
-				const auto edge_in_faces = incident_faces(*p.data.skeleton, cand.edge);
+				const auto edge_in_faces = incident_faces(p.data.skeleton, cand.edge);
 				if (edge_in_faces.empty())
 				{
-					remove_edge(*p.data.skeleton, cand.edge);
+					remove_edge(p.data.skeleton, cand.edge);
 					++stats.removed_edges;
 				}
 			}
@@ -226,7 +226,7 @@ struct BoundaryTetPrune
 			for (uint32 i = 0; i < 4; ++i)
 			{
 				const SkeletonFace f = old_tet.faces[i];
-				const uint32 idf = index_of(*p.data.skeleton, f);
+				const uint32 idf = index_of(p.data.skeleton, f);
 				(*p.data.face_incident_tets)[idf].erase(cand.tet_id);
 			}
 		}

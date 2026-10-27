@@ -80,9 +80,6 @@ struct DenseK5Repair
 	static DenseFiveVertexDetectionResult detect_k5_and_k5_minus_1_cells(Context& p)
 	{
 		DenseFiveVertexDetectionResult result;
-		if (!p.data.skeleton)
-			return result;
-
 		auto make_edge_key = [](uint32 a, uint32 b) -> uint64 {
 			if (a > b)
 				std::swap(a, b);
@@ -92,19 +89,19 @@ struct DenseK5Repair
 		std::vector<std::array<uint32, 5>> k5_minus_1_regions;
 
 		std::unordered_map<uint32, std::unordered_set<uint32>> adjacency;
-		adjacency.reserve(nb_cells<SkeletonVertex>(*p.data.skeleton));
+		adjacency.reserve(nb_cells<SkeletonVertex>(p.data.skeleton));
 		std::unordered_set<uint64> edge_pair_to_id;
-		edge_pair_to_id.reserve(nb_cells<SkeletonEdge>(*p.data.skeleton) * 2 + 1);
+		edge_pair_to_id.reserve(nb_cells<SkeletonEdge>(p.data.skeleton) * 2 + 1);
 
-		foreach_cell(*p.data.skeleton, [&](SkeletonEdge e) -> bool {
-			const uint32 ide = index_of(*p.data.skeleton, e);
+		foreach_cell(p.data.skeleton, [&](SkeletonEdge e) -> bool {
+			const uint32 ide = index_of(p.data.skeleton, e);
 			if (ide == INVALID_INDEX)
 				return true;
-			const std::vector<SkeletonVertex> vv = incident_vertices(*p.data.skeleton, e);
+			const std::vector<SkeletonVertex> vv = incident_vertices(p.data.skeleton, e);
 			if (vv.size() != 2)
 				return true;
-			const uint32 a = index_of(*p.data.skeleton, vv[0]);
-			const uint32 b = index_of(*p.data.skeleton, vv[1]);
+			const uint32 a = index_of(p.data.skeleton, vv[0]);
+			const uint32 b = index_of(p.data.skeleton, vv[1]);
 			if (a == INVALID_INDEX || b == INVALID_INDEX || a == b)
 				return true;
 			adjacency[a].insert(b);
@@ -124,9 +121,9 @@ struct DenseK5Repair
 				const SkeletonFace face = tet.faces[face_index];
 				if (!face.is_valid())
 					continue;
-				for (SkeletonVertex vertex : incident_vertices(*p.data.skeleton, face))
+				for (SkeletonVertex vertex : incident_vertices(p.data.skeleton, face))
 				{
-					const uint32 vertex_id = index_of(*p.data.skeleton, vertex);
+					const uint32 vertex_id = index_of(p.data.skeleton, vertex);
 					if (vertex_id == INVALID_INDEX ||
 						std::find(base_vertices.begin(), base_vertices.begin() + base_vertex_count, vertex_id) !=
 							base_vertices.begin() + base_vertex_count)
@@ -219,11 +216,6 @@ struct DenseK5Repair
 		std::array<SphereVertex, 5> spheres;
 	};
 
-	struct IndependentDenseFiveVertexRepairStats
-	{
-		uint32 repaired_regions = 0;
-		uint32 added_faces = 0;
-	};
 
 	static bool is_live_sphere_vertex(Context& p, const SphereVertex& sphere, uint32& sphere_index)
 	{
@@ -237,9 +229,9 @@ struct DenseK5Repair
 	static bool is_live_skeleton_vertex(Context& p, const SkeletonVertex& vertex, uint32& vertex_index)
 	{
 		vertex_index = INVALID_INDEX;
-		if (!p.data.skeleton || !vertex.is_valid())
+		if (!vertex.is_valid())
 			return false;
-		vertex_index = index_of(*p.data.skeleton, vertex);
+		vertex_index = index_of(p.data.skeleton, vertex);
 		return vertex_index != INVALID_INDEX;
 	}
 
@@ -248,9 +240,6 @@ struct DenseK5Repair
 	{
 		std::vector<IndependentDenseFiveVertexRepairSeed> seeds;
 		seeds.reserve(detection.independent_exact_k5_regions.size() + detection.independent_k5_minus_1_regions.size());
-		if (!p.data.skeleton || !p.data.skeleton_source_sphere)
-			return seeds;
-
 		auto append_regions = [&](const std::vector<std::array<uint32, 5>>& regions) {
 			for (const auto& region : regions)
 			{
@@ -258,14 +247,14 @@ struct DenseK5Repair
 				bool valid = true;
 				for (uint32 i = 0; i < 5; ++i)
 				{
-					const SkeletonVertex vertex = of_index<SkeletonVertex>(*p.data.skeleton, region[i]);
+					const SkeletonVertex vertex = of_index<SkeletonVertex>(p.data.skeleton, region[i]);
 					uint32 current_vertex_index = INVALID_INDEX;
 					if (!is_live_skeleton_vertex(p, vertex, current_vertex_index) || current_vertex_index != region[i])
 					{
 						valid = false;
 						break;
 					}
-					const SphereVertex sphere = value<SphereVertex>(*p.data.skeleton, p.data.skeleton_source_sphere, vertex);
+					const SphereVertex sphere = value<SphereVertex>(p.data.skeleton, p.data.skeleton_source_sphere, vertex);
 					uint32 sphere_index = INVALID_INDEX;
 					if (!is_live_sphere_vertex(p, sphere, sphere_index))
 					{
@@ -286,38 +275,23 @@ struct DenseK5Repair
 	static bool face_is_inside_vertex_set(Context& p, const SkeletonFace& face,
 										  const std::unordered_set<uint32>& vertex_ids)
 	{
-		if (!p.data.skeleton || !face.is_valid())
+		if (!face.is_valid())
 			return false;
-		const std::vector<SkeletonVertex> vertices = incident_vertices(*p.data.skeleton, face);
+		const std::vector<SkeletonVertex> vertices = incident_vertices(p.data.skeleton, face);
 		if (vertices.size() != 3)
 			return false;
 		for (SkeletonVertex vertex : vertices)
 		{
-			const uint32 vertex_id = index_of(*p.data.skeleton, vertex);
+			const uint32 vertex_id = index_of(p.data.skeleton, vertex);
 			if (vertex_id == INVALID_INDEX || vertex_ids.find(vertex_id) == vertex_ids.end())
 				return false;
 		}
 		return true;
 	}
 
-	enum class IndependentDenseFiveVertexRepairResult
+	// Returns true if the region is repaired.
+	static bool repair_independent_dense_five_vertex_region(Context& p, const IndependentDenseFiveVertexRepairSeed& seed)
 	{
-		Repaired,
-		MissingVertices,
-		NoNonManifoldEdges,
-		AdjacentNonManifoldEdges,
-		UnsafeExternalFaces,
-		DegenerateGeometry
-	};
-
-	static IndependentDenseFiveVertexRepairResult repair_independent_dense_five_vertex_region(
-		Context& p, const IndependentDenseFiveVertexRepairSeed& seed, uint32& out_added_faces)
-	{
-		out_added_faces = 0;
-		if (!p.data.sphere_skeleton_vertex || !p.data.skeleton || !p.data.skeleton_position || !p.data.skeleton_radius ||
-			!p.data.skeleton_source_sphere || !p.data.face_incident_tets)
-			return IndependentDenseFiveVertexRepairResult::MissingVertices;
-
 		std::array<uint32, 5> sphere_ids;
 		std::array<SkeletonVertex, 5> vertices;
 		std::array<uint32, 5> vertex_ids;
@@ -329,23 +303,23 @@ struct DenseK5Repair
 		for (uint32 i = 0; i < 5; ++i)
 		{
 			if (!is_live_sphere_vertex(p, seed.spheres[i], sphere_ids[i]))
-				return IndependentDenseFiveVertexRepairResult::MissingVertices;
+				return false;
 			vertices[i] = (*p.data.sphere_skeleton_vertex)[sphere_ids[i]];
 			if (!is_live_skeleton_vertex(p, vertices[i], vertex_ids[i]))
-				return IndependentDenseFiveVertexRepairResult::MissingVertices;
-			if (value<SphereVertex>(*p.data.skeleton, p.data.skeleton_source_sphere, vertices[i]) != seed.spheres[i])
-				return IndependentDenseFiveVertexRepairResult::MissingVertices;
+				return false;
+			if (value<SphereVertex>(p.data.skeleton, p.data.skeleton_source_sphere, vertices[i]) != seed.spheres[i])
+				return false;
 			positions[i] = (*p.optimizer_data.sphere_position)[sphere_ids[i]];
 			centroid += positions[i];
 			average_radius += (*p.optimizer_data.sphere_radius)[sphere_ids[i]];
 			region_vertex_ids.insert(vertex_ids[i]);
 		}
 		if (region_vertex_ids.size() != 5)
-			return IndependentDenseFiveVertexRepairResult::MissingVertices;
+			return false;
 		centroid /= Scalar(5);
 		average_radius /= Scalar(5);
 		if (!centroid.allFinite() || !std::isfinite(static_cast<double>(average_radius)) || average_radius <= Scalar(0))
-			return IndependentDenseFiveVertexRepairResult::DegenerateGeometry;
+			return false;
 
 		auto make_edge_key = [](uint32 a, uint32 b) -> uint64 {
 			if (a > b)
@@ -364,32 +338,32 @@ struct DenseK5Repair
 				if (!MeshOps::find_skeleton_edge_between(p, vertices[i], vertices[j], edge))
 					continue;
 				region_edges[make_edge_key(vertex_ids[i], vertex_ids[j])] = edge;
-				if (incident_faces(*p.data.skeleton, edge).size() > 2)
+				if (incident_faces(p.data.skeleton, edge).size() > 2)
 				{
-					const uint32 edge_id = index_of(*p.data.skeleton, edge);
+					const uint32 edge_id = index_of(p.data.skeleton, edge);
 					if (edge_id != INVALID_INDEX)
 						region_nm_edge_ids.insert(edge_id);
 				}
 			}
 		}
 		if (region_nm_edge_ids.empty())
-			return IndependentDenseFiveVertexRepairResult::NoNonManifoldEdges;
+			return false;
 
 		for (uint32 nm_edge_id : region_nm_edge_ids)
 		{
-			const SkeletonEdge nm_edge = of_index<SkeletonEdge>(*p.data.skeleton, nm_edge_id);
+			const SkeletonEdge nm_edge = of_index<SkeletonEdge>(p.data.skeleton, nm_edge_id);
 			if (!nm_edge.is_valid())
 				continue;
-			for (SkeletonVertex endpoint : incident_vertices(*p.data.skeleton, nm_edge))
+			for (SkeletonVertex endpoint : incident_vertices(p.data.skeleton, nm_edge))
 			{
-				for (SkeletonEdge adjacent_edge : incident_edges(*p.data.skeleton, endpoint))
+				for (SkeletonEdge adjacent_edge : incident_edges(p.data.skeleton, endpoint))
 				{
-					if (!adjacent_edge.is_valid() || incident_faces(*p.data.skeleton, adjacent_edge).size() <= 2)
+					if (!adjacent_edge.is_valid() || incident_faces(p.data.skeleton, adjacent_edge).size() <= 2)
 						continue;
-					const uint32 adjacent_edge_id = index_of(*p.data.skeleton, adjacent_edge);
+					const uint32 adjacent_edge_id = index_of(p.data.skeleton, adjacent_edge);
 					if (adjacent_edge_id != INVALID_INDEX &&
 						region_nm_edge_ids.find(adjacent_edge_id) == region_nm_edge_ids.end())
-						return IndependentDenseFiveVertexRepairResult::AdjacentNonManifoldEdges;
+						return false;
 				}
 			}
 		}
@@ -403,7 +377,7 @@ struct DenseK5Repair
 		Eigen::SelfAdjointEigenSolver<Eigen::Matrix<Scalar, 3, 3>> eigen_solver(covariance);
 		if (eigen_solver.info() != Eigen::Success ||
 			eigen_solver.eigenvalues()[1] <= std::numeric_limits<Scalar>::epsilon())
-			return IndependentDenseFiveVertexRepairResult::DegenerateGeometry;
+			return false;
 		const Vec3 axis_u = eigen_solver.eigenvectors().col(2);
 		const Vec3 axis_v = eigen_solver.eigenvectors().col(1);
 		std::array<uint32, 5> cyclic_order = {0, 1, 2, 3, 4};
@@ -424,7 +398,7 @@ struct DenseK5Repair
 			const Vec3 radial_a = positions[cyclic_order[i]] - centroid;
 			const Vec3 radial_b = positions[cyclic_order[(i + 1) % 5]] - centroid;
 			if (radial_a.cross(radial_b).norm() <= fan_area_epsilon)
-				return IndependentDenseFiveVertexRepairResult::DegenerateGeometry;
+				return false;
 		}
 
 		std::unordered_set<uint64> cycle_edge_keys;
@@ -438,35 +412,35 @@ struct DenseK5Repair
 
 		std::unordered_set<uint32> internal_face_ids;
 		internal_face_ids.reserve(16);
-		foreach_cell(*p.data.skeleton, [&](SkeletonFace face) -> bool {
+		foreach_cell(p.data.skeleton, [&](SkeletonFace face) -> bool {
 			if (face_is_inside_vertex_set(p, face, region_vertex_ids))
 			{
-				const uint32 face_id = index_of(*p.data.skeleton, face);
+				const uint32 face_id = index_of(p.data.skeleton, face);
 				if (face_id != INVALID_INDEX)
 					internal_face_ids.insert(face_id);
 			}
 			return true;
 		});
 		if (internal_face_ids.empty())
-			return IndependentDenseFiveVertexRepairResult::UnsafeExternalFaces;
+			return false;
 
 		for (const auto& edge_entry : region_edges)
 		{
 			uint32 external_face_count = 0;
-			for (SkeletonFace face : incident_faces(*p.data.skeleton, edge_entry.second))
+			for (SkeletonFace face : incident_faces(p.data.skeleton, edge_entry.second))
 			{
-				const uint32 face_id = index_of(*p.data.skeleton, face);
+				const uint32 face_id = index_of(p.data.skeleton, face);
 				if (face_id == INVALID_INDEX || internal_face_ids.find(face_id) == internal_face_ids.end())
 					++external_face_count;
 			}
 			if (cycle_edge_keys.find(edge_entry.first) == cycle_edge_keys.end())
 			{
 				if (external_face_count != 0)
-					return IndependentDenseFiveVertexRepairResult::UnsafeExternalFaces;
+					return false;
 			}
 			else if (external_face_count > 1)
 			{
-				return IndependentDenseFiveVertexRepairResult::UnsafeExternalFaces;
+				return false;
 			}
 		}
 
@@ -475,14 +449,14 @@ struct DenseK5Repair
 		deletion_options.remove_incident_orphan_edges_immediately = false;
 		deletion_options.remove_global_orphan_elements_after_batch = false;
 		if (!MeshOps::delete_skeleton_face_id_set(p, internal_face_ids, deletion_stats, deletion_options))
-			return IndependentDenseFiveVertexRepairResult::UnsafeExternalFaces;
+			return false;
 
 		for (const auto& edge_entry : region_edges)
 		{
 			if (cycle_edge_keys.find(edge_entry.first) != cycle_edge_keys.end())
 				continue;
-			if (edge_entry.second.is_valid() && incident_faces(*p.data.skeleton, edge_entry.second).empty())
-				remove_edge(*p.data.skeleton, edge_entry.second);
+			if (edge_entry.second.is_valid() && incident_faces(p.data.skeleton, edge_entry.second).empty())
+				remove_edge(p.data.skeleton, edge_entry.second);
 		}
 
 		for (uint32 i = 0; i < 5; ++i)
@@ -504,16 +478,16 @@ struct DenseK5Repair
 			}
 		}
 
-		const SphereVertex center_sphere = p.data.spheres_optimizer->add_sphere(centroid, average_radius);
+		const SphereVertex center_sphere = p.data.spheres_optimizer.add_sphere(centroid, average_radius);
 		if (!center_sphere.is_valid())
-			return IndependentDenseFiveVertexRepairResult::MissingVertices;
+			return false;
 		const uint32 center_sphere_id = index_of(p.optimizer_data.spheres, center_sphere);
-		p.metrics.added_spheres.push_back(center_sphere);
+		p.added_spheres.push_back(center_sphere);
 
-		const SkeletonVertex center_vertex = add_vertex(*p.data.skeleton);
-		value<Vec3>(*p.data.skeleton, p.data.skeleton_position, center_vertex) = centroid;
-		value<Scalar>(*p.data.skeleton, p.data.skeleton_radius, center_vertex) = average_radius;
-		value<SphereVertex>(*p.data.skeleton, p.data.skeleton_source_sphere, center_vertex) = center_sphere;
+		const SkeletonVertex center_vertex = add_vertex(p.data.skeleton);
+		value<Vec3>(p.data.skeleton, p.data.skeleton_position, center_vertex) = centroid;
+		value<Scalar>(p.data.skeleton, p.data.skeleton_radius, center_vertex) = average_radius;
+		value<SphereVertex>(p.data.skeleton, p.data.skeleton_source_sphere, center_vertex) = center_sphere;
 		(*p.data.sphere_skeleton_vertex)[center_sphere_id] = center_vertex;
 
 		std::array<SkeletonEdge, 5> cycle_edges;
@@ -523,8 +497,8 @@ struct DenseK5Repair
 			const uint32 a = cyclic_order[i];
 			const uint32 b = cyclic_order[(i + 1) % 5];
 			if (!MeshOps::find_skeleton_edge_between(p, vertices[a], vertices[b], cycle_edges[i]))
-				cycle_edges[i] = add_edge(*p.data.skeleton, vertices[a], vertices[b]);
-			spoke_edges[i] = add_edge(*p.data.skeleton, center_vertex, vertices[a]);
+				cycle_edges[i] = add_edge(p.data.skeleton, vertices[a], vertices[b]);
+			spoke_edges[i] = add_edge(p.data.skeleton, center_vertex, vertices[a]);
 			sorted_vector_insert((*p.optimizer_data.sphere_neighbors)[center_sphere_id], seed.spheres[a]);
 			sorted_vector_insert((*p.optimizer_data.sphere_neighbors)[sphere_ids[a]], center_sphere);
 		}
@@ -532,18 +506,16 @@ struct DenseK5Repair
 		for (uint32 i = 0; i < 5; ++i)
 		{
 			std::vector<SkeletonEdge> face_edges = {cycle_edges[i], spoke_edges[i], spoke_edges[(i + 1) % 5]};
-			const SkeletonFace new_face = add_face(*p.data.skeleton, face_edges);
-			value<std::set<std::size_t>>(*p.data.skeleton, p.data.face_incident_tets, new_face).clear();
-			++out_added_faces;
+			const SkeletonFace new_face = add_face(p.data.skeleton, face_edges);
+			value<std::set<std::size_t>>(p.data.skeleton, p.data.face_incident_tets, new_face).clear();
 		}
 
-		return IndependentDenseFiveVertexRepairResult::Repaired;
+		return true;
 	}
 
-	static IndependentDenseFiveVertexRepairStats repair_isolated_independent_dense_five_vertex_regions(
+	static void repair_isolated_independent_dense_five_vertex_regions(
 		Context& p, const std::vector<IndependentDenseFiveVertexRepairSeed>& seeds)
 	{
-		IndependentDenseFiveVertexRepairStats stats;
 		std::vector<IndependentDenseFiveVertexRepairSeed> live_seeds;
 		live_seeds.reserve(seeds.size());
 		for (const auto& seed : seeds)
@@ -562,7 +534,7 @@ struct DenseK5Repair
 				const SkeletonVertex vertex = (*p.data.sphere_skeleton_vertex)[sphere_id];
 				uint32 vertex_id = INVALID_INDEX;
 				if (!is_live_skeleton_vertex(p, vertex, vertex_id) ||
-					value<SphereVertex>(*p.data.skeleton, p.data.skeleton_source_sphere, vertex) != sphere)
+					value<SphereVertex>(p.data.skeleton, p.data.skeleton_source_sphere, vertex) != sphere)
 				{
 					all_vertices_live = false;
 					break;
@@ -573,29 +545,13 @@ struct DenseK5Repair
 				live_seeds.push_back(seed);
 		}
 
+		bool repaired_any = false;
 		for (const auto& seed : live_seeds)
-		{
-			uint32 added_faces = 0;
-			const IndependentDenseFiveVertexRepairResult result =
-				repair_independent_dense_five_vertex_region(p, seed, added_faces);
-			switch (result)
-			{
-			case IndependentDenseFiveVertexRepairResult::Repaired:
-				++stats.repaired_regions;
-				stats.added_faces += added_faces;
-				break;
-			case IndependentDenseFiveVertexRepairResult::NoNonManifoldEdges:
-			case IndependentDenseFiveVertexRepairResult::MissingVertices:
-			case IndependentDenseFiveVertexRepairResult::AdjacentNonManifoldEdges:
-			case IndependentDenseFiveVertexRepairResult::UnsafeExternalFaces:
-			case IndependentDenseFiveVertexRepairResult::DegenerateGeometry:
-				break;
-			}
-		}
+			if (repair_independent_dense_five_vertex_region(p, seed))
+				repaired_any = true;
 
-		if (stats.repaired_regions != 0)
+		if (repaired_any)
 			MeshOps::compute_edge_degree(p);
-		return stats;
 	}
 };
 

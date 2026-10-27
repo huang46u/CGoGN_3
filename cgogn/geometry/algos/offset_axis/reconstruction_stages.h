@@ -446,25 +446,22 @@ typename State::SpheresOptimizerType& optimizer_for(State& s)
 	return *s.optimizer;
 }
 
-// The topology data is copied from the state on every call.
+// Created on the first call after initialize_data: the topology refers to the skeleton and attributes of the state.
 template <typename State>
 typename State::TopologyType& topology_for(State& s)
 {
 	using TopologyType = typename State::TopologyType;
 
-	typename TopologyType::Data d;
-	d.skeleton = s.data.skeleton;
-	d.spheres_optimizer = &optimizer_for(s);
-	d.sphere_skeleton_vertex = s.sphere_skeleton_vertex;
-	d.skeleton_position = s.skeleton_position;
-	d.skeleton_radius = s.skeleton_radius;
-	d.skeleton_source_sphere = s.skeleton_source_sphere;
-	d.face_incident_tets = s.skeleton_incident_tets;
-	d.edge_degree = s.skeleton_edge_degree;
-	if (!s.topology)
-		s.topology = std::make_unique<TopologyType>(std::move(d));
-	else
-		s.topology->data() = std::move(d);
+	if (s.topology)
+		return *s.topology;
+	typename TopologyType::Data d{*s.data.skeleton, optimizer_for(s)};
+	d.sphere_skeleton_vertex = s.sphere_skeleton_vertex.get();
+	d.skeleton_position = s.skeleton_position.get();
+	d.skeleton_radius = s.skeleton_radius.get();
+	d.skeleton_source_sphere = s.skeleton_source_sphere.get();
+	d.face_incident_tets = s.skeleton_incident_tets.get();
+	d.edge_degree = s.skeleton_edge_degree.get();
+	s.topology = std::make_unique<TopologyType>(d);
 	return *s.topology;
 }
 
@@ -713,31 +710,26 @@ template <typename State>
 typename State::StatusInfo fix_topology(State& s)
 {
 	using NMVertex = typename State::NMVertex;
-	using TopologyType = typename State::TopologyType;
 	using Status = typename State::Status;
 
 	// skeleton comes from build_skeleton
 	OFFSET_AXIS_PRECONDITION(s.data.skeleton && nb_cells<NMVertex>(*s.data.skeleton) > 0, Status::invalid_data);
-	return topology_for(s).fix_topology([&](const std::vector<Vec3>& p, std::vector<Scalar>& v) {
-		return evaluate_topology_scores(s, p, v);
-	}) == TopologyType::Status::success
-			   ? Status::success
-			   : Status::topology_fix_failed;
+	if (!topology_for(s).fix_topology(
+			[&](const std::vector<Vec3>& p, std::vector<Scalar>& v) { return evaluate_topology_scores(s, p, v); }))
+		return Status::topology_fix_failed;
+	return Status::success;
 }
 
 template <typename State>
 typename State::StatusInfo prune_residual_sheets(State& s)
 {
 	using NMVertex = typename State::NMVertex;
-	using TopologyType = typename State::TopologyType;
 	using Status = typename State::Status;
 
 	// skeleton comes from build_skeleton
 	OFFSET_AXIS_PRECONDITION(s.data.skeleton && nb_cells<NMVertex>(*s.data.skeleton) > 0, Status::invalid_data);
-	auto& topology = topology_for(s);
-	topology.set_residual_prune_mode(s.options.residual_prune_mode);
-	return topology.prune_residual_sheets() == TopologyType::Status::success ? Status::success
-																					: Status::topology_fix_failed;
+	topology_for(s).prune_residual_sheets(s.options.residual_prune_mode);
+	return Status::success;
 }
 
 template <typename State>

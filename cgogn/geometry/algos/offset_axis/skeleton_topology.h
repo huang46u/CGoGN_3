@@ -62,8 +62,6 @@ public:
 	template <typename T>
 	using SkeletonAttribute = typename Types::template SkeletonAttribute<T>;
 	using Data = typename Types::Data;
-	using Metrics = typename Types::Metrics;
-	using Status = typename Types::Status;
 	using ResidualPruneMode = typename Types::ResidualPruneMode;
 
 	explicit SkeletonTopology(Data data) : data_(std::move(data))
@@ -71,56 +69,39 @@ public:
 	}
 	SkeletonTopology(const SkeletonTopology&) = delete;
 	SkeletonTopology& operator=(const SkeletonTopology&) = delete;
-	Data& data()
+	// Spheres added by the dense K5 repair of the last fix_topology.
+	const std::vector<SphereVertex>& added_spheres() const
 	{
-		return data_;
-	}
-	const Data& data() const
-	{
-		return data_;
-	}
-	const Metrics& metrics() const
-	{
-		return metrics_;
+		return added_spheres_;
 	}
 	bool has_tets() const
 	{
 		return !skeleton_tets_.empty();
 	}
-	void set_residual_prune_mode(ResidualPruneMode mode)
-	{
-		residual_prune_mode_ = mode;
-	}
-
 	void build_from_spheres()
 	{
-		metrics_ = Metrics{};
-		const auto& spheres = data_.spheres_optimizer->data();
+		added_spheres_.clear();
+		const auto& spheres = data_.spheres_optimizer.data();
 		build_skeleton_from_spheres(spheres.spheres, spheres.sphere_position, spheres.sphere_radius,
-									spheres.sphere_neighbors, *data_.skeleton, data_.skeleton_position.get(),
-									data_.skeleton_radius.get(), data_.skeleton_source_sphere.get(),
-									data_.sphere_skeleton_vertex.get(), data_.face_incident_tets.get(),
-									data_.edge_degree.get(), skeleton_tets_);
+									spheres.sphere_neighbors, data_.skeleton, data_.skeleton_position,
+									data_.skeleton_radius, data_.skeleton_source_sphere, data_.sphere_skeleton_vertex,
+									data_.face_incident_tets, data_.edge_degree, skeleton_tets_);
 	}
 
+	// Returns false if the scores cannot be evaluated.
 	template <typename ScoreEvaluator>
-	Status fix_topology(ScoreEvaluator&& evaluate_scores)
+	bool fix_topology(ScoreEvaluator&& evaluate_scores)
 	{
-		if (!valid_data())
-			return Status::invalid_data;
-		metrics_ = Metrics{};
+		added_spheres_.clear();
 		if (skeleton_tets_.empty())
-			return Status::success;
-		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
+			return true;
+		Context p(data_, skeleton_tets_, added_spheres_);
 		return run_topology_fix_pipeline(p, evaluate_scores);
 	}
 
 	void compute_edge_degree()
 	{
-		if (!valid_data())
-			return;
-		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
-		MeshOps::compute_edge_degree(p);
+		offset_axis::compute_edge_degree(data_.skeleton, data_.edge_degree);
 	}
 
 	// Read-only: ids (index_of) of the faces of the current boundary tets, and of the longest degree-2 edge of each
@@ -134,9 +115,7 @@ public:
 	BoundaryTetMask boundary_tet_mask()
 	{
 		BoundaryTetMask mask;
-		if (!valid_data())
-			return mask;
-		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
+		Context p(data_, skeleton_tets_, added_spheres_);
 		std::unordered_set<uint32> face_ids;
 		std::unordered_set<uint32> edge_ids;
 		BoundaryTetPrune::collect_boundary_tet_mask(p, face_ids, edge_ids);
@@ -155,9 +134,7 @@ public:
 							 std::unordered_map<uint32, Scalar>& face_scores)
 	{
 		face_scores.clear();
-		if (!valid_data())
-			return false;
-		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
+		Context p(data_, skeleton_tets_, added_spheres_);
 		const std::unordered_set<uint32> face_ids = QuadratureScores::collect_current_tet_face_id_whitelist(p);
 		return QuadratureScores::compute_skeleton_face_scores(p, evaluate_scores, face_ids, face_scores,
 															  normalize_by_area);
@@ -169,22 +146,18 @@ public:
 	bool tet_edge_gauss3_scores(ScoreEvaluator& evaluate_scores, std::unordered_map<uint32, Scalar>& edge_scores)
 	{
 		edge_scores.clear();
-		if (!valid_data())
-			return false;
-		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
+		Context p(data_, skeleton_tets_, added_spheres_);
 		const std::unordered_set<uint32> edge_ids = QuadratureScores::collect_current_tet_edge_ids(p);
 		return QuadratureScores::compute_skeleton_edge_scores_gauss3_normalized(p, evaluate_scores, edge_ids,
 																				edge_scores);
 	}
 
-	Status prune_residual_sheets()
+	void prune_residual_sheets(ResidualPruneMode mode)
 	{
-		if (!valid_data())
-			return Status::invalid_data;
-		metrics_ = Metrics{};
-		Context p(data_, skeleton_tets_, metrics_, residual_prune_mode_);
-		NonManifoldPrune::run_residual_sheet_prune(p);
-		return Status::success;
+		// the prune can remove spheres
+		added_spheres_.clear();
+		Context p(data_, skeleton_tets_, added_spheres_);
+		NonManifoldPrune::run_residual_sheet_prune(p, mode);
 	}
 
 private:
@@ -199,31 +172,21 @@ private:
 	using DenseK5Repair = topology_detail::DenseK5Repair<POINTS, NONMANIFOLD>;
 	using DenseFiveVertexDetectionResult = typename DenseK5Repair::DenseFiveVertexDetectionResult;
 	using IndependentDenseFiveVertexRepairSeed = typename DenseK5Repair::IndependentDenseFiveVertexRepairSeed;
-	using IndependentDenseFiveVertexRepairStats = typename DenseK5Repair::IndependentDenseFiveVertexRepairStats;
-
-	bool valid_data() const
-	{
-		return data_.skeleton && data_.spheres_optimizer && data_.skeleton_position && data_.skeleton_radius &&
-			   data_.skeleton_source_sphere && data_.face_incident_tets && data_.edge_degree &&
-			   data_.sphere_skeleton_vertex;
-	}
 
 	//------------------------------//
 	//-----Topology correction------//
 	//------------------------------//
 
 	template <typename ScoreEvaluator>
-	Status run_topology_fix_pipeline(Context& p, ScoreEvaluator& evaluator)
+	bool run_topology_fix_pipeline(Context& p, ScoreEvaluator& evaluator)
 	{
-		if (!p.data.skeleton || !p.data.face_incident_tets)
-			return Status::invalid_data;
 		const DenseFiveVertexDetectionResult dense_five_vertex_detection =
 			DenseK5Repair::detect_k5_and_k5_minus_1_cells(p);
 		const std::vector<IndependentDenseFiveVertexRepairSeed> independent_dense_repair_seeds =
 			DenseK5Repair::collect_independent_dense_five_vertex_repair_seeds(p, dense_five_vertex_detection);
 		TopologyFixScoreCache score_cache;
 		if (!QuadratureScores::initialize_topology_fix_score_cache(p, evaluator, score_cache))
-			return Status::score_evaluation_failed;
+			return false;
 		while (!p.skeleton_tets.empty())
 		{
 			const uint32 round_start_tets = static_cast<uint32>(p.skeleton_tets.size());
@@ -240,13 +203,12 @@ private:
 				break;
 		}
 		DenseK5Repair::repair_isolated_independent_dense_five_vertex_regions(p, independent_dense_repair_seeds);
-		return Status::success;
+		return true;
 	}
 
 	Data data_;
 	TetMap skeleton_tets_;
-	Metrics metrics_;
-	ResidualPruneMode residual_prune_mode_ = ResidualPruneMode::collapsible_only;
+	std::vector<SphereVertex> added_spheres_;
 };
 
 } // namespace offset_axis

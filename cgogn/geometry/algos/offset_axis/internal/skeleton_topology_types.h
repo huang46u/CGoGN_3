@@ -65,38 +65,19 @@ struct SkeletonTopologyTypes
 	template <typename T>
 	using SkeletonAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
 
+	// Borrowed: the meshes and the attributes belong to the caller.
 	struct Data
 	{
-		NONMANIFOLD* skeleton = nullptr;
-		SpheresOptimizer<POINTS>* spheres_optimizer = nullptr;
-		std::shared_ptr<SphereAttribute<SkeletonVertex>> sphere_skeleton_vertex;
-		std::shared_ptr<SkeletonAttribute<Vec3>> skeleton_position;
-		std::shared_ptr<SkeletonAttribute<Scalar>> skeleton_radius;
-		std::shared_ptr<SkeletonAttribute<SphereVertex>> skeleton_source_sphere;
-		std::shared_ptr<SkeletonAttribute<std::set<std::size_t>>> face_incident_tets;
-		std::shared_ptr<SkeletonAttribute<uint32>> edge_degree;
+		NONMANIFOLD& skeleton;
+		SpheresOptimizer<POINTS>& spheres_optimizer;
+		SphereAttribute<SkeletonVertex>* sphere_skeleton_vertex = nullptr;
+		SkeletonAttribute<Vec3>* skeleton_position = nullptr;
+		SkeletonAttribute<Scalar>* skeleton_radius = nullptr;
+		SkeletonAttribute<SphereVertex>* skeleton_source_sphere = nullptr;
+		SkeletonAttribute<std::set<std::size_t>>* face_incident_tets = nullptr;
+		SkeletonAttribute<uint32>* edge_degree = nullptr;
 	};
 
-	struct Metrics
-	{
-		uint32 residual_removed_sheets = 0;
-		uint32 residual_removed_faces = 0;
-		int32 residual_chi_before = 0;
-		int32 residual_chi_after = 0;
-		uint32 residual_fully_nm_removed_faces = 0;
-		uint32 residual_small_sheets = 0;
-		uint32 residual_small_sheets_guarded = 0;
-		uint32 residual_small_sheets_with_boundary_edge = 0;
-		uint32 residual_small_sheets_without_boundary_edge = 0;
-		std::vector<SphereVertex> added_spheres;
-	};
-
-	enum class Status
-	{
-		success,
-		invalid_data,
-		score_evaluation_failed
-	};
 	using ResidualPruneMode = offset_axis::ResidualPruneOption;
 
 	using SpheresOptimizerType = SpheresOptimizer<POINTS>;
@@ -109,17 +90,16 @@ struct SkeletonTopologyTypes
 	using TetMap = std::unordered_map<std::size_t, Tet>;
 
 	// What the topology functions work on: the topology data, the data of the spheres optimizer (samples and spheres),
-	// the current tets, the metrics of the running step and the residual prune mode.
+	// the current tets and the spheres added by the dense K5 repair.
 	struct Context
 	{
 		Data& data;
 		typename SpheresOptimizerType::Data& optimizer_data;
 		TetMap& skeleton_tets;
-		Metrics& metrics;
-		ResidualPruneMode residual_prune_mode;
+		std::vector<SphereVertex>& added_spheres;
 
-		Context(Data& d, TetMap& t, Metrics& m, ResidualPruneMode mode)
-			: data(d), optimizer_data(d.spheres_optimizer->data()), skeleton_tets(t), metrics(m), residual_prune_mode(mode)
+		Context(Data& d, TetMap& t, std::vector<SphereVertex>& added)
+			: data(d), optimizer_data(d.spheres_optimizer.data()), skeleton_tets(t), added_spheres(added)
 		{
 		}
 	};
@@ -149,13 +129,6 @@ struct SkeletonTopologyTypes
 		uint32 removed_edges = 0;
 		uint32 removed_tets = 0;
 
-		RemovalStats& operator+=(const RemovalStats& o)
-		{
-			removed_faces += o.removed_faces;
-			removed_edges += o.removed_edges;
-			removed_tets += o.removed_tets;
-			return *this;
-		}
 	};
 
 	struct SkeletonFaceDeletionOptions

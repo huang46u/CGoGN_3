@@ -180,18 +180,6 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 
 	result.counts = reconstruction_result.counts;
 	result.timing = reconstruction_result.timing;
-	const auto& topology_metrics = reconstruction.skeleton_topology().metrics();
-	result.residual_prune.residual_removed_sheets = topology_metrics.residual_removed_sheets;
-	result.residual_prune.residual_removed_faces = topology_metrics.residual_removed_faces;
-	result.residual_prune.residual_chi_before = topology_metrics.residual_chi_before;
-	result.residual_prune.residual_chi_after = topology_metrics.residual_chi_after;
-	result.residual_prune.residual_fully_nm_removed_faces = topology_metrics.residual_fully_nm_removed_faces;
-	result.residual_prune.residual_small_sheets = topology_metrics.residual_small_sheets;
-	result.residual_prune.residual_small_sheets_guarded = topology_metrics.residual_small_sheets_guarded;
-	result.residual_prune.residual_small_sheets_with_boundary_edge =
-		topology_metrics.residual_small_sheets_with_boundary_edge;
-	result.residual_prune.residual_small_sheets_without_boundary_edge =
-		topology_metrics.residual_small_sheets_without_boundary_edge;
 	result.extra_timing.average_iteration_ms =
 		reconstruction_result.counts.optimization_iterations > 0
 			? reconstruction_result.timing.optimization_ms / reconstruction_result.counts.optimization_iterations
@@ -244,17 +232,6 @@ void write_timing_json_impl(const BenchmarkConfig& config, const BenchmarkResult
 
 	boost::property_tree::ptree residual_prune;
 	residual_prune.put("mode", to_string(config.reconstruction.residual_prune_mode));
-	residual_prune.put("residual_removed_sheets", result.residual_prune.residual_removed_sheets);
-	residual_prune.put("residual_removed_faces", result.residual_prune.residual_removed_faces);
-	residual_prune.put("residual_chi_before", result.residual_prune.residual_chi_before);
-	residual_prune.put("residual_chi_after", result.residual_prune.residual_chi_after);
-	residual_prune.put("residual_fully_nm_removed_faces", result.residual_prune.residual_fully_nm_removed_faces);
-	residual_prune.put("residual_small_sheets", result.residual_prune.residual_small_sheets);
-	residual_prune.put("residual_small_sheets_guarded", result.residual_prune.residual_small_sheets_guarded);
-	residual_prune.put("residual_small_sheets_with_boundary_edge",
-					   result.residual_prune.residual_small_sheets_with_boundary_edge);
-	residual_prune.put("residual_small_sheets_without_boundary_edge",
-					   result.residual_prune.residual_small_sheets_without_boundary_edge);
 	root.add_child("residual_prune", residual_prune);
 
 	boost::property_tree::ptree timing;
