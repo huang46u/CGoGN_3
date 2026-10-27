@@ -38,7 +38,7 @@
     "neural_udf_model_extension": ".pt",
     "recursive": false,
     "resume_from_existing": true,
-    "output_directory": "D:/Code/UDF-Projects/Results/OffsetAxisCoherent/3dScene/dense/skeleton",
-    "timing_directory": "D:/Code/UDF-Projects/Results/OffsetAxisCoherent/3dScene/dense/timing"
+    "output_directory": "D:/Code/UDF-Projects/Results/OffsetAxis_1/3dScene/dense/skeleton",
+    "timing_directory": "D:/Code/UDF-Projects/Results/OffsetAxis_1/3dScene/dense/timing"
   }
 }

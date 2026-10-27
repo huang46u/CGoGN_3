@@ -181,9 +181,6 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 		throw std::runtime_error("Could not load neural model: " + config.input.neural_udf_model_path);
 	result.extra_timing.preprocess_ms = elapsed_ms(preprocessing_start);
 
-	if (config.benchmark.verbose)
-		std::cerr << "[BenchmarkStage] reconstruction_begin" << std::endl;
-
 	ReconstructionTiming& timing = result.timing;
 	auto stage_start = Clock::now();
 	auto input_position = get_or_add_attribute<Vec3, PVertex>(input_points, "position");

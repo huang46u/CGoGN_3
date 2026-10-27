@@ -30,7 +30,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <iostream>
 #include <limits>
 #include <optional>
 #include <random>
@@ -210,8 +209,6 @@ std::optional<std::vector<Vec3>> sample_level_set_rays(const TRAITS& traits, con
 		auto rays = detail::generate_rays(params, bbox_min, bbox_max, params.batch_size, gen);
 		const int R = static_cast<int>(rays.size());
 
-		std::cout << "Iteration " << iter << ": Processing " << R << " rays on CPU..." << std::endl;
-
 		std::vector<Scalar> t(static_cast<size_t>(R));
 		std::vector<Scalar> t_max(static_cast<size_t>(R));
 		std::vector<Scalar> step_udf(static_cast<size_t>(R));
@@ -224,12 +221,8 @@ std::optional<std::vector<Vec3>> sample_level_set_rays(const TRAITS& traits, con
 		std::vector<Vec3> iter_samples;
 		for (int step = 0; step < params.max_iterations; ++step)
 		{
-			if (step % check_interval == 0)
-			{
-				if (active_count == 0)
-					break;
-				std::cout << "    Step " << step << ": " << active_count << " active\r" << std::flush;
-			}
+			if (step % check_interval == 0 && active_count == 0)
+				break;
 
 			// stage 1 (parallel): udf of all active rays; reads t/rays only, writes only step_udf[i]
 			// (serial once few rays are left, the long tail would otherwise pay a pool dispatch per step)
@@ -282,9 +275,6 @@ std::optional<std::vector<Vec3>> sample_level_set_rays(const TRAITS& traits, con
 			}
 		}
 
-		std::cout << std::endl;
-		std::cout << "  Collected " << iter_samples.size() << " unique samples this iteration" << std::endl;
-		std::cout << "  Total: " << all_samples.size() << std::endl;
 	}
 
 	return all_samples;

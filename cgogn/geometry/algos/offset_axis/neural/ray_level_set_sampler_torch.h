@@ -30,7 +30,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <iostream>
 #include <limits>
 #include <random>
 #include <utility>
@@ -174,8 +173,6 @@ inline std::optional<std::vector<Vec3>> sample_level_set_rays(const NeuralFieldR
 		auto rays = detail::generate_rays(params, bbox_min, bbox_max, params.batch_size, gen);
 		const int R = static_cast<int>(rays.size());
 
-		std::cout << "Iteration " << iter << ": Processing " << R << " rays on GPU..." << std::endl;
-
 		auto batch = prepare_ray_batch(ray_buffers, rays);
 
 		auto& O = batch.O;
@@ -199,13 +196,8 @@ inline std::optional<std::vector<Vec3>> sample_level_set_rays(const NeuralFieldR
 		std::vector<Vec3> iter_samples;
 		for (int step = 0; step < params.max_iterations; ++step)
 		{
-			if (step % check_interval == 0)
-			{
-				int active_count = torch::sum(not_converged).item<int>();
-				if (active_count == 0)
-					break;
-				std::cout << "    Step " << step << ": " << active_count << " active\r" << std::flush;
-			}
+			if (step % check_interval == 0 && torch::sum(not_converged).item<int>() == 0)
+				break;
 			// the last rays run nearly tangent to the level set and creep forward by tiny steps: they take most
 			// of the marching time but find few seeds, which the Poisson expansion reaches anyway
 			if (params.min_active_rays > 0 && torch::sum(not_converged).item<int>() < params.min_active_rays)
@@ -318,9 +310,6 @@ inline std::optional<std::vector<Vec3>> sample_level_set_rays(const NeuralFieldR
 			not_converged = t < t_max;
 		}
 
-		std::cout << std::endl;
-		std::cout << "  Collected " << iter_samples.size() << " unique samples this iteration" << std::endl;
-		std::cout << "  Total: " << all_samples.size() << std::endl;
 	}
 
 	return all_samples;
