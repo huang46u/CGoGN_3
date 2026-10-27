@@ -38,7 +38,6 @@
 #include <limits>
 #include <memory>
 #include <set>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -149,9 +148,7 @@ public:
 		uint32 max_sample_index = 0;
 		foreach_cell(data_.samples, [&](Vertex v) {
 			sorted_vertices.push_back(v);
-			const uint32 idx = index_of(data_.samples, v);
-			if (idx != INVALID_INDEX)
-				max_sample_index = std::max(max_sample_index, idx);
+			max_sample_index = std::max(max_sample_index, index_of(data_.samples, v));
 			return true;
 		});
 		// same comparison outcomes as sorting the vertices directly, so ties end up in the same order
@@ -159,8 +156,7 @@ public:
 		keyed_vertices.reserve(sorted_vertices.size());
 		for (Vertex v : sorted_vertices)
 		{
-			const uint32 idx = index_of(data_.samples, v);
-			const Scalar r = idx != INVALID_INDEX ? (*data_.sample_ma_radius)[idx] : Scalar(-1);
+			const Scalar r = (*data_.sample_ma_radius)[index_of(data_.samples, v)];
 			keyed_vertices.emplace_back(std::isfinite(static_cast<double>(r)) ? r : Scalar(-1), v);
 		}
 		std::sort(keyed_vertices.begin(), keyed_vertices.end(),
@@ -178,7 +174,7 @@ public:
 		for (Vertex v : sorted_vertices)
 		{
 			const uint32 v_index = index_of(data_.samples, v);
-			if (v_index == INVALID_INDEX || sphere_count >= max_nb_spheres || (*covered)[v_index])
+			if (sphere_count >= max_nb_spheres || (*covered)[v_index])
 				continue;
 			const Vec3& vp = (*data_.sample_ma_position)[v_index];
 			const Scalar vr = (*data_.sample_ma_radius)[v_index];
@@ -186,18 +182,13 @@ public:
 				continue;
 			const Scalar dilation_radius = std::max<Scalar>(vr + init_dilation_constant, Scalar(0));
 			const Scalar dilation_radius_sq = dilation_radius * dilation_radius;
-			if (candidate_mark_token == std::numeric_limits<uint32>::max())
-			{
-				std::fill(candidate_marks.begin(), candidate_marks.end(), 0u);
-				candidate_mark_token = 1;
-			}
 			const uint32 current_mark = candidate_mark_token++;
 			candidate_cover.clear();
 			auto flood_cover = [&](Vertex seed) {
 				if (!seed.is_valid())
 					return;
 				const uint32 seed_idx = index_of(data_.samples, seed);
-				if (seed_idx == INVALID_INDEX || seed_idx >= candidate_marks.size() || (*covered)[seed_idx] ||
+				if (seed_idx >= candidate_marks.size() || (*covered)[seed_idx] ||
 					candidate_marks[seed_idx] == current_mark)
 					return;
 				stack.clear();
@@ -208,13 +199,10 @@ public:
 				{
 					const Vertex w = stack.back();
 					stack.pop_back();
-					const uint32 w_idx = index_of(data_.samples, w);
-					if (w_idx == INVALID_INDEX)
-						continue;
-					for (Vertex u : (*data_.sample_knn)[w_idx])
+					for (Vertex u : (*data_.sample_knn)[index_of(data_.samples, w)])
 					{
 						const uint32 u_idx = index_of(data_.samples, u);
-						if (u_idx == INVALID_INDEX || u_idx >= candidate_marks.size())
+						if (u_idx >= candidate_marks.size())
 							continue;
 						if (!(*covered)[u_idx] && candidate_marks[u_idx] != current_mark &&
 							((*data_.sample_position)[u_idx] - vp).squaredNorm() < dilation_radius_sq)
@@ -229,11 +217,7 @@ public:
 			flood_cover(v);
 			flood_cover((*data_.sample_ma_secondary_vertex)[v_index]);
 			for (Vertex covered_vertex : candidate_cover)
-			{
-				const uint32 covered_index = index_of(data_.samples, covered_vertex);
-				if (covered_index != INVALID_INDEX)
-					(*covered)[covered_index] = true;
-			}
+				(*covered)[index_of(data_.samples, covered_vertex)] = true;
 			if (candidate_cover.size() < min_cover_points && (sphere_count != 0 || candidate_cover.empty()))
 				continue;
 			const Vertex sphere = add_vertex(data_.spheres);
@@ -325,16 +309,11 @@ public:
 		parallel_foreach_cell(data_.samples, [&](Vertex v) {
 			const uint32 v_index = index_of(data_.samples, v);
 			const Vertex owner = (*data_.sample_sphere)[v_index];
-			const uint32 owner_index = owner.is_valid() ? index_of(data_.spheres, owner) : INVALID_INDEX;
 			Scalar min_distance = std::numeric_limits<Scalar>::max();
 			Vertex closest_sphere;
 			uint32 closest_index = INVALID_INDEX;
 			auto evaluate_candidate = [&](Vertex candidate) {
 				const uint32 idx = index_of(data_.spheres, candidate);
-				if (!is_valid_sphere_for_clustering(idx))
-				{
-					return;
-				}
 				const Vec3& center = (*data_.sphere_position)[idx];
 				const Scalar radius = (*data_.sphere_radius)[idx];
 				const Scalar distance = (*data_.sample_quadric)[v_index].eval(Vec4(center.x(), center.y(), center.z(), radius)) +
@@ -350,9 +329,9 @@ public:
 					closest_index = idx;
 				}
 			};
-			if (is_valid_sphere_for_clustering(owner_index))
+			if (owner.is_valid())
 			{
-				const std::vector<Vertex>& neighbors = (*data_.sphere_neighbors)[owner_index];
+				const std::vector<Vertex>& neighbors = (*data_.sphere_neighbors)[index_of(data_.spheres, owner)];
 				bool owner_evaluated = false;
 				for (Vertex candidate : neighbors)
 				{
@@ -427,25 +406,13 @@ public:
 
 	void remove_sphere(Vertex sphere)
 	{
-		if (!sphere.is_valid() || sphere.dart_.index_ >= data_.spheres.darts_.maximum_index())
-			return;
 		const uint32 sphere_index = index_of(data_.spheres, sphere);
-		if (sphere_index == INVALID_INDEX)
-			return;
 		const std::vector<Vertex> removed_cluster = (*data_.sphere_cluster)[sphere_index];
 		const std::vector<Vertex> removed_neighbors = (*data_.sphere_neighbors)[sphere_index];
 		for (Vertex sample : removed_cluster)
-		{
-			const uint32 idx = index_of(data_.samples, sample);
-			if (idx != INVALID_INDEX)
-				(*data_.sample_sphere)[idx] = Vertex();
-		}
-		for (Vertex neighbor : (*data_.sphere_neighbors)[sphere_index])
-		{
-			const uint32 idx = neighbor.is_valid() ? index_of(data_.spheres, neighbor) : INVALID_INDEX;
-			if (idx != INVALID_INDEX)
-				sorted_vector_erase((*data_.sphere_neighbors)[idx], sphere);
-		}
+			(*data_.sample_sphere)[index_of(data_.samples, sample)] = Vertex();
+		for (Vertex neighbor : removed_neighbors)
+			sorted_vector_erase((*data_.sphere_neighbors)[index_of(data_.spheres, neighbor)], sphere);
 		(*data_.sphere_neighbors)[sphere_index].clear();
 		remove_vertex(data_.spheres, sphere);
 		redistribute_removed_sphere_cluster(removed_cluster, removed_neighbors);
@@ -457,9 +424,6 @@ public:
 	{
 		const Vertex sphere = add_vertex(data_.spheres);
 		const uint32 sphere_id = index_of(data_.spheres, sphere);
-		if (sphere_id == INVALID_INDEX)
-			return Vertex();
-
 		(*data_.sphere_position)[sphere_id] = position;
 		(*data_.sphere_radius)[sphere_id] = radius;
 		(*data_.sphere_cluster)[sphere_id].clear();
@@ -483,16 +447,11 @@ private:
 		std::vector<Vertex> center_spheres;
 		foreach_cell(data_.spheres, [&](Vertex s) {
 			const uint32 idx = index_of(data_.spheres, s);
-			if (is_valid_sphere_for_clustering(idx))
-			{
-				centers.push_back((*data_.sphere_position)[idx]);
-				radii.push_back(double((*data_.sphere_radius)[idx]));
-				center_spheres.push_back(s);
-			}
+			centers.push_back((*data_.sphere_position)[idx]);
+			radii.push_back(double((*data_.sphere_radius)[idx]));
+			center_spheres.push_back(s);
 			return true;
 		});
-		if (centers.empty())
-			return;
 		const acc::BVHTreeSpheres<uint32, Vec3> bvh(centers, radii);
 		parallel_foreach_cell(data_.samples, [&](Vertex v) {
 			const uint32 v_index = index_of(data_.samples, v);
@@ -502,15 +461,6 @@ private:
 			return true;
 		});
 		compute_sphere_neighbors();
-	}
-
-	bool is_valid_sphere_for_clustering(uint32 sphere_index) const
-	{
-		if (sphere_index == INVALID_INDEX)
-			return false;
-		const Vec3& center = (*data_.sphere_position)[sphere_index];
-		const Scalar radius = (*data_.sphere_radius)[sphere_index];
-		return center.allFinite() && std::isfinite(static_cast<double>(radius)) && radius > Scalar(0);
 	}
 
 	void sync_sphere_count()
@@ -533,12 +483,10 @@ private:
 	bool try_get_nearest_sample_ma_radius(const Vec3& query, Scalar& out_radius) const
 	{
 		std::pair<uint32, Scalar> result;
-		if (!data_.sample_kdtree->find_nn(query, &result) || result.first >= data_.sample_kdtree_vertices.size())
+		if (!data_.sample_kdtree->find_nn(query, &result))
 			return false;
-		const uint32 sample_index = index_of(data_.samples, data_.sample_kdtree_vertices[result.first]);
-		if (sample_index == INVALID_INDEX)
-			return false;
-		const Scalar radius = (*data_.sample_ma_radius)[sample_index];
+		const Scalar radius =
+			(*data_.sample_ma_radius)[index_of(data_.samples, data_.sample_kdtree_vertices[result.first])];
 		if (!std::isfinite(radius) || radius <= Scalar(0))
 			return false;
 		out_radius = radius;
@@ -547,13 +495,8 @@ private:
 
 	void update_sphere_line_quadric_distance_fix_current_radius(Vertex sphere, Scalar fixed_radius)
 	{
-		if (!std::isfinite(fixed_radius) || fixed_radius <= Scalar(0))
-			return;
 		const uint32 sphere_index = index_of(data_.spheres, sphere);
 		const std::vector<Vertex>& cluster = (*data_.sphere_cluster)[sphere_index];
-		if (cluster.empty())
-			return;
-		Vec3 center = (*data_.sphere_position)[sphere_index];
 		Spherical_Quadric q;
 		Line_Quadric lq;
 		for (Vertex sample : cluster)
@@ -573,7 +516,7 @@ private:
 		const Vec3 Asr = q._A.block<3, 1>(0, 3);
 		const Mat3 A = As + lambda_ * Al;
 		const Vec3 b = (bs + lambda_ * bl) - Asr * fixed_radius;
-		center = A.ldlt().solve(b);
+		const Vec3 center = A.ldlt().solve(b);
 		if (!center.allFinite())
 			return;
 		(*data_.sphere_position)[sphere_index] = center;
@@ -585,8 +528,6 @@ private:
 		const uint32 sphere_index = index_of(data_.spheres, sphere);
 		const std::vector<Vertex>& cluster = (*data_.sphere_cluster)[sphere_index];
 		const Scalar radius = (*data_.sphere_radius)[sphere_index];
-		if (cluster.empty())
-			return;
 		Spherical_Quadric q;
 		Line_Quadric lq;
 		Scalar weight_sum = Scalar(0);
@@ -629,26 +570,14 @@ private:
 	void redistribute_removed_sphere_cluster(const std::vector<Vertex>& removed_cluster,
 										 const std::vector<Vertex>& removed_neighbors)
 	{
-		if (removed_cluster.empty() || metrics_.sphere_count == 0)
+		if (removed_cluster.empty())
 			return;
-		std::vector<Vertex> candidates;
-		std::unordered_set<uint32> candidate_indices;
-		auto add_candidate = [&](Vertex sphere) {
-			if (!sphere.is_valid())
-				return;
-			const uint32 idx = index_of(data_.spheres, sphere);
-			if (idx != INVALID_INDEX && candidate_indices.insert(idx).second)
-				candidates.push_back(sphere);
-		};
-		for (Vertex neighbor : removed_neighbors)
-			add_candidate(neighbor);
+		std::vector<Vertex> candidates = removed_neighbors;
 		if (candidates.empty())
-			foreach_cell(data_.spheres, [&](Vertex sphere) { add_candidate(sphere); return true; });
+			foreach_cell(data_.spheres, [&](Vertex sphere) { candidates.push_back(sphere); return true; });
 		for (Vertex sample : removed_cluster)
 		{
 			const uint32 sample_index = index_of(data_.samples, sample);
-			if (sample_index == INVALID_INDEX)
-				continue;
 			Scalar min_distance = std::numeric_limits<Scalar>::max();
 			Vertex closest_sphere;
 			uint32 closest_index = INVALID_INDEX;
