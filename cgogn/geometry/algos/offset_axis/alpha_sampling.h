@@ -29,6 +29,7 @@
 #include <cgogn/geometry/algos/offset_axis/distance_field.h>
 #include <cgogn/geometry/algos/offset_axis/normal_utils.h>
 #include <cgogn/geometry/algos/offset_axis/ray_level_set_sampler.h>
+#include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
 #include <cgogn/geometry/algos/offset_axis/spatial_grid.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
@@ -57,6 +58,9 @@ namespace constants
 // Padding added on each side of the input bounding box. The padded box is the sampling domain and the box the
 // projected points are clamped to.
 inline constexpr Scalar sampling_padding = Scalar(0.1);
+// Relative enlargement of the padded sampling box from which the seed rays are cast (its half size is multiplied by
+// 1 + ray_box_relative_expand). Overrides the ray sampler default (0.1).
+inline constexpr Scalar ray_box_relative_expand = Scalar(0.05);
 
 } // namespace constants
 
@@ -67,6 +71,24 @@ struct AlphaSamplingParams
 	size_t parent_batch_size = 1;
 	RayLevelSetParams rays;
 };
+
+// Parameters of the alpha level set sampling (step 2) from the options.
+inline AlphaSamplingParams alpha_sampling_params(const ReconstructionOptions& options)
+{
+	AlphaSamplingParams params;
+	params.sample_radius = Scalar(options.sample_radius);
+	params.candidates_per_parent = static_cast<size_t>(options.alpha_sampling_candidates_per_parent);
+	params.parent_batch_size = static_cast<size_t>(options.alpha_sampling_parent_batch_size);
+	params.rays.bbox_expand = constants::ray_box_relative_expand;
+	params.rays.alpha = Scalar(options.alpha);
+	params.rays.tol = Scalar(options.tolerance);
+	params.rays.step_bound = Scalar(2.0);
+	params.rays.batch_size = options.ray_sampler_batch_size;
+	params.rays.max_iterations = options.udf_max_iterations;
+	params.rays.min_active_rays = options.udf_min_active_rays;
+	params.rays.seed = options.seed;
+	return params;
+}
 
 struct AlphaSamplingResult
 {

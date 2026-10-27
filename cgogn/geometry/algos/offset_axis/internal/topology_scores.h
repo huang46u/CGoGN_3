@@ -29,8 +29,13 @@
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
 #include <cgogn/geometry/algos/area.h>
+#include <cgogn/geometry/algos/offset_axis/distance_field.h>
 #include <cgogn/geometry/algos/offset_axis/internal/skeleton_tets.h>
+#include <cgogn/geometry/algos/offset_axis/neural_model_type.h>
+#include <cgogn/geometry/algos/offset_axis/parallel_for.h>
 #include <cgogn/geometry/types/vector_traits.h>
+
+#include <libacc/kd_tree.h>
 
 #include <algorithm>
 #include <array>
@@ -319,6 +324,27 @@ std::unordered_set<uint32> tet_face_ids(const NONMANIFOLD& skeleton, const Skele
 }
 
 } // namespace topology_detail
+
+// UDF values used as scores by the topology fix (step 10) at the points. For MF models it is the distance to the
+// medial point of the nearest sample: mf - |sdf| is not a stable medial axis (its minimum is above zero and varies a
+// lot over a shape). Otherwise it is the value of the field. Returns false if the field cannot be evaluated.
+template <typename FIELD, typename POINTS>
+bool evaluate_topology_scores(FIELD& field, const POINTS& samples,
+							  const typename mesh_traits<POINTS>::template Attribute<Vec3>& sample_ma_position,
+							  const acc::KDTree<3, uint32>& sample_ma_kdtree,
+							  const std::vector<typename mesh_traits<POINTS>::Vertex>& sample_ma_vertices,
+							  const std::vector<Vec3>& points, std::vector<Scalar>& values)
+{
+	if (!is_neural_model(field, NeuralModelType::mf))
+		return field.distances(points, values);
+	values.resize(points.size(), Scalar(0));
+	detail::parallel_for_index(points.size(), [&](std::size_t i) {
+		std::pair<uint32, Scalar> nearest;
+		if (sample_ma_kdtree.find_nn(points[i], &nearest))
+			values[i] = (points[i] - sample_ma_position[index_of(samples, sample_ma_vertices[nearest.first])]).norm();
+	});
+	return true;
+}
 
 } // namespace offset_axis
 

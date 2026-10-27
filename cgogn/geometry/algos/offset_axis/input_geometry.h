@@ -67,7 +67,7 @@ public:
 	template <typename T>
 	using SurfaceAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
 
-	// non-owning pointers to the input (the owner is ReconstructionState::data)
+	// non-owning pointers to the input (owned by the caller)
 	struct
 	{
 		SURFACE* surface = nullptr;
@@ -88,6 +88,16 @@ public:
 	void build_surface_bvh();
 	bool query_surface_projection_info(const Vec3& query, AlphaProjectionInfo& info);
 	bool query_point_cloud_projection_info(const Vec3& query, AlphaProjectionInfo& info);
+
+	const std::shared_ptr<PAttribute>& input_position() const
+	{
+		return input_position_;
+	}
+
+	const std::shared_ptr<PAttribute>& input_normal() const
+	{
+		return input_normal_;
+	}
 
 	const std::unique_ptr<acc::KDTree<3, uint32>>& input_kdtree() const
 	{

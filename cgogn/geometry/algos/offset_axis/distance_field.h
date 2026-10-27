@@ -25,6 +25,7 @@
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
+#include <cgogn/geometry/algos/offset_axis/neural_model_type.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <memory>
@@ -67,8 +68,8 @@ enum class FieldPrepareResult
 	model_not_loaded
 };
 
-// Reconstruction data a field may need. The pointers are non-owning: the owner is ReconstructionState::data and the
-// attributes are the ones created by OffsetAxisReconstruction::initialize_data().
+// Reconstruction data a field may need. The pointers are non-owning: the meshes and the attributes belong to the
+// caller.
 template <typename SURFACE, typename POINTS>
 struct PrepareInputs
 {
@@ -82,6 +83,16 @@ struct PrepareInputs
 	std::shared_ptr<PointAttribute<Vec3>> input_normal;
 	std::shared_ptr<PointAttribute<std::vector<PVertex>>> input_knn;
 };
+
+// true if the field is neural and holds a model of the given type (CPU fields: false)
+template <typename FIELD>
+bool is_neural_model(const FIELD& field, NeuralModelType type)
+{
+	if constexpr (FIELD::is_neural_type)
+		return field.model_type() == type;
+	else
+		return false;
+}
 
 } // namespace offset_axis
 

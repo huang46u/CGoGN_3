@@ -36,7 +36,7 @@
 #include <cgogn/geometry/algos/offset_axis/alpha_sampling.h>
 #include <cgogn/geometry/algos/offset_axis/distance_field.h>
 #include <cgogn/geometry/algos/offset_axis/input_geometry.h>
-#include <cgogn/geometry/algos/offset_axis/medial_flip_prune.h>
+#include <cgogn/geometry/algos/offset_axis/alpha_medial.h>
 #include <cgogn/geometry/algos/offset_axis/neural_model_type.h>
 #include <cgogn/geometry/algos/offset_axis/normal_utils.h>
 #include <cgogn/geometry/algos/offset_axis/parallel_for.h>
@@ -79,35 +79,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-
-namespace cgogn
-{
-
-namespace geometry
-{
-
-namespace offset_axis
-{
-
-// Fixed constants of the reconstruction (not user options). Lengths are absolute, in model units (the inputs are
-// rescaled to [0,1] before the reconstruction).
-namespace constants
-{
-
-// Relative enlargement of the padded sampling box from which the seed rays are cast (its half size is multiplied by
-// 1 + ray_box_relative_expand). Overrides the ray sampler default (0.1).
-inline constexpr Scalar ray_box_relative_expand = Scalar(0.05);
-// Samples farther than alpha + filter_margin from the input are removed by the sampling filter.
-inline constexpr Scalar filter_margin = Scalar(1e-2);
-// MAFlipPrune, neural UDF: a medial centre is retried when its UDF value exceeds this factor times alpha.
-inline constexpr Scalar udf_flip_threshold_factor = Scalar(1.2);
-} // namespace constants
-
-} // namespace offset_axis
-
-} // namespace geometry
-
-} // namespace cgogn
 
 // Stage precondition: when cond does not hold, the enclosing stage function (template parameter State) returns code
 // with a message naming the stage and the condition.
@@ -155,9 +126,6 @@ typename State::Counts counts(State& s);
 template <typename State>
 void build_sample_kdtree(State& s);
 
-template <typename State>
-void recompute_samples_normals_from_input(State& s);
-
 
 template <typename State>
 typename State::SpheresOptimizerType& optimizer_for(State& s);
@@ -165,15 +133,6 @@ typename State::SpheresOptimizerType& optimizer_for(State& s);
 template <typename State>
 typename State::TopologyType& topology_for(State& s);
 
-// true if the field is neural and holds a model of the given type (CPU fields: false)
-template <typename State>
-bool neural_model_is(const State& s, NeuralModelType type)
-{
-	if constexpr (State::Field::is_neural_type)
-		return s.field.model_type() == type;
-	else
-		return false;
-}
 
 template <typename State>
 bool evaluate_topology_scores(State& s, const std::vector<Vec3>& points, std::vector<Scalar>& values);
@@ -362,60 +321,6 @@ void build_sample_kdtree(State& s)
 						s.sample_ma_vertices);
 }
 
-template <typename State>
-void recompute_samples_normals_from_input(State& s)
-{
-	using PVertex = typename State::PVertex;
-
-	bind_input(s);
-	if (!s.input.input_kdtree() && s.data.surface)
-	{
-		s.input.build_surface_bvh();
-		if (s.input.surface_bvh())
-		{
-			foreach_cell(*s.data.samples, [&](PVertex v) {
-				const uint32 idx = index_of(*s.data.samples, v);
-				const Vec3& position = (*s.sample_position)[idx];
-				std::pair<uint32, Vec3> closest;
-				Vec3 normal(0, 0, 1);
-				if (s.input.surface_bvh()->closest_point(position, &closest))
-				{
-					normal = unit_normal_or_z(position - closest.second);
-				}
-				(*s.sample_normal)[idx] = normal;
-				return true;
-			});
-			return;
-		}
-	}
-	if (s.input.input_kdtree() && s.data.input_points)
-	{
-		foreach_cell(*s.data.samples, [&](PVertex v) {
-			const uint32 idx = index_of(*s.data.samples, v);
-			const Vec3& position = (*s.sample_position)[idx];
-			std::pair<uint32, Scalar> nearest;
-			Vec3 normal(0, 0, 1);
-			if (s.input.input_kdtree()->find_nn(position, &nearest) && nearest.first < s.input.input_vertices().size())
-			{
-				const uint32 input_idx = index_of(*s.data.input_points, s.input.input_vertices()[nearest.first]);
-				if (input_idx != INVALID_INDEX)
-				{
-					normal = position - (*s.input_position)[input_idx];
-					if (normal.squaredNorm() < Scalar(1e-12))
-						normal = (*s.input_normal)[input_idx];
-					normal = unit_normal_or_z(normal);
-				}
-			}
-			(*s.sample_normal)[idx] = normal;
-			return true;
-		});
-		return;
-	}
-	foreach_cell(*s.data.samples, [&](PVertex v) {
-		(*s.sample_normal)[index_of(*s.data.samples, v)] = Vec3(0, 0, 1);
-		return true;
-	});
-}
 
 // Created on the first call after initialize_data: the optimizer refers to the meshes and attributes of the state.
 template <typename State>
@@ -472,27 +377,9 @@ typename State::TopologyType& topology_for(State& s)
 template <typename State>
 bool evaluate_topology_scores(State& s, const std::vector<Vec3>& points, std::vector<Scalar>& values)
 {
-	using NeuralModelType = typename State::NeuralModelType;
-
 	bind_input(s);
-	if (neural_model_is(s, NeuralModelType::mf))
-	{
-		// MF: mf - |sdf| is not a stable medial axis (its minimum is above zero and varies a lot over a shape),
-		// so the score is the distance to the medial point of the nearest sample instead of the network value
-		if (!s.sample_ma_kdtree)
-			return false;
-		values.resize(points.size(), Scalar(0));
-		detail::parallel_for_index(points.size(), [&](std::size_t i) {
-			std::pair<uint32, Scalar> nearest;
-			if (!s.sample_ma_kdtree->find_nn(points[i], &nearest) || nearest.first >= s.sample_ma_vertices.size())
-				return;
-			const uint32 sid = index_of(*s.data.samples, s.sample_ma_vertices[nearest.first]);
-			if (sid != INVALID_INDEX)
-				values[i] = (points[i] - (*s.sample_ma_position)[sid]).norm();
-		});
-		return true;
-	}
-	return s.field.distances(points, values);
+	return offset_axis::evaluate_topology_scores(s.field, *s.data.samples, *s.sample_ma_position, *s.sample_ma_kdtree,
+												 s.sample_ma_vertices, points, values);
 }
 
 template <typename State>
@@ -528,19 +415,7 @@ typename State::StatusInfo sample_alpha_level_set(State& s)
 	if (const FieldPrepareResult prepared = s.field.prepare(inputs); prepared != FieldPrepareResult::ok)
 		return status_of(s, prepared);
 
-	AlphaSamplingParams params;
-	params.sample_radius = Scalar(s.options.sample_radius);
-	params.candidates_per_parent = static_cast<size_t>(s.options.alpha_sampling_candidates_per_parent);
-	params.parent_batch_size = static_cast<size_t>(s.options.alpha_sampling_parent_batch_size);
-	params.rays.bbox_expand = constants::ray_box_relative_expand;
-	params.rays.alpha = Scalar(s.options.alpha);
-	params.rays.tol = Scalar(s.options.tolerance);
-	params.rays.step_bound = Scalar(2.0);
-	params.rays.batch_size = s.options.ray_sampler_batch_size;
-	params.rays.max_iterations = s.options.udf_max_iterations;
-	params.rays.min_active_rays = s.options.udf_min_active_rays;
-	params.rays.seed = s.options.seed;
-	switch (offset_axis::sample_alpha_level_set(s.field, inputs, params, *s.data.samples, s.sample_position.get(),
+	switch (offset_axis::sample_alpha_level_set(s.field, inputs, alpha_sampling_params(s.options), *s.data.samples, s.sample_position.get(),
 												s.sample_normal.get()))
 	{
 	case SamplingStatus::ok:
@@ -567,12 +442,8 @@ typename State::StatusInfo apply_sampling_filtering(State& s)
 	if (!s.options.apply_filtering || !s.data.samples || nb_cells<PVertex>(*s.data.samples) == 0)
 		return Status::success;
 	bind_input(s);
-	s.input.build_input_kdtree();
-	if (!s.input.input_kdtree())
-		s.input.build_surface_bvh();
-	const Scalar max_distance = Scalar(s.options.alpha) + constants::filter_margin;
-	if (filter_samples_far_from_input(s.input, max_distance, *s.data.samples, s.sample_position.get(),
-									  s.sample_normal.get()) == 0)
+	if (filter_samples<Field>(s.input, Scalar(s.options.alpha), *s.data.samples, s.sample_position.get(),
+							  s.sample_normal.get()) == 0)
 		return Status::success;
 	s.fitting_data_computed = false;
 	if (nb_cells<PVertex>(*s.data.samples) == 0)
@@ -585,10 +456,6 @@ typename State::StatusInfo apply_sampling_filtering(State& s)
 				"apply_sampling_filtering: every sample is farther than alpha + filter_margin from the input "
 				"(the field does not match the input)"};
 	}
-	// neural samples keep their projection normals (the network gradient); for point cloud / surface input the
-	// normal is recomputed at the projected position from the input
-	if constexpr (Field::recompute_normals_from_input_after_filtering)
-		recompute_samples_normals_from_input(s);
 	build_sample_kdtree(s);
 	return Status::success;
 }
@@ -630,37 +497,16 @@ template <typename State>
 typename State::StatusInfo compute_initial_medial_axis(State& s)
 {
 	using PVertex = typename State::PVertex;
-	using Field = typename State::Field;
-	using NeuralModelType = typename State::NeuralModelType;
 	using Status = typename State::Status;
 
 	// samples and their kd-tree come from sample_alpha_level_set / apply_sampling_filtering
 	OFFSET_AXIS_PRECONDITION(s.data.samples && nb_cells<PVertex>(*s.data.samples) > 0 && s.sample_kdtree, Status::invalid_data);
-	const Scalar fallback_radius = Scalar(s.options.alpha);
-	// field.prepare succeeded, so a neural field is loaded
-	const bool mf_model = Field::is_neural_type && neural_model_is(s, NeuralModelType::mf);
-	const bool udf_model = Field::is_neural_type && neural_model_is(s, NeuralModelType::udf);
-	const Scalar initial_radius = fallback_radius * Scalar(10);
-	shrinking_ball_centers(*s.data.samples, *s.sample_position, *s.sample_normal, *s.sample_kdtree, s.sample_vertices,
-						   initial_radius, fallback_radius, *s.sample_ma_position, *s.sample_ma_radius,
-						   *s.sample_ma_secondary);
-	if (s.options.ma_flip_prune)
-	{
-		const Scalar udf_threshold =
-			udf_model ? constants::udf_flip_threshold_factor * fallback_radius : fallback_radius;
-		const Scalar mf_threshold = fallback_radius * Scalar(s.options.ma_flip_prune_alpha_factor);
-		auto scores = [&](const std::vector<Vec3>& points, std::vector<Scalar>& values,
-						  std::vector<Scalar>& sdf) -> bool {
-			sdf.clear();
-			if (!mf_model)
-				return evaluate_topology_scores(s, points, values);
-			return s.field.values_sdf(points, values, sdf);
-		};
-		flip_prune_medial_axis(*s.data.samples, *s.sample_position, *s.sample_normal, s.sample_kdtree,
-							   s.sample_vertices, *s.sample_ma_position, *s.sample_ma_radius, *s.sample_ma_secondary,
-							   mf_model, mf_model ? mf_threshold : udf_threshold, fallback_radius, s.options.knn_k,
-							   scores);
-	}
+	bind_input(s);
+	offset_axis::compute_initial_medial_axis(s.field, *s.data.samples, *s.sample_position, *s.sample_normal,
+											 s.sample_kdtree, s.sample_vertices, *s.sample_ma_position,
+											 *s.sample_ma_radius, *s.sample_ma_secondary, Scalar(s.options.alpha),
+											 s.options.ma_flip_prune, Scalar(s.options.ma_flip_prune_alpha_factor),
+											 s.options.knn_k);
 	build_sample_kdtree(s);
 	return Status::success;
 }
