@@ -43,6 +43,7 @@
 #include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_state.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_stats.h>
+#include <cgogn/geometry/algos/offset_axis/sampling_filter.h>
 #include <cgogn/geometry/algos/offset_axis/sample_processing.h>
 #include <cgogn/geometry/algos/offset_axis/skeleton_topology.h>
 #include <cgogn/geometry/algos/offset_axis/spatial_query.h>
@@ -92,9 +93,6 @@ namespace offset_axis
 namespace constants
 {
 
-// Padding added on each side of the input bounding box. The padded box is the sampling domain and the box the
-// projected points are clamped to.
-inline constexpr Scalar sampling_padding = Scalar(0.1);
 // Relative enlargement of the padded sampling box from which the seed rays are cast (its half size is multiplied by
 // 1 + ray_box_relative_expand). Overrides the ray sampler default (0.1).
 inline constexpr Scalar ray_box_relative_expand = Scalar(0.05);
@@ -619,7 +617,6 @@ template <typename State>
 typename State::StatusInfo sample_alpha_level_set(State& s)
 {
 	using PVertex = typename State::PVertex;
-	using RayTraits = typename State::RayTraits;
 	using Status = typename State::Status;
 
 	if (const typename State::StatusInfo initialized = initialize_data(s); initialized != Status::success)
@@ -632,56 +629,31 @@ typename State::StatusInfo sample_alpha_level_set(State& s)
 	if (const FieldPrepareResult prepared = s.field.prepare(inputs); prepared != FieldPrepareResult::ok)
 		return status_of(s, prepared);
 
-	Vec3 bbox_min(0, 0, 0), bbox_max(1, 1, 1);
-	if (const FieldPrepareResult boxed = s.field.sampling_box(inputs, bbox_min, bbox_max);
-		boxed != FieldPrepareResult::ok)
-		return status_of(s, boxed);
-	const Scalar padding = constants::sampling_padding;
-	bbox_min -= Vec3(padding, padding, padding);
-	bbox_max += Vec3(padding, padding, padding);
-
-	RayTraits traits = s.field.ray_traits(inputs);
-	OFFSET_AXIS_PRECONDITION(traits.is_ready(), Status::invalid_data);
-	RayLevelSetParams ray_params;
-	ray_params.bbox_expand = constants::ray_box_relative_expand;
-	ray_params.alpha = Scalar(s.options.alpha);
-	ray_params.tol = Scalar(s.options.tolerance);
-	ray_params.step_bound = Scalar(2.0);
-	ray_params.batch_size = std::max(1, s.options.ray_sampler_batch_size);
-	ray_params.max_iterations = s.options.udf_max_iterations;
-	ray_params.min_active_rays = s.options.udf_min_active_rays;
-	ray_params.seed = s.options.seed;
-	AlphaSamplingParameters params;
+	AlphaSamplingParams params;
 	params.sample_radius = Scalar(s.options.sample_radius);
 	params.seed = static_cast<uint32>(s.options.seed);
 	params.ray_sampler_batch_size = static_cast<size_t>(std::max(1, s.options.ray_sampler_batch_size));
 	params.candidates_per_parent = static_cast<size_t>(std::max(1, s.options.alpha_sampling_candidates_per_parent));
 	params.parent_batch_size = static_cast<size_t>(std::max(1, s.options.alpha_sampling_parent_batch_size));
-	params.bbox_min = bbox_min;
-	params.bbox_max = bbox_max;
-	auto compute_normals = [&](const std::vector<Vec3>& points, std::vector<Vec3>& normals,
-							   std::vector<uint8_t>& keep) {
-		keep.assign(points.size(), uint8_t(0));
-		normals.assign(points.size(), Vec3(0, 0, 1));
-		return s.field.normals(points, normals, keep);
-	};
-	const AlphaProjectionParameters pp{Scalar(s.options.alpha), Scalar(s.options.tolerance), bbox_min, bbox_max, 1};
-	auto project_points = [&](const std::vector<Vec3>& points, AlphaProjectionResult& projection) {
-		return s.field.project(points, pp, projection);
-	};
-	AlphaSamplingResult result =
-		offset_axis::sample_alpha_level_set(traits, ray_params, params, compute_normals, project_points);
-	if (!result.success || result.positions.empty())
-		return Status::sampling_failed;
-	clear(*s.data.samples);
-	s.samples_before_filtering = static_cast<uint32>(result.positions.size());
-	for (size_t i = 0; i < result.positions.size(); ++i)
+	params.rays.bbox_expand = constants::ray_box_relative_expand;
+	params.rays.alpha = Scalar(s.options.alpha);
+	params.rays.tol = Scalar(s.options.tolerance);
+	params.rays.step_bound = Scalar(2.0);
+	params.rays.batch_size = std::max(1, s.options.ray_sampler_batch_size);
+	params.rays.max_iterations = s.options.udf_max_iterations;
+	params.rays.min_active_rays = s.options.udf_min_active_rays;
+	params.rays.seed = s.options.seed;
+	switch (offset_axis::sample_alpha_level_set(s.field, inputs, params, *s.data.samples, s.sample_position.get(),
+												s.sample_normal.get()))
 	{
-		PVertex v = add_vertex(*s.data.samples);
-		const uint32 idx = index_of(*s.data.samples, v);
-		(*s.sample_position)[idx] = result.positions[i];
-		(*s.sample_normal)[idx] = result.normals[i];
+	case SamplingStatus::ok:
+		break;
+	case SamplingStatus::invalid_data:
+		return Status::invalid_data;
+	case SamplingStatus::failed:
+		return Status::sampling_failed;
 	}
+	s.samples_before_filtering = static_cast<uint32>(nb_cells<PVertex>(*s.data.samples));
 	build_sample_kdtree(s);
 	return Status::success;
 }
@@ -701,41 +673,12 @@ typename State::StatusInfo apply_sampling_filtering(State& s)
 	s.input.build_input_kdtree();
 	if (!s.input.input_kdtree())
 		s.input.build_surface_bvh();
-	std::vector<Vec3> kept, kept_normals;
-	kept.reserve(nb_cells<PVertex>(*s.data.samples));
-	foreach_cell(*s.data.samples, [&](PVertex v) {
-		const Vec3 p = (*s.sample_position)[index_of(*s.data.samples, v)];
-		bool within_distance = false;
-		const Scalar max_distance = Scalar(s.options.alpha) + constants::filter_margin;
-		if (s.input.input_kdtree())
-		{
-			std::pair<uint32, Scalar> nearest;
-			within_distance = s.input.input_kdtree()->find_nn(p, &nearest, max_distance);
-		}
-		else if (s.input.surface_bvh())
-		{
-			std::pair<uint32, Vec3> closest;
-			within_distance = s.input.surface_bvh()->closest_point(p, &closest, max_distance);
-		}
-		if (within_distance)
-		{
-			kept.push_back(p);
-			kept_normals.push_back((*s.sample_normal)[index_of(*s.data.samples, v)]);
-		}
-		return true;
-	});
-	const size_t before = nb_cells<PVertex>(*s.data.samples);
-	if (kept.size() == before)
+	const Scalar max_distance = Scalar(s.options.alpha) + constants::filter_margin;
+	if (filter_samples_far_from_input(s.input, max_distance, *s.data.samples, s.sample_position.get(),
+									  s.sample_normal.get()) == 0)
 		return Status::success;
-	clear(*s.data.samples);
-	for (size_t i = 0; i < kept.size(); ++i)
-	{
-		PVertex v = add_vertex(*s.data.samples);
-		(*s.sample_position)[index_of(*s.data.samples, v)] = kept[i];
-		(*s.sample_normal)[index_of(*s.data.samples, v)] = kept_normals[i];
-	}
 	s.fitting_data_computed = false;
-	if (kept.empty())
+	if (nb_cells<PVertex>(*s.data.samples) == 0)
 	{
 		s.sample_kdtree.reset();
 		s.sample_vertices.clear();

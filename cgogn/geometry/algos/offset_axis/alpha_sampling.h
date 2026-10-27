@@ -23,7 +23,9 @@
 #ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_ALPHA_SAMPLING_H_
 #define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_ALPHA_SAMPLING_H_
 
+#include <cgogn/core/types/mesh_traits.h>
 #include <cgogn/geometry/algos/offset_axis/alpha_projection.h>
+#include <cgogn/geometry/algos/offset_axis/distance_field.h>
 #include <cgogn/geometry/algos/offset_axis/normal_utils.h>
 #include <cgogn/geometry/algos/offset_axis/ray_level_set_sampler.h>
 #include <cgogn/geometry/algos/offset_axis/spatial_grid.h>
@@ -47,7 +49,16 @@ namespace geometry
 namespace offset_axis
 {
 
-struct AlphaSamplingParameters
+namespace constants
+{
+
+// Padding added on each side of the input bounding box. The padded box is the sampling domain and the box the
+// projected points are clamped to.
+inline constexpr Scalar sampling_padding = Scalar(0.1);
+
+} // namespace constants
+
+struct AlphaSamplingParams
 {
 	Scalar sample_radius = Scalar(0);
 	uint32 seed = 0;
@@ -56,6 +67,7 @@ struct AlphaSamplingParameters
 	Vec3 bbox_max = Vec3(1, 1, 1);
 	size_t candidates_per_parent = 1;
 	size_t parent_batch_size = 1;
+	RayLevelSetParams rays;
 };
 
 struct AlphaSamplingResult
@@ -63,6 +75,13 @@ struct AlphaSamplingResult
 	std::vector<Vec3> positions;
 	std::vector<Vec3> normals;
 	bool success = true;
+};
+
+enum class SamplingStatus
+{
+	ok,
+	invalid_data,
+	failed
 };
 
 namespace detail
@@ -123,12 +142,9 @@ inline void sample_active_parent_indices(const std::vector<uint32>& active_indic
 	}
 }
 
-} // namespace detail
-
 template <typename Traits, typename NormalFn, typename ProjectionFn>
-AlphaSamplingResult sample_alpha_level_set(Traits& traits, const RayLevelSetParams& ray_params,
-											   const AlphaSamplingParameters& parameters, NormalFn&& compute_normals,
-											   ProjectionFn&& project_points)
+AlphaSamplingResult sample_alpha_level_set(Traits& traits, const AlphaSamplingParams& parameters,
+										   NormalFn&& compute_normals, ProjectionFn&& project_points)
 {
 	AlphaSamplingResult result;
 	if (parameters.sample_radius <= Scalar(0) || !traits.is_ready())
@@ -184,7 +200,7 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, const RayLevelSetPara
 	SpatialGrid working_grid(grid_cell_size);
 
 	std::vector<Vec3> seed_points = sample_level_set_rays(
-		traits, ray_params, static_cast<int>(detail::alpha_sampling_warmup_iterations), &working_grid,
+		traits, parameters.rays, static_cast<int>(detail::alpha_sampling_warmup_iterations), &working_grid,
 		parameters.sample_radius, parameters.bbox_min, parameters.bbox_max, &result.positions);
 	if (!seed_points.empty())
 	{
@@ -278,6 +294,55 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, const RayLevelSetPara
 	}
 
 	return result;
+}
+
+} // namespace detail
+
+// Samples the alpha level set of the field and stores the samples in the samples point cloud (cleared first), with
+// their positions and normals in sample_position and sample_normal. field.prepare(inputs) must have succeeded.
+template <typename FIELD, typename INPUTS, typename POINTS>
+SamplingStatus sample_alpha_level_set(FIELD& field, const INPUTS& inputs, const AlphaSamplingParams& params,
+									  POINTS& samples,
+									  typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_position,
+									  typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_normal)
+{
+	using PVertex = typename mesh_traits<POINTS>::Vertex;
+
+	Vec3 bbox_min(0, 0, 0), bbox_max(1, 1, 1);
+	if (field.sampling_box(inputs, bbox_min, bbox_max) != FieldPrepareResult::ok)
+		return SamplingStatus::invalid_data;
+	const Scalar padding = constants::sampling_padding;
+	bbox_min -= Vec3(padding, padding, padding);
+	bbox_max += Vec3(padding, padding, padding);
+
+	auto traits = field.ray_traits(inputs);
+	if (!traits.is_ready())
+		return SamplingStatus::invalid_data;
+	AlphaSamplingParams box_params = params;
+	box_params.bbox_min = bbox_min;
+	box_params.bbox_max = bbox_max;
+	auto compute_normals = [&](const std::vector<Vec3>& points, std::vector<Vec3>& normals,
+							   std::vector<uint8_t>& keep) {
+		keep.assign(points.size(), uint8_t(0));
+		normals.assign(points.size(), Vec3(0, 0, 1));
+		return field.normals(points, normals, keep);
+	};
+	const AlphaProjectionParameters pp{params.rays.alpha, params.rays.tol, bbox_min, bbox_max, 1};
+	auto project_points = [&](const std::vector<Vec3>& points, AlphaProjectionResult& projection) {
+		return field.project(points, pp, projection);
+	};
+	AlphaSamplingResult result = detail::sample_alpha_level_set(traits, box_params, compute_normals, project_points);
+	if (!result.success || result.positions.empty())
+		return SamplingStatus::failed;
+	clear(samples);
+	for (size_t i = 0; i < result.positions.size(); ++i)
+	{
+		PVertex v = add_vertex(samples);
+		const uint32 idx = index_of(samples, v);
+		(*sample_position)[idx] = result.positions[i];
+		(*sample_normal)[idx] = result.normals[i];
+	}
+	return SamplingStatus::ok;
 }
 
 } // namespace offset_axis
