@@ -40,27 +40,18 @@ namespace geometry
 namespace offset_axis
 {
 
-// Distance field: the function the UDF reconstruction samples and scores. The reconstruction is written once and
-// the reconstruction takes the field class template as its FIELD template parameter:
-//   - SurfaceDistanceField: the unsigned distance to a triangle surface (exact closest point on the BVH);
-//   - PointCloudDistanceField: the unsigned distance to an oriented point cloud (k-d tree queries);
-//   - NeuralDistanceField: a TorchScript network that predicts the UDF or the MF value of the input.
-// Every field is constructed from the InputGeometry caches and the ReconstructionOptions of the reconstruction, and
-// provides the following interface (the CPU fields hold no model, see the notes on each method):
-//   RayTraits, is_neural_type                    type of the ray traits and compile-time kind of the field
-//   prepare(inputs)                              build the caches, or report that the field is not usable yet
-//   sampling_box(inputs, min, max)               bounding box of the input, before padding
-//   ray_traits(inputs)                           traits of the ray sampler (valid until the sampling ends)
-//   normals(points, normals, keep)               normals of the candidate points, keep flags the usable ones
-//   project(points, parameters, result)          projection of the points onto the alpha level set
-//   load_model(path, type) / reset() / loaded()  neural model life cycle (CPU fields: no model, loaded() is false)
-//   distances(points, values)                    topology scores of the points (unsigned distance to the input)
-//   values_sdf(points, values, sdf)              MF value and sdf of the points (CPU fields: returns false)
-//   recompute_normals_from_input_after_filtering constant: whether the normals are recomputed from the input after
-//                                                the sampling filter
-//   forward() / workspace() / device()           neural state (neural fields only)
+// Distance field: the function the UDF reconstruction samples and scores, the FIELD template parameter of the
+// reconstruction (SurfaceDistanceField, PointCloudDistanceField, NeuralDistanceField). Every field is constructed
+// from the InputGeometry and the ReconstructionOptions and provides:
+//   prepare(inputs)                        build the caches, or report that the field is not usable yet
+//   sampling_box(inputs, min, max)         bounding box of the input, before padding
+//   ray_traits(inputs)                     traits of the ray sampler (valid until the sampling ends)
+//   normals(points, normals, keep)         normals of the candidate points, keep flags the usable ones
+//   project(points, parameters, result)    projection of the points onto the alpha level set
+//   distances(points, values)              topology scores of the points
+//   values_sdf(points, values, sdf)        MF value and sdf of the points (CPU fields: returns false)
+//   load_model / reset / loaded            neural model life cycle (CPU fields: no model)
 
-// Result of the preparation and sampling-box steps of a field.
 enum class FieldPrepareResult
 {
 	ok,
@@ -68,8 +59,7 @@ enum class FieldPrepareResult
 	model_not_loaded
 };
 
-// Reconstruction data a field may need. The pointers are non-owning: the meshes and the attributes belong to the
-// caller.
+// Non-owning pointers to the reconstruction data a field may need.
 template <typename SURFACE, typename POINTS>
 struct PrepareInputs
 {
@@ -84,7 +74,6 @@ struct PrepareInputs
 	std::shared_ptr<PointAttribute<std::vector<PVertex>>> input_knn;
 };
 
-// true if the field is neural and holds a model of the given type (CPU fields: false)
 template <typename FIELD>
 bool is_neural_model(const FIELD& field, NeuralModelType type)
 {

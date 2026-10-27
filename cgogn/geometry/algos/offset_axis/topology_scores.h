@@ -320,9 +320,9 @@ std::unordered_set<uint32> tet_face_ids(const NONMANIFOLD& skeleton, const Skele
 	return tet_face_ids;
 }
 
-// UDF values used as scores by the topology fix (step 10) at the points. For MF models it is the distance to the
-// medial point of the nearest sample: mf - |sdf| is not a stable medial axis (its minimum is above zero and varies a
-// lot over a shape). Otherwise it is the value of the field. Returns false if the field cannot be evaluated.
+// UDF values used as scores by the topology fix at the points. For MF models it is the distance to the medial point of
+// the nearest sample: mf - |sdf| is not a stable medial axis (its minimum is above zero and varies a lot over a shape).
+// Otherwise it is the value of the field. Returns false if the field cannot be evaluated.
 template <typename FIELD, typename POINTS>
 bool evaluate_topology_scores(FIELD& field, const POINTS& samples,
 							  const typename mesh_traits<POINTS>::template Attribute<Vec3>& sample_ma_position,

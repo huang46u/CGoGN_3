@@ -58,7 +58,6 @@ public:
 	using SVertex = typename mesh_traits<SURFACE>::Vertex;
 	using typename Base::RayTraits;
 
-	// the surface field does not use the options
 	SurfaceDistanceField(InputGeometry<SURFACE, POINTS>& input, const ReconstructionOptions& /*options*/)
 		: input_(input)
 	{
@@ -105,7 +104,6 @@ public:
 		});
 	}
 
-	// topology scores: the unsigned distance from the points to the surface (closest point on the BVH)
 	bool distances(const std::vector<Vec3>& points, std::vector<Scalar>& values)
 	{
 		input_.build_surface_bvh();

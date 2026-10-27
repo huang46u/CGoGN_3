@@ -121,7 +121,7 @@ private:
 		bool initialized_ = false;
 		bool fitting_data_computed_ = false; // UI workflow gate for the sphere-fitting controls.
 		bool spheres_initialized_ = false; // UI workflow gate for the sphere-optimization controls; reset with the fitting data.
-		// Reconstruction: the field refers to input_ and options_, so it is declared after them
+		// Reconstruction
 		cgogn::geometry::offset_axis::ReconstructionOptions options_;
 		cgogn::geometry::offset_axis::InputGeometry<SURFACE, POINTS> input_;
 		Field field_{input_, options_};
@@ -607,7 +607,7 @@ private:
 		return true;
 	}
 
-	// One optimizer iteration; the caller passes lambda so that the update thread can feed a live value.
+	// The caller passes lambda so that the update thread can feed a live value.
 	static SpheresOptimizerStatus update_spheres_once(PointsParameters& p, Scalar sqem_update_lambda_line_plane)
 	{
 		if (nb_cells<PVertex>(*p.spheres_) == 0)
@@ -624,7 +624,6 @@ private:
 		return true;
 	}
 
-	// Scores of the topology fix and of the display (see evaluate_topology_scores).
 	static auto topology_scores_evaluator(PointsParameters& p)
 	{
 		return [&p](const std::vector<Vec3>& points, std::vector<Scalar>& values) {
@@ -634,7 +633,7 @@ private:
 		};
 	}
 
-	// Residual sheet prune after the topology fix, if enabled, as in the benchmark.
+	// Residual sheet prune after the topology fix, if enabled.
 	static bool fix_topology_and_prune(PointsParameters& p)
 	{
 		if (nb_cells<NMVertex>(*p.skeleton_) == 0 || !p.topology_->fix_topology(topology_scores_evaluator(p)))
@@ -751,7 +750,7 @@ private:
 	void refresh_skeleton_topology_colors(PointsParameters& p)
 	{
 		p.topology_->compute_edge_degree();
-		// Edge colors as in V0: degree 1 blue, degree 2 green, degree > 2 red, all others dim gray.
+		// Edge colors: degree 1 blue, degree 2 green, degree > 2 red, all others dim gray.
 		foreach_cell(*p.skeleton_, [&](NMEdge e) {
 			const std::size_t degree = incident_faces(*p.skeleton_, e).size();
 			Vec3 color(0.15, 0.15, 0.15);
@@ -805,8 +804,8 @@ private:
 		}
 	}
 
-	// V0 "Boundary tet mask": faces of boundary tets yellow, other faces dim gray. The longest degree-2 edge of
-	// each boundary tet is orange, other edges dim gray. The V0 K5 mask is not included.
+	// "Boundary tet mask": faces of boundary tets yellow, other faces dim gray. The longest degree-2 edge of each
+	// boundary tet is orange, other edges dim gray.
 	void mark_boundary_tets_color(PointsParameters& p)
 	{
 		const auto mask = p.topology_->boundary_tet_mask();
@@ -824,7 +823,7 @@ private:
 		});
 	}
 
-	// V0 palette helpers, copied from V0 (golden-ratio hue spacing).
+	// Palette helpers (golden-ratio hue spacing).
 	static Vec3 hsv_to_rgb(Scalar h, Scalar s, Scalar v)
 	{
 		const Scalar hh = h - std::floor(h);
@@ -866,7 +865,7 @@ private:
 		return hsv_to_rgb(hue, saturation, value);
 	}
 
-	// V0 "Face components (UF)": color each skeleton face by its sheet. Faces are only recolored, not removed.
+	// "Face components (UF)": color each skeleton face by its sheet. Faces are only recolored, not removed.
 	void mark_skeleton_face_components_color(PointsParameters& p)
 	{
 		const auto sheet_of_face = cgogn::geometry::offset_axis::compute_skeleton_face_components(*p.skeleton_);
@@ -878,8 +877,8 @@ private:
 		});
 	}
 
-	// V0 colormaps: cells with a score are colored by color_map over the range of those scores (0.5 if the range is
-	// empty, as in V0); NaN (cell not adjacent to a tet) gets the dim fallback color.
+	// Colormaps: cells with a score are colored by color_map over the range of those scores (0.5 if the range is
+	// empty); NaN (cell not adjacent to a tet) gets the dim fallback color.
 	template <typename CELL>
 	void color_cells_by_scores(PointsParameters& p, const std::vector<Scalar>& scores,
 							   const std::shared_ptr<NMAttribute<Vec3>>& attribute, const Vec3& fallback)
@@ -909,7 +908,7 @@ private:
 		});
 	}
 
-	// V0 "Tet face UDF colormap (Integral / Normalized)": read-only, only the face colors change.
+	// "Tet face UDF colormap (Integral / Normalized)": read-only, only the face colors change.
 	bool mark_tet_face_udf_color(PointsParameters& p, bool normalize_by_area)
 	{
 		if (!skeleton_colors_ready(p))
@@ -930,7 +929,7 @@ private:
 		return true;
 	}
 
-	// V0 "Edge UDF score colormap (Gauss3)": read-only, only the edge colors change.
+	// "Edge UDF score colormap (Gauss3)": read-only, only the edge colors change.
 	bool mark_tet_edge_gauss3_color(PointsParameters& p)
 	{
 		if (!skeleton_colors_ready(p))
@@ -1491,8 +1490,8 @@ protected:
 			}
 		}
 
-		// Topology Fix. While the sphere update runs, the topology is not read (the update thread writes it), so
-		// the step stays visible with its parameters disabled, as before.
+		// Topology Fix. While the sphere update runs, the topology is not read (the update thread writes it), so the
+		// step stays visible with its parameters disabled.
 		const bool has_tets = !running && spheres_ready && skeleton_built && p.topology_->has_tets();
 		const bool topology_fix_step = spheres_ready && skeleton_built && (running || has_tets);
 		if (topology_fix_step && ImGui::CollapsingHeader("Topology Fix", ImGuiTreeNodeFlags_DefaultOpen))

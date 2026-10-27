@@ -90,7 +90,6 @@ void flip_prune_medial_axis(POINTS& samples, const typename mesh_traits<POINTS>:
 		return true;
 	});
 	std::vector<Scalar> values, sdf;
-	// scores fails when the field evaluation fails (e.g. a neural forward error): no flip prune
 	if (!scores(centers, values, sdf))
 		return;
 	cgogn_message_assert(values.size() == centers.size() && (!mf_model || sdf.size() == centers.size()),
@@ -148,9 +147,9 @@ void flip_prune_medial_axis(POINTS& samples, const typename mesh_traits<POINTS>:
 	}
 }
 
-// Step 5: the shrinking ball medial point of every sample, then (ma_flip_prune) the medial flip prune. Its threshold
-// is ma_flip_prune_alpha_factor * alpha on the network value for MF models, udf_flip_threshold_factor * alpha on the
-// UDF for UDF models and alpha on the distance for the CPU fields. The caller rebuilds the kd-trees of the samples.
+// The shrinking ball medial point of every sample, then (ma_flip_prune) the medial flip prune. Its threshold is
+// ma_flip_prune_alpha_factor * alpha on the network value for MF models, udf_flip_threshold_factor * alpha on the UDF
+// for UDF models and alpha on the distance for the CPU fields. The caller rebuilds the kd-trees of the samples.
 template <typename FIELD, typename POINTS>
 void compute_initial_medial_axis(
 	FIELD& field, POINTS& samples, const typename mesh_traits<POINTS>::template Attribute<Vec3>& position,

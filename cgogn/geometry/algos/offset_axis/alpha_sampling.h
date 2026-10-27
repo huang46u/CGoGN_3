@@ -72,7 +72,6 @@ struct AlphaSamplingParams
 	RayLevelSetParams rays;
 };
 
-// Parameters of the alpha level set sampling (step 2) from the options.
 inline AlphaSamplingParams alpha_sampling_params(const ReconstructionOptions& options)
 {
 	AlphaSamplingParams params;
@@ -222,7 +221,6 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, const AlphaSamplingPa
 
 		std::vector<Vec3> seed_normals;
 		std::vector<uint8_t> seed_keep_mask;
-		// the field fails when its evaluation fails (e.g. a neural forward error)
 		if (!compute_normals(seed_points, seed_normals, seed_keep_mask))
 		{
 			result.success = false;

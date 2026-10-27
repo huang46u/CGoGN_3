@@ -51,7 +51,6 @@ namespace geometry
 namespace offset_axis
 {
 
-// Hash and equality of an unordered pair of vertex indices.
 struct edge_hash
 {
 	std::size_t operator()(const std::pair<uint32, uint32>& edge) const
@@ -179,7 +178,6 @@ void build_skeleton_from_spheres(
 		return true;
 	});
 
-	// Resolve Tets
 	tets.clear();
 	tets.reserve(raw_tets.size());
 	foreach_cell(skeleton, [&](SkeletonFace f) -> bool {

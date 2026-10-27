@@ -447,7 +447,6 @@ private:
 							  candidate.first_face_score, version});
 	}
 
-	// The current tets of the faces of the edges.
 	std::unordered_set<std::size_t> dirty_tets(const std::vector<SkeletonEdge>& affected_edges)
 	{
 		std::unordered_set<std::size_t> result;
@@ -459,8 +458,8 @@ private:
 	}
 };
 
-// Steps b and c of the topology fix loop: greedy removal of the tets accepted by Policy (SimpleTetPolicy or
-// NonSimpleTetPolicy), the best edge and face first by score.
+// Greedy removal of the tets accepted by Policy (SimpleTetPolicy or NonSimpleTetPolicy), the best edge and face first
+// by score.
 template <typename Policy, typename POINTS, typename NONMANIFOLD>
 void remove_tets_greedy(
 	NONMANIFOLD& skeleton, SkeletonTets<NONMANIFOLD>& tets,

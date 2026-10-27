@@ -56,7 +56,6 @@ class CpuDistanceField
 public:
 	using RayTraits = RAY_TRAITS;
 	static constexpr bool is_neural_type = false;
-	// the normals of the samples are recomputed from the input after the sampling filter
 	static constexpr bool recompute_normals_from_input_after_filtering = true;
 
 	// MF values are only defined for neural fields; this method is not called for the CPU fields
@@ -65,7 +64,6 @@ public:
 		return false;
 	}
 
-	// the CPU fields never hold a neural model (see NeuralDistanceField)
 	bool load_model(const std::filesystem::path& /*path*/, NeuralModelType /*type*/)
 	{
 		return false;
@@ -99,7 +97,6 @@ protected:
 		return true;
 	}
 
-	// projection onto the alpha level set with the same query
 	template <typename QUERY>
 	bool project_with(const std::vector<Vec3>& points, const AlphaProjectionParameters& pp,
 					  AlphaProjectionResult& projection, const QUERY& query)

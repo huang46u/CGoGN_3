@@ -42,7 +42,6 @@ namespace offset_axis
 // Dataset presets: named sets of sampling / postprocess defaults for one dataset family.
 // A profile only overrides the fields listed for it. Profiles never change neural_model_type or seed.
 
-// Known profile names, in UI order.
 inline const std::vector<std::string>& reconstruction_profile_names()
 {
 	static const std::vector<std::string> names = {"default", "mf_organic", "mf_abc", "udf"};

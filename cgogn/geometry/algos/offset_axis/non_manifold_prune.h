@@ -82,8 +82,8 @@ void remove_fully_non_manifold_triangles(
 		compute_edge_degree(skeleton, edge_degree);
 }
 
-// Step 11: removes the small sheets (at most 2 faces connected by degree-2 edges) that have no vertex on an isolated
-// edge, with their tets; the mode keeps some of them and removes the fully non-manifold triangles before and after.
+// Removes the small sheets (at most 2 faces connected by degree-2 edges) that have no vertex on an isolated edge, with
+// their tets; the mode keeps some of them and removes the fully non-manifold triangles before and after.
 template <typename POINTS, typename NONMANIFOLD>
 void prune_residual_sheets(
 	NONMANIFOLD& skeleton, SkeletonTets<NONMANIFOLD>& tets,

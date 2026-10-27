@@ -67,7 +67,6 @@ public:
 	template <typename T>
 	using SurfaceAttribute = typename mesh_traits<SURFACE>::template Attribute<T>;
 
-	// non-owning pointers to the input (owned by the caller)
 	struct
 	{
 		SURFACE* surface = nullptr;

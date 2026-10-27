@@ -188,7 +188,6 @@ inline std::optional<std::vector<Vec3>> sample_level_set_rays(const NeuralFieldR
 		torch::Tensor d = d_sdf.first;
 		torch::Tensor sdf = d_sdf.second;
 		const bool has_sdf = sdf.defined();
-		// the forward failed (e.g. out of device memory)
 		if (!d.defined())
 			return std::nullopt;
 

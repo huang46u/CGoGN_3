@@ -47,7 +47,6 @@ namespace offset_axis
 // Read-only: splits the faces of a skeleton into sheets. Two faces belong to the same sheet when they are
 // connected through a manifold edge, i.e. an edge incident to exactly two faces.
 // Returns a map from face index (index_of) to sheet id. Sheet ids are numbered from 0 in face traversal order.
-// The skeleton is not modified.
 template <typename NONMANIFOLD>
 std::unordered_map<uint32, uint32> compute_skeleton_face_components(NONMANIFOLD& skeleton)
 {

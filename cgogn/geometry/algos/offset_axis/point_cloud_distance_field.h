@@ -108,7 +108,6 @@ public:
 		});
 	}
 
-	// topology scores: the unsigned distance from the points to the input points (nearest point on the k-d tree)
 	bool distances(const std::vector<Vec3>& points, std::vector<Scalar>& values)
 	{
 		input_.build_input_kdtree();

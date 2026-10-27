@@ -102,7 +102,6 @@ public:
 		return tets_.at(tet_id);
 	}
 
-	// Tets of the face of index face_index.
 	const std::set<std::size_t>& tets_of(uint32 face_index) const
 	{
 		return (*face_tets_)[face_index];

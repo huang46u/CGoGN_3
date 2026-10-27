@@ -36,7 +36,7 @@ namespace geometry
 namespace offset_axis
 {
 
-// Residual sheet prune mode (postprocess.residual_prune_mode); SkeletonTopology uses this enum directly.
+// Residual sheet prune mode (postprocess.residual_prune_mode).
 enum class ResidualPruneOption
 {
 	current,
@@ -145,7 +145,6 @@ struct OptionInfo
 	double min, max, ui_min, ui_max;
 };
 
-// option_info::alpha.ui_min etc.
 namespace option_info
 {
 
@@ -156,7 +155,6 @@ CGOGN_OFFSET_AXIS_OPTIONS(CGOGN_OFFSET_AXIS_OPTION_INFO)
 } // namespace option_info
 
 // f(const OptionInfo&, T& value) for every option, in table order.
-// Options = ReconstructionOptions or const ReconstructionOptions
 template <typename Options, typename F>
 void for_each_option(Options& options, F&& f)
 {

@@ -39,7 +39,6 @@ namespace offset_axis
 namespace benchmark
 {
 
-// time of each reconstruction step
 struct ReconstructionTiming
 {
 	float64 preprocessing_ms = 0.0;

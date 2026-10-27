@@ -61,7 +61,6 @@ public:
 		return device_;
 	}
 
-	// Forward points in GPU tensor
 	torch::Tensor forward_values_gpu(const torch::Tensor& points_gpu) const
 	{
 		if (!is_loaded())

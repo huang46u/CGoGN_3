@@ -170,7 +170,6 @@ BenchmarkResult run_impl(const BenchmarkConfig& config)
 	result.extra_timing.input_loading_ms = elapsed_ms(input_start);
 	Surface* input_surface = use_surface ? &surface : nullptr;
 
-	// the field refers to input and options
 	const ReconstructionOptions& options = config.reconstruction;
 	InputGeometry<Surface, Points> input;
 	Field field{input, options};

@@ -134,8 +134,8 @@ void boundary_tet_mask(const NONMANIFOLD& skeleton, const SkeletonTets<NONMANIFO
 	}
 }
 
-// Step a of the topology fix loop: removes the two faces of the longest degree-2 edge of each boundary tet, and the
-// tet. The boundary tets are found before any removal.
+// Removes the two faces of the longest degree-2 edge of each boundary tet, and the tet. The boundary tets are found
+// before any removal.
 template <typename POINTS, typename NONMANIFOLD>
 void remove_boundary_tets(
 	NONMANIFOLD& skeleton, SkeletonTets<NONMANIFOLD>& tets,

@@ -64,7 +64,6 @@ public:
 	using SkeletonAttribute = typename mesh_traits<NONMANIFOLD>::template Attribute<T>;
 	using ResidualPruneMode = ResidualPruneOption;
 
-	// Borrowed: the meshes and the attributes belong to the caller.
 	struct Data
 	{
 		NONMANIFOLD& skeleton;
@@ -103,8 +102,8 @@ public:
 									data_.edge_degree, tets_);
 	}
 
-	// Step 10: removes the tets of the skeleton (boundary tets, then greedy by score, until no tet is removed) and
-	// repairs the dense K5 regions found at the start. Returns false if the scores cannot be evaluated.
+	// Removes the tets of the skeleton (boundary tets, then greedy by score, until no tet is removed) and repairs the
+	// dense K5 regions found at the start. Returns false if the scores cannot be evaluated.
 	template <typename ScoreEvaluator>
 	bool fix_topology(ScoreEvaluator&& evaluate_scores)
 	{
@@ -149,8 +148,7 @@ public:
 		offset_axis::compute_edge_degree(data_.skeleton, data_.edge_degree);
 	}
 
-	// Read-only: ids (index_of) of the faces of the current boundary tets, and of the longest degree-2 edge of each
-	// such tet. Intended for display only; the skeleton and the tet set are not modified.
+	// Ids (index_of) of the faces of the current boundary tets, and of the longest degree-2 edge of each such tet.
 	struct BoundaryTetMask
 	{
 		std::vector<uint32> face_ids;
@@ -170,8 +168,8 @@ public:
 		return mask;
 	}
 
-	// For display: sets face_score to the UDF score of the topology fix (optionally divided by the face area) on
-	// the faces of the current tets and to NaN on the other faces. Returns false if the scores cannot be evaluated.
+	// Sets face_score to the UDF score of the topology fix (optionally divided by the face area) on the faces of the
+	// current tets and to NaN on the other faces. Returns false if the scores cannot be evaluated.
 	template <typename ScoreEvaluator>
 	bool compute_face_scores(ScoreEvaluator& evaluate_scores, bool normalize_by_area)
 	{
@@ -181,8 +179,8 @@ public:
 												data_.face_score);
 	}
 
-	// For display: sets edge_score to the UDF score of the topology fix on the edges of the current tets and to NaN
-	// on the other edges. Returns false if the scores cannot be evaluated.
+	// Sets edge_score to the UDF score of the topology fix on the edges of the current tets and to NaN on the other
+	// edges. Returns false if the scores cannot be evaluated.
 	template <typename ScoreEvaluator>
 	bool compute_edge_scores(ScoreEvaluator& evaluate_scores)
 	{
@@ -191,7 +189,6 @@ public:
 												tet_edge_ids(data_.skeleton, tets_), evaluate_scores, data_.edge_score);
 	}
 
-	// Step 11.
 	void prune_residual_sheets(ResidualPruneMode mode)
 	{
 		offset_axis::prune_residual_sheets(data_.skeleton, tets_, data_.edge_degree, data_.spheres_optimizer,

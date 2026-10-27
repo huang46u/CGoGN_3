@@ -55,7 +55,6 @@ struct LevelSetRay
 	Scalar t_max;
 };
 
-// Parameters of the level set sampler.
 struct RayLevelSetParams
 {
 	Scalar bbox_expand = Scalar(0.1);
@@ -71,8 +70,6 @@ struct RayLevelSetParams
 
 namespace detail
 {
-
-// CPU and GPU samplers share these helpers
 
 inline Vec3 clamp_point(const Vec3& p, const Vec3& bbox_min, const Vec3& bbox_max)
 {
@@ -126,9 +123,7 @@ inline std::vector<LevelSetRay> generate_rays(const RayLevelSetParams& params, c
 	const Scalar diag = (expanded_max - expanded_min).norm();
 
 	std::uniform_real_distribution<Scalar> uniform(0.0, 1.0);
-	auto uniform_signed = [&](Scalar a) {
-		return (uniform(gen) * 2.0 - 1.0) * a; // [-a, a]
-	};
+	auto uniform_signed = [&](Scalar a) { return (uniform(gen) * 2.0 - 1.0) * a; };
 	for (int i = 0; i < num_rays; ++i)
 	{
 		LevelSetRay ray;
@@ -145,10 +140,8 @@ inline std::vector<LevelSetRay> generate_rays(const RayLevelSetParams& params, c
 		Scalar factor = 2.0 * std::sqrt(1.0 - s);
 		ray.direction = Vec3(u1 * factor, u2 * factor, 1.0 - 2.0 * s);
 
-		// Generate orthogonal basis
 		Vec3 l = ray.direction;
 
-		// Chose a vector not aligned with l
 		Vec3 a, n, b;
 		Vec3 ad = l.cwiseAbs();
 		if (ad.x() <= ad.y() && ad.x() <= ad.z())
@@ -167,7 +160,7 @@ inline std::vector<LevelSetRay> generate_rays(const RayLevelSetParams& params, c
 			Scalar u = uniform_signed(diag * 0.5);
 			Scalar v = uniform_signed(diag * 0.5);
 
-			Vec3 q = center + n * u + b * v; // candidate point on plane
+			Vec3 q = center + n * u + b * v;
 
 			LevelSetRay tmp;
 			tmp.origin = q;
@@ -177,7 +170,6 @@ inline std::vector<LevelSetRay> generate_rays(const RayLevelSetParams& params, c
 			if (!(t_exit > t_enter))
 				continue;
 
-			// Unique ray: start at entry point
 			ray.origin = q + t_enter * l;
 			ray.t_min = 0.0;
 			ray.t_max = t_exit - t_enter;
@@ -254,7 +246,7 @@ std::optional<std::vector<Vec3>> sample_level_set_rays(const TRAITS& traits, con
 				for (std::size_t i = 0; i < static_cast<std::size_t>(R); ++i)
 					eval_ray(i);
 
-			// stage 2 (serial): same ordered logic as before, using the precomputed udf
+			// stage 2 (serial): uses the precomputed udf
 			for (int i = 0; i < R; ++i)
 			{
 				if (t[i] >= t_max[i])

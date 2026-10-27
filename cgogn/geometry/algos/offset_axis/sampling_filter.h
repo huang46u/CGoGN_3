@@ -152,9 +152,9 @@ void recompute_samples_normals_from_input(InputGeometry<SURFACE, POINTS>& input,
 	});
 }
 
-// Step 3: removes the samples farther than alpha + filter_margin from the input (the input point cloud through its
-// kd-tree, otherwise the input surface through its BVH). For the CPU fields the normals of the remaining samples are
-// recomputed from the input; the neural samples keep the network gradient. Returns the number of removed samples.
+// Removes the samples farther than alpha + filter_margin from the input (the input point cloud through its kd-tree,
+// otherwise the input surface through its BVH). For the CPU fields the normals of the remaining samples are recomputed
+// from the input; the neural samples keep the network gradient. Returns the number of removed samples.
 template <typename FIELD, typename SURFACE, typename POINTS>
 uint32 filter_samples(InputGeometry<SURFACE, POINTS>& input, Scalar alpha, POINTS& samples,
 					  typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_position,
