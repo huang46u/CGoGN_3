@@ -700,14 +700,13 @@ template <typename State>
 typename State::StatusInfo build_skeleton(State& s)
 {
 	using PVertex = typename State::PVertex;
-	using TopologyType = typename State::TopologyType;
 	using Status = typename State::Status;
 
 	// spheres come from initialize_spheres / optimize_spheres
 	OFFSET_AXIS_PRECONDITION(s.data.spheres && nb_cells<PVertex>(*s.data.spheres) > 0, Status::invalid_data);
 	optimizer_for(s).compute_sphere_neighbors();
-	return topology_for(s).build_from_spheres() == TopologyType::Status::success ? Status::success
-																				 : Status::skeleton_build_failed;
+	topology_for(s).build_from_spheres();
+	return Status::success;
 }
 
 template <typename State>

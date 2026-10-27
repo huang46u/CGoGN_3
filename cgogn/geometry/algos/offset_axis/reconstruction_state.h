@@ -88,7 +88,6 @@ struct ReconstructionState
 		model_load_failed,
 		sampling_failed,
 		optimization_failed,
-		skeleton_build_failed,
 		topology_fix_failed
 	};
 

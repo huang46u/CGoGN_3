@@ -84,25 +84,14 @@ void build_skeleton_from_spheres(
 		return key;
 	};
 	std::vector<std::array<uint32, 4>> raw_tets;
-	if (sphere_skeleton_vertex)
-	{
-		foreach_cell(spheres, [&](SphereVertex pv) -> bool {
-			const uint32 sphere_index = index_of(spheres, pv);
-			if (sphere_index != INVALID_INDEX)
-				(*sphere_skeleton_vertex)[sphere_index] = SkeletonVertex();
-			return true;
-		});
-	}
 	foreach_cell(spheres, [&](SphereVertex pv) -> bool {
 		uint32 pv_index = index_of(spheres, pv);
 		SkeletonVertex nmv = add_vertex(skeleton);
 		const uint32 skeleton_index = index_of(skeleton, nmv);
 		(*skeleton_position)[skeleton_index] = (*sphere_position)[pv_index];
 		(*skeleton_radius)[skeleton_index] = (*sphere_radius)[pv_index];
-		if (sphere_skeleton_vertex)
-			(*sphere_skeleton_vertex)[pv_index] = nmv;
-		if (skeleton_source_sphere)
-			value<SphereVertex>(skeleton, skeleton_source_sphere, nmv) = pv;
+		(*sphere_skeleton_vertex)[pv_index] = nmv;
+		value<SphereVertex>(skeleton, skeleton_source_sphere, nmv) = pv;
 		return true;
 	});
 
@@ -110,35 +99,29 @@ void build_skeleton_from_spheres(
 
 	foreach_cell(spheres, [&](SphereVertex pv) -> bool {
 		uint32 pv_index = index_of(spheres, pv);
-		SkeletonVertex nmv1 =
-			sphere_skeleton_vertex ? (*sphere_skeleton_vertex)[pv_index] : SkeletonVertex();
+		SkeletonVertex nmv1 = (*sphere_skeleton_vertex)[pv_index];
 		const std::vector<SphereVertex>& neighbors = (*sphere_neighbors)[pv_index];
 		for (SphereVertex neighbor : neighbors)
 		{
 			uint32 n_index = index_of(spheres, neighbor);
-			SkeletonVertex nmv2 =
-				sphere_skeleton_vertex ? (*sphere_skeleton_vertex)[n_index] : SkeletonVertex();
-			std::vector<SkeletonVertex> av = adjacent_vertices_through_edge(skeleton, nmv1);
-			if (std::find(av.begin(), av.end(), nmv2) == av.end())
-			{
-				SkeletonEdge e = add_edge(skeleton, nmv1, nmv2);
-				edge_indices[{index_of(skeleton, nmv1), index_of(skeleton, nmv2)}] = e;
-			}
+			SkeletonVertex nmv2 = (*sphere_skeleton_vertex)[n_index];
+			const std::pair<uint32, uint32> key{index_of(skeleton, nmv1), index_of(skeleton, nmv2)};
+			if (edge_indices.find(key) == edge_indices.end())
+				edge_indices[key] = add_edge(skeleton, nmv1, nmv2);
 		}
 		return true;
 	});
 
 	foreach_cell(spheres, [&](SphereVertex pv) -> bool {
 		uint32 idx1 = index_of(spheres, pv);
-		SkeletonVertex nmv1 = sphere_skeleton_vertex ? (*sphere_skeleton_vertex)[idx1] : SkeletonVertex();
+		SkeletonVertex nmv1 = (*sphere_skeleton_vertex)[idx1];
 		const std::vector<SphereVertex>& n_pv = (*sphere_neighbors)[idx1];
 		for (const SphereVertex& ne1 : n_pv)
 		{
 			uint32 idx2 = index_of(spheres, ne1);
 			if (idx1 >= idx2)
 				continue;
-			SkeletonVertex nmv2 =
-				sphere_skeleton_vertex ? (*sphere_skeleton_vertex)[idx2] : SkeletonVertex();
+			SkeletonVertex nmv2 = (*sphere_skeleton_vertex)[idx2];
 			const std::vector<SphereVertex>& ne_ne1 = (*sphere_neighbors)[idx2];
 			for (const SphereVertex& ne2 : ne_ne1)
 			{
@@ -148,19 +131,14 @@ void build_skeleton_from_spheres(
 				if (idx2 >= idx3)
 					continue;
 
-				SkeletonVertex nmv3 =
-					sphere_skeleton_vertex ? (*sphere_skeleton_vertex)[idx3] : SkeletonVertex();
+				SkeletonVertex nmv3 = (*sphere_skeleton_vertex)[idx3];
 
-				const auto e12 = edge_indices.find({index_of(skeleton, nmv1), index_of(skeleton, nmv2)});
-				const auto e23 = edge_indices.find({index_of(skeleton, nmv2), index_of(skeleton, nmv3)});
-				const auto e13 = edge_indices.find({index_of(skeleton, nmv1), index_of(skeleton, nmv3)});
-				if (e12 == edge_indices.end() || e23 == edge_indices.end() || e13 == edge_indices.end())
-					continue;
+				// the three edges exist: the three spheres are pairwise neighbors
 				std::vector<SkeletonEdge> edges;
 				edges.reserve(3);
-				edges.push_back(e12->second);
-				edges.push_back(e23->second);
-				edges.push_back(e13->second);
+				edges.push_back(edge_indices.at({index_of(skeleton, nmv1), index_of(skeleton, nmv2)}));
+				edges.push_back(edge_indices.at({index_of(skeleton, nmv2), index_of(skeleton, nmv3)}));
+				edges.push_back(edge_indices.at({index_of(skeleton, nmv1), index_of(skeleton, nmv3)}));
 				SkeletonFace new_face = add_face(skeleton, edges);
 
 				skeleton_faces_map[get_face_key(idx1, idx2, idx3)] = new_face;
@@ -200,16 +178,12 @@ void build_skeleton_from_spheres(
 		FaceKey keys[4] = {get_face_key(v[1], v[2], v[3]), get_face_key(v[0], v[2], v[3]),
 						   get_face_key(v[0], v[1], v[3]), get_face_key(v[0], v[1], v[2])};
 
+		// the four faces exist: every triple of pairwise neighbors with increasing indices got a face
 		for (uint32 i = 0; i < 4; ++i)
 		{
-			auto it = skeleton_faces_map.find(keys[i]);
-			if (it != skeleton_faces_map.end())
-			{
-				SkeletonFace f = it->second;
-				new_tet.faces[i] = f;
-
-				value<std::set<size_t>>(skeleton, face_incident_tets, f).insert(tet_index);
-			}
+			const SkeletonFace f = skeleton_faces_map.at(keys[i]);
+			new_tet.faces[i] = f;
+			value<std::set<size_t>>(skeleton, face_incident_tets, f).insert(tet_index);
 		}
 		tets.insert({tet_index, new_tet});
 		tet_index++;

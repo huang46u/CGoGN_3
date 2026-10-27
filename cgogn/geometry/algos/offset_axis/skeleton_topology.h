@@ -92,10 +92,8 @@ public:
 		residual_prune_mode_ = mode;
 	}
 
-	Status build_from_spheres()
+	void build_from_spheres()
 	{
-		if (!valid_data())
-			return Status::invalid_data;
 		metrics_ = Metrics{};
 		const auto& spheres = data_.spheres_optimizer->data();
 		build_skeleton_from_spheres(spheres.spheres, spheres.sphere_position, spheres.sphere_radius,
@@ -103,7 +101,6 @@ public:
 									data_.skeleton_radius.get(), data_.skeleton_source_sphere.get(),
 									data_.sphere_skeleton_vertex.get(), data_.face_incident_tets.get(),
 									data_.edge_degree.get(), skeleton_tets_);
-		return Status::success;
 	}
 
 	template <typename ScoreEvaluator>

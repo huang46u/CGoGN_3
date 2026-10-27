@@ -52,13 +52,7 @@ void compute_edge_degree(const NONMANIFOLD& skeleton,
 {
 	using SkeletonEdge = typename mesh_traits<NONMANIFOLD>::Edge;
 	parallel_foreach_cell(skeleton, [&](SkeletonEdge e) {
-		auto in_face = incident_faces(skeleton, e);
-		const uint32 ide = index_of(skeleton, e);
-		const uint32 deg = static_cast<uint32>(in_face.size());
-
-		if (ide != INVALID_INDEX && edge_degree)
-			(*edge_degree)[ide] = deg;
-
+		(*edge_degree)[index_of(skeleton, e)] = static_cast<uint32>(incident_faces(skeleton, e).size());
 		return true;
 	});
 }
