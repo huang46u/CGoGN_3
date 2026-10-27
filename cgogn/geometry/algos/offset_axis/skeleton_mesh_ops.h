@@ -20,8 +20,8 @@
  * Contact information: cgogn@unistra.fr                                        *
  *                                                                              *
  *******************************************************************************/
-#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_SKELETON_MESH_OPS_H_
-#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_SKELETON_MESH_OPS_H_
+#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_MESH_OPS_H_
+#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_MESH_OPS_H_
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
@@ -29,7 +29,7 @@
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
 #include <cgogn/core/types/cell_marker.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_tets.h>
+#include <cgogn/geometry/algos/offset_axis/skeleton_tets.h>
 #include <cgogn/geometry/algos/offset_axis/spheres_optimizer.h>
 
 #include <cstddef>
@@ -57,9 +57,6 @@ void compute_edge_degree(const NONMANIFOLD& skeleton,
 		return true;
 	});
 }
-
-namespace topology_detail
-{
 
 // Removes the skeleton vertex and the sphere it comes from.
 template <typename POINTS, typename NONMANIFOLD>
@@ -204,12 +201,10 @@ typename mesh_traits<NONMANIFOLD>::Edge find_edge(const NONMANIFOLD& skeleton,
 	return SkeletonEdge();
 }
 
-} // namespace topology_detail
-
 } // namespace offset_axis
 
 } // namespace geometry
 
 } // namespace cgogn
 
-#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_SKELETON_MESH_OPS_H_
+#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_MESH_OPS_H_

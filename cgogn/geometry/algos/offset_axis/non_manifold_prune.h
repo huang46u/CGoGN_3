@@ -20,8 +20,8 @@
  * Contact information: cgogn@unistra.fr                                        *
  *                                                                              *
  *******************************************************************************/
-#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_NON_MANIFOLD_PRUNE_H_
-#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_NON_MANIFOLD_PRUNE_H_
+#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_NON_MANIFOLD_PRUNE_H_
+#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_NON_MANIFOLD_PRUNE_H_
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
@@ -29,8 +29,8 @@
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
 #include <cgogn/core/types/cell_marker.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
+#include <cgogn/geometry/algos/offset_axis/skeleton_mesh_ops.h>
 
 #include <algorithm>
 #include <unordered_map>
@@ -45,9 +45,6 @@ namespace geometry
 {
 
 namespace offset_axis
-{
-
-namespace topology_detail
 {
 
 // Removes the faces whose 3 edges have more than 2 faces, until there is none.
@@ -227,12 +224,10 @@ void prune_residual_sheets(
 											sphere_skeleton_vertex);
 }
 
-} // namespace topology_detail
-
 } // namespace offset_axis
 
 } // namespace geometry
 
 } // namespace cgogn
 
-#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_NON_MANIFOLD_PRUNE_H_
+#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_NON_MANIFOLD_PRUNE_H_

@@ -20,8 +20,8 @@
  * Contact information: cgogn@unistra.fr                                        *
  *                                                                              *
  *******************************************************************************/
-#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_TOPOLOGY_SCORES_H_
-#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_TOPOLOGY_SCORES_H_
+#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_TOPOLOGY_SCORES_H_
+#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_TOPOLOGY_SCORES_H_
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
@@ -30,9 +30,9 @@
 #include <cgogn/core/functions/traversals/vertex.h>
 #include <cgogn/geometry/algos/area.h>
 #include <cgogn/geometry/algos/offset_axis/distance_field.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_tets.h>
 #include <cgogn/geometry/algos/offset_axis/neural_model_type.h>
 #include <cgogn/geometry/algos/offset_axis/parallel_for.h>
+#include <cgogn/geometry/algos/offset_axis/skeleton_tets.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <libacc/kd_tree.h>
@@ -50,9 +50,6 @@ namespace geometry
 {
 
 namespace offset_axis
-{
-
-namespace topology_detail
 {
 
 // Sets the face_score of each face of a current tet to the UDF integral over the face (adaptive Dunavant-7
@@ -323,8 +320,6 @@ std::unordered_set<uint32> tet_face_ids(const NONMANIFOLD& skeleton, const Skele
 	return tet_face_ids;
 }
 
-} // namespace topology_detail
-
 // UDF values used as scores by the topology fix (step 10) at the points. For MF models it is the distance to the
 // medial point of the nearest sample: mf - |sdf| is not a stable medial axis (its minimum is above zero and varies a
 // lot over a shape). Otherwise it is the value of the field. Returns false if the field cannot be evaluated.
@@ -352,4 +347,4 @@ bool evaluate_topology_scores(FIELD& field, const POINTS& samples,
 
 } // namespace cgogn
 
-#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_TOPOLOGY_SCORES_H_
+#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_TOPOLOGY_SCORES_H_

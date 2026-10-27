@@ -20,8 +20,8 @@
  * Contact information: cgogn@unistra.fr                                        *
  *                                                                              *
  *******************************************************************************/
-#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_SKELETON_TETS_H_
-#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_SKELETON_TETS_H_
+#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_TETS_H_
+#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_TETS_H_
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/types/mesh_traits.h>
@@ -140,4 +140,4 @@ private:
 
 } // namespace cgogn
 
-#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_SKELETON_TETS_H_
+#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_TETS_H_

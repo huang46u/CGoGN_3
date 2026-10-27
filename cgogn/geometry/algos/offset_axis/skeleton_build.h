@@ -20,16 +20,16 @@
  * Contact information: cgogn@unistra.fr                                        *
  *                                                                              *
  *******************************************************************************/
-#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_SKELETON_BUILD_H_
-#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_SKELETON_BUILD_H_
+#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_BUILD_H_
+#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_BUILD_H_
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
 #include <cgogn/core/functions/traversals/edge.h>
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_tets.h>
+#include <cgogn/geometry/algos/offset_axis/skeleton_mesh_ops.h>
+#include <cgogn/geometry/algos/offset_axis/skeleton_tets.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
 #include <algorithm>
@@ -49,9 +49,6 @@ namespace geometry
 {
 
 namespace offset_axis
-{
-
-namespace topology_detail
 {
 
 // Hash and equality of an unordered pair of vertex indices.
@@ -74,8 +71,6 @@ struct edge_equal
 	}
 };
 
-} // namespace topology_detail
-
 // Builds the skeleton of the spheres: one vertex per sphere, one edge per pair of neighbor spheres, one face per triple
 // of pairwise neighbors, and one tet (4 faces, not a mesh cell) per 4 pairwise neighbors. The neighbor lists are sorted.
 template <typename POINTS, typename NONMANIFOLD>
@@ -97,8 +92,6 @@ void build_skeleton_from_spheres(
 	using SkeletonFace = typename mesh_traits<NONMANIFOLD>::Face;
 	using Tet = typename SkeletonTets<NONMANIFOLD>::Tet;
 	using FaceKey = std::array<uint32, 3>;
-	using edge_hash = topology_detail::edge_hash;
-	using edge_equal = topology_detail::edge_equal;
 
 	clear(skeleton);
 	std::map<FaceKey, SkeletonFace> skeleton_faces_map;
@@ -213,10 +206,11 @@ void build_skeleton_from_spheres(
 	}
 	compute_edge_degree(skeleton, edge_degree);
 }
+
 } // namespace offset_axis
 
 } // namespace geometry
 
 } // namespace cgogn
 
-#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_SKELETON_BUILD_H_
+#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_BUILD_H_

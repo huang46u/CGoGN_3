@@ -36,7 +36,7 @@
 #include <cgogn/geometry/algos/offset_axis/alpha_sampling.h>
 #include <cgogn/geometry/algos/offset_axis/distance_field.h>
 #include <cgogn/geometry/algos/offset_axis/input_geometry.h>
-#include <cgogn/geometry/algos/offset_axis/internal/topology_scores.h>
+#include <cgogn/geometry/algos/offset_axis/topology_scores.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_profiles.h>
 #include <cgogn/geometry/algos/offset_axis/sample_processing.h>

@@ -20,8 +20,8 @@
  * Contact information: cgogn@unistra.fr                                        *
  *                                                                              *
  *******************************************************************************/
-#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_DENSE_K5_H_
-#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_DENSE_K5_H_
+#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_DENSE_K5_H_
+#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_DENSE_K5_H_
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -31,8 +31,8 @@
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
 #include <cgogn/core/types/cell_marker.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_tets.h>
+#include <cgogn/geometry/algos/offset_axis/skeleton_mesh_ops.h>
+#include <cgogn/geometry/algos/offset_axis/skeleton_tets.h>
 #include <cgogn/geometry/algos/offset_axis/spheres_optimizer.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
@@ -54,9 +54,6 @@ namespace geometry
 {
 
 namespace offset_axis
-{
-
-namespace topology_detail
 {
 
 // The 5 spheres of a dense region of the skeleton (5 vertices pairwise adjacent, or with one missing edge).
@@ -562,12 +559,10 @@ void repair_k5_regions(
 		compute_edge_degree(skeleton, edge_degree);
 }
 
-} // namespace topology_detail
-
 } // namespace offset_axis
 
 } // namespace geometry
 
 } // namespace cgogn
 
-#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_DENSE_K5_H_
+#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_DENSE_K5_H_

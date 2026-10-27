@@ -24,15 +24,15 @@
 #define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_SKELETON_TOPOLOGY_H_
 
 #include <cgogn/core/utils/numerics.h>
-#include <cgogn/geometry/algos/offset_axis/internal/boundary_tet_prune.h>
-#include <cgogn/geometry/algos/offset_axis/internal/dense_k5.h>
-#include <cgogn/geometry/algos/offset_axis/internal/greedy_tet_removal.h>
-#include <cgogn/geometry/algos/offset_axis/internal/non_manifold_prune.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_build.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
-#include <cgogn/geometry/algos/offset_axis/internal/topology_scores.h>
+#include <cgogn/geometry/algos/offset_axis/boundary_tet_prune.h>
+#include <cgogn/geometry/algos/offset_axis/dense_k5.h>
+#include <cgogn/geometry/algos/offset_axis/greedy_tet_removal.h>
+#include <cgogn/geometry/algos/offset_axis/non_manifold_prune.h>
 #include <cgogn/geometry/algos/offset_axis/reconstruction_options.h>
+#include <cgogn/geometry/algos/offset_axis/skeleton_build.h>
+#include <cgogn/geometry/algos/offset_axis/skeleton_mesh_ops.h>
 #include <cgogn/geometry/algos/offset_axis/spheres_optimizer.h>
+#include <cgogn/geometry/algos/offset_axis/topology_scores.h>
 
 #include <algorithm>
 #include <limits>
@@ -108,8 +108,6 @@ public:
 	template <typename ScoreEvaluator>
 	bool fix_topology(ScoreEvaluator&& evaluate_scores)
 	{
-		using namespace topology_detail;
-
 		added_spheres_.clear();
 		if (tets_.empty())
 			return true;
@@ -119,10 +117,10 @@ public:
 		// the cells that are not in a tet keep a zero score
 		data_.edge_score->fill(Scalar(0));
 		data_.face_score->fill(Scalar(0));
-		if (!topology_detail::compute_edge_scores(skeleton, data_.skeleton_position, tet_edge_ids(skeleton, tets_),
-												  evaluate_scores, data_.edge_score) ||
-			!topology_detail::compute_face_scores(skeleton, data_.skeleton_position, tet_face_ids(skeleton, tets_),
-												  evaluate_scores, false, data_.face_score))
+		if (!offset_axis::compute_edge_scores(skeleton, data_.skeleton_position, tet_edge_ids(skeleton, tets_),
+											  evaluate_scores, data_.edge_score) ||
+			!offset_axis::compute_face_scores(skeleton, data_.skeleton_position, tet_face_ids(skeleton, tets_),
+											  evaluate_scores, false, data_.face_score))
 			return false;
 		while (!tets_.empty())
 		{
@@ -164,7 +162,7 @@ public:
 		BoundaryTetMask mask;
 		std::unordered_set<uint32> face_ids;
 		std::unordered_set<uint32> edge_ids;
-		topology_detail::boundary_tet_mask(data_.skeleton, tets_, data_.skeleton_position, face_ids, edge_ids);
+		offset_axis::boundary_tet_mask(data_.skeleton, tets_, data_.skeleton_position, face_ids, edge_ids);
 		mask.face_ids.assign(face_ids.begin(), face_ids.end());
 		mask.edge_ids.assign(edge_ids.begin(), edge_ids.end());
 		std::sort(mask.face_ids.begin(), mask.face_ids.end());
@@ -178,9 +176,9 @@ public:
 	bool compute_face_scores(ScoreEvaluator& evaluate_scores, bool normalize_by_area)
 	{
 		data_.face_score->fill(std::numeric_limits<Scalar>::quiet_NaN());
-		return topology_detail::compute_face_scores(data_.skeleton, data_.skeleton_position,
-													topology_detail::tet_face_ids(data_.skeleton, tets_),
-													evaluate_scores, normalize_by_area, data_.face_score);
+		return offset_axis::compute_face_scores(data_.skeleton, data_.skeleton_position,
+												tet_face_ids(data_.skeleton, tets_), evaluate_scores, normalize_by_area,
+												data_.face_score);
 	}
 
 	// For display: sets edge_score to the UDF score of the topology fix on the edges of the current tets and to NaN
@@ -189,16 +187,15 @@ public:
 	bool compute_edge_scores(ScoreEvaluator& evaluate_scores)
 	{
 		data_.edge_score->fill(std::numeric_limits<Scalar>::quiet_NaN());
-		return topology_detail::compute_edge_scores(data_.skeleton, data_.skeleton_position,
-													topology_detail::tet_edge_ids(data_.skeleton, tets_),
-													evaluate_scores, data_.edge_score);
+		return offset_axis::compute_edge_scores(data_.skeleton, data_.skeleton_position,
+												tet_edge_ids(data_.skeleton, tets_), evaluate_scores, data_.edge_score);
 	}
 
 	// Step 11.
 	void prune_residual_sheets(ResidualPruneMode mode)
 	{
-		topology_detail::prune_residual_sheets(data_.skeleton, tets_, data_.edge_degree, data_.spheres_optimizer,
-											   data_.skeleton_source_sphere, data_.sphere_skeleton_vertex, mode);
+		offset_axis::prune_residual_sheets(data_.skeleton, tets_, data_.edge_degree, data_.spheres_optimizer,
+										   data_.skeleton_source_sphere, data_.sphere_skeleton_vertex, mode);
 		// the prune can remove added spheres: a removed sphere is unlinked from its skeleton vertex
 		const POINTS& spheres = data_.spheres_optimizer.data().spheres;
 		added_spheres_.erase(

@@ -20,8 +20,8 @@
  * Contact information: cgogn@unistra.fr                                        *
  *                                                                              *
  *******************************************************************************/
-#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_GREEDY_TET_REMOVAL_H_
-#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_GREEDY_TET_REMOVAL_H_
+#ifndef CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_GREEDY_TET_REMOVAL_H_
+#define CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_GREEDY_TET_REMOVAL_H_
 
 #include <cgogn/core/functions/attributes.h>
 #include <cgogn/core/functions/mesh_info.h>
@@ -29,7 +29,7 @@
 #include <cgogn/core/functions/traversals/face.h>
 #include <cgogn/core/functions/traversals/vertex.h>
 #include <cgogn/core/types/cell_marker.h>
-#include <cgogn/geometry/algos/offset_axis/internal/skeleton_mesh_ops.h>
+#include <cgogn/geometry/algos/offset_axis/skeleton_mesh_ops.h>
 
 #include <algorithm>
 #include <cmath>
@@ -49,9 +49,6 @@ namespace geometry
 {
 
 namespace offset_axis
-{
-
-namespace topology_detail
 {
 
 // Greedy removal of tets that have a simple face (a face owned by this tet only): the first face removed must be
@@ -478,12 +475,10 @@ void remove_tets_greedy(
 		.run();
 }
 
-} // namespace topology_detail
-
 } // namespace offset_axis
 
 } // namespace geometry
 
 } // namespace cgogn
 
-#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_INTERNAL_GREEDY_TET_REMOVAL_H_
+#endif // CGOGN_GEOMETRY_ALGOS_OFFSET_AXIS_GREEDY_TET_REMOVAL_H_
