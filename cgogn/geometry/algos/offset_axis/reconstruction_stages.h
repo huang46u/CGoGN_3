@@ -672,9 +672,9 @@ typename State::StatusInfo compute_initial_medial_axis(State& s)
 			return s.field.values_sdf(points, values, sdf);
 		};
 		flip_prune_medial_axis(*s.data.samples, *s.sample_position, *s.sample_normal, s.sample_kdtree,
-							   s.sample_vertices, s.sample_ma_kdtree, s.sample_ma_vertices, *s.sample_ma_position,
-							   *s.sample_ma_radius, *s.sample_ma_secondary, mf_model,
-							   mf_model ? mf_threshold : udf_threshold, fallback_radius, s.options.knn_k, scores);
+							   s.sample_vertices, *s.sample_ma_position, *s.sample_ma_radius, *s.sample_ma_secondary,
+							   mf_model, mf_model ? mf_threshold : udf_threshold, fallback_radius, s.options.knn_k,
+							   scores);
 	}
 	build_sample_kdtree(s);
 	return Status::success;

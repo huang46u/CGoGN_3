@@ -48,15 +48,13 @@ namespace offset_axis
 // Medial flip prune. scores(points, values, sdf) -> bool scores the medial points (sdf is filled for MF models
 // only): a medial point whose score is above threshold (or, for MF models, whose sdf is positive) is on the wrong
 // side, so the normal of its sample is flipped and its shrinking ball recomputed. The samples whose new medial
-// point still scores above threshold are removed; if some were, the kd-trees are rebuilt and the flipped samples
+// point still scores above threshold are removed; if some were, the kd-tree is rebuilt and the flipped samples
 // that remain get a PCA normal and a new shrinking ball, and are pruned again.
 template <typename POINTS, typename SCORES>
 void flip_prune_medial_axis(POINTS& samples, const typename mesh_traits<POINTS>::template Attribute<Vec3>& position,
 							typename mesh_traits<POINTS>::template Attribute<Vec3>& normal,
 							std::unique_ptr<acc::KDTree<3, uint32>>& kdtree,
 							std::vector<typename mesh_traits<POINTS>::Vertex>& kdtree_vertices,
-							std::unique_ptr<acc::KDTree<3, uint32>>& ma_kdtree,
-							std::vector<typename mesh_traits<POINTS>::Vertex>& ma_kdtree_vertices,
 							typename mesh_traits<POINTS>::template Attribute<Vec3>& ma_position,
 							typename mesh_traits<POINTS>::template Attribute<Scalar>& ma_radius,
 							typename mesh_traits<POINTS>::template Attribute<typename mesh_traits<POINTS>::Vertex>&
@@ -125,7 +123,6 @@ void flip_prune_medial_axis(POINTS& samples, const typename mesh_traits<POINTS>:
 	if (deleted > 0 && !flipped_indices.empty() && nb_cells<Vertex>(samples) > 0)
 	{
 		build_point_kdtree(samples, position, kdtree, kdtree_vertices);
-		build_medial_kdtree(samples, ma_position, ma_radius, ma_kdtree, ma_kdtree_vertices);
 		std::vector<Vertex> survivors;
 		survivors.reserve(flipped_indices.size());
 		for (uint32 i : flipped_indices)
