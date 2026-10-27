@@ -55,20 +55,9 @@ class CpuDistanceField
 {
 public:
 	using RayTraits = RAY_TRAITS;
-	using RaySampler = RayLevelSetSampler<RayTraits>;
 	static constexpr bool is_neural_type = false;
 	// the normals of the samples are recomputed from the input after the sampling filter
 	static constexpr bool recompute_normals_from_input_after_filtering = true;
-
-	std::unique_ptr<RaySampler> make_ray_sampler(const typename RaySampler::Params& params) const
-	{
-		return std::make_unique<RaySampler>(params);
-	}
-
-	void configure_ray_sampler(RaySampler& sampler, const typename RaySampler::Params& params) const
-	{
-		sampler.set_params(params);
-	}
 
 	// MF values are only defined for neural fields; this method is not called for the CPU fields
 	bool values_sdf(const std::vector<Vec3>& /*points*/, std::vector<Scalar>& /*values*/, std::vector<Scalar>& /*sdf*/)

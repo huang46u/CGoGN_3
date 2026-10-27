@@ -254,7 +254,6 @@ template <typename State>
 void reset(State& s)
 {
 	clear_results(s);
-	s.ray_sampler.reset();
 	s.field.reset();
 	s.initialized = false;
 }
@@ -621,7 +620,6 @@ typename State::StatusInfo sample_alpha_level_set(State& s)
 {
 	using PVertex = typename State::PVertex;
 	using RayTraits = typename State::RayTraits;
-	using RayParams = typename State::RayParams;
 	using Status = typename State::Status;
 
 	if (const typename State::StatusInfo initialized = initialize_data(s); initialized != Status::success)
@@ -644,7 +642,7 @@ typename State::StatusInfo sample_alpha_level_set(State& s)
 
 	RayTraits traits = s.field.ray_traits(inputs);
 	OFFSET_AXIS_PRECONDITION(traits.is_ready(), Status::invalid_data);
-	RayParams ray_params;
+	RayLevelSetParams ray_params;
 	ray_params.bbox_expand = constants::ray_box_relative_expand;
 	ray_params.alpha = Scalar(s.options.alpha);
 	ray_params.tol = Scalar(s.options.tolerance);
@@ -653,10 +651,6 @@ typename State::StatusInfo sample_alpha_level_set(State& s)
 	ray_params.max_iterations = s.options.udf_max_iterations;
 	ray_params.min_active_rays = s.options.udf_min_active_rays;
 	ray_params.seed = s.options.seed;
-	if (!s.ray_sampler)
-		s.ray_sampler = s.field.make_ray_sampler(ray_params);
-	else
-		s.field.configure_ray_sampler(*s.ray_sampler, ray_params);
 	AlphaSamplingParameters params;
 	params.sample_radius = Scalar(s.options.sample_radius);
 	params.seed = static_cast<uint32>(s.options.seed);
@@ -676,7 +670,7 @@ typename State::StatusInfo sample_alpha_level_set(State& s)
 		return s.field.project(points, pp, projection);
 	};
 	AlphaSamplingResult result =
-		offset_axis::sample_alpha_level_set(traits, *s.ray_sampler, params, compute_normals, project_points);
+		offset_axis::sample_alpha_level_set(traits, ray_params, params, compute_normals, project_points);
 	if (!result.success || result.positions.empty())
 		return Status::sampling_failed;
 	clear(*s.data.samples);

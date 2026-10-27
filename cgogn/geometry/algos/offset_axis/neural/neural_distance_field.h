@@ -74,7 +74,6 @@ public:
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
 	using SVertex = typename mesh_traits<SURFACE>::Vertex;
 	using RayTraits = NeuralFieldRayTraits;
-	using RaySampler = TorchRayLevelSetSampler<RayTraits>;
 	static constexpr bool is_neural_type = true;
 
 	NeuralDistanceField(InputGeometry<SURFACE, POINTS>& input, const ReconstructionOptions& options)
@@ -172,18 +171,10 @@ public:
 		RayTraits traits;
 		// the traits point to the member neural_field_, which outlives the sampling
 		traits.field = &neural_field_;
+		// the GPU level set sampler keeps its ray buffers here; they live on the device of the field
+		ray_buffers_.device = device_;
+		traits.ray_buffers = &ray_buffers_;
 		return traits;
-	}
-
-	std::unique_ptr<RaySampler> make_ray_sampler(const typename RaySampler::Params& params) const
-	{
-		return std::make_unique<RaySampler>(params, device_);
-	}
-
-	void configure_ray_sampler(RaySampler& sampler, const typename RaySampler::Params& params) const
-	{
-		sampler.set_params(params);
-		sampler.set_device(device_);
 	}
 
 	bool normals(const std::vector<Vec3>& points, std::vector<Vec3>& normals, std::vector<uint8_t>& keep)
@@ -231,6 +222,7 @@ private:
 	// do not go through autograd again on every call
 	NeuralFieldForward neural_field_{neural_model_, false, device_};
 	NeuralProjectionWorkspace projection_workspace_;
+	TorchRayBuffers ray_buffers_;
 	InputGeometry<SURFACE, POINTS>& input_;
 	const ReconstructionOptions& options_;
 };

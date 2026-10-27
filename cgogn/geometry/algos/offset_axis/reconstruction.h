@@ -64,8 +64,6 @@ public:
 	using TopologyType = typename State::TopologyType;
 	using Field = typename State::Field;
 	using RayTraits = typename State::RayTraits;
-	using RaySampler = typename State::RaySampler;
-	using RayParams = typename State::RayParams;
 	using PAttribute = typename State::PAttribute;
 	template <typename T>
 	using PointAttribute = typename State::template PointAttribute<T>;

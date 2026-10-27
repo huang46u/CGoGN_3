@@ -57,7 +57,6 @@ class SurfaceDistanceField : public CpuDistanceField<SurfaceMeshRayTraits<SURFAC
 public:
 	using SVertex = typename mesh_traits<SURFACE>::Vertex;
 	using typename Base::RayTraits;
-	using typename Base::RaySampler;
 
 	// the surface field does not use the options
 	SurfaceDistanceField(InputGeometry<SURFACE, POINTS>& input, const ReconstructionOptions& /*options*/)

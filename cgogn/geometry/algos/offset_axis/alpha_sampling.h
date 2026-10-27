@@ -25,6 +25,7 @@
 
 #include <cgogn/geometry/algos/offset_axis/alpha_projection.h>
 #include <cgogn/geometry/algos/offset_axis/normal_utils.h>
+#include <cgogn/geometry/algos/offset_axis/ray_level_set_sampler.h>
 #include <cgogn/geometry/algos/offset_axis/spatial_grid.h>
 #include <cgogn/geometry/types/vector_traits.h>
 
@@ -124,8 +125,8 @@ inline void sample_active_parent_indices(const std::vector<uint32>& active_indic
 
 } // namespace detail
 
-template <typename Traits, typename RaySampler, typename NormalFn, typename ProjectionFn>
-AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampler,
+template <typename Traits, typename NormalFn, typename ProjectionFn>
+AlphaSamplingResult sample_alpha_level_set(Traits& traits, const RayLevelSetParams& ray_params,
 											   const AlphaSamplingParameters& parameters, NormalFn&& compute_normals,
 											   ProjectionFn&& project_points)
 {
@@ -182,9 +183,9 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, RaySampler& ray_sampl
 	// empty grid: no samples exist yet at this point, so nothing is inserted
 	SpatialGrid working_grid(grid_cell_size);
 
-	std::vector<Vec3> seed_points = ray_sampler.sample_alpha_level_set_rays_fixed_iterations(
-		traits, static_cast<int>(detail::alpha_sampling_warmup_iterations), &working_grid, parameters.sample_radius,
-		parameters.bbox_min, parameters.bbox_max, &result.positions);
+	std::vector<Vec3> seed_points = sample_level_set_rays(
+		traits, ray_params, static_cast<int>(detail::alpha_sampling_warmup_iterations), &working_grid,
+		parameters.sample_radius, parameters.bbox_min, parameters.bbox_max, &result.positions);
 	if (!seed_points.empty())
 	{
 		const size_t remaining_slots = max_samples - result.positions.size();

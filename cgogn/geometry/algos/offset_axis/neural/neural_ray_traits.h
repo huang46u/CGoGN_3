@@ -38,9 +38,13 @@ namespace geometry
 namespace offset_axis
 {
 
+struct TorchRayBuffers;
+
 struct NeuralFieldRayTraits
 {
 	NeuralFieldForward* field = nullptr;
+	// reusable ray buffers of the GPU level set sampler, owned by the neural field (see ray_level_set_sampler_torch.h)
+	TorchRayBuffers* ray_buffers = nullptr;
 
 	bool is_ready() const
 	{

@@ -46,12 +46,10 @@ namespace offset_axis
 //   - NeuralDistanceField: a TorchScript network that predicts the UDF or the MF value of the input.
 // Every field is constructed from the InputGeometry caches and the ReconstructionOptions of the reconstruction, and
 // provides the following interface (the CPU fields hold no model, see the notes on each method):
-//   RayTraits, RaySampler, is_neural_type  types of the ray sampler and compile-time kind of the field
+//   RayTraits, is_neural_type                    type of the ray traits and compile-time kind of the field
 //   prepare(inputs)                              build the caches, or report that the field is not usable yet
 //   sampling_box(inputs, min, max)               bounding box of the input, before padding
 //   ray_traits(inputs)                           traits of the ray sampler (valid until the sampling ends)
-//   make_ray_sampler(params)                     new ray sampler for the field (on the device of the field)
-//   configure_ray_sampler(sampler, params)       update a ray sampler created by make_ray_sampler
 //   normals(points, normals, keep)               normals of the candidate points, keep flags the usable ones
 //   project(points, parameters, result)          projection of the points onto the alpha level set
 //   load_model(path, type) / reset() / loaded()  neural model life cycle (CPU fields: no model, loaded() is false)

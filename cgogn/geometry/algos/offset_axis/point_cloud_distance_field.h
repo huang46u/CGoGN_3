@@ -59,7 +59,6 @@ class PointCloudDistanceField : public CpuDistanceField<PointCloudRayTraits<POIN
 public:
 	using PVertex = typename mesh_traits<POINTS>::Vertex;
 	using typename Base::RayTraits;
-	using typename Base::RaySampler;
 
 	PointCloudDistanceField(InputGeometry<SURFACE, POINTS>& input, const ReconstructionOptions& options)
 		: input_(input), options_(options)

@@ -72,8 +72,6 @@ struct ReconstructionState
 	using TopologyType = SkeletonTopology<POINTS, NONMANIFOLD>;
 	using Field = FIELD<SURFACE, POINTS>;
 	using RayTraits = typename Field::RayTraits;
-	using RaySampler = typename Field::RaySampler;
-	using RayParams = typename RaySampler::Params;
 	using PAttribute = typename mesh_traits<POINTS>::template Attribute<Vec3>;
 	template <typename T>
 	using PointAttribute = typename mesh_traits<POINTS>::template Attribute<T>;
@@ -140,7 +138,6 @@ struct ReconstructionState
 
 	Data data;
 	Options options;
-	std::unique_ptr<RaySampler> ray_sampler;
 	InputGeometry<SURFACE, POINTS> input;
 	// distance field of the input kind (CPU fields or the neural model); it refers to input and options, so it is
 	// declared after them
