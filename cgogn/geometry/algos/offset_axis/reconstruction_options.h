@@ -63,6 +63,10 @@ inline bool parse(const std::string& value, NeuralModelType& out)
 // neural_model_type: type of the neural model to load; the loaded NeuralDistanceField keeps its own copy
 // udf_min_active_rays: neural seed rays, a ray batch ends once fewer than this many rays are still marching (0 = off)
 // init_owner_euclidean: initial sphere owners from a sphere BVH, the closest sphere surface (default); false scans all spheres
+// reprojection_iterations: Newton iterations, along the central difference gradient, of a final projection of all the
+//   samples onto the alpha level set (MF models only; 0 = off; the Bridson children get a single iteration)
+// query_batch_size: most points the neural field is queried at in one call (the ray sampler and the Bridson sampler
+//   use their own batches)
 // clang-format off
 #define CGOGN_OFFSET_AXIS_OPTIONS(X) \
   X(NeuralModelType,     neural_model_type,              NeuralModelType::udf,                  "input.neural_model_type",                   0, 0) \
@@ -75,8 +79,9 @@ inline bool parse(const std::string& value, NeuralModelType& out)
   X(float,               sample_radius,                  0.002f,                                "sampling.bridson.sample_radius",            0.0005, 0.02) \
   X(int,                 alpha_sampling_candidates_per_parent, 12,                              "sampling.bridson.candidates_per_parent",    1, 200) \
   X(int,                 alpha_sampling_parent_batch_size, 1024,                                "sampling.bridson.parent_batch_size",        1, 4096) \
+  X(int,                 reprojection_iterations,        0,                                     "sampling.reprojection_iterations",          0, 100) \
   X(int,                 ray_sampler_batch_size,         8192,                                  "sampling.ray.batch_size",                   1, 65536) \
-  X(int,                 batch_size,                     1048576,                               "sampling.ray.query_batch_size",             1, 1 << 22) \
+  X(int,                 query_batch_size,               262144,                                "sampling.query_batch_size",                 1, 1 << 22) \
   X(float,               tolerance,                      1e-6f,                                 "sampling.ray.tolerance",                    1e-9, 1e-3) \
   X(int,                 udf_max_iterations,             3000,                                  "sampling.ray.max_iterations",               1, 10000) \
   X(int,                 udf_min_active_rays,            100,                                   "sampling.ray.min_active_rays",              0, 10000) \
@@ -126,6 +131,7 @@ inline ReconstructionOptions default_options(NeuralModelType type)
 		options.alpha_sampling_parent_batch_size = 102;
 		options.apply_filtering = false;
 		options.recompute_normals_after_sampling = true;
+		options.reprojection_iterations = 3;
 	}
 	return options;
 }

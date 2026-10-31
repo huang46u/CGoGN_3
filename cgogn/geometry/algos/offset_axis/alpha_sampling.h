@@ -61,14 +61,33 @@ inline constexpr Scalar sampling_padding = Scalar(0.1);
 // Relative enlargement of the padded sampling box from which the seed rays are cast (its half size is multiplied by
 // 1 + ray_box_relative_expand). Overrides the ray sampler default (0.1).
 inline constexpr Scalar ray_box_relative_expand = Scalar(0.05);
+// Final reprojection of the samples: lengths relative to the sample radius. The Newton direction is the central
+// difference gradient of the field values, since the gradient predicted by the MF networks is not the gradient of
+// their values.
+inline constexpr Scalar reprojection_difference_step = Scalar(0.05);
+inline constexpr Scalar reprojection_max_step = Scalar(0.5);
+// from the sampled position
+inline constexpr Scalar reprojection_max_displacement = Scalar(3);
+// on |f - alpha| / |grad f|
+inline constexpr Scalar reprojection_tolerance = Scalar(0.01);
 
 } // namespace constants
+
+enum class ReprojectionState : uint8_t
+{
+	active,
+	converged,
+	rejected // farther than the maximum displacement from its sampled position, or no gradient
+};
 
 struct AlphaSamplingParams
 {
 	Scalar sample_radius = Scalar(0);
 	size_t candidates_per_parent = 1;
 	size_t parent_batch_size = 1;
+	int reprojection_iterations = 0;
+	// field values queried per call during the reprojection
+	size_t query_batch_size = 1;
 	RayLevelSetParams rays;
 };
 
@@ -78,6 +97,8 @@ inline AlphaSamplingParams alpha_sampling_params(const ReconstructionOptions& op
 	params.sample_radius = Scalar(options.sample_radius);
 	params.candidates_per_parent = static_cast<size_t>(options.alpha_sampling_candidates_per_parent);
 	params.parent_batch_size = static_cast<size_t>(options.alpha_sampling_parent_batch_size);
+	params.reprojection_iterations = options.reprojection_iterations;
+	params.query_batch_size = static_cast<size_t>(options.query_batch_size);
 	params.rays.bbox_expand = constants::ray_box_relative_expand;
 	params.rays.alpha = Scalar(options.alpha);
 	params.rays.tol = Scalar(options.tolerance);
@@ -291,7 +312,159 @@ AlphaSamplingResult sample_alpha_level_set(Traits& traits, const AlphaSamplingPa
 	return result;
 }
 
+// Evaluates the MF field and its central difference gradient at the active samples, stores the normalized gradient as
+// their normal and their distance to the level set (f - alpha) / |grad f| as their residual, marks the converged ones
+// (rejected instead on the positive sdf side, the alpha level set outside the shape) and, when move is set, moves the
+// others by one Newton step. Each sample takes 7 queries, so the field is queried at most query_batch_size / 7 samples
+// at a time.
+template <typename FIELD, typename POINTS>
+bool reprojection_iteration(FIELD& field, const POINTS& samples,
+							typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_position,
+							typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_normal,
+							const typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_origin,
+							typename mesh_traits<POINTS>::template Attribute<ReprojectionState>* sample_state,
+							typename mesh_traits<POINTS>::template Attribute<Scalar>* sample_residual, Scalar alpha,
+							Scalar sample_radius, size_t query_batch_size, bool move)
+{
+	using PVertex = typename mesh_traits<POINTS>::Vertex;
+
+	std::vector<uint32> active;
+	foreach_cell(samples, [&](PVertex v) {
+		const uint32 i = index_of(samples, v);
+		if ((*sample_state)[i] == ReprojectionState::active)
+			active.push_back(i);
+		return true;
+	});
+	if (active.empty())
+		return true;
+
+	const Scalar h = constants::reprojection_difference_step * sample_radius;
+	const Scalar tolerance = constants::reprojection_tolerance * sample_radius;
+	const Scalar max_step = constants::reprojection_max_step * sample_radius;
+	const Scalar max_displacement = constants::reprojection_max_displacement * sample_radius;
+	const size_t chunk = std::max<size_t>(1, query_batch_size / 7);
+	std::vector<Vec3> points;
+	std::vector<Scalar> values, sdf;
+	for (size_t begin = 0; begin < active.size(); begin += chunk)
+	{
+		const size_t count = std::min(chunk, active.size() - begin);
+		points.resize(count * 7);
+		for (size_t a = 0; a < count; ++a)
+		{
+			const Vec3& x = (*sample_position)[active[begin + a]];
+			points[7 * a] = x;
+			for (int k = 0; k < 3; ++k)
+			{
+				Vec3 e(0, 0, 0);
+				e[k] = h;
+				points[7 * a + 1 + 2 * k] = x + e;
+				points[7 * a + 2 + 2 * k] = x - e;
+			}
+		}
+		if (!field.values_sdf(points, values, sdf))
+			return false;
+		for (size_t a = 0; a < count; ++a)
+		{
+			const uint32 i = active[begin + a];
+			const Scalar* f = &values[7 * a];
+			const Vec3 g((f[1] - f[2]) / (2 * h), (f[3] - f[4]) / (2 * h), (f[5] - f[6]) / (2 * h));
+			const Scalar g_norm = g.norm();
+			// the network can return non finite values far from the input
+			if (!(g_norm > Scalar(1e-12)) || !std::isfinite(f[0]))
+			{
+				(*sample_state)[i] = ReprojectionState::rejected;
+				continue;
+			}
+			const Vec3 n = g / g_norm;
+			const Scalar residual = (f[0] - alpha) / g_norm;
+			(*sample_normal)[i] = n;
+			(*sample_residual)[i] = residual;
+			if (std::abs(residual) <= tolerance)
+			{
+				(*sample_state)[i] = sdf[7 * a] > 0 ? ReprojectionState::rejected : ReprojectionState::converged;
+				continue;
+			}
+			if (!move)
+				continue;
+			Vec3& x = (*sample_position)[i];
+			x -= std::clamp(residual, -max_step, max_step) * n;
+			if ((x - (*sample_origin)[i]).norm() > max_displacement)
+				(*sample_state)[i] = ReprojectionState::rejected;
+		}
+	}
+	return true;
+}
+
 } // namespace detail
+
+// Starts the reprojection of the samples onto the alpha level set: every sample is active and its position is kept in
+// sample_origin.
+template <typename POINTS>
+void start_samples_reprojection(const POINTS& samples,
+								const typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_position,
+								typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_origin,
+								typename mesh_traits<POINTS>::template Attribute<ReprojectionState>* sample_state,
+								typename mesh_traits<POINTS>::template Attribute<Scalar>* sample_residual)
+{
+	using PVertex = typename mesh_traits<POINTS>::Vertex;
+	foreach_cell(samples, [&](PVertex v) {
+		const uint32 i = index_of(samples, v);
+		(*sample_origin)[i] = (*sample_position)[i];
+		(*sample_state)[i] = ReprojectionState::active;
+		(*sample_residual)[i] = Scalar(0);
+		return true;
+	});
+}
+
+// One Newton iteration of the active samples (see detail::reprojection_iteration). Each step is at most
+// reprojection_max_step; a sample that ends farther than reprojection_max_displacement from its sampled position is
+// rejected.
+template <typename FIELD, typename POINTS>
+bool reproject_samples_step(FIELD& field, const POINTS& samples,
+							typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_position,
+							typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_normal,
+							const typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_origin,
+							typename mesh_traits<POINTS>::template Attribute<ReprojectionState>* sample_state,
+							typename mesh_traits<POINTS>::template Attribute<Scalar>* sample_residual, Scalar alpha,
+							Scalar sample_radius, size_t query_batch_size)
+{
+	return detail::reprojection_iteration(field, samples, sample_position, sample_normal, sample_origin, sample_state,
+										  sample_residual, alpha, sample_radius, query_batch_size, true);
+}
+
+// Ends the reprojection: the samples still active are evaluated once more, then only the converged samples are kept.
+template <typename FIELD, typename POINTS>
+bool finish_samples_reprojection(FIELD& field, POINTS& samples,
+								 typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_position,
+								 typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_normal,
+								 const typename mesh_traits<POINTS>::template Attribute<Vec3>* sample_origin,
+								 typename mesh_traits<POINTS>::template Attribute<ReprojectionState>* sample_state,
+								 typename mesh_traits<POINTS>::template Attribute<Scalar>* sample_residual, Scalar alpha,
+								 Scalar sample_radius, size_t query_batch_size)
+{
+	using PVertex = typename mesh_traits<POINTS>::Vertex;
+
+	if (!detail::reprojection_iteration(field, samples, sample_position, sample_normal, sample_origin, sample_state,
+										sample_residual, alpha, sample_radius, query_batch_size, false))
+		return false;
+	std::vector<Vec3> positions, normals;
+	foreach_cell(samples, [&](PVertex v) {
+		const uint32 i = index_of(samples, v);
+		if ((*sample_state)[i] != ReprojectionState::converged)
+			return true;
+		positions.push_back((*sample_position)[i]);
+		normals.push_back((*sample_normal)[i]);
+		return true;
+	});
+	clear(samples);
+	for (size_t i = 0; i < positions.size(); ++i)
+	{
+		PVertex v = add_vertex(samples);
+		(*sample_position)[index_of(samples, v)] = positions[i];
+		(*sample_normal)[index_of(samples, v)] = normals[i];
+	}
+	return true;
+}
 
 // Samples the alpha level set of the field and stores the samples in the samples point cloud (cleared first), with
 // their positions and normals in sample_position and sample_normal. field.prepare(inputs) must have succeeded.
@@ -332,6 +505,27 @@ SamplingStatus sample_alpha_level_set(FIELD& field, const INPUTS& inputs, const 
 		const uint32 idx = index_of(samples, v);
 		(*sample_position)[idx] = result.positions[i];
 		(*sample_normal)[idx] = result.normals[i];
+	}
+	// the Bridson children are projected with one Newton iteration; the samples of an MF field are projected again
+	if (params.reprojection_iterations > 0 && is_neural_model(field, NeuralModelType::mf))
+	{
+		auto origin = add_attribute<Vec3, PVertex>(samples, "__reprojection_origin");
+		auto state = add_attribute<ReprojectionState, PVertex>(samples, "__reprojection_state");
+		auto residual = add_attribute<Scalar, PVertex>(samples, "__reprojection_residual");
+		start_samples_reprojection(samples, sample_position, origin.get(), state.get(), residual.get());
+		bool ok = true;
+		for (int it = 0; ok && it < params.reprojection_iterations; ++it)
+			ok = reproject_samples_step(field, samples, sample_position, sample_normal, origin.get(), state.get(),
+										residual.get(), params.rays.alpha, params.sample_radius,
+										params.query_batch_size);
+		ok = ok && finish_samples_reprojection(field, samples, sample_position, sample_normal, origin.get(),
+											   state.get(), residual.get(), params.rays.alpha, params.sample_radius,
+											   params.query_batch_size);
+		remove_attribute<PVertex>(samples, origin);
+		remove_attribute<PVertex>(samples, state);
+		remove_attribute<PVertex>(samples, residual);
+		if (!ok || nb_cells<PVertex>(samples) == 0)
+			return SamplingStatus::failed;
 	}
 	return SamplingStatus::ok;
 }

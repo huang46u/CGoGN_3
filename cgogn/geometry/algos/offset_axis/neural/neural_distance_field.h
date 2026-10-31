@@ -178,7 +178,7 @@ public:
 
 	bool normals(const std::vector<Vec3>& points, std::vector<Vec3>& normals, std::vector<uint8_t>& keep)
 	{
-		if (!evaluate_udf_normals(neural_field_, points, static_cast<size_t>(options_.batch_size),
+		if (!evaluate_udf_normals(neural_field_, points, static_cast<size_t>(options_.query_batch_size),
 								  projection_workspace_, normals))
 			return false;
 		std::fill(keep.begin(), keep.end(), uint8_t(1));
@@ -197,12 +197,12 @@ public:
 
 	bool distances(const std::vector<Vec3>& points, std::vector<Scalar>& values)
 	{
-		return evaluate_udf_values(forward(), points, static_cast<size_t>(options_.batch_size), values);
+		return evaluate_udf_values(forward(), points, static_cast<size_t>(options_.query_batch_size), values);
 	}
 
 	bool values_sdf(const std::vector<Vec3>& points, std::vector<Scalar>& values, std::vector<Scalar>& sdf)
 	{
-		return evaluate_udf_values_sdf(forward(), points, static_cast<size_t>(options_.batch_size), values, sdf);
+		return evaluate_udf_values_sdf(forward(), points, static_cast<size_t>(options_.query_batch_size), values, sdf);
 	}
 
 	// the normals of the samples are the network gradient

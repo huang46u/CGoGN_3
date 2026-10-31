@@ -1280,6 +1280,11 @@ protected:
 					std::clamp(options.alpha_sampling_parent_batch_size,
 							   int(cgogn::geometry::offset_axis::option_info::alpha_sampling_parent_batch_size.min),
 							   int(cgogn::geometry::offset_axis::option_info::alpha_sampling_parent_batch_size.max));
+			if (ImGui::InputInt("Reprojection iterations (MF, 0 = off)", &options.reprojection_iterations, 1, 5))
+				options.reprojection_iterations =
+					std::clamp(options.reprojection_iterations,
+							   int(cgogn::geometry::offset_axis::option_info::reprojection_iterations.min),
+							   int(cgogn::geometry::offset_axis::option_info::reprojection_iterations.max));
 			if (ImGui::InputInt("Seed", &options.seed, 1, 10))
 				options.seed = std::clamp(options.seed, int(cgogn::geometry::offset_axis::option_info::seed.min),
 										  int(cgogn::geometry::offset_axis::option_info::seed.max));
